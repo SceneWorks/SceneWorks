@@ -1,5 +1,20 @@
-use super::*;
+#[cfg(not(target_os = "macos"))]
+use super::attach_required_components;
+#[cfg(not(target_os = "macos"))]
+use super::candle_certified_load_spec;
+#[cfg(not(target_os = "macos"))]
+use super::load_spec;
+use super::seal_sdxl_endpoint_load_spec;
+use super::super::LoadSpec;
+#[cfg(not(target_os = "macos"))]
+use super::super::Quant;
+use super::super::WeightsSource;
+#[cfg(not(target_os = "macos"))]
+use crate::Settings;
+#[cfg(not(target_os = "macos"))]
+use crate::Value;
 use sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::EndpointArtifactFile;
+use sha2::Digest;
 use sha2::{Digest, Sha256};
 
 fn fixture() -> (tempfile::TempDir, LoadSpec, Vec<EndpointArtifactFile>) {

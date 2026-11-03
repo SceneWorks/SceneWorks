@@ -1,4 +1,7 @@
-use super::*;
+use super::prepare_candle_image_route;
+use super::super::ImageRequest;
+use crate::Settings;
+use crate::WorkerError;
 use serde_json::json;
 
 fn request(entry: serde_json::Value) -> ImageRequest {

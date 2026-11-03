@@ -1,11 +1,765 @@
-use super::*;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::{
-    flux1_control_candle::*, flux2_comfyui_candle::*, flux2_control_candle::*,
-    flux2_edit_candle::*, flux_ipadapter::*, kolors_control::*, kolors_ipadapter::*,
-    krea_control_candle::*, pulid_candle::*, qwen_control::*, qwen_edit_candle::*,
-    sdxl_ipadapter::*, zimage_control::*,
-};
+#[cfg(native_lane)]
+use super::AdapterKind;
+#[cfg(native_lane)]
+use super::AdapterSpec;
+#[cfg(native_lane)]
+use crate::ApiClient;
+use super::Arc;
+#[cfg(target_os="macos")]
+use super::conditioning::BOOGU_MAX_EDIT_REFERENCES;
+#[cfg(native_lane)]
+use super::artifact_resolution::BOOGU_MLX_TURNKEY_REVISION;
+#[cfg(target_os="macos")]
+use super::zimage::CHARACTER_ANGLE_SET_ORDER;
+#[cfg(native_lane)]
+use super::checkpoint_plan::CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS;
+#[cfg(native_lane)]
+use super::checkpoint_plan::CHECKPOINT_PLAN_RESIDENT_BASE_TIERS;
+#[cfg(native_lane)]
+use super::CancelFlag;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::routing::CandleImageRoute;
+#[cfg(native_lane)]
+use super::Conditioning;
+#[cfg(native_lane)]
+use super::ControlKind;
+#[cfg(native_lane)]
+use super::detail::DetailParams;
+#[cfg(native_lane)]
+use crate::Duration;
+#[cfg(target_os="macos")]
+use super::conditioning::EditGrouping;
+#[cfg(target_os="macos")]
+use super::flux1_control::FLUX1_CONTROL_FILE;
+#[cfg(target_os="macos")]
+use super::flux1_control::FLUX1_CONTROL_REVISION;
+#[cfg(target_os="macos")]
+use super::flux2::FLUX2_CONTROL_FILE;
+#[cfg(target_os="macos")]
+use super::flux2::FLUX2_CONTROL_REVISION;
+#[cfg(target_os="macos")]
+use super::flux2::FLUX2_DEV_CONTROL_ENGINE_ID;
+#[cfg(target_os="macos")]
+use super::conditioning::FlattenPolicy;
+#[cfg(native_lane)]
+use super::stream::GenEvent;
+use super::GeneratedPixels;
+#[cfg(native_lane)]
+use super::GenerationOutput;
+#[cfg(native_lane)]
+use super::GenerationRequest;
+#[cfg(native_lane)]
+use super::Generator;
+#[cfg(native_lane)]
+use super::render::HiresFixPlan;
+#[cfg(native_lane)]
+use super::artifact_resolution::IDEOGRAM_MLX_TURNKEY_REVISION;
+use crate::INSTALL_MARKER;
+#[cfg(target_os="macos")]
+use super::instantid::INSTANTID_ARCFACE_FILE;
+#[cfg(native_lane)]
+use super::instantid::INSTANTID_CONTROLNET_REVISION;
+#[cfg(target_os="macos")]
+use super::instantid::INSTANTID_CONTROLNET_SCALE;
+#[cfg(target_os="macos")]
+use super::instantid::INSTANTID_DEFAULT_GUIDANCE;
+#[cfg(target_os="macos")]
+use super::instantid::INSTANTID_DEFAULT_STEPS;
+#[cfg(target_os="macos")]
+use super::instantid::INSTANTID_IP_ADAPTER_FILE;
+#[cfg(target_os="macos")]
+use super::instantid::INSTANTID_IP_SCALE;
+#[cfg(native_lane)]
+use super::instantid::INSTANTID_MLX_REPO;
+#[cfg(native_lane)]
+use super::instantid::INSTANTID_MLX_REVISION;
+#[cfg(native_lane)]
+use super::instantid::INSTANTID_OPENPOSE_REVISION;
+#[cfg(target_os="macos")]
+use super::instantid::INSTANTID_SCRFD_FILE;
+#[cfg(target_os="macos")]
+use super::IdentityWeights;
+#[cfg(native_lane)]
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+#[cfg(target_os="macos")]
+use super::routing::ImageRoute;
+#[cfg(target_os="macos")]
+use super::InstantId;
+#[cfg(not(test))]
+use super::InstantId;
+#[cfg(target_os="macos")]
+use super::InstantIdPaths;
+#[cfg(not(test))]
+use super::InstantIdPaths;
+#[cfg(target_os="macos")]
+use super::InstantIdRequest;
+#[cfg(not(test))]
+use super::InstantIdRequest;
+#[cfg(native_lane)]
+use crate::JobSnapshot;
+use crate::JsonObject;
+#[cfg(target_os="macos")]
+use super::krea_control::KREA_CONTROL_BASE_REVISION;
+#[cfg(target_os="macos")]
+use super::krea_control::KREA_CONTROL_DEFAULT_SCALE;
+#[cfg(target_os="macos")]
+use super::krea_control::KREA_CONTROL_ENGINE_ID;
+#[cfg(target_os="macos")]
+use super::krea_control::KREA_CONTROL_MLX_REPO;
+#[cfg(target_os="macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_FILE;
+#[cfg(target_os="macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_PIN;
+#[cfg(target_os="macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_REVISION;
+#[cfg(native_lane)]
+use super::krea_imported::KREA_IMPORTED_BASE_REPO;
+#[cfg(native_lane)]
+use super::krea_imported::KREA_IMPORTED_BASE_TIER;
+#[cfg(not(test))]
+use super::krea_imported::KREA_IMPORTED_ENGINE;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::krea_imported::KREA_IMPORTED_ENGINE;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::artifact_resolution::KREA_MLX_TURNKEY_REVISION;
+#[cfg(native_lane)]
+use super::krea_turbo_raw::KREA_RAW_MODEL_ID;
+#[cfg(native_lane)]
+use super::krea_turbo_raw::KREA_TURBO_ENGINE_ID;
+#[cfg(native_lane)]
+use super::LoadSpec;
+#[cfg(native_lane)]
+use super::mage_finetuned::MAGE_FINETUNED_BASE_MODEL;
+#[cfg(native_lane)]
+use super::mage_finetuned::MAGE_FINETUNED_COMPONENT_TIER;
+#[cfg(target_os="macos")]
+use super::mage_finetuned::MAGE_FINETUNED_MEMORY_ROUTE;
+#[cfg(target_os="macos")]
+use super::mage_finetuned::MAGE_FLOW_PLAN_FAMILY;
+#[cfg(target_os="macos")]
+use super::conditioning::MAX_EDIT_REFERENCES;
+#[cfg(target_os="macos")]
+use super::flux2::MAX_KLEIN_EDIT_REFERENCES;
+#[cfg(target_os="macos")]
+use super::krea_multiphase::MultiPhaseSpec;
+#[cfg(target_os="macos")]
+use super::zimage::POSE_SKELETON_PROMPT;
+use super::PREFIX_KV_CACHE_RESULT_KEY;
+#[cfg(target_os="macos")]
+use super::pulid::PULID_ADAPTER_FILE;
+#[cfg(target_os="macos")]
+use super::pulid::PULID_ADAPTER_REPO;
+#[cfg(native_lane)]
+use super::instantid::PULID_ADAPTER_REVISION;
+#[cfg(target_os="macos")]
+use super::pulid::PULID_BISENET_FILE;
+#[cfg(target_os="macos")]
+use super::pulid::PULID_EVA_FILE;
+#[cfg(target_os="macos")]
+use super::pulid::PULID_MLX_REPO;
+#[cfg(native_lane)]
+use super::instantid::PULID_MLX_REVISION;
+use crate::Path;
+#[cfg(native_lane)]
+use crate::PathBuf;
+#[cfg(target_os="macos")]
+use super::krea_multiphase::PhaseLoraRef;
+#[cfg(native_lane)]
+use super::conditioning::PoseInput;
+#[cfg(target_os="macos")]
+use super::adapters::PreparedAdapters;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::routing::PreparedCandleImageRoute;
+#[cfg(native_lane)]
+use super::checkpoint_plan::PreparedCheckpointPlanSources;
+#[cfg(target_os="macos")]
+use super::routing::PreparedImageRoute;
+#[cfg(target_os="macos")]
+use super::krea_imported::PreparedKreaImportedControlSources;
+#[cfg(native_lane)]
+use super::krea_imported::PreparedKreaImportedSources;
+#[cfg(native_lane)]
+use super::events::PreviewSlot;
+#[cfg(native_lane)]
+use super::Progress;
+#[cfg(native_lane)]
+use crate::ProjectStore;
+#[cfg(native_lane)]
+use super::PromptEnhance;
+#[cfg(native_lane)]
+use super::events::PromptEnhancementReports;
+#[cfg(target_os="macos")]
+use super::pulid::PulidWeights;
+#[cfg(target_os="macos")]
+use super::qwen::QWEN_CONTROL_ENGINE_ID;
+#[cfg(target_os="macos")]
+use super::qwen::QWEN_LIGHTNING_LORA_REVISION;
+#[cfg(native_lane)]
+use super::Quant;
+#[cfg(native_lane)]
+use super::conditioning::QwenImage21Reference;
+#[cfg(native_lane)]
+use super::sdxl_imported::SDXL_CLIP_BIGG_REVISION;
+#[cfg(native_lane)]
+use super::sdxl_imported::SDXL_CLIP_L_REPO;
+#[cfg(native_lane)]
+use super::sdxl_imported::SDXL_CLIP_L_REVISION;
+#[cfg(native_lane)]
+use super::sdxl_control::SDXL_CONTROL_ENGINE_ID;
+#[cfg(native_lane)]
+use super::sdxl_control::SDXL_CONTROL_MODELS;
+#[cfg(native_lane)]
+use super::sdxl_control::SDXL_CONTROL_REPO;
+use super::STUB_ADAPTER;
+#[cfg(target_os="macos")]
+use super::sdxl::SdxlSubMode;
+use crate::Settings;
+use crate::Sha256;
+use crate::Value;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::routing::WIRED_CANDLE_POSE_FAMILIES;
+#[cfg(target_os="macos")]
+use super::routing::WIRED_MLX_POSE_FAMILIES;
+#[cfg(target_os="macos")]
+use super::Weights;
+#[cfg(native_lane)]
+use super::WeightsSource;
+use crate::WorkerError;
+#[cfg(native_lane)]
+use crate::WorkerResult;
+use super::WorkflowLora;
+#[cfg(target_os="macos")]
+use super::zimage::ZIMAGE_CONTROL_ENGINE_ID;
+#[cfg(target_os="macos")]
+use super::zimage::ZIMAGE_CONTROL_FILE;
+#[cfg(target_os="macos")]
+use super::adapter_id;
+#[cfg(target_os="macos")]
+use super::conditioning::angle_prompt_augment;
+#[cfg(native_lane)]
+use super::apply_inline_iris_restore;
+#[cfg(native_lane)]
+use super::load_spec::attach_manifest_text_encoder;
+#[cfg(target_os="macos")]
+use super::load_spec::attach_selected_decoder;
+#[cfg(target_os="macos")]
+use super::conditioning::augment_prompt_for_angle;
+#[cfg(target_os="macos")]
+use super::zimage::augment_prompt_for_pose;
+use super::backend_label;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::bernini::bernini_adapter_resident_bytes;
+#[cfg(target_os="macos")]
+use super::bernini::bernini_image_available;
+#[cfg(target_os="macos")]
+use super::bernini::bernini_image_engine_task;
+#[cfg(native_lane)]
+use super::bernini::bernini_image_generate_one;
+#[cfg(target_os="macos")]
+use super::conditioning::boogu_edit_reference_ids;
+#[cfg(target_os="macos")]
+use super::artifact_resolution::boogu_model_subdir;
+#[cfg(target_os="macos")]
+use super::strict_control::build_control_conditioning;
+#[cfg(target_os="macos")]
+use super::flux2::build_edit_conditioning;
+#[cfg(target_os="macos")]
+use super::krea_multiphase::build_generation_phases;
+#[cfg(native_lane)]
+use super::render::build_lane_conditioning;
+#[cfg(native_lane)]
+use super::render::build_lane_conditioning_with_alpha;
+#[cfg(native_lane)]
+use super::conditioning::build_qwen_image_2_1_conditioning;
+#[cfg(target_os="macos")]
+use super::conditioning::build_reference_conditioning;
+use super::cached_lora_hash_for_file;
+use super::cached_model_hash_for_file;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::bernini::candle_bernini_snapshot_ok;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::bernini::candle_bernini_tier_order;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::bernini::candle_bernini_tier_quant;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::bernini::candle_bernini_tree_present;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::conditioning::candle_conditioned_edit_work;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::artifact_resolution::candle_weights_gap;
+#[cfg(target_os="macos")]
+use super::checkpoint_plan::checkpoint_plan_adapter;
+#[cfg(target_os="macos")]
+use super::checkpoint_plan::checkpoint_plan_backend_eligible;
+#[cfg(target_os="macos")]
+use super::checkpoint_plan::checkpoint_plan_bespoke_primary_pin;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::checkpoint_plan::checkpoint_plan_bespoke_roles;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::checkpoint_plan::checkpoint_plan_candle_companion_dirs;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_component_from_layers;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_entry_source_shape;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_lane_source_shape;
+#[cfg(target_os="macos")]
+use super::checkpoint_plan::checkpoint_plan_layer_roles;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_load_spec;
+#[cfg(target_os="macos")]
+use super::checkpoint_plan::checkpoint_plan_memory_inputs;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_negative_prompt;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_primary_selection;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_source_shape;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_unconsumed_layers;
+use super::civitai_lora_key;
+#[cfg(native_lane)]
+use super::adapters::classify_adapter;
+#[cfg(native_lane)]
+use super::detail::compose_feathered;
+#[cfg(native_lane)]
+use super::events::consume_gen_events;
+#[cfg(target_os="macos")]
+use super::strict_control::control_source_asset_id;
+#[cfg(native_lane)]
+use super::detail::detail_feather;
+use super::detail_workflow_share;
+use super::dispatch_legacy_fallback;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::memory::downtier_candidate_tiers;
+#[cfg(native_lane)]
+use super::stream::drive_gen_items;
+#[cfg(native_lane)]
+use super::stream::drive_gen_items_scored_reported;
+#[cfg(target_os="macos")]
+use super::krea_imported::drive_krea_imported_mlx_items;
+#[cfg(target_os="macos")]
+use super::conditioning::edit_grouping;
+#[cfg(target_os="macos")]
+use super::conditioning::edit_reference_ids;
+#[cfg(native_lane)]
+use super::events::encode_preview_data_url;
+#[cfg(native_lane)]
+use super::detail::engine_dim;
+#[cfg(native_lane)]
+use super::krea_multiphase::ensure_multiphase_job_shape;
+use super::existing_lora_install_marker;
+#[cfg(target_os="macos")]
+use super::flux2::fit_edit_references;
+#[cfg(target_os="macos")]
+use super::geometry::fit_engine_image;
+#[cfg(native_lane)]
+use super::geometry::fit_rgb;
+#[cfg(target_os="macos")]
+use super::flux1_control::flux1_control_generate_one;
+#[cfg(target_os="macos")]
+use super::flux1_control::flux1_control_load;
+#[cfg(target_os="macos")]
+use super::flux1_control::flux1_control_repo_file;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::flux2_comfyui_candle;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::flux2_control_candle_available;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_control_generate_one_scoped;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_control_load;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_control_raw_settings;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_control_repo_file;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_control_scale;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_dev_edit_memory_context;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::flux2_edit_candle_available;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_edit_conditioning_reference_count;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_edit_engine_id;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_edit_generate_one;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_edit_image_guidance;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_edit_reference_ids;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_edit_resolved_quant;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_edit_route_mode;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_edit_text_guidance;
+#[cfg(target_os="macos")]
+use super::flux2::flux2_edit_uses_provider_memory_safety;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::memory::flux2_klein_reference_bearing_mode;
+#[cfg(target_os="macos")]
+use super::render::generate_one;
+#[cfg(native_lane)]
+use super::render::generate_one_with_hires;
+#[cfg(native_lane)]
+use super::conditioning::guard_qwen_image_2_1_lane_slots;
+#[cfg(native_lane)]
+use super::render::hires_first_pass_context;
+#[cfg(native_lane)]
+use super::render::hires_fix_reference_count;
+#[cfg(target_os="macos")]
+use super::conditioning::identity_strength;
+#[cfg(target_os="macos")]
+use super::artifact_resolution::ideogram_model_subdir;
+#[cfg(native_lane)]
+use super::artifact_resolution::ideogram_tier_subdir;
+#[cfg(native_lane)]
+use super::routing::imported_base_snapshot_companions;
+use super::imported_checkpoint_file_for_share;
+#[cfg(native_lane)]
+use super::routing::imported_generate_request_has_unsupported_shape;
+#[cfg(native_lane)]
+use super::krea_imported::imported_model_quant;
+#[cfg(native_lane)]
+use super::instantid::instantid_revision;
+#[cfg(native_lane)]
+use super::iris;
+#[cfg(native_lane)]
+use super::iris_upscale_overlay;
+#[cfg(target_os="macos")]
+use super::conditioning::is_mage_edit_model;
+#[cfg(native_lane)]
+use super::conditioning::is_qwen_image_2_1_edit;
+#[cfg(native_lane)]
+use super::krea_imported::is_single_file_checkpoint;
+#[cfg(target_os="macos")]
+use super::kolors::kolors_control_available;
+#[cfg(target_os="macos")]
+use super::krea_control::krea_control_calibration_provenance;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::krea_control_candle_available;
+#[cfg(target_os="macos")]
+use super::krea_control::krea_control_generate_one;
+#[cfg(target_os="macos")]
+use super::krea_control::krea_control_memory_inputs;
+#[cfg(target_os="macos")]
+use super::krea_control::krea_control_overlay_repo_file;
+#[cfg(target_os="macos")]
+use super::krea_control::krea_control_payload_overlay_path;
+#[cfg(target_os="macos")]
+use super::krea_control::krea_control_spec;
+#[cfg(target_os="macos")]
+use super::krea_edit::krea_edit_generate_one;
+#[cfg(native_lane)]
+use super::krea_imported::krea_imported_available;
+#[cfg(target_os="macos")]
+use super::krea_imported::krea_imported_base_tier_complete;
+#[cfg(native_lane)]
+use super::krea_imported::krea_imported_conditioning;
+#[cfg(native_lane)]
+use super::krea_imported::krea_imported_control_available;
+#[cfg(native_lane)]
+use super::krea_imported::krea_imported_img2img_requested;
+#[cfg(target_os="macos")]
+use super::krea_imported::krea_imported_memory_inputs;
+#[cfg(native_lane)]
+use super::krea_imported::krea_imported_raw_settings;
+#[cfg(target_os="macos")]
+use super::krea_imported::krea_imported_request_shape_available;
+#[cfg(target_os="macos")]
+use super::krea_multiphase::krea_multiphase_generate_one;
+#[cfg(native_lane)]
+use super::memory::krea_turbo_memory_route;
+#[cfg(native_lane)]
+use super::lane_controls;
+#[cfg(native_lane)]
+use super::render::lane_reference_count;
+#[cfg(target_os="macos")]
+use super::load_spec::load_control_engine;
+#[cfg(target_os="macos")]
+use super::load_spec::load_engine;
+#[cfg(target_os="macos")]
+use super::conditioning::load_reference_alpha;
+#[cfg(target_os="macos")]
+use super::conditioning::load_reference_image;
+#[cfg(target_os="macos")]
+use super::conditioning::load_reference_image_with;
+#[cfg(native_lane)]
+use super::load_spec::load_spec;
+#[cfg(target_os="macos")]
+use super::krea_turbo_raw::lora_declares_accelerator_role;
+use super::lora_weight;
+#[cfg(target_os="macos")]
+use super::conditioning::mage_edit_reference_ids;
+#[cfg(target_os="macos")]
+use super::mage_finetuned::mage_finetuned_available;
+#[cfg(native_lane)]
+use super::mage_finetuned::mage_finetuned_generation_request;
+#[cfg(target_os="macos")]
+use super::mage_finetuned::mage_finetuned_memory_load_shape_with;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::min_quality_floor;
+#[cfg(native_lane)]
+use super::sdxl_imported::mirror_cached_sdxl_component_file;
+#[cfg(native_lane)]
+use super::sdxl_imported::mirror_cached_sdxl_component_file_with_copy;
+#[cfg(target_os="macos")]
+use super::quantization::mlx_load_quant_for_resolved_artifact;
+#[cfg(native_lane)]
+use super::mlx_model;
+#[cfg(native_lane)]
+use super::sampling::mlx_raw_settings;
+use crate::model_file_identity;
+#[cfg(native_lane)]
+use super::artifact_resolution::model_repo;
+#[cfg(native_lane)]
+use super::krea_multiphase::multiphase_load_quant;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::nvfp4_requested;
+#[cfg(target_os="macos")]
+use super::krea_multiphase::parse_multiphase_specs;
+#[cfg(native_lane)]
+use super::conditioning::parse_poses;
+use super::parse_prompt_enhancement_fields;
+use crate::paths;
+#[cfg(target_os="macos")]
+use super::krea_imported::pin_krea_imported_payload_control_overlay;
+#[cfg(target_os="macos")]
+use super::flux2::plan_edit_batch;
+#[cfg(native_lane)]
+use super::conditioning::pose_entries;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::routing::prepare_candle_image_route;
+#[cfg(native_lane)]
+use super::checkpoint_plan::prepare_checkpoint_plan_sources;
+#[cfg(target_os="macos")]
+use super::routing::prepare_image_route;
+#[cfg(target_os="macos")]
+use super::krea_imported::prepare_krea_imported_control_sources;
+#[cfg(target_os="macos")]
+use super::krea_imported::prepare_krea_imported_sources;
+#[cfg(target_os="macos")]
+use super::mage_finetuned::prepare_mage_finetuned_transformer;
+#[cfg(target_os="macos")]
+use super::sdxl_imported::prepare_sdxl_imported_sources;
+#[cfg(native_lane)]
+use super::strict_control::preprocess_control_entry;
+#[cfg(native_lane)]
+use super::stream::preview_sink_for;
+#[cfg(all(native_lane,all (windows , feature = "backend-candle")))]
+use super::sdxl_imported::promote_cached_sdxl_component;
+#[cfg(native_lane)]
+use super::prompt_enhancement_fact;
+#[cfg(target_os="macos")]
+use super::pulid::pulid_identity_weights;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::qwen_comfyui_candle;
+#[cfg(target_os="macos")]
+use super::qwen::qwen_control_generate_one;
+#[cfg(target_os="macos")]
+use super::qwen::qwen_control_load;
+#[cfg(target_os="macos")]
+use super::qwen::qwen_control_raw_settings;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::qwen_edit_candle_available;
+#[cfg(target_os="macos")]
+use super::qwen::qwen_edit_engine_id;
+#[cfg(target_os="macos")]
+use super::qwen::qwen_edit_generate_one;
+#[cfg(target_os="macos")]
+use super::qwen::qwen_edit_lightning;
+#[cfg(target_os="macos")]
+use super::qwen::qwen_edit_reference_ids;
+#[cfg(native_lane)]
+use super::conditioning::qwen_image_2_1_reference_ids;
+use super::reattach_alpha;
+#[cfg(native_lane)]
+use super::events::record_prompt_enhancement_report;
+#[cfg(target_os="macos")]
+use super::sampling::recover_ideogram_placeholder;
+#[cfg(native_lane)]
+use super::sampling::recover_ideogram_placeholder_with;
+#[cfg(native_lane)]
+use super::detail::refine_tiled_detail;
+#[cfg(target_os="macos")]
+use super::stream::release_gen_cache_between_items;
+#[cfg(not(test))]
+use super::stream::release_gen_cache_between_items;
+#[cfg(target_os="macos")]
+use super::krea_multiphase::request_has_multiphase;
+#[cfg(native_lane)]
+use super::checkpoint_plan::request_is_checkpoint_plan_backed;
+#[cfg(native_lane)]
+use super::strict_control::requested_control_kind;
+use super::resolve_adapter_file;
+#[cfg(native_lane)]
+use super::adapters::resolve_adapters;
+#[cfg(native_lane)]
+use super::sampling::resolve_advanced_or_manifest_f32;
+#[cfg(native_lane)]
+use super::sampling::resolve_advanced_or_manifest_f32_with;
+#[cfg(native_lane)]
+use super::sampling::resolve_advanced_or_manifest_u32;
+#[cfg(native_lane)]
+use super::sampling::resolve_advanced_or_manifest_u32_with;
+#[cfg(target_os="macos")]
+use super::zimage::resolve_base_control_weights;
+#[cfg(target_os="macos")]
+use super::bernini::resolve_bernini_image_quant;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::bernini::resolve_candle_bernini_tier_dir_and_quant;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::detail::resolve_candle_detail_components;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::routing::resolve_candle_image_route;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::candle::resolve_candle_lane_inputs;
+#[cfg(target_os="macos")]
+use super::conditioning::resolve_character_image_likeness_source;
+#[cfg(target_os="macos")]
+use super::conditioning::resolve_control_identity_source;
+#[cfg(target_os="macos")]
+use super::zimage::resolve_control_scale;
+#[cfg(target_os="macos")]
+use super::zimage::resolve_control_weights;
+#[cfg(target_os="macos")]
+use super::artifact_resolution::resolve_flux_ip_adapter_dir;
+#[cfg(target_os="macos")]
+use super::conditioning::resolve_generic_lane_conditioning;
+#[cfg(target_os="macos")]
+use super::conditioning::resolve_generic_lane_inputs;
+#[cfg(native_lane)]
+use super::sampling::resolve_guidance;
+#[cfg(target_os="macos")]
+use super::routing::resolve_image_route;
+#[cfg(target_os="macos")]
+use super::krea_imported::resolve_imported_krea_dit;
+#[cfg(target_os="macos")]
+use super::krea_imported::resolve_imported_krea_dit_pin;
+#[cfg(target_os="macos")]
+use super::sdxl_imported::resolve_imported_sdxl_file;
+#[cfg(target_os="macos")]
+use super::sdxl_imported::resolve_imported_sdxl_pin;
+#[cfg(target_os="macos")]
+use super::krea_control::resolve_krea_control_base;
+#[cfg(native_lane)]
+use super::krea_imported::resolve_krea_imported_base_tier;
+#[cfg(target_os="macos")]
+use super::krea_imported::resolve_krea_imported_control_overlay;
+#[cfg(not(test))]
+use super::krea_imported::resolve_krea_imported_control_overlay;
+#[cfg(native_lane)]
+use super::krea_imported::resolve_krea_imported_edit_conditioning;
+#[cfg(native_lane)]
+use super::mage_finetuned::resolve_mage_finetuned_transformer;
+#[cfg(native_lane)]
+use super::sampling::resolve_negative_prompt;
+use super::resolve_pinned_native_package;
+#[cfg(target_os="macos")]
+use super::mage_finetuned::resolve_plan_backed_mage_finetuned_transformer;
+#[cfg(native_lane)]
+use super::resolve_prepared_adapter_file;
+#[cfg(all(native_lane,any (native_lane , test),any(native_lane,all (unix , native_lane))))]
+use super::adapters::resolve_prepared_adapters;
+#[cfg(target_os="macos")]
+use super::quantization::resolve_quant;
+#[cfg(target_os="macos")]
+use super::qwen::resolve_qwen_control_weights;
+#[cfg(target_os="macos")]
+use super::qwen::resolve_qwen_edit_guidance;
+#[cfg(target_os="macos")]
+use super::conditioning::resolve_qwen_image_2_1_edit;
+use super::resolve_seed;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::conditioning::resolve_sensenova_candle_true_cfg;
+#[cfg(target_os="macos")]
+use super::sensenova::resolve_sensenova_img_cfg;
+#[cfg(target_os="macos")]
+use super::sensenova::resolve_sensenova_timestep_shift;
+#[cfg(native_lane)]
+use super::sampling::resolve_steps;
+#[cfg(target_os="macos")]
+use super::sampling::resolve_true_cfg;
+#[cfg(native_lane)]
+use super::strict_control::resolve_user_control_map;
+#[cfg(native_lane)]
+use super::artifact_resolution::resolve_weights_dir;
+use super::resolved_sampler_for_share;
+use super::resolved_steps_for_share;
+use crate::safe_download_dir;
+#[cfg(target_os="macos")]
+use super::sdxl_imported::sdxl_imported_available;
+#[cfg(target_os="macos")]
+use super::sdxl_imported::sdxl_imported_request_shape_available;
+#[cfg(target_os="macos")]
+use super::sdxl::sdxl_sub_mode;
+#[cfg(target_os="macos")]
+use super::sensenova::sensenova_dim;
+#[cfg(target_os="macos")]
+use super::sensenova::sensenova_edit_available;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::conditioning::sensenova_edit_candle_reference_ids;
+#[cfg(target_os="macos")]
+use super::sensenova::sensenova_edit_generate_one;
+#[cfg(native_lane)]
+use crate::settings;
+#[cfg(target_os="macos")]
+use super::conditioning::should_fit_edit_source;
+#[cfg(native_lane)]
+use super::slim_step_result;
+#[cfg(native_lane)]
+use super::events::slim_step_result_with_preview;
+use super::split_alpha;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::standard_tier_subdir;
+use super::streaming_result;
+#[cfg(target_os="macos")]
+use super::strict_control::strict_control_default_repo;
+#[cfg(native_lane)]
+use super::strict_control::strict_control_engine;
+#[cfg(native_lane)]
+use crate::strip_jsonc_comments;
+use super::stub_raw_settings;
+use super::stub_rgb8;
+#[cfg(native_lane)]
+use super::events::take_prompt_enhancement_fact;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::quantization::tier_key_from_resolved_dir;
+#[cfg(native_lane)]
+use super::strict_control::trusted_control_weight_revision;
+#[cfg(native_lane)]
+use super::artifact_resolution::turnkey_tier_revision;
+use super::upscaled_workflow_share;
+#[cfg(target_os="macos")]
+use super::sampling::uses_true_cfg;
+#[cfg(native_lane)]
+use super::strict_control::validate_control_kind;
+use super::validate_flux3_layout_request;
+use super::validate_hires_fix_request;
+use super::validate_prompt_enhancement_request;
+#[cfg(target_os="macos")]
+use super::stream::without_mlx_cache_release_for_headless_test;
+use super::workflow_source;
+use super::write_image_asset;
+#[cfg(native_lane)]
+use super::write_upscaled_asset;
+#[cfg(target_os="macos")]
+use super::zimage::zimage_base_control_generate_one;
+#[cfg(target_os="macos")]
+use super::zimage::zimage_base_control_load;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::zimage_comfyui_candle;
+#[cfg(target_os="macos")]
+use super::zimage::zimage_control_generate_one;
+#[cfg(target_os="macos")]
+use super::zimage::zimage_control_load;
+#[cfg(all(not(target_os="macos"),feature="backend-candle"))]
+use super::zimage_identity_candle_strength;
+use sha2::Digest;
 use serde_json::json;
 
 #[test]
@@ -1271,7 +2025,7 @@ fn ideogram_selection_telemetry_binds_each_pass_to_the_full_physical_identity() 
     // Architecture tripwire retained: real rendering cannot cheaply expose both serialised
     // per-pass telemetry records on this host; this guards the non-runtime payload schema that
     // binds a receipt to its physical pass identity.
-    let source = include_str!("base.rs");
+    let source = include_str!("candle.rs");
     let telemetry = source
         .split_once("let passes = match hires_first_pass_memory_context.as_ref()")
         .expect("Ideogram per-pass telemetry")
@@ -3712,13 +4466,8 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         "PoseReject dispatch must execute before the procedural-stub fallback"
     );
 
-    let base = include_str!("base.rs");
-    let mlx_stream = between(
-        base,
-        "async fn generate_stream(",
-        "\nasync fn generate_candle_stream(",
-    );
-    let candle_stream = between(base, "async fn generate_candle_stream(", "\nfn lora_label(");
+    let mlx_stream = include_str!("mlx.rs");
+    let candle_stream = include_str!("candle.rs");
     assert_eq!(
         mlx_stream.matches("recover_ideogram_placeholder(").count(),
         1,
@@ -3765,7 +4514,7 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     );
     assert!(
         candle_stream.contains("memory_strategy_context.as_ref()")
-            && base.contains("crate::memory_strategy::generate_with_scope("),
+            && candle_stream.contains("crate::memory_strategy::generate_with_scope("),
         "the selected Krea contract must reach provider safety and lifecycle hooks"
     );
     let probes: Vec<usize> = candle_stream
@@ -18825,7 +19574,9 @@ fn candle_kolors_bespoke_routes_bind_immutable_receipts_before_load() {
 fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
     // Architecture tripwire retained: the Candle-only SANA path has no CPU-safe provider execution;
     // the scan protects immutable revision literals and cross-pass admission wiring.
-    let source = include_str!("base.rs");
+    let source = include_str!("candle.rs");
+    let artifacts = include_str!("artifact_resolution.rs");
+    let memory = include_str!("memory.rs");
     let selector = include_str!("../candle_memory_strategy.rs");
     let registry = include_str!("../memory_route_registry.rs");
     for required in [
@@ -18834,7 +19585,14 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
         "SANA_SPRINT_CANDLE_DIFFUSERS_REVISION",
         "19683c58b7ea290e55cedd8950ae1d86ada7ef96",
         "huggingface_pinned_snapshot_dir(",
-        "\"sana_1600m\" | \"sana_sprint_1600m\"",
+    ] {
+        assert!(
+            artifacts.contains(required),
+            "SANA artifact owner omitted {required}"
+        );
+    }
+    assert!(memory.contains("\"sana_1600m\" | \"sana_sprint_1600m\""));
+    for required in [
         "hires_first_pass_generation_memory",
         "hires_first_pass_memory_context",
         "requires an exact receipt-priced pre-load memory selection for every render pass",
@@ -18847,7 +19605,7 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
             "SANA production route omitted {required}"
         );
     }
-    let force_dense = source
+    let force_dense = memory
         .split_once("fn candle_quant_for_resolved_tier(")
         .expect("Candle tier resolver")
         .1
@@ -21925,8 +22683,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     const BASE_ADMITTED: &[(&str, &str, &str, &str)] = &[
         (
             "Flux3Reference",
-            "base.rs",
-            include_str!("base.rs"),
+            "candle.rs",
+            include_str!("candle.rs"),
             "evaluate_shared_image_priced_with_resources(",
         ),
         (
@@ -22215,8 +22973,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
 
     // Every route the resolver can actually produce, read out of its source. `Some(CandleImageRoute::`
     // is the production form, so prose mentioning a variant cannot inflate this set.
-    let base = include_str!("base.rs");
-    let resolver = base
+    let routing = include_str!("routing.rs");
+    let resolver = routing
         .split_once("fn resolve_candle_image_route_with_prepared_availability(")
         .expect("resolve_candle_image_route_with_prepared_availability must exist")
         .1
@@ -22687,7 +23445,7 @@ mod preview_stream_tests {
 fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
     // Architecture tripwire retained: this is an event-loop/UI cadence invariant spanning the worker
     // and web placeholder contract; no helper exposes the arm's deliberate absence of a post.
-    let base = include_str!("base.rs");
+    let base = include_str!("events.rs");
     let arm_start = base
         .find("GenEvent::Preview { index, frame } => {")
         .expect("the Preview arm of consume_gen_events");
@@ -27916,7 +28674,8 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
     let edit = include_str!("sdxl_edit_candle.rs");
     let ip = include_str!("sdxl_ipadapter.rs");
     let detail = include_str!("detail.rs");
-    let base = include_str!("base.rs");
+    let base = include_str!("candle.rs");
+    let render = include_str!("render.rs");
     for (label, source) in [("edit", edit), ("ip", ip)] {
         assert!(
             source.contains("let adapters = resolve_adapters(request, settings)?;"),
@@ -27955,7 +28714,7 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
     assert!(detail.contains("raw_adapter_settings[\"memoryStrategy\"]"));
     assert!(detail.contains("raw_adapter_settings[\"memoryEvidenceRevision\"]"));
     assert!(!detail.contains("packed/request-quantized detail is not supported"));
-    assert!(base.contains("context.mode = if reference_count == 0"));
+    assert!(render.contains("context.mode = if reference_count == 0"));
     let mode_call = base
         .split_once("let shared_request_mode = candle_base_memory_request_mode(")
         .expect("shared mode must use the family-specific mode mapper")
@@ -28003,7 +28762,7 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
 fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebinding() {
     // Architecture tripwire retained: the Candle body is cfg-gated off on macOS, and the invariant
     // is the ordering of receipt authority versus cache rebinding rather than a provider result.
-    let base = include_str!("base.rs");
+    let base = include_str!("candle.rs");
     let body = base
         .split_once("async fn generate_candle_registry_stream_using(")
         .expect("missing production generic Candle function marker")
@@ -28215,7 +28974,7 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
 /// the count; deleting either `fit.selection_telemetry(..)` emission reds its block.
 #[test]
 fn candle_stream_emits_the_krea_ladder_selection() {
-    let source = include_str!("base.rs");
+    let source = include_str!("candle.rs");
     let stream = source
         .split_once("async fn generate_candle_stream(")
         .expect("generate_candle_stream")
@@ -28286,7 +29045,7 @@ fn candle_stream_emits_the_krea_ladder_selection() {
 /// the deference arm reds the third.
 #[test]
 fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw_probe() {
-    let source = include_str!("base.rs");
+    let source = include_str!("candle.rs");
     let stream = source
         .split_once("async fn generate_candle_stream(")
         .expect("generate_candle_stream")

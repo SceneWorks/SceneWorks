@@ -1,17 +1,44 @@
-use super::advanced;
-use super::{
-    candle_artifact_path_matches, candle_certified_hf_artifact_path, candle_resolved_tier_key,
-    curated_image_menu, normalize_sampling_knob, pid_effective_dims, pid_output_tier, pose_entries,
-    read_advanced_sampling_knobs, resolve_adapters, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_pid_weights, run_candle_strict_control,
-    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, KolorsControl, KolorsControlPaths, KolorsControlRequest,
-    Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult,
-};
-use super::{
-    ensure_hf_cached_file, resolve_app_managed_model_dir, safe_weight_filename,
-    standard_tier_subdir, DownloadContext,
-};
+use crate::ApiClient;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use crate::DownloadContext;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use super::KolorsControl;
+use super::KolorsControlPaths;
+use super::KolorsControlRequest;
+use crate::Path;
+use crate::PathBuf;
+use super::Progress;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use crate::advanced;
+use super::load_spec::candle_artifact_path_matches;
+use super::load_spec::candle_certified_hf_artifact_path;
+use super::memory::candle_resolved_tier_key;
+use super::sampling::curated_image_menu;
+use crate::ensure_hf_cached_file;
+#[cfg(target_os="macos")]
+use super::kolors::kolors_control_raw_settings;
+use super::sampling::normalize_sampling_knob;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::conditioning::pose_entries;
+use super::sampling::read_advanced_sampling_knobs;
+use super::adapters::resolve_adapters;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use crate::resolve_app_managed_model_dir;
+use super::pid::resolve_pid_weights;
+use super::run_candle_strict_control;
+use crate::safe_weight_filename;
+use super::standard_tier_subdir;
+use super::strict_control::trusted_control_weight_revision;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 

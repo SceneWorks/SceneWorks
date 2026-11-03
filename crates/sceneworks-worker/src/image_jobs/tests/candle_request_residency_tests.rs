@@ -1,5 +1,18 @@
-use super::*;
-
+use super::apply_request_scoped_candle_residency;
+#[cfg(not(target_os = "macos"))]
+use super::auto_tier_fit_decision;
+use super::auto_tier_streaming_disclosure;
+use super::candle_base_memory_request_mode;
+use super::flux2_klein_reference_bearing_mode;
+use super::krea_streaming_measurement;
+use super::progress_with_auto_tier_streaming;
+use super::rejects_unverified_shared_memory_fallback;
+use super::scrub_untrusted_memory_strategy_disclosure;
+use super::verified_only_memory_family_label;
+use super::AutoTierFitDecision;
+use super::AUTO_TIER_STREAMING_DISCLOSURE_KEY;
+use crate::JsonObject;
+use serde_json::json;
 #[test]
 fn sequential_admission_sets_the_request_bit_without_erasing_other_rungs() {
     let mut resident = None;

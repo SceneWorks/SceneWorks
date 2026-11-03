@@ -1,12 +1,29 @@
-use super::{
-    admit_conditioning_overlay, consume_gen_events, drive_gen_items_scored,
-    ensure_depth_estimator_dir, parse_poses, preprocess_control_entry, requested_control_kind,
-    resolve_control_identity_source, resolve_control_source, resolve_seed,
-    resolve_user_control_map, stage_likeness, start_gen_stream, validate_control_kind, ApiClient,
-    CancelFlag, ControlKind, Image, ImagePlan, JobSnapshot, JsonObject, Path, Progress, Settings,
-    Value, WorkerResult,
-};
-
+use crate::ApiClient;
+use super::CancelFlag;
+use super::ControlKind;
+use super::Image;
+use super::ImagePlan;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use super::Progress;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerResult;
+use super::admit_conditioning_overlay;
+use super::events::consume_gen_events;
+use super::stream::drive_gen_items_scored;
+use super::strict_control::ensure_depth_estimator_dir;
+use super::conditioning::parse_poses;
+use super::strict_control::preprocess_control_entry;
+use super::strict_control::requested_control_kind;
+use super::conditioning::resolve_control_identity_source;
+use super::strict_control::resolve_control_source;
+use super::resolve_seed;
+use super::strict_control::resolve_user_control_map;
+use super::conditioning::stage_likeness;
+use super::stream::start_gen_stream;
+use super::strict_control::validate_control_kind;
 use crate::conditioning_fit::ConditioningAdmission;
 
 // Shared candle (Windows/CUDA) strict-control driver (sc-8304, epic 8236). The candle siblings of the

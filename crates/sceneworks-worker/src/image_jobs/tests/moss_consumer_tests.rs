@@ -1,0 +1,2145 @@
+use super::emit_moss_advanced_outputs;
+use super::huggingface_pinned_snapshot_dir;
+use super::lane_controls;
+use super::moss_admit;
+use super::moss_edit_cold_peak;
+use super::moss_edit_peak;
+use super::moss_edit_render;
+use super::moss_execution_asset_selected;
+use super::moss_load_admitted;
+#[cfg(not(target_os = "macos"))]
+use super::moss_memory;
+#[cfg(target_os = "macos")]
+use super::moss_memory;
+use super::moss_owned_weight_bytes;
+use super::moss_pin_spec;
+use super::moss_render;
+use super::prepare_moss_preload;
+#[cfg(any(test, feature = "test-support"))]
+use super::prepare_moss_preload_with_check;
+use super::run_image_generate_job;
+use super::run_image_generate_job_unexplained;
+use super::streaming_result;
+use super::write_image_asset;
+use super::ApiClient;
+use super::Arc;
+use super::GenEvent;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::JobSnapshot;
+use super::JsonObject;
+use super::LoadSpec;
+use super::Path;
+use super::PathBuf;
+use super::Progress;
+use super::ProjectStore;
+use super::Settings;
+use super::Sha256;
+use super::Value;
+use super::WeightsSource;
+use super::WorkerError;
+use gen_core::moss_image::*;
+use serde_json::json;
+use std::cell::{Cell, RefCell};
+
+// Request metadata only: no model fixture, source payload, device, tensor or
+// native backend invocation. The tests below stop before backend header pricing.
+fn preload_payload_for_pure_test(variant: MossImageVariant, mode: &str) -> JsonObject {
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .unwrap()
+        .1;
+    let manifest: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+    let entry = manifest["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == variant.provider_id())
+        .unwrap();
+    json!({
+        "model":variant.provider_id(), "modelManifestEntry":entry,
+        "prompt":"source-only preload request", "width":256, "height":256,
+        "count":1, "advanced":if mode == "off" {
+            json!({"steps":8,"guidanceScale":1.0,"mossImage":{"acceleration":mode}})
+        } else {
+            // DMD is natively no-CFG; this test targets snapshot availability.
+            json!({"steps":8,"mossImage":{"acceleration":mode}})
+        }
+    })
+    .as_object()
+    .unwrap()
+    .clone()
+}
+
+#[test]
+fn checked_preload_refuses_cancellation_before_any_source_lookup() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = Settings::for_test(temp.path().join("data"));
+    let payload = json!({"model":"not_a_moss_provider","prompt":"metadata only"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let request = ImageRequest::from_payload(&payload);
+    let mut checks = 0;
+    let error = prepare_moss_preload_with_check(
+        &settings,
+        &payload,
+        &request,
+        &mut |_, _| panic!("source lookup reached"),
+        &mut || {
+            checks += 1;
+            Err(gen_core::Error::Canceled)
+        },
+    )
+    .err()
+    .expect("cancellation must refuse");
+    assert!(matches!(&error, WorkerError::Canceled(_)), "{error:?}");
+    assert_eq!(checks, 1);
+}
+
+#[test]
+fn prepared_preload_refuses_non_moss_before_source_lookup() {
+    let temp = tempfile::tempdir().unwrap();
+    let hub = temp.path().join("hub");
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HF_HOME", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+    ]);
+    let settings = Settings::for_test(temp.path().join("data"));
+    let payload = json!({"model":"not_a_moss_provider","prompt":"metadata only"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let request = ImageRequest::from_payload(&payload);
+    let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
+        .err()
+        .expect("non-MOSS must fail before snapshot/backend preparation");
+    assert!(
+        matches!(error, WorkerError::InvalidPayload(ref message) if message == "missing MOSS model"),
+        "{error}"
+    );
+    assert!(
+        !hub.exists(),
+        "request refusal must not create a model cache"
+    );
+}
+
+#[test]
+fn prepared_preload_preserves_base_dmd_refusal_before_source_lookup() {
+    let temp = tempfile::tempdir().unwrap();
+    let hub = temp.path().join("hub");
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HF_HOME", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+    ]);
+    let settings = Settings::for_test(temp.path().join("data"));
+    for mode in ["unmerged_bf16", "full_fp32"] {
+        let payload = preload_payload_for_pure_test(MossImageVariant::Base, mode);
+        let request = ImageRequest::from_payload(&payload);
+        let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
+            .err()
+            .expect("Base+DMD must fail before source/backend preparation");
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(ref message) if message.contains("DMD requires the exact SFT parent")),
+            "{mode}: {error}"
+        );
+        assert!(
+            !error.to_string().contains("snapshot missing"),
+            "parent refusal must precede cache lookup: {error}"
+        );
+    }
+    assert!(
+        !hub.exists(),
+        "parent refusal must not create a model cache"
+    );
+}
+
+#[test]
+fn prepared_preload_requires_exact_frozen_snapshot_for_each_admissible_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let hub = temp.path().join("hub");
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HF_HOME", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+    ]);
+    let settings = Settings::for_test(temp.path().join("data"));
+    for (variant, mode) in [
+        (MossImageVariant::Base, "off"),
+        (MossImageVariant::Sft, "off"),
+        (MossImageVariant::Sft, "unmerged_bf16"),
+        (MossImageVariant::Sft, "full_fp32"),
+    ] {
+        // An unrelated empty revision must not become a fallback. No model
+        // file is created, and native/backend demand functions remain unreachable.
+        let wrong = hub
+            .join(format!(
+                "models--{}",
+                variant.repository().replace('/', "--")
+            ))
+            .join("snapshots")
+            .join("0000000000000000000000000000000000000000");
+        std::fs::create_dir_all(&wrong).unwrap();
+        let payload = preload_payload_for_pure_test(variant, mode);
+        let request = ImageRequest::from_payload(&payload);
+        let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
+            .err()
+            .expect("absent frozen snapshot must refuse before backend demand pricing");
+        let expected = format!(
+            "{} frozen snapshot missing; install or repair this model in Models",
+            variant.provider_id()
+        );
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(ref message) if message == &expected),
+            "{variant:?}/{mode}: {error}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&wrong).unwrap().count(),
+            0,
+            "no model payload may be staged by a pre-load refusal"
+        );
+    }
+}
+
+#[test]
+fn full_prepared_consumer_config_reaches_native_shared_preparation_without_ordinary_dit() {
+    let temp = tempfile::tempdir().unwrap();
+    let hub = temp.path().join("hub");
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HF_HOME", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+    ]);
+    let root = |repo: &str, revision: &str| {
+        hub.join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+    };
+    let ordinary = root(SFT_REPO, SFT_REVISION);
+    let full = root(DMD_REPO, DMD_REVISION);
+    std::fs::create_dir_all(ordinary.join("transformer")).unwrap();
+    std::fs::create_dir_all(full.join("transformer")).unwrap();
+    std::fs::write(
+        ordinary.join("transformer/config.json"),
+        b"unused ordinary config must not be consumed",
+    )
+    .unwrap();
+    std::fs::write(
+        full.join("transformer/config.json"),
+        include_bytes!("../../../../../tests/fixtures/moss-transformer-config.json"),
+    )
+    .unwrap();
+    let mode = MossImageAcceleration::Dmd(MossDmdPrecision::FullFp32);
+    let mut spec = LoadSpec::new(WeightsSource::Dir(ordinary))
+        .with_resolved_route("moss_image_sft:full_fp32")
+        .with_component(DMD_TRANSFORMER_COMPONENT, WeightsSource::Dir(full.clone()))
+        .with_component(DMD_DATASPACE_COMPONENT, WeightsSource::Dir(full.clone()));
+    // A projection containing the real frozen selected config, deliberately missing shared
+    // weights. Successful admission/execution requires real weights and remains terminal-only.
+    let entry = json!({"downloads":[
+        {"repo":SFT_REPO,"revision":SFT_REVISION,"files":["transformer/config.json"]},
+        {"repo":DMD_REPO,"revision":DMD_REVISION,"files":["transformer/config.json"]}
+    ]})
+    .as_object()
+    .unwrap()
+    .clone();
+    let mut pin_progress = Vec::new();
+    moss_pin_spec(
+        &mut spec,
+        &entry,
+        &Settings::for_test(temp.path().join("data")),
+        mode,
+        &mut |done, total| pin_progress.push((done, total)),
+    )
+    .unwrap();
+    assert_eq!(spec.prepared_file_pins().len(), 1);
+    // sc-26610: one progress tick per selected file, before its (possibly cold) seal.
+    assert_eq!(pin_progress, vec![(0, 1)]);
+    #[cfg(target_os = "macos")]
+    let error = moss_memory::selected_asset_facts(MossImageVariant::Sft, &spec, mode)
+        .unwrap_err()
+        .to_string();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let error = moss_memory::selected_preload_estimate(
+        MossImageVariant::Sft,
+        &spec,
+        &GenerationRequest {
+            moss_image: Some(MossImageOptions {
+                acceleration: mode,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        MossImageAdvancedInputs::default(),
+    )
+    .unwrap_err()
+    .to_string();
+    // Native errors display host paths, including Windows backslash separators.
+    let error = error.replace('\\', "/");
+    assert!(error.contains("text_encoder/config.json"), "{error}");
+    assert!(!error.contains("transformer/config.json"), "{error}");
+    // The macOS normal registry constructor prepares sources before device/tensor work.
+    // CUDA factory execution is covered by the separately admitted native worker campaign.
+    #[cfg(target_os = "macos")]
+    {
+        let error = crate::inference_runtime::load("moss_image_sft", &spec)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("text_encoder/config.json"), "{error}");
+        assert!(!error.contains("transformer/config.json"), "{error}");
+    }
+}
+#[test]
+fn moss_worker_persisted_batch_recipe_keeps_per_prompt_count_and_total_generation_metadata() {
+    // The Studio regression consumes this projection of a real persisted recipe.
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/moss-batch-recipe.json"
+    ))
+    .unwrap();
+    let prompts = fixture["rawAdapterSettings"]["promptBatch"].clone();
+    let payload = json!({"model":"moss_image_sft","mode":"text_to_image","prompt":prompts[0],"prompts":prompts,"count":2,"width":16,"height":16,"modelManifestEntry":{"limits":{"minDimension":16}},"advanced":{"mossImage":{"acceleration":"off"}}});
+    let request = ImageRequest::from_payload(payload.as_object().unwrap());
+    let plan = ImagePlan::with_count_and_adapter(&request, 4, "mlx_moss_image_sft", None);
+    assert_eq!(plan.generation_set["count"], 4);
+    assert_eq!(streaming_result(&plan, &[])["expectedCount"], 4);
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::new(temp.path().to_path_buf(), "test");
+    let project = store.create_project("MOSS batch recipe").unwrap();
+    for index in 0..4 {
+        let fact = write_image_asset(
+            &plan,
+            index,
+            173,
+            16,
+            16,
+            vec![0; 16 * 16 * 3],
+            "mlx_moss_image_sft",
+            request.advanced.clone(),
+            Path::new(&project.path),
+        )
+        .unwrap();
+        let asset = store
+            .persist_generated_asset(
+                &project.id,
+                "job-moss",
+                &plan.genset_id,
+                &Value::Object(fact.clone()),
+            )
+            .unwrap();
+        let path = Path::new(&project.path)
+            .join("recipes")
+            .join(format!("{}.recipe.json", fact["assetId"].as_str().unwrap()));
+        let recipe: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(recipe, asset["recipe"]);
+        for pointer in [
+            "/mode",
+            "/model",
+            "/negativePrompt",
+            "/normalizedSettings/width",
+            "/normalizedSettings/height",
+            "/normalizedSettings/count",
+            "/rawAdapterSettings/mossImage",
+            "/rawAdapterSettings/promptBatch",
+        ] {
+            assert_eq!(
+                recipe.pointer(pointer),
+                fixture.pointer(pointer),
+                "{pointer}: {recipe}"
+            );
+        }
+        assert_eq!(recipe["prompt"], prompts[index / request.count as usize]);
+    }
+}
+
+#[test]
+fn moss_edit_history_writer_persists_all_semantic_slots_and_authored_controls() {
+    // This exercises egress/ProjectStore only, with CPU pixels. Native execution and the
+    // four-reference REST gate are tested independently; no weights or device is loaded.
+    for ids in [json!(["a"]), json!(["a", "b", "a", "c"])] {
+        let options = json!({"reference_max_edge":768,"use_kv_cache":false});
+        let payload = json!({"model":"moss_image_sft","mode":"edit_image","prompt":"blue cup","referenceAssetIds":ids,"sourceAssetId":"a","referenceAssetId":"a","count":1,"width":512,"height":512,"advanced":{"mossImage":{"acceleration":"off","uncond_skip_layers":[]},"mossImageEdit":options,"steps":30,"guidanceScale":4,"schedulerShift":5,"referenceAssetIds":["forged-output"]}});
+        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let plan = ImagePlan::with_count_and_adapter(&request, 1, "mlx_moss_image_sft", None);
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().to_path_buf(), "test");
+        let project = store.create_project("MOSS edit history").unwrap();
+        let fact = write_image_asset(
+            &plan,
+            0,
+            17,
+            512,
+            512,
+            vec![0; 512 * 512 * 3],
+            "mlx_moss_image_sft",
+            request.advanced.clone(),
+            Path::new(&project.path),
+        )
+        .unwrap();
+        let asset = store
+            .persist_generated_asset(
+                &project.id,
+                "job-edit-history",
+                &plan.genset_id,
+                &Value::Object(fact),
+            )
+            .unwrap();
+        assert_eq!(
+            asset["recipe"]["rawAdapterSettings"]["referenceAssetIds"],
+            ids
+        );
+        assert_eq!(
+            asset["recipe"]["rawAdapterSettings"]["mossImageEdit"],
+            options
+        );
+        for (key, value) in [
+            ("steps", json!(30)),
+            ("guidanceScale", json!(4)),
+            ("schedulerShift", json!(5)),
+        ] {
+            assert_eq!(asset["recipe"]["rawAdapterSettings"][key], value);
+        }
+        assert_eq!(asset["lineage"]["sourceAssetId"], "a");
+        assert_eq!(asset["recipe"]["normalizedSettings"]["width"], 512);
+        assert_eq!(asset["recipe"]["normalizedSettings"]["height"], 512);
+        assert_eq!(asset["recipe"]["negativePrompt"], "");
+        assert_eq!(asset["recipe"]["seed"], 17);
+        let path = Path::new(&project.path)
+            .join("recipes")
+            .join(format!("{}.recipe.json", asset["id"].as_str().unwrap()));
+        let persisted: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(persisted, asset["recipe"]);
+    }
+}
+
+#[test]
+fn moss_edit_history_writer_refuses_conflicting_scalar_alias_before_writing_output() {
+    let payload = json!({"model":"moss_image_sft","mode":"edit_image","prompt":"blue cup","referenceAssetIds":["a","b","a","c"],"sourceAssetId":"different-source","width":16,"height":16,"advanced":{"mossImageEdit":{"reference_max_edge":512,"use_kv_cache":true},"referenceAssetIds":["forged-output"]}});
+    let request = ImageRequest::from_payload(payload.as_object().unwrap());
+    let plan = ImagePlan::with_count_and_adapter(&request, 1, "mlx_moss_image_sft", None);
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::new(temp.path().to_path_buf(), "test");
+    let project = store.create_project("MOSS conflicting history").unwrap();
+    let error = write_image_asset(
+        &plan,
+        0,
+        17,
+        16,
+        16,
+        vec![0; 16 * 16 * 3],
+        "mlx_moss_image_sft",
+        request.advanced.clone(),
+        Path::new(&project.path),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("sourceAssetId"), "{error}");
+    assert_eq!(
+        std::fs::read_dir(Path::new(&project.path).join("assets/images"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(
+        std::fs::read_dir(Path::new(&project.path).join("recipes"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+fn completed_receipt(req: &GenerationRequest) -> MossImageExecutionReport {
+    completed_receipt_for(req, MossImageVariant::Sft)
+}
+fn completed_receipt_for(
+    req: &GenerationRequest,
+    variant: MossImageVariant,
+) -> MossImageExecutionReport {
+    let resolved = MossImageResolved::resolve(variant, req).unwrap();
+    let hash = "a".repeat(64);
+    let mode = resolved.acceleration;
+    let mut paths = SNAPSHOT_FILES
+        .iter()
+        .filter(|p| **p != "LICENSE")
+        .map(|p| (*p).to_owned())
+        .collect::<Vec<_>>();
+    if mode == MossImageAcceleration::Dmd(MossDmdPrecision::FullFp32) {
+        paths.retain(|p| !p.starts_with("transformer/diffusion_pytorch_model-000"));
+        paths.extend(
+            (1..=4).map(|i| {
+                format!("transformer/diffusion_pytorch_model-{i:05}-of-00004.safetensors")
+            }),
+        );
+    }
+    if mode != MossImageAcceleration::Off {
+        paths.push("dataspace.safetensors".into());
+    }
+    if mode == MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16) {
+        paths.extend([
+            "lora.safetensors".into(),
+            "time_embedding.safetensors".into(),
+        ]);
+    }
+    let assets = paths
+        .into_iter()
+        .map(|path| {
+            let role = if path.starts_with("transformer/") {
+                MossImageAssetRole::Transformer
+            } else if path.starts_with("text_encoder/") {
+                MossImageAssetRole::TextEncoder
+            } else if path.starts_with("tokenizer/") {
+                MossImageAssetRole::Tokenizer
+            } else if path.starts_with("scheduler/") {
+                MossImageAssetRole::Scheduler
+            } else if path == "dataspace.safetensors" {
+                MossImageAssetRole::DmdDataspace
+            } else if path == "lora.safetensors" {
+                MossImageAssetRole::DmdLora
+            } else if path == "time_embedding.safetensors" {
+                MossImageAssetRole::DmdTime
+            } else {
+                MossImageAssetRole::Vae
+            };
+            let dmd = matches!(
+                role,
+                MossImageAssetRole::DmdLora
+                    | MossImageAssetRole::DmdTime
+                    | MossImageAssetRole::DmdDataspace
+            ) || (role == MossImageAssetRole::Transformer
+                && mode == MossImageAcceleration::Dmd(MossDmdPrecision::FullFp32));
+            MossImageAssetReceipt {
+                role,
+                repository: if dmd {
+                    DMD_REPO
+                } else if role == MossImageAssetRole::Transformer {
+                    variant.repository()
+                } else {
+                    SFT_REPO
+                }
+                .into(),
+                revision: if dmd {
+                    DMD_REVISION
+                } else if role == MossImageAssetRole::Transformer {
+                    variant.revision()
+                } else {
+                    SFT_REVISION
+                }
+                .into(),
+                relative_path: path,
+                sha256: hash.clone(),
+            }
+        })
+        .collect();
+    let sequence_length = resolved.max_sequence_length.min(3);
+    let needs_cfg = mode == MossImageAcceleration::Off && resolved.guidance != 1.0;
+    let input = MossImageConditioningInputReceipt {
+        source: MossImageConditioningSource::Text,
+        sha256: hash.clone(),
+        sequence_length,
+        valid_tokens: sequence_length,
+    };
+    let sampling = if mode == MossImageAcceleration::Off {
+        MossImageSamplingReceipt::Euler {
+            sigmas: moss_image_schedule(resolved.steps, resolved.shift, resolved.training_shift)
+                .unwrap(),
+        }
+    } else {
+        MossImageSamplingReceipt::Dmd {
+            step_codes: vec![1.0; resolved.steps as usize],
+            mix_matrix_sha256: hash.clone(),
+        }
+    };
+    let mut component_dtypes = [
+        ("transformer", MossImageDtype::Bf16),
+        ("text_encoder", MossImageDtype::F32),
+        ("vae", MossImageDtype::F32),
+        ("latents", MossImageDtype::F32),
+        ("time_embedding", MossImageDtype::Bf16),
+        ("shared_block_modulation", MossImageDtype::Bf16),
+        ("video_head_modulation", MossImageDtype::Bf16),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect::<std::collections::BTreeMap<_, _>>();
+    let mut adapter_reports = vec![];
+    if mode != MossImageAcceleration::Off {
+        for key in [
+            "time_embedding",
+            "shared_block_modulation",
+            "video_head_modulation",
+        ] {
+            component_dtypes.insert(key.into(), MossImageDtype::F32);
+        }
+        if mode == MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16) {
+            component_dtypes.insert("lora_residual".into(), MossImageDtype::F32);
+            adapter_reports.push(gen_core::AdapterApplyReport {
+                adapter_path: "/Users/private/models/lora.safetensors".into(),
+                applied: 252,
+                skipped: vec![],
+            });
+        } else {
+            component_dtypes.insert("transformer".into(), MossImageDtype::F32);
+        }
+    }
+    MossImageExecutionReport::new(MossImageExecutionData {
+        execution_device: MossImageExecutionDevice::Cpu,
+        resolved,
+        assets,
+        sampling,
+        samples: vec![MossImageSampleReceipt {
+            seed: Some(173),
+            noise_sha256: hash,
+        }],
+        conditioning: vec![MossImageConditioningReceipt {
+            positive: input.clone(),
+            negative: needs_cfg.then_some(input),
+        }],
+        images_per_prompt: 1,
+        latent_shape: [1, 128, 1, 1],
+        output_kind: MossImageOutputKind::Images,
+        component_dtypes,
+        adapter_reports,
+    })
+    .unwrap()
+}
+#[test]
+fn moss_png_recipe_roundtrip_preserves_requested_mode_and_complete_actual_receipt_without_local_paths(
+) {
+    for mode in [
+        MossImageAcceleration::Off,
+        MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16),
+        MossImageAcceleration::Dmd(MossDmdPrecision::FullFp32),
+    ] {
+        let native = GenerationRequest {
+            width: 16,
+            height: 16,
+            moss_image: Some(MossImageOptions {
+                acceleration: mode,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let report = completed_receipt(&native);
+        let options = serde_json::to_value(native.moss_image.unwrap()).unwrap();
+        let payload=json!({"model":"moss_image_sft","mode":"text_to_image","prompt":"日本語 <tag> {\"items\":[]}","count":1,"width":16,"height":16,"modelManifestEntry":{"limits":{"minDimension":16}},"advanced":{"mossImage":options}}).as_object().unwrap().clone();
+        let request = ImageRequest::from_payload(&payload);
+        let plan = ImagePlan::with_count_and_adapter(
+            &request,
+            1,
+            "mlx_moss_image_sft",
+            Some(Arc::new(payload.clone())),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let mut raw = request.advanced.clone();
+        raw.insert(
+            "mossImageExecutionReport".into(),
+            serde_json::to_value(&report).unwrap(),
+        );
+        raw.insert("numInferenceSteps".into(), json!(1));
+        let fact = write_image_asset(
+            &plan,
+            0,
+            173,
+            16,
+            16,
+            vec![0; 16 * 16 * 3],
+            "mlx_moss_image_sft",
+            raw,
+            temp.path(),
+        )
+        .unwrap();
+        let path = temp.path().join(fact["mediaPath"].as_str().unwrap());
+        let shared = sceneworks_core::workflow_png::read_workflow_chunk_file(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(shared.advanced["mossImage"], options);
+        assert_eq!(
+            shared.advanced["steps"],
+            json!(report.data().resolved.steps)
+        );
+        let wire = &shared.advanced["mossImageExecutionReport"];
+        let parsed: MossImageExecutionReport = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.data().assets.len(), report.data().assets.len());
+        assert_eq!(parsed.data().resolved.acceleration, mode);
+        assert_eq!(parsed.data().samples[0].seed, Some(173));
+        assert!(!serde_json::to_string(&shared)
+            .unwrap()
+            .contains("/Users/private/"));
+        assert!(
+            sceneworks_core::workflow_png::workflow_chunk_size(&shared).unwrap()
+                < sceneworks_core::workflow_share::WORKFLOW_SHARE_MAX_BYTES
+        );
+        if mode == MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16) {
+            assert_eq!(
+                parsed.data().adapter_reports[0].adapter_path,
+                PathBuf::from("lora.safetensors")
+            );
+        }
+        let mut replay = payload.clone();
+        replay.insert("advanced".into(), Value::Object(shared.advanced));
+        sceneworks_core::moss_image::scrub_reports(&mut replay);
+        assert!(replay["advanced"].get("mossImageExecutionReport").is_none());
+        assert_eq!(replay["advanced"]["mossImage"], options);
+    }
+}
+type AdvancedObservation = (
+    Vec<u32>,
+    Vec<u8>,
+    Vec<String>,
+    Vec<u32>,
+    MossImageOutputKind,
+);
+struct Probe {
+    descriptor: gen_core::ModelDescriptor,
+    report: RefCell<Option<MossImageExecutionReport>>,
+    edit_report: RefCell<Option<gen_core::moss_image_edit::MossImageEditExecutionReport>>,
+    edit_inputs: RefCell<Vec<(u32, u32, Vec<u8>)>>,
+    expected_edit_inputs: RefCell<Vec<(u32, u32, Vec<u8>)>>,
+    expected_edit_cache: Cell<bool>,
+    failure: Cell<bool>,
+    cancel: Cell<bool>,
+    reads: Cell<usize>,
+    owned_weight_bytes: Cell<u64>,
+    adapter_reports: RefCell<Vec<gen_core::AdapterApplyReport>>,
+    adapter_report_reads: Cell<usize>,
+    advanced_inputs: RefCell<Vec<AdvancedObservation>>,
+}
+impl Probe {
+    fn new() -> Self {
+        Self {
+            descriptor: gen_core::ModelDescriptor {
+                id: "moss_image_sft",
+                family: "moss_image",
+                backend: "test",
+                modality: gen_core::Modality::Image,
+                capabilities: Default::default(),
+                denoiser_output_latent_space: None,
+                control_kinds: None,
+                encoder_contract: None,
+                required_components: &[],
+            },
+            report: RefCell::new(None),
+            edit_report: RefCell::new(None),
+            edit_inputs: RefCell::new(Vec::new()),
+            expected_edit_inputs: RefCell::new(vec![(48, 16, vec![73; 48 * 16 * 3])]),
+            expected_edit_cache: Cell::new(false),
+            failure: Cell::new(false),
+            cancel: Cell::new(false),
+            reads: Cell::new(0),
+            owned_weight_bytes: Cell::new(0),
+            adapter_reports: RefCell::new(vec![]),
+            adapter_report_reads: Cell::new(0),
+            advanced_inputs: RefCell::new(Vec::new()),
+        }
+    }
+}
+impl Generator for Probe {
+    fn moss_image_edit_request_peak(
+        &self,
+        request: &GenerationRequest,
+        inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
+    ) -> gen_core::Result<u64> {
+        inputs.validate()?;
+        let native = gen_core_moss_image::moss_image_edit::edit_request(request)?;
+        let resolved = MossImageResolved::resolve(MossImageVariant::Sft, &native)?;
+        inputs.advanced.validate(&native, &resolved)?;
+        self.advanced_inputs.borrow_mut().push((
+            inputs
+                .advanced
+                .positive
+                .map(|e| e.values.iter().map(|v| v.to_bits()).collect())
+                .unwrap_or_default(),
+            inputs
+                .advanced
+                .positive
+                .and_then(|e| e.mask)
+                .unwrap_or_default()
+                .to_vec(),
+            inputs
+                .advanced
+                .negative_prompts
+                .unwrap_or_default()
+                .to_vec(),
+            inputs
+                .advanced
+                .noise
+                .unwrap_or_default()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect(),
+            inputs.advanced.output,
+        ));
+        assert_eq!(inputs.reference_max_edge, 32);
+        assert_eq!(inputs.use_kv_cache, self.expected_edit_cache.get());
+        assert_eq!(
+            inputs
+                .references
+                .iter()
+                .map(|image| (image.width, image.height, image.pixels.clone()))
+                .collect::<Vec<_>>(),
+            *self.expected_edit_inputs.borrow(),
+            "the typed peak receives every semantic RGB slot in request order"
+        );
+        Ok(73)
+    }
+    fn generate_moss_image_edit(
+        &self,
+        req: &GenerationRequest,
+        inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<MossImageAdvancedOutput> {
+        use gen_core::moss_image_edit::*;
+        use gen_core_moss_image::moss_image_edit::edit_request;
+        *self.report.borrow_mut() = None;
+        *self.edit_report.borrow_mut() = None;
+        let dimensions = inputs.validate()?;
+        *self.edit_inputs.borrow_mut() = inputs
+            .references
+            .iter()
+            .map(|i| (i.width, i.height, i.pixels.clone()))
+            .collect();
+        progress(Progress::Step {
+            current: 1,
+            total: 1,
+        });
+        if self.failure.get() {
+            return Err(gen_core::Error::Unsupported("edit fixture failure".into()));
+        }
+        if self.cancel.get() {
+            req.cancel.cancel();
+        }
+        let native = edit_request(req)?;
+        let mut base = completed_receipt_for(
+            &native,
+            MossImageVariant::from_provider_id(self.descriptor.id).expect("MOSS fixture variant"),
+        );
+        let advanced = inputs.advanced;
+        let advanced_mode = advanced.positive.is_some()
+            || advanced.negative.is_some()
+            || advanced.negative_prompts.is_some()
+            || advanced.noise.is_some()
+            || advanced.output == MossImageOutputKind::Latents;
+        if advanced_mode {
+            use sha2::{Digest, Sha256};
+            let mut data = base.data().clone();
+            let total = advanced.validate(&native, &data.resolved)?;
+            data.images_per_prompt = native.count;
+            data.latent_shape[0] = total;
+            data.output_kind = advanced.output;
+            let batch = total / native.count as usize;
+            data.conditioning = (0..batch)
+                .map(|row| {
+                    let positive = advanced
+                        .positive
+                        .map(|e| {
+                            let n = e.sequence * 4096;
+                            let mut hash = Sha256::new();
+                            for v in &e.values[row * n..(row + 1) * n] {
+                                hash.update(v.to_le_bytes());
+                            }
+                            let mask = e.mask.map(|m| &m[row * e.sequence..(row + 1) * e.sequence]);
+                            if let Some(mask) = mask {
+                                hash.update(mask);
+                            }
+                            MossImageConditioningInputReceipt {
+                                source: MossImageConditioningSource::Embeddings,
+                                sha256: format!("{:x}", hash.finalize()),
+                                sequence_length: e.sequence as u32,
+                                valid_tokens: mask
+                                    .map_or(e.sequence, |m| m.iter().filter(|v| **v == 1).count())
+                                    as u32,
+                            }
+                        })
+                        .unwrap_or_else(|| data.conditioning[0].positive.clone());
+                    let negative = advanced
+                        .negative_prompts
+                        .map(|texts| MossImageConditioningInputReceipt {
+                            source: MossImageConditioningSource::Text,
+                            sha256: format!("{:x}", Sha256::digest(texts[row].as_bytes())),
+                            sequence_length: 1,
+                            valid_tokens: 1,
+                        })
+                        .or_else(|| data.conditioning[0].negative.clone());
+                    MossImageConditioningReceipt { positive, negative }
+                })
+                .collect();
+            data.samples = (0..total)
+                .map(|index| MossImageSampleReceipt {
+                    seed: if advanced.noise.is_some() {
+                        None
+                    } else {
+                        Some(173 + index as u64)
+                    },
+                    noise_sha256: if let Some(noise) = advanced.noise {
+                        let n = noise.len() / total;
+                        let bytes = noise[index * n..(index + 1) * n]
+                            .iter()
+                            .flat_map(|v| v.to_le_bytes())
+                            .collect::<Vec<_>>();
+                        format!("{:x}", Sha256::digest(bytes))
+                    } else {
+                        "a".repeat(64)
+                    },
+                })
+                .collect();
+            base = MossImageExecutionReport::new(data)?;
+            self.advanced_inputs.borrow_mut().push((
+                advanced
+                    .positive
+                    .map(|e| e.values.iter().map(|v| v.to_bits()).collect())
+                    .unwrap_or_default(),
+                advanced
+                    .positive
+                    .and_then(|e| e.mask)
+                    .unwrap_or_default()
+                    .to_vec(),
+                advanced.negative_prompts.unwrap_or_default().to_vec(),
+                advanced
+                    .noise
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect(),
+                advanced.output,
+            ));
+        }
+        let total = base.data().samples.len();
+        *self.edit_report.borrow_mut() = Some(MossImageEditExecutionReport {
+            base,
+            adapter_path: "/private/adapter_model.safetensors".into(),
+            edit_contract: EDIT_CONTRACT.into(),
+            adapter_repository: EDIT_REPOSITORY.into(),
+            adapter_revision: EDIT_REVISION.into(),
+            adapter_sha256: EDIT_WEIGHTS_SHA256.into(),
+            config_sha256: EDIT_CONFIG_SHA256.into(),
+            applied_projections: 252,
+            references: inputs
+                .references
+                .iter()
+                .zip(dimensions)
+                .map(|(image, dimensions)| MossImageEditReferenceReceipt {
+                    original_dimensions: [image.width, image.height],
+                    encoded_dimensions: dimensions,
+                    pixels_sha256: {
+                        use sha2::Digest;
+                        format!("{:x}", sha2::Sha256::digest(&image.pixels))
+                    },
+                    resized_pixels_sha256: "b".repeat(64),
+                    latent_sha256: "c".repeat(64),
+                })
+                .collect(),
+            reference_max_edge: inputs.reference_max_edge,
+            use_kv_cache: inputs.use_kv_cache,
+        });
+        if advanced.output == MossImageOutputKind::Latents {
+            Ok(MossImageAdvancedOutput::Latents {
+                values: (0..total * 128).map(|index| index as f32 / 512.).collect(),
+                shape: [total, 128, 1, 1],
+            })
+        } else {
+            Ok(MossImageAdvancedOutput::Images(
+                (0..total)
+                    .map(|_| Image {
+                        width: 16,
+                        height: 16,
+                        pixels: vec![0; 16 * 16 * 3],
+                    })
+                    .collect(),
+            ))
+        }
+    }
+    fn moss_image_edit_execution_report(
+        &self,
+    ) -> Option<gen_core::moss_image_edit::MossImageEditExecutionReport> {
+        self.reads.set(self.reads.get() + 1);
+        self.edit_report.borrow().clone()
+    }
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        &self.descriptor
+    }
+    fn validate(&self, _: &GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+    fn moss_image_owned_weight_bytes(&self) -> Option<u64> {
+        Some(self.owned_weight_bytes.get())
+    }
+    fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
+        self.adapter_report_reads
+            .set(self.adapter_report_reads.get() + 1);
+        self.adapter_reports.borrow().clone()
+    }
+    fn moss_image_execution_report(&self) -> Option<MossImageExecutionReport> {
+        self.reads.set(self.reads.get() + 1);
+        self.report.borrow().clone()
+    }
+    fn generate(
+        &self,
+        req: &GenerationRequest,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        *self.report.borrow_mut() = None;
+        progress(Progress::Step {
+            current: 1,
+            total: 1,
+        });
+        if self.failure.get() {
+            return Err(gen_core::Error::Unsupported("fixture failure".into()));
+        }
+        if self.cancel.get() {
+            req.cancel.cancel();
+        }
+        *self.report.borrow_mut() = Some(completed_receipt(req));
+        Ok(GenerationOutput::Images(vec![Image {
+            width: 16,
+            height: 16,
+            pixels: vec![0; 16 * 16 * 3],
+        }]))
+    }
+}
+#[test]
+fn advanced_images_use_shared_image_events_and_preserve_explicit_noise_seed() {
+    let temp = tempfile::tempdir().unwrap();
+    let payload = json!({"model":"moss_image_sft","mode":"edit_image","prompt":"edit","referenceAssetIds":["rgb"],"width":16,"height":16,"count":1}).as_object().unwrap().clone();
+    let plan = ImagePlan::with_count_and_adapter(
+        &ImageRequest::from_payload(&payload),
+        1,
+        "mlx_moss_image_sft",
+        Some(Arc::new(payload)),
+    );
+    let native = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
+        prompt: "edit".into(),
+        width: 16,
+        height: 16,
+        seed: None,
+        ..Default::default()
+    })
+    .unwrap();
+    let references = [Image {
+        width: 16,
+        height: 16,
+        pixels: vec![0; 768],
+    }];
+    let noise = [0.; 128];
+    let (output, facts) = moss_edit_render(
+        &Probe::new(),
+        &native,
+        &references,
+        sceneworks_core::moss_image::EditOptions::default(),
+        MossImageAdvancedInputs {
+            noise: Some(&noise),
+            ..Default::default()
+        },
+        &[],
+        &mut |_| {},
+    )
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+    emit_moss_advanced_outputs(
+        &tx,
+        &plan,
+        temp.path(),
+        output,
+        &facts,
+        JsonObject::from_iter([("referenceAssetIds".into(), json!(["rgb"]))]),
+        &native,
+    )
+    .unwrap();
+    let GenEvent::ImageFacts { index, facts } = rx.try_recv().unwrap() else {
+        panic!("shared image facts")
+    };
+    assert_eq!(index, 0);
+    assert_eq!(facts["mossImageSampleIndex"], 0);
+    let GenEvent::Image {
+        index,
+        seed,
+        width,
+        height,
+        pixels,
+        ..
+    } = rx.try_recv().unwrap()
+    else {
+        panic!("shared image event")
+    };
+    assert_eq!(
+        (index, seed, width, height, pixels.len()),
+        (0, None, 16, 16, 768)
+    );
+    assert!(
+        !temp.path().join("assets").exists(),
+        "the shared consumer owns image encoding"
+    );
+}
+
+#[test]
+fn advanced_edit_b2_count2_uses_identical_admission_render_views_and_persists_ordered_latent_recipes(
+) {
+    use sceneworks_core::{
+        moss_image_advanced::{self, OwnedInputs},
+        tensor_artifact,
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let store = ProjectStore::new(temporary.path().to_owned(), "test");
+    let project = store.create_project("advanced outputs").unwrap();
+    let import = |name: &str, bytes: Vec<u8>, mime: &str| {
+        let path = temporary.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        store
+            .import_asset(
+                &project.id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: name.into(),
+                    content_type: Some(mime.into()),
+                    source_path: path,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .unwrap()
+    };
+    let mut rgb = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(48, 16)
+        .write_to(&mut rgb, image::ImageFormat::Png)
+        .unwrap();
+    let reference = import("reference.png", rgb.into_inner(), "image/png");
+    let positive = import(
+        "positive.npy",
+        tensor_artifact::encode_f32(&[2, 2, 4096], &vec![0.125; 16384]).unwrap(),
+        tensor_artifact::MIME,
+    );
+    let mut noise = vec![0.; 512];
+    noise[0] = -0.;
+    noise[1] = f32::from_bits(1);
+    noise[128] = 0.25;
+    let noise_asset = import(
+        "noise.npy",
+        tensor_artifact::encode_f32(&[4, 128, 1, 1], &noise).unwrap(),
+        tensor_artifact::MIME,
+    );
+    let tensor_ref =
+        |asset: &Value| json!({"assetId":asset["id"],"sha256":asset["tensor"]["sha256"]});
+    let mut payload=json!({"projectId":project.id,"model":"moss_image_sft","mode":"edit_image","prompt":"","referenceAssetIds":[reference["id"]],"count":2,"width":16,"height":16,"seed":173,"advanced":{"mossImage":{"max_sequence_length":2,"training_shift":2.5},"mossImageEdit":{"reference_max_edge":32,"use_kv_cache":false},"mossImageAdvanced":{"positive":{"values":tensor_ref(&positive)},"noise":tensor_ref(&noise_asset),"negativePrompts":["blur","text"],"output":"latents"}}}).as_object().unwrap().clone();
+    let entry = json!({"limits":{"minDimension":16}})
+        .as_object()
+        .unwrap()
+        .clone();
+    moss_image_advanced::canonicalize(&store, &mut payload, &entry).unwrap();
+    let owned = OwnedInputs::load(&store, &payload, &entry).unwrap();
+    let native = sceneworks_core::moss_image::native_request(&payload, &entry)
+        .unwrap()
+        .unwrap();
+    let request = ImageRequest::from_payload(&payload);
+    let plan = ImagePlan::with_count_and_adapter(
+        &request,
+        4,
+        "mlx_moss_image_sft",
+        Some(Arc::new(payload.clone())),
+    );
+    let probe = Probe {
+        expected_edit_inputs: RefCell::new(vec![(48, 16, vec![0; 48 * 16 * 3])]),
+        ..Probe::new()
+    };
+    let refs = vec![Image {
+        width: 48,
+        height: 16,
+        pixels: vec![0; 48 * 16 * 3],
+    }];
+    let options = sceneworks_core::moss_image::EditOptions {
+        reference_max_edge: 32,
+        use_kv_cache: false,
+    };
+    assert_eq!(
+        moss_edit_peak(&probe, &native, &refs, options, owned.inputs()).unwrap(),
+        73
+    );
+    let (output, facts) = moss_edit_render(
+        &probe,
+        &native,
+        &refs,
+        options,
+        owned.inputs(),
+        &[],
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(probe.advanced_inputs.borrow().len(), 2);
+    assert_eq!(
+        probe.advanced_inputs.borrow()[0],
+        probe.advanced_inputs.borrow()[1]
+    );
+    assert_eq!(probe.advanced_inputs.borrow()[0].3[0], (-0.0f32).to_bits());
+    assert_eq!(probe.advanced_inputs.borrow()[0].3[1], 1);
+    let mut raw = request.advanced.clone();
+    raw.insert("referenceAssetIds".into(), json!([reference["id"]]));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    emit_moss_advanced_outputs(
+        &tx,
+        &plan,
+        Path::new(&project.path),
+        output,
+        &facts,
+        raw,
+        &native,
+    )
+    .unwrap();
+    drop(tx);
+    for index in 0..4 {
+        let GenEvent::AssetWritten {
+            index: actual_index,
+            fact,
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("expected actual tensor artifact write")
+        };
+        assert_eq!(actual_index, index);
+        assert_eq!(fact["seed"], Value::Null);
+        let asset = store
+            .persist_generated_asset(
+                &project.id,
+                "advanced-job",
+                &plan.genset_id,
+                &Value::Object(fact),
+            )
+            .unwrap();
+        assert_eq!(asset["type"], "tensor");
+        assert_eq!(asset["recipe"]["seed"], Value::Null);
+        assert_eq!(asset["recipe"]["normalizedSettings"]["count"], 2);
+        assert_eq!(
+            asset["recipe"]["rawAdapterSettings"][moss_image_advanced::KEY],
+            payload["advanced"][moss_image_advanced::KEY]
+        );
+        assert_eq!(
+            asset["recipe"]["rawAdapterSettings"]["mossImageSampleIndex"],
+            index
+        );
+        assert_eq!(asset["tensor"]["shape"], json!([1, 128, 1, 1]));
+        let path = store
+            .project_file(&project.id, asset["file"]["path"].as_str().unwrap())
+            .unwrap()
+            .path;
+        let metadata = tensor_artifact::inspect(&path).unwrap();
+        let bytes = tensor_artifact::read_data(&path, &metadata).unwrap();
+        assert_eq!(
+            f32::from_le_bytes(bytes[..4].try_into().unwrap()),
+            (index * 128) as f32 / 512.
+        );
+        let companion = store
+            .project_file(
+                &project.id,
+                asset["extra"]["workflowCompanion"]["path"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap()
+            .path;
+        let share = sceneworks_core::workflow_share::parse_workflow_share_json(
+            &std::fs::read_to_string(companion).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(share.count, Some(2));
+        assert_eq!(share.seed, None);
+        assert_eq!(share.advanced["mossImageSampleIndex"], index);
+        assert!(share.advanced[moss_image_advanced::KEY]["noise"]
+            .get("assetId")
+            .is_none());
+        assert_eq!(
+            moss_image_advanced::requirements(&share.advanced[moss_image_advanced::KEY]).len(),
+            2
+        );
+    }
+    assert!(rx.try_recv().is_err());
+    assert!(!Path::new(&project.path)
+        .join(format!("assets/images/{}", plan.genset_id))
+        .exists());
+    drop(store);
+    let reloaded = ProjectStore::new(temporary.path().to_owned(), "restart");
+    assert_eq!(
+        reloaded
+            .get_asset(&project.id, reference["id"].as_str().unwrap())
+            .unwrap()["type"],
+        "image"
+    );
+    assert_eq!(
+        reloaded
+            .get_asset(&project.id, noise_asset["id"].as_str().unwrap())
+            .unwrap()["tensor"],
+        noise_asset["tensor"]
+    );
+    let reloaded_inputs = OwnedInputs::load(&reloaded, &payload, &entry).unwrap();
+    assert_eq!(
+        reloaded_inputs
+            .noise
+            .unwrap()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        noise
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+}
+#[tokio::test]
+async fn direct_moss_edit_worker_refuses_invalid_controls_before_any_api_or_provider_call() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = Settings::for_test(temp.path().join("data"));
+    let api = ApiClient::new(&settings);
+    for model in ["moss_image_base", "moss_image_sft"] {
+        for patch in [
+            json!({"sourceAssetId":"conflict"}),
+            json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
+            json!({"advanced":{"controlImage":"pose"}}),
+            json!({"referenceAssetIds":[]}),
+        ] {
+            let mut payload =
+                json!({"model":model,"mode":"edit_image","referenceAssetIds":["ref"]})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+            payload.extend(patch.as_object().unwrap().clone());
+            let job: JobSnapshot = serde_json::from_value(json!({"id":"moss-refusal","type":"image_edit","status":"queued",
+                    "payload":payload,"result":{},"requestedGpu":"auto","progress":0,"stage":"queued","message":"","attempts":1,
+                    "cancelRequested":false,"createdAt":"2026-10-23T00:00:00Z","updatedAt":"2026-10-23T00:00:00Z"})).unwrap();
+            assert!(matches!(
+                run_image_generate_job_unexplained(&api, &settings, &job).await,
+                Err(WorkerError::InvalidPayload(_))
+            ));
+        }
+    }
+}
+
+#[test]
+fn cold_edit_uses_native_typed_validation_before_provider_loading() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = LoadSpec::new(WeightsSource::Dir(temp.path().to_path_buf()));
+    let mut request = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
+        width: 16,
+        height: 16,
+        ..Default::default()
+    })
+    .unwrap();
+    let refs = [Image {
+        width: 48,
+        height: 16,
+        pixels: vec![73; 48 * 16 * 3],
+    }];
+    let options = sceneworks_core::moss_image::EditOptions {
+        reference_max_edge: 32,
+        use_kv_cache: false,
+    };
+    for variant in [MossImageVariant::Base, MossImageVariant::Sft] {
+        let missing =
+            moss_edit_cold_peak(variant, &spec, &request, &refs, options, Default::default())
+                .unwrap_err();
+        assert!(
+            missing.to_string().to_lowercase().contains("edit"),
+            "{missing}"
+        );
+        assert!(
+            moss_edit_cold_peak(variant, &spec, &request, &[], options, Default::default())
+                .is_err()
+        );
+        request.moss_image.as_mut().unwrap().acceleration =
+            MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16);
+        assert!(
+            moss_edit_cold_peak(variant, &spec, &request, &refs, options, Default::default())
+                .is_err()
+        );
+        request.moss_image.as_mut().unwrap().acceleration = MossImageAcceleration::Off;
+    }
+}
+
+#[test]
+fn edit_admission_and_typed_render_helpers_refuse_unsupported_providers() {
+    let loads = Cell::new(0);
+    let budget = gen_core::MemoryBudget {
+        total_bytes: 100,
+        committed_bytes: 30,
+        reclaimable_bytes: 0,
+        reserved_headroom_bytes: 10,
+    };
+    let load = || {
+        loads.set(loads.get() + 1);
+        Ok(Probe::new())
+    };
+    // The injected helper peak is 73 bytes; a smaller ordinary placeholder would fit.
+    assert!(moss_load_admitted(73, budget, load).is_err());
+    assert_eq!(
+        loads.get(),
+        0,
+        "refusal must precede the actual provider callback"
+    );
+    let generator = moss_load_admitted(60, budget, load).unwrap();
+    assert_eq!(loads.get(), 1);
+    let request = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
+        width: 16,
+        height: 16,
+        ..Default::default()
+    })
+    .unwrap();
+    let references = [Image {
+        width: 48,
+        height: 16,
+        pixels: vec![73; 48 * 16 * 3],
+    }];
+    let options = sceneworks_core::moss_image::EditOptions {
+        reference_max_edge: 32,
+        use_kv_cache: false,
+    };
+    let peak = moss_edit_peak(
+        &generator,
+        &request,
+        &references,
+        options,
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(peak, 73);
+    // A linked ordinary-only provider cannot silently serve an edit via Generator::generate.
+    struct OrdinaryOnly(Probe);
+    impl Generator for OrdinaryOnly {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            self.0.descriptor()
+        }
+        fn validate(&self, request: &GenerationRequest) -> gen_core::Result<()> {
+            self.0.validate(request)
+        }
+        fn generate(
+            &self,
+            request: &GenerationRequest,
+            progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            self.0.generate(request, progress)
+        }
+    }
+    let wrong_provider = OrdinaryOnly(Probe::new());
+    assert!(moss_edit_peak(
+        &wrong_provider,
+        &request,
+        &references,
+        options,
+        Default::default()
+    )
+    .is_err());
+    assert!(moss_edit_render(
+        &wrong_provider,
+        &request,
+        &references,
+        options,
+        Default::default(),
+        &[],
+        &mut |_| {}
+    )
+    .is_err());
+    assert_eq!(
+        wrong_provider.0.reads.get(),
+        0,
+        "unsupported edit must not publish ordinary receipts"
+    );
+    assert!(moss_admit(peak, moss_owned_weight_bytes(&generator, 0), budget).is_err());
+    generator.owned_weight_bytes.set(20);
+    moss_admit(peak, moss_owned_weight_bytes(&generator, 0), budget).unwrap();
+    let (images, facts) = moss_edit_render(
+        &generator,
+        &request,
+        &references,
+        options,
+        Default::default(),
+        &[],
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(matches!(images, MossImageAdvancedOutput::Images(ref items) if items.len() == 1));
+    assert_eq!(
+        facts[sceneworks_core::moss_image::EDIT_REPORT_KEY]["references"][0]["original_dimensions"],
+        json!([48, 16])
+    );
+    generator.failure.set(true);
+    assert!(moss_edit_render(
+        &generator,
+        &request,
+        &references,
+        options,
+        Default::default(),
+        &[],
+        &mut |_| {}
+    )
+    .is_err());
+    assert!(generator.edit_report.borrow().is_none());
+    generator.failure.set(false);
+    generator.cancel.set(true);
+    assert!(matches!(
+        moss_edit_render(
+            &generator,
+            &request,
+            &references,
+            options,
+            Default::default(),
+            &[],
+            &mut |_| {}
+        ),
+        Err(WorkerError::Canceled(_))
+    ));
+    generator.cancel.set(false);
+    let request = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
+        width: 16,
+        height: 16,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(
+        matches!(moss_edit_render(&generator, &request, &references, options, Default::default(), &[], &mut |_| {}).unwrap().0, MossImageAdvancedOutput::Images(ref items) if items.len() == 1)
+    );
+    assert_eq!(
+        loads.get(),
+        1,
+        "direct helper calls reused the constructed probe"
+    );
+}
+
+#[test]
+fn edit_calls_typed_native_method_with_uncropped_rgb_and_only_publishes_actual_success() {
+    let probe = Probe::new();
+    let identity = lane_controls::AdapterIdentity {
+        id: Some("selected-edit-custom".into()),
+        path: PathBuf::from("edit-custom.safetensors"),
+        sha256: Some("cd".repeat(32)),
+        scale: 0.75,
+        kind: gen_core::AdapterKind::Lora,
+    };
+    *probe.adapter_reports.borrow_mut() = vec![gen_core::AdapterApplyReport {
+        adapter_path: identity.path.clone(),
+        applied: 36,
+        skipped: vec![],
+    }];
+    let req = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
+        width: 16,
+        height: 16,
+        ..Default::default()
+    })
+    .unwrap();
+    let refs = vec![Image {
+        width: 48,
+        height: 16,
+        pixels: vec![73; 48 * 16 * 3],
+    }];
+    let options = sceneworks_core::moss_image::EditOptions {
+        reference_max_edge: 32,
+        use_kv_cache: false,
+    };
+    assert_eq!(
+        moss_edit_peak(&probe, &req, &refs, options, Default::default()).unwrap(),
+        73
+    );
+    let mut progress = 0;
+    let (images, facts) = moss_edit_render(
+        &probe,
+        &req,
+        &refs,
+        options,
+        Default::default(),
+        std::slice::from_ref(&identity),
+        &mut |_| progress += 1,
+    )
+    .unwrap();
+    assert!(
+        matches!(images, gen_core::moss_image::MossImageAdvancedOutput::Images(ref values) if values.len()==1)
+    );
+    assert_eq!(
+        facts[sceneworks_core::moss_image::EDIT_REPORT_KEY]["base"]["samples"][0]["seed"],
+        173
+    );
+    assert_eq!(progress, 1);
+    assert_eq!(
+        facts[lane_controls::ADAPTER_APPLY_KEY][0],
+        json!({
+            "id": "selected-edit-custom", "path": "edit-custom.safetensors",
+            "sha256": "cd".repeat(32), "scale": 0.75, "kind": "lora",
+            "applied": 36, "skipped": []
+        })
+    );
+    assert_eq!(probe.adapter_report_reads.get(), 1);
+    assert_eq!(
+        probe.edit_inputs.borrow()[0],
+        (48, 16, vec![73; 48 * 16 * 3])
+    );
+    assert!(facts.get(sceneworks_core::moss_image::REPORT_KEY).is_none());
+    let report = &facts[sceneworks_core::moss_image::EDIT_REPORT_KEY];
+    assert_eq!(
+        report["adapter_sha256"],
+        gen_core::moss_image_edit::EDIT_WEIGHTS_SHA256
+    );
+    assert_eq!(
+        report["references"][0]["encoded_dimensions"],
+        json!([32, 16])
+    );
+    assert_eq!(report["use_kv_cache"], false);
+    let shared =
+        sceneworks_core::workflow_share::sanitize_moss_edit_execution_report(report).unwrap();
+    assert_eq!(shared["adapter_path"], "adapter_model.safetensors");
+    assert!(!shared.to_string().contains("/private/"));
+    probe.failure.set(true);
+    assert!(moss_edit_render(
+        &probe,
+        &req,
+        &refs,
+        options,
+        Default::default(),
+        std::slice::from_ref(&identity),
+        &mut |_| {}
+    )
+    .is_err());
+    assert!(probe.edit_report.borrow().is_none());
+    assert_eq!(
+        probe.adapter_report_reads.get(),
+        1,
+        "failed output cannot read prior adapter reports"
+    );
+    assert_eq!(probe.reads.get(), 1);
+    probe.failure.set(false);
+    probe.cancel.set(true);
+    assert!(matches!(
+        moss_edit_render(
+            &probe,
+            &req,
+            &refs,
+            options,
+            Default::default(),
+            std::slice::from_ref(&identity),
+            &mut |_| {}
+        ),
+        Err(WorkerError::Canceled(_))
+    ));
+    assert_eq!(
+        probe.reads.get(),
+        1,
+        "canceled output must not publish a receipt"
+    );
+    assert_eq!(
+        probe.adapter_report_reads.get(),
+        1,
+        "canceled output cannot read prior adapter reports"
+    );
+}
+#[test]
+fn actual_provider_receipt_and_seed_reach_facts_and_failed_attempt_never_reads_stale_report() {
+    let probe = Probe::new();
+    let req = GenerationRequest {
+        width: 16,
+        height: 16,
+        seed: Some(42),
+        ..Default::default()
+    };
+    let mut progress = 0;
+    let (images, facts) = moss_render(&probe, &req, &[], &mut |_| progress += 1).unwrap();
+    assert_eq!(
+        images[0].0, 173,
+        "provider's actual seed, not requested seed"
+    );
+    assert_eq!(
+        facts[sceneworks_core::moss_image::REPORT_KEY]["samples"][0]["seed"],
+        173
+    );
+    assert_eq!(progress, 1);
+    probe.failure.set(true);
+    assert!(moss_render(&probe, &req, &[], &mut |_| {}).is_err());
+    assert_eq!(probe.reads.get(), 1);
+    assert!(probe.report.borrow().is_none());
+}
+// CI_IMPACT: literal pixels, metadata and provider reports only; no model/tensor execution.
+#[test]
+fn moss_custom_application_reports_join_selected_identity_into_image_facts() {
+    let probe = Probe::new();
+    let custom_path = PathBuf::from("custom.safetensors");
+    *probe.adapter_reports.borrow_mut() = vec![gen_core::AdapterApplyReport {
+        adapter_path: custom_path.clone(),
+        applied: 252,
+        skipped: vec![],
+    }];
+    let identity = lane_controls::AdapterIdentity {
+        id: Some("selected-custom".into()),
+        path: custom_path,
+        sha256: Some("ab".repeat(32)),
+        scale: 1.,
+        kind: gen_core::AdapterKind::Lokr,
+    };
+    let req = GenerationRequest {
+        width: 16,
+        height: 16,
+        ..Default::default()
+    };
+    let (_, facts) =
+        moss_render(&probe, &req, std::slice::from_ref(&identity), &mut |_| {}).unwrap();
+    let applied = &facts[lane_controls::ADAPTER_APPLY_KEY][0];
+    assert_eq!(applied["id"], "selected-custom");
+    assert_eq!(applied["path"], "custom.safetensors");
+    assert_eq!(applied["sha256"], "ab".repeat(32));
+    assert_eq!(applied["scale"], 1.);
+    assert_eq!(applied["kind"], "lokr");
+    assert_eq!(applied["applied"], 252);
+    assert_eq!(applied["skipped"], json!([]));
+    assert!(
+        facts[sceneworks_core::moss_image::REPORT_KEY]["adapter_reports"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let wrong = lane_controls::AdapterIdentity {
+        path: PathBuf::from("other.safetensors"),
+        ..identity
+    };
+    let (_, facts) = moss_render(&probe, &req, &[wrong], &mut |_| {}).unwrap();
+    assert!(facts[lane_controls::ADAPTER_APPLY_KEY][0]["applied"].is_null());
+}
+
+#[test]
+fn cancellation_after_output_cannot_publish_a_previous_or_current_receipt() {
+    let probe = Probe::new();
+    probe.cancel.set(true);
+    let req = GenerationRequest {
+        width: 16,
+        height: 16,
+        ..Default::default()
+    };
+    assert!(matches!(
+        moss_render(&probe, &req, &[], &mut |_| {}),
+        Err(WorkerError::Canceled(_))
+    ));
+    assert_eq!(probe.reads.get(), 0);
+}
+#[test]
+fn admission_credits_only_same_entry_measured_owned_bytes_bounded_by_committed() {
+    let budget = gen_core::MemoryBudget {
+        total_bytes: 100,
+        committed_bytes: 60,
+        reclaimable_bytes: 0,
+        reserved_headroom_bytes: 10,
+    };
+    assert!(moss_admit(40, 0, budget).is_err());
+    assert!(moss_admit(40, 10, budget).is_ok());
+    assert!(moss_admit(91, u64::MAX, budget).is_err());
+}
+
+#[test]
+fn lazy_renderer_warm_reentry_credits_actual_owned_census_without_double_charging() {
+    let generator = Probe::new();
+    let cold = gen_core::MemoryBudget {
+        total_bytes: 47,
+        committed_bytes: 0,
+        reclaimable_bytes: 0,
+        reserved_headroom_bytes: 2,
+    };
+    assert!(moss_admit(38, moss_owned_weight_bytes(&generator, 1), cold).is_ok());
+    generator.owned_weight_bytes.set(30);
+    let warm = gen_core::MemoryBudget {
+        committed_bytes: 30,
+        ..cold
+    };
+    assert!(
+        moss_admit(38, 1, warm).is_err(),
+        "loader delta alone double-charges lazy renderer"
+    );
+    assert!(moss_admit(38, moss_owned_weight_bytes(&generator, 1), warm).is_ok());
+    assert!(
+        moss_admit(38, moss_owned_weight_bytes(&Probe::new(), 1), warm).is_err(),
+        "another mode/source entry owns no current weights"
+    );
+    assert!(
+        moss_admit(46, u64::MAX, warm).is_err(),
+        "even provider-owned credit is bounded by current committed bytes"
+    );
+}
+#[test]
+fn each_mode_prepares_exactly_its_frozen_execution_assets_and_selected_corruption_fails_closed() {
+    use std::collections::BTreeSet;
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .unwrap()
+        .1;
+    let manifest: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+    for variant in [MossImageVariant::Base, MossImageVariant::Sft] {
+        for mode in [
+            MossImageAcceleration::Off,
+            MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16),
+            MossImageAcceleration::Dmd(MossDmdPrecision::FullFp32),
+        ] {
+            if variant == MossImageVariant::Base && mode != MossImageAcceleration::Off {
+                continue;
+            }
+            let entry = manifest["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == variant.provider_id())
+                .unwrap();
+            let selected = sceneworks_core::moss_image::selected_components(
+                entry.as_object().unwrap(),
+                &MossImageOptions {
+                    acceleration: mode,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let actual: BTreeSet<_> = selected["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|row| {
+                    row["files"].as_array().unwrap().iter().filter_map(|p| {
+                        let repo = row["repo"].as_str().unwrap();
+                        let path = p.as_str().unwrap();
+                        moss_execution_asset_selected(mode, repo, path)
+                            .then_some((repo.to_owned(), path.to_owned()))
+                    })
+                })
+                .collect();
+            let expected: BTreeSet<_> = MOSS_IMAGE_ASSETS
+                .iter()
+                .filter(|a| {
+                    if a.repository == BASE_REPO {
+                        return variant == MossImageVariant::Base;
+                    }
+                    if a.repository == SFT_REPO {
+                        return !a.relative_path.starts_with("transformer/")
+                            || (variant == MossImageVariant::Sft
+                                && mode != MossImageAcceleration::Dmd(MossDmdPrecision::FullFp32));
+                    }
+                    if a.repository == DMD_REPO {
+                        return match mode {
+                            MossImageAcceleration::Off => false,
+                            MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16) => [
+                                "lora.safetensors",
+                                "time_embedding.safetensors",
+                                "dataspace.safetensors",
+                            ]
+                            .contains(&a.relative_path),
+                            MossImageAcceleration::Dmd(MossDmdPrecision::FullFp32) => {
+                                a.relative_path.starts_with("transformer/")
+                                    || a.relative_path == "dataspace.safetensors"
+                            }
+                        };
+                    }
+                    false
+                })
+                .map(|a| (a.repository.to_owned(), a.relative_path.to_owned()))
+                .collect();
+            assert_eq!(actual, expected, "{variant:?}/{mode:?}");
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let hub = temp.path().join("hub");
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HF_HOME", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+    ]);
+    let root = hub
+        .join("models--OpenMOSS-Team--MOSS-Image-Base")
+        .join("snapshots")
+        .join(BASE_REVISION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("LICENSE"), b"corrupt selected bytes").unwrap();
+    let settings = Settings::for_test(temp.path().join("data"));
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root));
+    let entry =
+        json!({"downloads":[{"repo":BASE_REPO,"revision":BASE_REVISION,"files":["LICENSE"]}]})
+            .as_object()
+            .unwrap()
+            .clone();
+    let error = moss_pin_spec(
+        &mut spec,
+        &entry,
+        &settings,
+        MossImageAcceleration::Off,
+        &mut |_, _| {},
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("MOSS frozen component identity"),
+        "{error}"
+    );
+}
+#[test]
+fn corrupt_edit_package_is_rejected_during_file_preparation() {
+    use gen_core::moss_image_edit::*;
+    let temp = tempfile::tempdir().unwrap();
+    let hub = temp.path().join("hub");
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HF_HOME", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+    ]);
+    let root = hub
+        .join("models--chinoll--Moss-Image-Edit")
+        .join("snapshots")
+        .join(EDIT_REVISION);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("adapter_config.json"), b"corrupted").unwrap();
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
+        .with_component(EDIT_COMPONENT, WeightsSource::Dir(root));
+    let entry=json!({"downloads":[{"repo":EDIT_REPOSITORY,"revision":EDIT_REVISION,"files":["adapter_config.json"]}]}).as_object().unwrap().clone();
+    let error = moss_pin_spec(
+        &mut spec,
+        &entry,
+        &Settings::for_test(temp.path().join("data")),
+        MossImageAcceleration::Off,
+        &mut |_, _| {},
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("MOSS edit frozen component identity mismatch"),
+        "{error}"
+    );
+    assert!(!spec.prepared_file_pins().is_prepared());
+}
+#[test]
+fn every_mode_and_content_change_has_an_independent_cache_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("selected.safetensors");
+    std::fs::write(&file, b"first").unwrap();
+    let make = |mode: &str| {
+        let mut spec = LoadSpec::new(WeightsSource::File(file.clone()))
+            .with_resolved_route(format!("moss_image_sft:{mode}"));
+        spec.prepare_with_file_pins([gen_core::PinnedWeightsFile::pin(&file).unwrap()])
+            .unwrap();
+        spec
+    };
+    let off =
+        crate::generator_cache::LoadIdentity::try_from_load_spec("moss_image_sft", &make("off"))
+            .unwrap();
+    let mixed = crate::generator_cache::LoadIdentity::try_from_load_spec(
+        "moss_image_sft",
+        &make("unmerged_bf16"),
+    )
+    .unwrap();
+    let full = crate::generator_cache::LoadIdentity::try_from_load_spec(
+        "moss_image_sft",
+        &make("full_fp32"),
+    )
+    .unwrap();
+    assert_ne!(off, mixed);
+    assert_ne!(mixed, full);
+    std::fs::write(&file, b"other").unwrap();
+    let replaced =
+        crate::generator_cache::LoadIdentity::try_from_load_spec("moss_image_sft", &make("off"))
+            .unwrap();
+    assert_ne!(off, replaced);
+}
+
+/// Terminal-only product acceptance. Uses the normal dispatcher and loader, never the probe.
+/// Run this exact test alone after coordinator hardware admission; all artifacts stay outside
+/// the checkout. Snapshot env vars name already provisioned canonical HF snapshots (no fetch).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires coordinator-admitted native device and complete frozen MOSS weights"]
+async fn moss_real_native_product_worker_campaign() {
+    use axum::{
+        extract::State,
+        routing::{get, post},
+        Json, Router,
+    };
+    use std::sync::{Arc, Mutex};
+    let admitted =
+        std::env::var("MOSS_NATIVE_TERMINAL_ADMITTED").expect("coordinator admission required");
+    #[cfg(target_os = "macos")]
+    assert_eq!(admitted, "sc-26325-mlx");
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(admitted, "sc-26325-physical-gpu0");
+    let output = PathBuf::from(
+        std::env::var("MOSS_TRANSPORT_ARTIFACT_ROOT").expect("outside-repo output required"),
+    )
+    .join("product-worker");
+    assert!(output.is_absolute());
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap();
+    assert!(
+        !output.starts_with(repository),
+        "artifact output must be outside checkout"
+    );
+    std::fs::create_dir_all(&output).unwrap();
+    assert!(
+        !output.join("case-summary.json").exists(),
+        "use a fresh campaign directory"
+    );
+    let source = |name| {
+        std::fs::canonicalize(std::env::var(name).expect("provisioned snapshot env required"))
+            .unwrap()
+    };
+    let base = source("MOSS_BASE_SNAPSHOT");
+    let shared = source("MOSS_SHARED_SNAPSHOT");
+    let dmd = source("MOSS_DMD_SNAPSHOT");
+    let hub = base
+        .ancestors()
+        .nth(3)
+        .expect("canonical HF snapshot")
+        .to_owned();
+    let data = output.join("data");
+    let _cache = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    for (repo, revision, expected) in [
+        (BASE_REPO, BASE_REVISION, &base),
+        (SFT_REPO, SFT_REVISION, &shared),
+        (DMD_REPO, DMD_REVISION, &dmd),
+    ] {
+        assert_eq!(
+            std::fs::canonicalize(
+                huggingface_pinned_snapshot_dir(&data, repo, revision)
+                    .expect("normal product source discovery")
+            )
+            .unwrap(),
+            *expected
+        );
+    }
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .unwrap()
+        .1;
+    let manifest: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+    let project = ProjectStore::new(data.clone(), "worker")
+        .create_project("MOSS native product acceptance")
+        .unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = data;
+    settings.config_dir = output.join("config");
+    settings.backend_mlx_enabled = true;
+    settings.backend_candle_enabled = true;
+    settings.heartbeat_seconds = 1;
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert_eq!(std::env::var("MOSS_PHYSICAL_GPU_INDEX").unwrap(), "0");
+        assert!(!std::env::var("MOSS_EXPECTED_CUDA_UUID").unwrap().is_empty());
+        assert_eq!(settings.gpu_id, "0");
+    }
+    #[derive(Clone)]
+    struct Recorder {
+        job: Value,
+        posts: Arc<Mutex<Vec<Value>>>,
+        cancel: bool,
+    }
+    let mut rows = Vec::new();
+    // End on ordinary SFT so cancellation is a real warm-cache re-entry, after lazy weights.
+    for (case, model, mode, cancel) in [
+        ("base_off", "moss_image_base", "off", false),
+        (
+            "sft_unmerged_bf16",
+            "moss_image_sft",
+            "unmerged_bf16",
+            false,
+        ),
+        ("sft_full_fp32", "moss_image_sft", "full_fp32", false),
+        ("sft_off", "moss_image_sft", "off", false),
+        ("sft_off_warm_cancel", "moss_image_sft", "off", true),
+    ] {
+        let entry = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == model)
+            .unwrap()
+            .clone();
+        let payload = json!({"projectId":project.id,"model":model,"mode":"text_to_image","modelManifestEntry":entry,"prompt":"日本語 <tag> a red ceramic cup on a white table {\"items\":[]}","width":64,"height":64,"count":if cancel {2}else{1},"seed":26325,"advanced":{"steps":if cancel {1000}else{1},"mossImage":{"acceleration":mode,"max_sequence_length":64},"mossImageExecutionReport":{"forged":true}}});
+        let mut job_value = crate::iris_restore::tests::job_json(case, payload);
+        job_value["type"] = json!("image_generate");
+        let posts = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let recorder = Recorder {
+            job: job_value.clone(),
+            posts: posts.clone(),
+            cancel,
+        };
+        let app=Router::new().route("/api/v1/jobs/:id",get(|State(s):State<Recorder>|async move{let mut job=s.job;job["cancelRequested"]=json!(s.cancel&&s.posts.lock().unwrap().iter().any(|p|p["message"].as_str().is_some_and(|m|m.contains("step "))));Json(job)}))
+                .route("/api/v1/jobs/:id/progress",post(|State(s):State<Recorder>,Json(body):Json<Value>|async move{s.posts.lock().unwrap().push(body);Json(s.job)}))
+                .route("/api/v1/workers/:id/heartbeat",post(||async{Json(json!({"id":"worker","gpuId":"0","status":"busy","currentJobId":null,"capabilities":[],"loadedModels":[],"registeredAt":"2026-10-18T00:00:00Z","lastSeenAt":"2026-10-18T00:00:00Z"}))})).with_state(recorder);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        settings.api_url = format!("http://{}", listener.local_addr().unwrap());
+        let server =
+            crate::load_progress::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot = serde_json::from_value(job_value).unwrap();
+        let result = run_image_generate_job(&api, &settings, &job).await;
+        let events = posts.lock().unwrap().clone();
+        server.abort();
+        std::fs::write(
+            output.join(format!("{case}.progress.json")),
+            serde_json::to_vec_pretty(&events).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            events.iter().any(|p| p["stage"] == "generating"
+                && p["message"].as_str().is_some_and(|m| m.contains("step "))),
+            "actual denoise progress missing: {case}"
+        );
+        if cancel {
+            assert!(
+                matches!(result, Err(WorkerError::Canceled(_))),
+                "{result:?}"
+            );
+            let terminal = events
+                .iter()
+                .find(|p| p["status"] == "canceled")
+                .expect("terminal canceled");
+            assert!(
+                terminal["result"]["assetWrites"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "canceled run must publish no receipt/image"
+            );
+            rows.push(json!({"case":case,"model":model,"acceleration":mode,"status":"canceled","warmReentry":true,"images":0,"receipts":0}));
+        } else {
+            result.unwrap();
+            let terminal = events
+                .iter()
+                .find(|p| p["status"] == "completed")
+                .expect("terminal completed");
+            let facts = terminal["result"]["assetWrites"].as_array().unwrap();
+            assert_eq!(facts.len(), 1);
+            let fact = &facts[0];
+            let report: MossImageExecutionReport = serde_json::from_value(
+                fact["rawAdapterSettings"][sceneworks_core::moss_image::REPORT_KEY].clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                report.data().resolved.acceleration,
+                serde_json::from_value::<MossImageOptions>(json!({"acceleration":mode}))
+                    .unwrap()
+                    .acceleration
+            );
+            assert_eq!(report.data().resolved.variant.provider_id(), model);
+            assert_eq!(report.data().samples.len(), 1);
+            let receipt_path = format!("{case}.receipt.json");
+            std::fs::write(
+                output.join(&receipt_path),
+                serde_json::to_vec_pretty(&report).unwrap(),
+            )
+            .unwrap();
+            let png_path = format!("{case}.png");
+            let source = PathBuf::from(&project.path).join(fact["mediaPath"].as_str().unwrap());
+            std::fs::copy(source, output.join(&png_path)).unwrap();
+            let decoded = image::open(output.join(&png_path)).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (64, 64));
+            rows.push(json!({"case":case,"model":model,"acceleration":mode,"status":"completed","images":1,"receipts":1,"png":png_path,"receipt":receipt_path,"adapter":fact["adapter"]}));
+        }
+    }
+    crate::generator_cache::evict_cached_generator()
+        .await
+        .unwrap();
+    std::fs::write(output.join("case-summary.json"),serde_json::to_vec_pretty(&json!({"protocol":"sc-26325-product-worker-v1","backend":if cfg!(target_os="macos"){"mlx"}else{"candle"},"cases":rows})).unwrap()).unwrap();
+}
+#[cfg(test)]
+#[path = "moss_dispatch_tests.rs"]
+mod dispatch_transaction_tests;

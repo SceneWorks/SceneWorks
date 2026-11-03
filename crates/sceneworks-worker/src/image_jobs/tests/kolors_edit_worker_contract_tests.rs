@@ -1,4 +1,15 @@
-use super::*;
+use super::resolve_candle_kolors_edit_init;
+use super::super::routing::resolve_candle_image_route;
+use super::super::routing::CandleImageRoute;
+use super::super::ImageRequest;
+use crate::Path;
+use crate::PathBuf;
+use crate::ProjectStore;
+use crate::Settings;
+use crate::Value;
+use crate::DEFAULT_HUGGINGFACE_BASE_URL;
+use crate::DEFAULT_MAX_LORA_URL_BYTES;
+use crate::DEFAULT_MAX_MODEL_URL_BYTES;
 use serde_json::json;
 
 fn settings(data_dir: &Path) -> Settings {

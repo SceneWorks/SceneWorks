@@ -1,17 +1,44 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
-use super::{
-    apply_candle_image_load_shape, attach_manifest_text_encoder, candle_certified_artifact_path,
-    candle_certified_hf_artifact_path, candle_quant_for_resolved_tier, candle_resolved_tier_key,
-    pid_effective_dims, pid_output_tier, pose_entries, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
-    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
-    CandleStrictControl, Flux2Control, Flux2ControlPaths, Flux2ControlRequest, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Quant, Settings, Value,
-    WorkerError, WorkerResult,
-};
-use super::{
-    resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
-};
+use crate::ApiClient;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use crate::DownloadContext;
+use super::Flux2Control;
+use super::Flux2ControlPaths;
+use super::Flux2ControlRequest;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use super::Progress;
+use super::Quant;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use crate::advanced;
+use super::load_policy::apply_candle_image_load_shape;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::candle_certified_artifact_path;
+use super::load_spec::candle_certified_hf_artifact_path;
+use super::memory::candle_quant_for_resolved_tier;
+use super::memory::candle_resolved_tier_key;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::conditioning::pose_entries;
+use super::adapters::resolve_adapters;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use crate::resolve_app_managed_model_dir;
+use super::pid::resolve_pid_weights;
+use super::run_candle_strict_control;
+use crate::safe_weight_filename;
+use super::standard_tier_subdir;
+use super::strict_control::trusted_control_weight_revision;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 

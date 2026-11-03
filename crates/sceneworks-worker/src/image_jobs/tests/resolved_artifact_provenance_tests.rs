@@ -1,4 +1,11 @@
-use super::*;
+use super::resolved_mlx_artifact_provenance;
+use super::super::ImageRequest;
+use crate::Path;
+use crate::Settings;
+use crate::Value;
+use crate::DEFAULT_HUGGINGFACE_BASE_URL;
+use crate::DEFAULT_MAX_LORA_URL_BYTES;
+use crate::DEFAULT_MAX_MODEL_URL_BYTES;
 use serde_json::json;
 
 pub(crate) fn settings(data_dir: &Path) -> Settings {

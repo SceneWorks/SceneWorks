@@ -1722,7 +1722,7 @@ mod tests {
     /// *Mutation that reds this:* move/drop the `evict_resident_transform()` before the probe.
     #[test]
     fn the_candle_arm_evicts_a_resident_transform_before_probing_vram() {
-        let base = include_str!("base.rs");
+        let base = include_str!("candle.rs");
         let body = &base[base
             .find("async fn generate_candle_stream_using(")
             .expect("candle arm")..];

@@ -1,4 +1,7 @@
-use super::*;
+use super::candle_tier_fit;
+use super::choose_downtier;
+use super::DowntierPick;
+use super::TierFit;
 use serde_json::json;
 
 #[test]

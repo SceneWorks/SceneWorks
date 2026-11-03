@@ -1,5 +1,4 @@
-use super::*;
-
+use super::boogu_tier_subdir;
 #[test]
 fn every_variant_has_a_default_download_tier() {
     for variant in ["base", "turbo", "edit"] {

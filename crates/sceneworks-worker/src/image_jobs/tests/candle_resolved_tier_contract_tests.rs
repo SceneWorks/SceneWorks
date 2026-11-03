@@ -1,4 +1,23 @@
-use super::*;
+use super::super::artifact_resolution::candle_flux1_packed_requested_tier;
+use super::super::artifact_resolution::candle_flux1_packed_resolution_is_exact;
+use super::super::load_spec::apply_declared_candle_image_load_shape;
+use super::super::load_spec::candle_shared_memory_tier;
+use super::super::load_spec::load_spec;
+use super::candle_quant_for_resolved_tier;
+use super::candle_resolved_tier_key;
+use super::super::metrics::effective_quant_label_gated;
+use super::super::mlx_model;
+use super::super::quantization::resolve_quant;
+use super::super::sampling::mlx_raw_settings;
+use super::super::standard_tier_subdir_gated;
+use super::super::ImageRequest;
+use super::super::LoadSpec;
+use super::super::Quant;
+use super::super::WeightsSource;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Value;
 use serde_json::json;
 
 const MAGE_IDS: &[&str] = &[

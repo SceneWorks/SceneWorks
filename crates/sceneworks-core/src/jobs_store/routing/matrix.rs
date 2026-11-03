@@ -71,8 +71,25 @@ const API_GENERATION: &str = include_str!("../../../../../apps/rust-api/src/gene
 const API_CONTRACT_ENTRY: &str = include_str!("../../../../../apps/rust-api/src/lib.rs");
 const API_DTO: &str = include_str!("../../../../../apps/rust-api/src/dto.rs");
 const WORKER_DISPATCH: &str = include_str!("../../../../sceneworks-worker/src/lib.rs");
-const WORKER_IMAGE_DISPATCH: &str =
-    include_str!("../../../../sceneworks-worker/src/image_jobs/base.rs");
+// Preserve the complete former base compilation unit in this existing source digest.
+// These are its explicit current production owners, rather than a directory scan.
+const WORKER_IMAGE_DISPATCH: &str = concat!(
+    include_str!("../../../../sceneworks-worker/src/image_jobs/geometry.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/routing.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/artifact_resolution.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/quantization.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/load_spec.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/adapters.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/load_policy.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/memory.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/sampling.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/conditioning.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/render.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/mlx.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/candle.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/metrics.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/events.rs"),
+);
 const WORKER_IMAGE_QWEN_EDIT_CANDLE: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/qwen_edit_candle.rs");
 const WORKER_IMAGE_PULID: &str =

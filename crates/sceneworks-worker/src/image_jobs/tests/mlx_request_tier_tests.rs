@@ -1,5 +1,8 @@
-use super::*;
-
+use super::choose_mlx_request_tier;
+use super::MlxTierFit;
+use crate::Path;
+use crate::PathBuf;
+use crate::WorkerError;
 #[tokio::test]
 async fn request_tiers_preserve_the_first_fitting_prepared_candidate() {
     let mut seen = Vec::new();

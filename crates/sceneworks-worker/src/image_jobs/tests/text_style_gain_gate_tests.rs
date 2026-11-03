@@ -1,4 +1,6 @@
-use super::*;
+use super::resolve_text_style_gain;
+use super::super::ImageRequest;
+use crate::Value;
 use serde_json::json;
 
 fn request_with(manifest_entry: Value, advanced: Value) -> ImageRequest {

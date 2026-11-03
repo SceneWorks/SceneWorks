@@ -1,16 +1,43 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
-use super::{
-    attach_manifest_text_encoder, candle_certified_hf_artifact_path, candle_certified_load_spec,
-    candle_resolved_tier_key, pid_effective_dims, pid_output_tier, pose_entries, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_pid_weights,
-    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
-    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
-    Progress, Settings, Value, WorkerError, WorkerResult, ZImageControl, ZImageControlPaths,
-    ZImageControlRequest,
-};
-use super::{
-    resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
-};
+use crate::ApiClient;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use crate::DownloadContext;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use super::Progress;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use super::ZImageControl;
+use super::ZImageControlPaths;
+use super::ZImageControlRequest;
+use crate::advanced;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::candle_certified_hf_artifact_path;
+use super::load_spec::candle_certified_load_spec;
+use super::memory::candle_resolved_tier_key;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::conditioning::pose_entries;
+use super::adapters::resolve_adapters;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32_with;
+use crate::resolve_app_managed_model_dir;
+use super::pid::resolve_pid_weights;
+use super::run_candle_strict_control;
+use crate::safe_weight_filename;
+use super::standard_tier_subdir;
+use super::strict_control::trusted_control_weight_revision;
+#[cfg(target_os="macos")]
+use super::zimage::zimage_control_raw_settings;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 

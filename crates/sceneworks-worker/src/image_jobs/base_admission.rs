@@ -1,3 +1,21 @@
+use super::ImageRequest;
+use crate::JsonObject;
+use super::LoadSpec;
+use super::NVFP4_TIER;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+#[cfg(test)]
+use super::WeightsSource;
+use crate::WorkerError;
+use crate::WorkerResult;
+use super::quantization::gate_tier_key;
+use super::memory::gate_with_evict_reclaim;
+#[cfg(test)]
+use serde_json::json;
+use super::nvfp4_host_eligible;
+use super::nvfp4_selected;
 //! Admission for bespoke Candle image routes that load one base model outside
 //! `generate_candle_stream` (sc-16093).
 //!
@@ -6,7 +24,7 @@
 //! catalog tier, so they use an explicitly weaker on-disk weights floor. Both checks
 //! run before the handler hands control to `start_*_gen_stream`.
 
-use super::*;
+
 
 use crate::fit_gate::BYTES_PER_GIB;
 use crate::vram_gate::LoadPlan;

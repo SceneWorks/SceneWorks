@@ -911,7 +911,21 @@ fn cfg_rules_use_the_checked_native_alias_and_keep_helpers_in_their_lanes() {
         "video_admission.rs",
         "image_jobs/stream.rs",
         "image_jobs/strict_control.rs",
-        "image_jobs/base.rs",
+        "image_jobs/geometry.rs",
+        "image_jobs/routing.rs",
+        "image_jobs/artifact_resolution.rs",
+        "image_jobs/quantization.rs",
+        "image_jobs/load_spec.rs",
+        "image_jobs/adapters.rs",
+        "image_jobs/load_policy.rs",
+        "image_jobs/memory.rs",
+        "image_jobs/sampling.rs",
+        "image_jobs/conditioning.rs",
+        "image_jobs/render.rs",
+        "image_jobs/mlx.rs",
+        "image_jobs/candle.rs",
+        "image_jobs/metrics.rs",
+        "image_jobs/events.rs",
         "image_decode.rs",
     ];
     for path in rust_sources(&worker.join("src")) {
@@ -975,33 +989,26 @@ fn build_script_alias_matches_the_full_platform_feature_truth_table() {
 #[test]
 fn native_stream_helper_and_training_hash_import_follow_their_callers() {
     let image = parse(include_str!("image_jobs.rs"));
-    let include_attrs = |file: &str| {
+    let module_attrs = |name: &str| {
         image
             .items
             .iter()
             .find_map(|item| match item {
-                Item::Macro(item)
-                    if item.mac.path.is_ident("include")
-                        && syn::parse2::<syn::LitStr>(item.mac.tokens.clone())
-                            .unwrap()
-                            .value()
-                            == file =>
-                {
-                    Some(&item.attrs)
-                }
+                Item::Mod(item) if item.ident == name => Some(&item.attrs),
                 _ => None,
             })
-            .expect("native include exists")
+            .expect("actual native image module exists")
     };
-    let stream = include_attrs("image_jobs/stream.rs");
-    let base = include_attrs("image_jobs/base.rs");
+    let stream = module_attrs("stream");
+    let mlx_module = module_attrs("mlx");
+    let candle_module = module_attrs("candle");
     let helper = function(
         include_str!("image_jobs/stream.rs"),
         "drive_gen_items_scored_reported",
     );
-    let mac_caller = function(include_str!("image_jobs/base.rs"), "generate_stream_using");
+    let mac_caller = function(include_str!("image_jobs/mlx.rs"), "generate_stream_using");
     let candle_caller = function(
-        include_str!("image_jobs/base.rs"),
+        include_str!("image_jobs/candle.rs"),
         "generate_candle_registry_stream_using",
     );
     for caller in [&mac_caller, &candle_caller] {
@@ -1072,22 +1079,29 @@ fn native_stream_helper_and_training_hash_import_follow_their_callers() {
                     "stream include: {context}"
                 );
                 assert_eq!(
-                    enabled(base, mac, candle, test),
+                    enabled(candle_module, mac, candle, test),
                     native,
-                    "base include: {context}"
+                    "Candle owner module boundary: {context}"
                 );
                 assert_eq!(
-                    native && enabled(&helper.attrs, mac, candle, test),
+                    enabled(mlx_module, mac, candle, test),
+                    native,
+                    "MLX owner module boundary: {context}"
+                );
+                assert_eq!(
+                    enabled(stream, mac, candle, test) && enabled(&helper.attrs, mac, candle, test),
                     native,
                     "shared scored/report helper must exist for every native caller: {context}"
                 );
                 assert_eq!(
-                    native && enabled(&mac_caller.attrs, mac, candle, test),
+                    enabled(mlx_module, mac, candle, test)
+                        && enabled(&mac_caller.attrs, mac, candle, test),
                     mac,
                     "MLX eligibility unchanged: {context}"
                 );
                 assert_eq!(
-                    native && enabled(&candle_caller.attrs, mac, candle, test),
+                    enabled(candle_module, mac, candle, test)
+                        && enabled(&candle_caller.attrs, mac, candle, test),
                     !mac && candle,
                     "Candle eligibility unchanged: {context}"
                 );

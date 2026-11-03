@@ -1,4 +1,15 @@
-use super::*;
+use super::super::artifact_resolution::resolved_mlx_artifact_tier_for_model;
+use super::dense_te_requested_tier_bits;
+use super::fixed_mlx_artifact_quant;
+use super::mlx_load_quant_for_resolved_artifact;
+use super::reconcile_resolved_tier_quant;
+use super::resolve_quant;
+use super::tier_quant_from_resolved_dir;
+use super::super::standard_tier_subdir;
+use super::super::ImageRequest;
+use super::super::Quant;
+use crate::JsonObject;
+use crate::Path;
 use serde_json::json;
 
 /// The resolved basename → precision map used to record the tier that ran (not the one requested).

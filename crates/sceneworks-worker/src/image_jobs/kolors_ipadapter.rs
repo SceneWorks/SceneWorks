@@ -1,15 +1,41 @@
-use super::{
-    admit_conditioning_paths, candle_artifact_path_matches, candle_certified_hf_artifact_path,
-    candle_resolved_tier_key, consume_gen_events, curated_image_menu, drive_gen_items_scored,
-    load_reference_image, non_empty, normalize_sampling_knob, read_advanced_sampling_knobs,
-    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
-    resolve_character_image_likeness_source, resolve_seed, stage_likeness, start_gen_stream,
-    ApiClient, Image, ImagePlan, ImageRequest, IpAdapterKolors, IpAdapterKolorsPaths,
-    IpAdapterKolorsRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
-    WorkerResult,
-};
-use super::{advanced, ensure_hf_cached_file};
-use super::{resolve_app_managed_model_dir, standard_tier_subdir, DownloadContext};
+use crate::ApiClient;
+use crate::DownloadContext;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::IpAdapterKolors;
+use super::IpAdapterKolorsPaths;
+use super::IpAdapterKolorsRequest;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use super::admit_conditioning_paths;
+use crate::advanced;
+use super::load_spec::candle_artifact_path_matches;
+use super::load_spec::candle_certified_hf_artifact_path;
+use super::memory::candle_resolved_tier_key;
+use super::events::consume_gen_events;
+use super::sampling::curated_image_menu;
+use super::stream::drive_gen_items_scored;
+use crate::ensure_hf_cached_file;
+use super::conditioning::load_reference_image;
+use super::conditioning::non_empty;
+use super::sampling::normalize_sampling_knob;
+use super::sampling::read_advanced_sampling_knobs;
+use super::adapters::resolve_adapters;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use crate::resolve_app_managed_model_dir;
+use super::conditioning::resolve_character_image_likeness_source;
+use super::resolve_seed;
+use super::conditioning::stage_likeness;
+use super::standard_tier_subdir;
+use super::stream::start_gen_stream;
 use serde_json::json;
 
 // Candle (Windows/CUDA) Kolors IP-Adapter-Plus reference route (sc-5488, epic 5480) — reference-image

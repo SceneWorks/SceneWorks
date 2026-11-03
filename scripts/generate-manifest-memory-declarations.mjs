@@ -15,7 +15,7 @@
 //   3. crates/sceneworks-worker/src/image_jobs/strict_control.rs — STRICT_CONTROL_ENGINES, which is
 //      how a `*_control` provider is known to be a real overlay on a base model's route rather than
 //      a separately routed entry.
-//   4. crates/sceneworks-worker/src/image_jobs/base.rs — WIRED_{MLX,CANDLE}_POSE_FAMILIES, the wired
+//   4. crates/sceneworks-worker/src/image_jobs/routing.rs — WIRED_{MLX,CANDLE}_POSE_FAMILIES, the wired
 //      control lanes, for the catalog-reach intersection (see `catalogAxes`).
 //   5. crates/sceneworks-worker/src/memory_route_registry.rs — RULES, for both the deferred-route
 //      population's `legacy_shaping` flag (see `parseRequestContextLanes`: an MLX lane that requires
@@ -51,7 +51,7 @@ const clearOnly = argv.includes("--clear");
 const MANIFEST = "config/manifests/builtin.models.jsonc";
 const ENGINES = "crates/sceneworks-worker/src/engines.rs";
 const STRICT_CONTROL = "crates/sceneworks-worker/src/image_jobs/strict_control.rs";
-const IMAGE_ROUTING = "crates/sceneworks-worker/src/image_jobs/base.rs";
+const IMAGE_ROUTING = "crates/sceneworks-worker/src/image_jobs/routing.rs";
 const ROUTE_REGISTRY = "crates/sceneworks-worker/src/memory_route_registry.rs";
 const BACKENDS = ["mlx", "candle"];
 

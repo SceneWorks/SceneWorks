@@ -166,7 +166,7 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     ("model_jobs/import.rs", DownloadRole::Installer),
     // -- Job-time: the population epic 17625 is migrating. Only ever shrinks. --------------------
     // Video/image tier fetches via `model_jobs::ensure_hf_files_cached` at generation time.
-    ("image_jobs/base.rs", DownloadRole::JobTime),
+    ("image_jobs/artifact_resolution.rs", DownloadRole::JobTime),
     ("video_jobs/bernini.rs", DownloadRole::JobTime),
     ("video_jobs/krea_realtime.rs", DownloadRole::JobTime),
     ("video_jobs/ltx.rs", DownloadRole::JobTime),

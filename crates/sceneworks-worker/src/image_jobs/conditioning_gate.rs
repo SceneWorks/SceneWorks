@@ -1,5 +1,7 @@
-use super::{gate_with_evict_reclaim, Path, Settings, WorkerResult};
-
+use crate::Path;
+use crate::Settings;
+use crate::WorkerResult;
+use super::memory::gate_with_evict_reclaim;
 use crate::conditioning_fit::{ConditioningFit, ConditioningFootprint};
 
 // The ONE admission seam every candle conditioning route (ControlNet / IP-Adapter / identity encoder)

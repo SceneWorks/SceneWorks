@@ -3209,7 +3209,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // `origin/main` would not build on Apple Silicon.
   //
   // The Linux `parity` lane CANNOT catch that class of bug: image_jobs.rs gates
-  // `include!("image_jobs/base.rs")` on `any(macos, all(not(macos), backend-candle))`,
+  // `include!("image_jobs/memory.rs")` on `any(macos, all(not(macos), backend-candle))`,
   // so on Linux without candle the file is not compiled at all. Verified by reverting
   // the sc-17007 `cfg` and running each lane's own command — macOS exits 101, the
   // Linux target exits 0. macOS+default is the ONLY configuration in the fleet that
@@ -4703,11 +4703,11 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // way for every one of the five members, so neither copy can be edited alone. The Rust guard
   // (`packed_turnkeys_keep_load_quantization_none_for_every_public_route`) is cfg'd to a non-macOS
   // candle build and cannot run on the host that writes either file.
-  const worker = await source("crates/sceneworks-worker/src/image_jobs/base.rs");
+  const worker = await source("crates/sceneworks-worker/src/image_jobs/memory.rs");
   const carveOut =
     /\/\/ Keep the load instruction empty while retaining the resolved artifact bits for the recipe\n[\s\S]*?if matches!\(\n\s+request\.model\.as_str\(\),\n([\s\S]*?)\n\s+\) \{\n\s+return \(None, resolved_bits\);/
       .exec(worker);
-  assert.ok(carveOut, "image_jobs/base.rs must still carve packed turnkeys out of the quant fold");
+  assert.ok(carveOut, "image_jobs/memory.rs must still carve packed turnkeys out of the quant fold");
   const carved = new Set([...carveOut[1].matchAll(/"([a-z0-9_]+)"/g)].map(([, id]) => id));
   assert.ok(carved.has("chroma1_hd"), "the parsed carve-out is the packed-turnkey list");
   for (const member of members) {

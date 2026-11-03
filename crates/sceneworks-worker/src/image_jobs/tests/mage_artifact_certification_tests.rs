@@ -1,4 +1,15 @@
-use super::*;
+use super::candle_certified_hf_artifact_path;
+use super::candle_certified_load_spec;
+use super::super::LoadSpec;
+use super::super::WeightsSource;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::DEFAULT_HUGGINGFACE_BASE_URL;
+use crate::DEFAULT_MAX_LORA_URL_BYTES;
+use crate::DEFAULT_MAX_MODEL_URL_BYTES;
 use std::fs;
 
 fn settings(data_dir: &Path) -> Settings {

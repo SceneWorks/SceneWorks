@@ -1,16 +1,44 @@
-use super::advanced;
+use crate::ApiClient;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use crate::DownloadContext;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use super::Progress;
+#[cfg(target_os="macos")]
+use super::qwen::QWEN_CONTROL_ENGINE_ID;
+#[cfg(target_os="macos")]
+use super::qwen::QWEN_CONTROL_FILE;
+use super::QwenFunControl;
+use super::QwenFunControlPaths;
+use super::QwenFunControlRequest;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use crate::advanced;
+use super::load_spec::attach_manifest_text_encoder;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use super::conditioning::pose_entries;
+#[cfg(target_os="macos")]
+use super::qwen::qwen_control_raw_settings;
+use super::adapters::resolve_adapters;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use crate::resolve_app_managed_model_dir;
+use super::run_candle_strict_control;
+use crate::safe_weight_filename;
+use super::standard_tier_subdir;
+use super::strict_control::trusted_control_weight_revision;
 use super::tier_resolver::qwen_control_tier_subdir;
-use super::{
-    attach_manifest_text_encoder, pose_entries, resolve_adapters, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
-    ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot,
-    JsonObject, Path, PathBuf, Progress, QwenFunControl, QwenFunControlPaths,
-    QwenFunControlRequest, Settings, Value, WorkerError, WorkerResult,
-};
-use super::{
-    ensure_hf_cached_file, huggingface_snapshot_dir, resolve_app_managed_model_dir,
-    safe_weight_filename, standard_tier_subdir, DownloadContext,
-};
+
+
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 

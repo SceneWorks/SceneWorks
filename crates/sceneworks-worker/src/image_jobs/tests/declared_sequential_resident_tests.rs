@@ -1,4 +1,4 @@
-use super::{admission_needs_no_staging, declared_sequential_resident_alternative};
+use super::super::{admission_needs_no_staging, declared_sequential_resident_alternative};
 use gen_core::{LoadShapeDeclarationResult, LoadSpec, OffloadPolicy, WeightsSource};
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -119,10 +119,7 @@ fn every_lane_that_binds_a_declared_policy_offers_the_resident_release() {
             "{declaration}"
         );
     }
-    let base = function_body(
-        include_str!("../base.rs"),
-        "async fn generate_stream_using(",
-    );
+    let base = function_body(include_str!("../mlx.rs"), "async fn generate_stream_using(");
     let prepared = base
         .find("prepare_mlx_load_policy(")
         .expect("base policy step");

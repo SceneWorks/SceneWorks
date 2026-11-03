@@ -1,3 +1,83 @@
+use super::adapters::resolve_adapters;
+#[cfg(not(target_os = "macos"))]
+use super::admit_conditioning_paths;
+use super::conditioning::augment_prompt_for_angle;
+use super::conditioning::load_reference_image;
+use super::conditioning::non_empty;
+use super::conditioning::parse_poses;
+use super::conditioning::pose_entries;
+use super::events::consume_gen_events;
+#[cfg(not(target_os = "macos"))]
+use super::load_spec::resolve_sdxl_components;
+use super::pick_loadable_tier;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::resolve_pid_weights;
+use super::resolve_seed;
+use super::sampling::curated_image_menu;
+use super::sampling::normalize_sampling_knob;
+use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_gen_stream;
+use super::tier_components_present;
+#[cfg(test)]
+use super::AdapterKind;
+use super::AdapterSpec;
+#[cfg(not(target_os = "macos"))]
+use super::BodyPoint;
+#[cfg(target_os = "macos")]
+use super::BodyPoint;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+#[cfg(not(target_os = "macos"))]
+use super::InstantId;
+#[cfg(target_os = "macos")]
+use super::InstantId;
+#[cfg(not(target_os = "macos"))]
+use super::InstantIdPaths;
+#[cfg(target_os = "macos")]
+use super::InstantIdPaths;
+#[cfg(not(target_os = "macos"))]
+use super::InstantIdRequest;
+#[cfg(target_os = "macos")]
+use super::InstantIdRequest;
+#[cfg(any(test, target_os = "macos"))]
+use super::Quant;
+#[cfg(not(target_os = "macos"))]
+use super::SdxlComponents;
+use super::WeightsSource;
+#[cfg(not(target_os = "macos"))]
+use super::COMPONENT_TOKENIZER_CLIP_BIGG;
+#[cfg(not(target_os = "macos"))]
+use super::COMPONENT_TOKENIZER_CLIP_L;
+#[cfg(not(target_os = "macos"))]
+use super::COMPONENT_VAE_FP16_FIX;
+#[cfg(not(target_os = "macos"))]
+use super::FACE_RESTORE_PROMPT;
+#[cfg(target_os = "macos")]
+use super::FACE_RESTORE_PROMPT;
+use crate::advanced;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use crate::quant_int;
+use crate::resolve_app_managed_model_dir;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::ProjectStore;
+use crate::Settings;
+use crate::Sha256;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
+use sha2::Digest;
 /// The SceneWorks model id for native InstantID (production = InstantID on RealVisXL_V5.0).
 const INSTANTID_MODEL: &str = "instantid_realvisxl";
 /// SDXL base for InstantID when the manifest omits `repo`: the SceneWorks quant-matrix turnkey
@@ -13,21 +93,20 @@ const INSTANTID_SDXL_REPO: &str = "SceneWorks/realvisxl-mlx";
 /// Stock InstantID checkpoint repo — the IdentityNet `ControlNetModel/` lives here.
 const INSTANTID_CONTROLNET_REPO: &str = "InstantX/InstantID";
 /// Pinned revision for the stock InstantX IdentityNet repo (sc-9879, F-077 follow-up).
-const INSTANTID_CONTROLNET_REVISION: &str = "57b32dfee076092ad2930c71fd6d439c2c3b1820";
+pub(super) const INSTANTID_CONTROLNET_REVISION: &str = "57b32dfee076092ad2930c71fd6d439c2c3b1820";
 /// Converted-weights bundle (download-on-first-use): the MLX `ip-adapter.safetensors`
 /// (`tools/convert_instantid.py`) + the native face stack `scrfd_10g.safetensors`
 /// (`convert_scrfd.py`) + `arcface_iresnet100.safetensors` (`convert_glintr100.py`). Public
 /// repo, mirroring the YOLO11 / SAM2 `SceneWorks/*-mlx` uploads (sc-3633 / sc-3707).
-const INSTANTID_MLX_REPO: &str = "SceneWorks/instantid-mlx";
+pub(super) const INSTANTID_MLX_REPO: &str = "SceneWorks/instantid-mlx";
 /// Pinned revision for the first-party converted InstantID bundle (sc-9879, F-077 follow-up). Even
 /// though `SceneWorks/instantid-mlx` is a first-party repo, fetching the mutable `main` branch means a
 /// re-push (or a compromised token) could silently swap the ip-adapter / SCRFD / ArcFace weights we
 /// load. Pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports
 /// each file's `lfs.oid`, which `ensure_hf_cached_file` verifies against. NOTE: the candle PuLID lane
 /// reuses this SAME repo (`pulid_candle.rs` `PULID_CANDLE_FACE_REPO`); its pin must match this sha.
-pub(crate) const INSTANTID_MLX_REVISION: &str =
-    "bca0cacf8e5e04529bb2b326a521361b02be84fd";
-const INSTANTID_IP_ADAPTER_FILE: &str = "ip-adapter.safetensors";
+pub(crate) const INSTANTID_MLX_REVISION: &str = "bca0cacf8e5e04529bb2b326a521361b02be84fd";
+pub(super) const INSTANTID_IP_ADAPTER_FILE: &str = "ip-adapter.safetensors";
 // `pub(crate)` so the Dataset Doctor face pass (sc-6538) can join them under the bundle dir that
 // `ensure_face_stack_dir` stages, to load the MLX `FaceAnalysis` (SCRFD + ArcFace) directly.
 pub(crate) const INSTANTID_SCRFD_FILE: &str = "scrfd_10g.safetensors";
@@ -37,10 +116,10 @@ const INSTANTID_CONTROLNET_FILES: [&str; 2] =
     ["config.json", "diffusion_pytorch_model.safetensors"];
 /// Torch-parity defaults (the `instantid_realvisxl` MODEL_TARGETS): RealVisXL is tuned for a
 /// low CFG; the engine's own `InstantIdRequest::default` guidance (5.0) is for base SDXL.
-const INSTANTID_DEFAULT_STEPS: u32 = 30;
-const INSTANTID_DEFAULT_GUIDANCE: f32 = 3.0;
-const INSTANTID_IP_SCALE: f32 = 0.8;
-const INSTANTID_CONTROLNET_SCALE: f32 = 0.8;
+pub(super) const INSTANTID_DEFAULT_STEPS: u32 = 30;
+pub(super) const INSTANTID_DEFAULT_GUIDANCE: f32 = 3.0;
+pub(super) const INSTANTID_IP_SCALE: f32 = 0.8;
+pub(super) const INSTANTID_CONTROLNET_SCALE: f32 = 0.8;
 /// Angle-set default `controlnetConditioningScale` (sc-8354). The sc-8222 real-weight A/B (full
 /// 5-point cn sweep, paired on the built-in 11-angle set) found the landmark-ControlNet lock is the
 /// only viable lever that sharpens angle-set output: lowering it from 0.80 to 0.65 lifts median blur
@@ -52,7 +131,7 @@ const INSTANTID_ANGLE_CONTROLNET_SCALE: f32 = 0.65;
 /// `load_controlnet` (no conversion) — `image_adapters.py:615-617` parity.
 const INSTANTID_OPENPOSE_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
 /// Pinned revision for the xinsir OpenPose-SDXL ControlNet (sc-9879, F-077 follow-up).
-const INSTANTID_OPENPOSE_REVISION: &str = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
+pub(super) const INSTANTID_OPENPOSE_REVISION: &str = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
 /// Pinned commit revisions for the MLX PuLID-FLUX download repos (sc-11168, F-007 — completes the sc-9879
 /// rollout on the MLX lane). The MLX PuLID route (`pulid.rs`) fetches its adapter + EVA/BiSeNet bundle
 /// through `ensure_instantid_file`, so those repos route through `instantid_revision` below and were
@@ -63,8 +142,8 @@ const INSTANTID_OPENPOSE_REVISION: &str = "23f966cd5cfdd3f7729c903e243d87152162d
 /// consts do not exist (a macOS test ties the literals back to the consts). These shas MUST equal the
 /// candle `PULID_CANDLE_ADAPTER_REVISION` / `PULID_CANDLE_MLX_REVISION` (same repos). PuLID's third repo
 /// (SCRFD / ArcFace) IS `SceneWorks/instantid-mlx`, already pinned above by `INSTANTID_MLX_REVISION`.
-const PULID_ADAPTER_REVISION: &str = "492b1451255dc9d9bc3c857259690b5f8b998d4a";
-const PULID_MLX_REVISION: &str = "78ef91f977eae16d66fb191caf003154b7a0a0b8";
+pub(super) const PULID_ADAPTER_REVISION: &str = "492b1451255dc9d9bc3c857259690b5f8b998d4a";
+pub(super) const PULID_MLX_REVISION: &str = "78ef91f977eae16d66fb191caf003154b7a0a0b8";
 /// Torch-parity default OpenPose lock (`instantid_adapter.py::_openpose_scale`, default 0.7).
 const INSTANTID_OPENPOSE_SCALE: f32 = 0.7;
 /// The face-restore re-render side (the engine's production crop size, sc-3380).
@@ -73,9 +152,9 @@ const INSTANTID_FACE_RESTORE_SIDE: u32 = 1024;
 /// MLX provider on macOS, the candle (Windows/CUDA) provider off-Mac (sc-5491). Distinguishes the two
 /// lanes in the asset sidecar + the `instantIdEngine` raw-settings key.
 #[cfg(target_os = "macos")]
-const INSTANTID_ENGINE: &str = "mlx_instantid";
+pub(super) const INSTANTID_ENGINE: &str = "mlx_instantid";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const INSTANTID_ENGINE: &str = "candle_instantid";
+pub(super) const INSTANTID_ENGINE: &str = "candle_instantid";
 
 // ---------------------------------------------------------------------------
 // Request-scoped memory admission (sc-20799, epic 15448)
@@ -95,10 +174,10 @@ const INSTANTID_ENGINE: &str = "candle_instantid";
 // route/identity/overlay-key/evidence-revision are deliberately backend-neutral
 // so cross-backend evidence is not split); only `provider_contract` differs — the
 // MLX one takes the numeric tier, the candle one is dense-only.
-#[cfg(target_os = "macos")]
-use runtime_macos::providers::instantid::memory_strategy as instantid_memory;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use runtime_cuda::providers::instantid::memory_strategy as instantid_memory;
+#[cfg(target_os = "macos")]
+use runtime_macos::providers::instantid::memory_strategy as instantid_memory;
 
 use instantid_memory::{InstantIdMemoryIdentity, InstantIdRoute};
 
@@ -112,8 +191,6 @@ const INSTANTID_BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 fn instantid_gib_bytes(gb: f64) -> u64 {
     (gb * INSTANTID_BYTES_PER_GIB).ceil() as u64
 }
-
-
 
 /// The exact, ORDERED artifact set one InstantID load consumes, each tagged with the role it plays.
 ///
@@ -133,13 +210,19 @@ fn instantid_artifact_entries<'a>(
 ) -> Vec<(&'static str, &'a Path)> {
     let mut entries: Vec<(&'static str, &Path)> = vec![
         ("sdxl_base", sdxl_base),
-        ("identitynet", crate::weights_source::WeightsSourceExt::path(identitynet)),
+        (
+            "identitynet",
+            crate::weights_source::WeightsSourceExt::path(identitynet),
+        ),
         ("ip_adapter", ip_adapter),
         ("scrfd", scrfd),
         ("arcface", arcface),
     ];
     if let Some(openpose) = openpose {
-        entries.push(("openpose", crate::weights_source::WeightsSourceExt::path(openpose)));
+        entries.push((
+            "openpose",
+            crate::weights_source::WeightsSourceExt::path(openpose),
+        ));
     }
     entries.extend(
         adapters
@@ -147,8 +230,14 @@ fn instantid_artifact_entries<'a>(
             .map(|adapter| ("adapter", adapter.path.as_path())),
     );
     if let Some(pid) = pid {
-        entries.push(("pid_checkpoint", crate::weights_source::WeightsSourceExt::path(&pid.checkpoint)));
-        entries.push(("pid_gemma", crate::weights_source::WeightsSourceExt::path(&pid.gemma)));
+        entries.push((
+            "pid_checkpoint",
+            crate::weights_source::WeightsSourceExt::path(&pid.checkpoint),
+        ));
+        entries.push((
+            "pid_gemma",
+            crate::weights_source::WeightsSourceExt::path(&pid.gemma),
+        ));
     }
     entries
 }
@@ -387,8 +476,9 @@ fn instantid_validate_admission(
     identity: &InstantIdMemoryIdentity,
     context: &gen_core::MemoryRunContext,
 ) -> WorkerResult<()> {
-    instantid_memory::validate_context(contract, tier, identity, context)
-        .map_err(|error| WorkerError::InvalidPayload(format!("InstantID memory admission: {error}")))
+    instantid_memory::validate_context(contract, tier, identity, context).map_err(|error| {
+        WorkerError::InvalidPayload(format!("InstantID memory admission: {error}"))
+    })
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -399,8 +489,9 @@ fn instantid_validate_admission(
     context: &gen_core::MemoryRunContext,
 ) -> WorkerResult<()> {
     let _ = tier;
-    instantid_memory::validate_context(contract, identity, context)
-        .map_err(|error| WorkerError::InvalidPayload(format!("InstantID memory admission: {error}")))
+    instantid_memory::validate_context(contract, identity, context).map_err(|error| {
+        WorkerError::InvalidPayload(format!("InstantID memory admission: {error}"))
+    })
 }
 
 /// The provider contract for this lane (MLX validates the request tier, candle is dense-only).
@@ -551,7 +642,12 @@ fn instantid_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             .flatten()
             .flatten()
             .filter(|entry| !sceneworks_core::lora_family::is_hidden_file(&entry.path()))
-            .any(|entry| entry.file_name().to_string_lossy().ends_with(".safetensors"));
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".safetensors")
+            });
         has_backbone.then(|| root.join(name))
     };
     // sc-12279 generalized: the `SceneWorks/realvisxl-mlx` base ships a per-tier `model_index.json`, so
@@ -559,15 +655,19 @@ fn instantid_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     // `tokenizer/` missing) now falls through to a complete sibling instead of crashing the SDXL loader
     // on the absent tokenizer. `instantid.rs` is `include!`d into the `image_jobs` module, so
     // `pick_loadable_tier` / `tier_components_present` (base.rs) are directly in scope.
-    pick_loadable_tier(&[preferred, "bf16", "q8", "q4"], &present, &tier_components_present)
-        .unwrap_or_else(|| root.to_path_buf())
+    pick_loadable_tier(
+        &[preferred, "bf16", "q8", "q4"],
+        &present,
+        &tier_components_present,
+    )
+    .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// True when this is a native-MLX-eligible InstantID job: the production model in
 /// `character_image` mode with a reference face whose SDXL base resolves locally. ALL InstantID
 /// modes are now native (sc-3345 identity + angle set; sc-3381 pose mode + face-restore via the
 /// #193 engine). Mirrors `jobs_store::instantid_mlx_eligible` so the worker and the router agree.
-fn instantid_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn instantid_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == INSTANTID_MODEL
         && request.mode == "character_image"
         && non_empty(&request.reference_asset_id)
@@ -576,7 +676,7 @@ fn instantid_available(request: &ImageRequest, settings: &Settings) -> bool {
 
 /// The number of images an InstantID job produces: `n` for a pose set, the active angle
 /// collection's length for an angle set (sc-4450 — variable N, not fixed 11), else `request.count`.
-fn instantid_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
+pub(super) fn instantid_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
     match instantid_mode(request) {
         InstantIdMode::PoseSet(count) => count as u32,
         InstantIdMode::AngleSet => active_angle_collection(request, settings).1.len() as u32,
@@ -651,14 +751,13 @@ fn instantid_guidance(request: &ImageRequest) -> f32 {
 /// manifest opt-in (identity drops to ~0.64 @512² and full-res quant is unvalidated). Returns
 /// the engine `bits` (`Some(4)`/`Some(8)`/`None`) + the recipe bit count.
 fn instantid_quant(request: &ImageRequest) -> (Option<i32>, Option<i64>) {
-    let raw = request.quant_bits()
-        .or_else(|| {
-            request
-                .model_manifest_entry
-                .get("mlx")
-                .and_then(|mlx| mlx.get("quantize"))
-                .and_then(quant_int)
-        });
+    let raw = request.quant_bits().or_else(|| {
+        request
+            .model_manifest_entry
+            .get("mlx")
+            .and_then(|mlx| mlx.get("quantize"))
+            .and_then(quant_int)
+    });
     match raw {
         Some(bits) if bits > 0 && bits <= 4 => (Some(4), Some(4)),
         Some(bits) if bits > 4 => (Some(8), Some(8)),
@@ -710,7 +809,7 @@ fn instantid_raw_settings(
 /// could silently swap the weights we load. Pin each to its exact commit for defense-in-depth (mirrors
 /// sc-8879/sc-9682); the `lfs.oid` sha256 verify in `ensure_hf_cached_file` is retained. Any repo not in
 /// this table (a caller passing something unexpected) falls back to `main` rather than a wrong sha.
-fn instantid_revision(repo: &str) -> &'static str {
+pub(super) fn instantid_revision(repo: &str) -> &'static str {
     match repo {
         INSTANTID_MLX_REPO => INSTANTID_MLX_REVISION,
         INSTANTID_CONTROLNET_REPO => INSTANTID_CONTROLNET_REVISION,
@@ -727,13 +826,20 @@ fn instantid_revision(repo: &str) -> &'static str {
 /// Resolve a single InstantID weight file: return it if already present in `dir`, else
 /// download `url` into `dir` (atomic `.tmp` + rename, so a partial download is never mistaken
 /// for a complete one).
-async fn ensure_instantid_file(
+pub(super) async fn ensure_instantid_file(
     context: &DownloadContext<'_>,
     repo: &str,
     dir: &Path,
     name: &str,
 ) -> WorkerResult<PathBuf> {
-    ensure_hf_cached_file(context, repo, instantid_revision(repo), name, &dir.join(name)).await
+    ensure_hf_cached_file(
+        context,
+        repo,
+        instantid_revision(repo),
+        name,
+        &dir.join(name),
+    )
+    .await
 }
 
 /// Resolve only the SCRFD detector weights (`scrfd_10g.safetensors`) from the same converted
@@ -797,7 +903,13 @@ pub(crate) async fn ensure_face_stack_dir(
     let bundle_dir = std::env::var("SCENEWORKS_INSTANTID_WEIGHTS")
         .map(PathBuf::from)
         .unwrap_or_else(|_| settings.data_dir.join("cache").join("instantid-mlx"));
-    ensure_instantid_file(&context, INSTANTID_MLX_REPO, &bundle_dir, INSTANTID_SCRFD_FILE).await?;
+    ensure_instantid_file(
+        &context,
+        INSTANTID_MLX_REPO,
+        &bundle_dir,
+        INSTANTID_SCRFD_FILE,
+    )
+    .await?;
     ensure_instantid_file(
         &context,
         INSTANTID_MLX_REPO,
@@ -940,7 +1052,7 @@ async fn ensure_instantid_openpose(
 /// `InstantIdRequest.cancel`) and a `Progress` callback (sc-4380/sc-4382), so streaming is
 /// per-step (`Step`/`Decoding` events) and cancellation is honoured mid-denoise — same contract
 /// as the registry families. Reuses [`consume_gen_events`] for the asset writes.
-async fn generate_instantid_stream(
+pub(super) async fn generate_instantid_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -1096,8 +1208,12 @@ async fn generate_instantid_stream(
     // this same base, so control + latent stay aligned. Gated to the PiD-capable face backends (where
     // `use_pid` + the helpers exist); the no-face build keeps the requested dims verbatim.
     #[cfg(native_lane)]
-    let (width, height) =
-        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     #[cfg(not(native_lane))]
     let (width, height) = (request.width, request.height);
     let work: Vec<(i64, String, InstantIdAction)> = match &mode {
@@ -1177,10 +1293,7 @@ async fn generate_instantid_stream(
     // identity face. Captured as an owned String for the blocking closure. Consumed on every InstantID
     // mode now (single identity / angle / pose all score, sc-4411); allow it unused on the
     // non-face-backend build.
-    #[cfg_attr(
-        not(native_lane),
-        allow(unused_variables)
-    )]
+    #[cfg_attr(not(native_lane), allow(unused_variables))]
     let face_likeness_source_ref = reference_id.to_owned();
     // InstantID reuses the candle SDXL conditioner + VAE (candle-gen-instantid, sc-13663), so it stages
     // the SAME three SDXL components (epic 13657, sc-13682): CLIP-L/bigG tokenizers + fp16-fix VAE.
@@ -1359,11 +1472,12 @@ async fn generate_instantid_stream(
             )
             .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-            let model =
-                InstantId::load_with_memory_context(&paths, load_memory_identity, load_memory_context)
-                    .map_err(|error| {
-                        WorkerError::Engine(format!("InstantID load failed: {error}"))
-                    })?;
+            let model = InstantId::load_with_memory_context(
+                &paths,
+                load_memory_identity,
+                load_memory_context,
+            )
+            .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
             // Attach OpenPose (pose mode) BEFORE quantize so it quantizes with the stack; quantize
             // before with_face (the engine's documented order). `with_openpose` is backend-neutral
             // (both engines take `&WeightsSource` and consume+return `self`).
@@ -1646,7 +1760,13 @@ async fn generate_instantid_stream(
                         let _ = (&scorer, &face_likeness_source_ref);
                         None
                     };
-                    Ok(Some((seed, out.width, out.height, out.pixels, face_likeness)))
+                    Ok(Some((
+                        seed,
+                        out.width,
+                        out.height,
+                        out.pixels,
+                        face_likeness,
+                    )))
                 },
             )
         },
@@ -1905,7 +2025,9 @@ mod instantid_memory_tests {
         assert_eq!(reference, base(&a, &b), "the digest must be deterministic");
         assert_eq!(reference.len(), 64, "sha256 hex");
         assert!(
-            reference.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            reference
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
             "the digest lands inside the overlay key, which must never carry '='"
         );
         assert_ne!(
@@ -1958,8 +2080,16 @@ mod instantid_memory_tests {
             gemma: WeightsSource::Dir(PathBuf::from("/w/gemma")),
         };
         let adapters = vec![
-            AdapterSpec::new(PathBuf::from("/w/lora-a.safetensors"), 1.0, AdapterKind::Lora),
-            AdapterSpec::new(PathBuf::from("/w/lora-b.safetensors"), 1.0, AdapterKind::Lora),
+            AdapterSpec::new(
+                PathBuf::from("/w/lora-a.safetensors"),
+                1.0,
+                AdapterKind::Lora,
+            ),
+            AdapterSpec::new(
+                PathBuf::from("/w/lora-b.safetensors"),
+                1.0,
+                AdapterKind::Lora,
+            ),
         ];
         let bare = instantid_artifact_entries(
             Path::new("/w/base"),
@@ -2094,10 +2224,7 @@ mod instantid_memory_tests {
         };
         let dense = instantid_memory_tier(&request(json!({})));
         assert_eq!(dense.quant, None);
-        assert_eq!(
-            instantid_memory_backend_keys(&request(json!({}))).1,
-            "bf16"
-        );
+        assert_eq!(instantid_memory_backend_keys(&request(json!({}))).1, "bf16");
         #[cfg(target_os = "macos")]
         {
             assert_eq!(

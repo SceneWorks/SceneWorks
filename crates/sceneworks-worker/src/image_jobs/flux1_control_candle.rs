@@ -1,18 +1,40 @@
-use super::{
-    advanced, apply_candle_image_load_shape, candle_artifact_path_matches,
-    candle_certified_artifact_path, candle_pinned_hf_artifact_path, ensure_hf_cached_file,
-    huggingface_snapshot_dir,
-};
-use super::{
-    control_kind_label, pose_entries, requested_control_kind, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, run_candle_strict_control,
-    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Flux1ControlPaths,
-    Flux1ControlRequest, Flux1DevControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult,
-};
-use super::{
-    resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
-};
+use crate::ApiClient;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use crate::DownloadContext;
+use super::Flux1ControlPaths;
+use super::Flux1ControlRequest;
+use super::Flux1DevControl;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use super::Progress;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use crate::advanced;
+use super::load_policy::apply_candle_image_load_shape;
+use super::load_spec::candle_artifact_path_matches;
+use super::load_spec::candle_certified_artifact_path;
+use super::load_spec::candle_pinned_hf_artifact_path;
+use super::strict_control::control_kind_label;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use super::conditioning::pose_entries;
+use super::strict_control::requested_control_kind;
+use super::adapters::resolve_adapters;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use crate::resolve_app_managed_model_dir;
+use super::run_candle_strict_control;
+use crate::safe_weight_filename;
+use super::standard_tier_subdir;
+use super::strict_control::trusted_control_weight_revision;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 

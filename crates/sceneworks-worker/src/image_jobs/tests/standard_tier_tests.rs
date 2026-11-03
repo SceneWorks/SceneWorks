@@ -1,4 +1,47 @@
-use super::*;
+#[cfg(not(target_os = "macos"))]
+use super::anima_dense_split_files_dir;
+use super::anima_tier_subdir;
+use super::boogu_model_subdir;
+use super::dense_tier_subdir;
+use super::ideogram_model_subdir;
+use super::is_anima_model;
+use super::krea_model_subdir;
+use super::krea_model_subdir_gated;
+use super::super::conditioning::model_supports_img2img;
+use super::super::conditioning::uses_generic_img2img;
+#[cfg(target_os = "macos")]
+use super::super::conditioning::zimage_uses_generic_img2img;
+use super::super::is_dense_te_tier;
+use super::super::load_spec::load_spec;
+use super::super::metrics::effective_quant_label_gated;
+use super::super::min_quality_floor;
+use super::super::nvfp4_requested;
+use super::super::preferred_tier;
+use super::super::quantization::resolve_quant;
+use super::super::quantization::resolve_quant_gated;
+#[cfg(target_os = "macos")]
+use super::super::resolved_tier_is_complete;
+use super::super::standard_tier_subdir;
+use super::super::standard_tier_subdir_gated;
+use super::super::tier_components_present;
+use super::super::tier_quality_rank;
+use super::super::uses_standard_tier_layout;
+use super::super::AdapterKind;
+use super::super::AdapterSpec;
+#[cfg(target_os = "macos")]
+use super::super::GenerationOutput;
+#[cfg(target_os = "macos")]
+use super::super::GenerationRequest;
+use super::super::ImageRequest;
+#[cfg(target_os = "macos")]
+use super::super::LoadSpec;
+use super::super::Quant;
+#[cfg(target_os = "macos")]
+use super::super::WeightsSource;
+use super::super::NVFP4_TIER;
+use crate::Path;
+use crate::PathBuf;
+use crate::Value;
 use serde_json::json;
 
 fn request(advanced: serde_json::Value) -> ImageRequest {

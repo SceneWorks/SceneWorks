@@ -1,4 +1,8 @@
-use super::{
+use super::choose_downtier;
+use super::DowntierPick;
+use super::TierFit;
+use super::super::tier_quality_rank;
+use super::super::{
     candle_adapter_resident_bytes, capability_downtier_floor,
     krea_streamed_blocks_adapter_evidence, krea_turbo_capability_reject_message,
     krea_turbo_memory_route, krea_unverified_resident_decision,

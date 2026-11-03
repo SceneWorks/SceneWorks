@@ -1,5 +1,13 @@
-use super::*;
-
+use super::choose_downtier;
+use super::DowntierPick;
+use super::TierFit;
+#[cfg(not(target_os = "macos"))]
+use super::super::quantization::gate_tier_key;
+use super::super::quantization::tier_key_from_resolved_dir;
+use super::super::tier_quality_rank;
+#[cfg(not(target_os = "macos"))]
+use super::super::INT8_CONVROT_TIER;
+use super::super::NVFP4_TIER;
 /// sc-12425 — **a resolved ConvRot load must be gated by its OWN tier, never aliased to q8.**
 ///
 /// The defect this kills: `generate_candle_stream` handed ConvRot to the BITS-derived
