@@ -4,7 +4,7 @@ import { Icon } from "../components/Icons.jsx";
 import { AssetMedia, assetCanRenderAsAudio, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
 import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
 import { audioAssetMetaLine, audioAssetRunGroups } from "../audioTakes.js";
-import { useAppContext } from "../context/AppContext.js";
+import { useAppStatic } from "../context/AppContext.js";
 import { usePreviewArrowNavigation } from "../hooks/usePreviewArrowNavigation.js";
 import { SimpleAudioViewer } from "./simpleAudioParts.jsx";
 import { DownloadButton } from "./studioParts.jsx";
@@ -43,7 +43,7 @@ export function SimplePreview({
   onNavigate,
   position = null,
 }) {
-  const { audioModels = [] } = useAppContext();
+  const { audioModels = [] } = useAppStatic();
   const audio = assetCanRenderAsAudio(asset);
   const title = assetCanRenderAsVideo(asset) ? "Clip" : audio ? "Audio" : "Image";
   const favorite = Boolean(asset.status?.favorite);

@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useCallback, useEffect, useState } from "react";
 import { putUiPreferences } from "../uiPreferences.js";
 import { readStoredAccent, readStoredTheme } from "../appHelpers.js";
@@ -54,5 +55,9 @@ export function useThemeAccent() {
       // ignore (private mode etc.)
     }
   }, [accent]);
-  return { theme, setTheme, changeTheme, accent, setAccent, changeAccent };
+  const context = useAppDomainValue({
+    theme,
+    changeTheme
+  });
+  return { ...context, setTheme, accent, setAccent, changeAccent, context };
 }
