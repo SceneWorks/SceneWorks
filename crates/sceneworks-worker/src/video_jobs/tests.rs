@@ -957,8 +957,11 @@ fn video_jobs_remains_split_into_real_engine_modules() {
             source.lines().count() >= 100,
             "{name}.rs is unexpectedly empty or collapsed"
         );
+        // Check the family module's root imports, not nested test modules whose parent
+        // is the family itself. This stays independent of cfg aliases on those tests.
         assert!(
-            !source.contains("use super::*"),
+            !source.lines().any(|line| line.starts_with("use super::*"))
+                && source.lines().any(|line| line == "use super::prelude::*;"),
             "{name}.rs must import its parent dependencies through the explicit prelude"
         );
         assert!(
