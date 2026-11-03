@@ -14,7 +14,7 @@ use super::smoke_support::{
 };
 
 fn env_path(key: &str) -> PathBuf {
-    PathBuf::from(std::env::var(key).unwrap_or_else(|_| panic!("set ${key}")))
+    super::smoke_support::env_path_raw(key)
 }
 
 fn reference(width: u32, height: u32, inverted: bool) -> Image {

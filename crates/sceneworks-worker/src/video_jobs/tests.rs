@@ -3118,7 +3118,7 @@ fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
     };
     let settings = Settings {
         data_dir: data.path().to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let request = mochi_request(json!({ "mlxQuantize": 4 }));
 
@@ -3180,7 +3180,7 @@ fn resolve_mochi_model_dir_picks_the_requested_tier_dir() {
     let root = root_guard.path();
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     // Route the resolver at the fixture via the operator override.
     temp_env_var(MOCHI_DIR_ENV, root.to_str().unwrap(), || {
@@ -3247,7 +3247,7 @@ fn cached_mochi_tier_preserves_shared_encoder_blob_boundary() {
 
     let settings = Settings {
         data_dir: data.path().to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let selected = resolve_mochi_model_dir(&settings, &mochi_request(json!({}))).unwrap();
     assert_eq!(selected, tier);
@@ -3315,7 +3315,7 @@ fn resolve_mochi_model_dir_requires_the_shared_corequisite() {
     let root = root_guard.path();
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     temp_env_var(MOCHI_DIR_ENV, root.to_str().unwrap(), || {
         assert!(
@@ -5474,7 +5474,7 @@ fn mochi_precheck_dir_names_the_requested_tier_not_the_installed_fallback() {
     let root = root_guard.path();
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let dir = temp_env_var(MOCHI_DIR_ENV, root.to_str().unwrap(), || {
         // bf16 requested; only q4 is on disk.
@@ -5500,7 +5500,7 @@ fn mochi_available_is_text_to_video_only() {
     let root = root_guard.path();
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     temp_env_var(MOCHI_DIR_ENV, root.to_str().unwrap(), || {
         let t2v = request(json!({
@@ -5570,7 +5570,7 @@ fn mochi_routes_to_the_mochi_engine_and_never_degrades_to_a_fake_video() {
     let root = root_guard.path();
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let req = request(json!({
         "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p"
@@ -5599,7 +5599,7 @@ fn mochi_routes_to_the_mochi_engine_and_never_degrades_to_a_fake_video() {
     let empty = empty_guard.path();
     let bare = Settings {
         data_dir: empty.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     temp_env_var(MOCHI_DIR_ENV, "", || {
         assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
@@ -5786,7 +5786,7 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
         .expect("temp dir");
     let settings = Settings {
         data_dir: data_dir_guard.path().to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let req = request(json!({
         "projectId": "p", "model": "krea_realtime_14b", "mode": "text_to_video", "prompt": "p"
@@ -5826,7 +5826,7 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
     let empty = empty_guard.path();
     let bare = Settings {
         data_dir: empty.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     temp_env_vars(
         &[
@@ -7640,7 +7640,7 @@ fn ltx_bundle_manifest_rows_match_the_worker_pin() {
 #[cfg(target_os = "macos")]
 #[test]
 fn video_route_replace_person_dispatches_by_model() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
 
     // `replace_person` on the SCAIL-2 model → the SCAIL-2 replacement backend (sc-5452), carrying
     // the resolved engine id — NOT Wan-VACE.
@@ -7683,7 +7683,7 @@ fn video_route_replace_person_dispatches_by_model() {
 /// and rejects modes that the real provider does not implement.
 #[test]
 fn vace_fun_capability_refuses_before_output_planning() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     let unsupported = request(json!({
         "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "text_to_video",
     }));
@@ -7719,7 +7719,7 @@ fn vace_fun_capability_refuses_before_output_planning() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_video_route_gates_on_backend_flag_then_mode() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
 
     // Candle disabled (default) → supported models stub, but Eros remains a terminal refusal so a
     // direct/replayed legacy job can never manufacture procedural success.
@@ -7840,7 +7840,7 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_vace_fun_dispatch_is_dedicated_to_person_replace() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.backend_candle_enabled = true;
 
     let replacement = request(json!({
@@ -7902,7 +7902,7 @@ fn candle_vace_fun_attaches_fail_closed_sequential_cold_admission() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_video_route_bernini_every_mode() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.backend_candle_enabled = true;
     let engine = bernini_engine_id("bernini").expect("bernini engine id");
     for mode in [
@@ -9464,7 +9464,7 @@ fn candle_scail2_resolves_exact_model_manager_tier_fail_closed() {
         .join(SCAIL2_REVISION);
     let settings = Settings {
         data_dir: data.path().to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
 
     let write_complete_tier = |tier: Scail2CandleTier, marker: Value| {
@@ -9566,7 +9566,7 @@ fn candle_scail2_preserves_complete_legacy_layout_only() {
     }
     let settings = Settings {
         data_dir: data.path().to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     assert!(resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Bf16).is_err());
 
@@ -10712,7 +10712,7 @@ fn wan_vace_adapters_are_single_dense() {
     // the fixture dir the temp LoRAs live in.
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let specs = resolve_wan_vace_adapters(&settings, &req).expect("resolve vace adapters");
     assert_eq!(specs.len(), 2);
@@ -10753,7 +10753,7 @@ fn wan_vace_base_resolves_from_a_ti2v_5b_only_install() {
     )]);
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     assert_eq!(
         resolve_wan_vace_base_dir(&settings),
@@ -10835,7 +10835,7 @@ fn wan_adapters_gate_lightning_on_toggle() {
 
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
 
     // Toggle ON (default / absent) → Lightning high/low pair, then the user LoRA (3 specs).
@@ -10901,7 +10901,7 @@ fn lora_path_outside_app_managed_root_is_rejected() {
 
     let settings = Settings {
         data_dir: data_dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let req = request(json!({
         "projectId": "p",
@@ -10945,7 +10945,7 @@ fn scail2_adapters_are_single_dense() {
     // the fixture dir the temp LoRAs live in.
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let specs = resolve_scail2_adapters(&settings, &req).expect("resolve scail2 adapters");
     assert_eq!(specs.len(), 2);
@@ -10988,7 +10988,7 @@ fn resolve_lora_file_finds_nested_safetensors() {
 
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     // Point the resolver at the LoRA dir (not the file); it must recurse into `adapter/`.
     // No declared file → falls back to the recursive scan.
@@ -11014,7 +11014,7 @@ fn resolve_lora_file_prefers_declared_over_checkpoint() {
 
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let resolved = resolve_lora_file(&settings, dir.to_path_buf(), Some("my_style.safetensors"))
         .expect("declared adapter must resolve");
@@ -11035,7 +11035,7 @@ fn resolve_dense_adapters_honors_the_max_lora_cap() {
     write_lora_fixture(&plain, None);
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
 
     // Two LoRAs under a cap of 1 → rejected; the same two under a cap of 2 → accepted.
@@ -13115,7 +13115,7 @@ fn resolve_ltx_eros_gemma_prefers_local_sibling() {
     std::fs::create_dir_all(&eros).unwrap();
     let settings = Settings {
         data_dir: data.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
 
     // No sibling gemma and no bundle snapshot in this fresh data dir → None.
@@ -14112,7 +14112,7 @@ fn ltx_advanced_flags_map_to_video_gen_input() {
     assert!(advanced::bool(&req.advanced, "enhancePrompt"));
     assert!(!advanced::bool(&req.advanced, "useUncensoredEnhancer"));
     // LTX adapters: a plain user LoRA is uniform (no per-pass schedule, no moe tag).
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     let none = resolve_ltx_adapters(&settings, &req).unwrap();
     assert!(none.is_empty());
 }
@@ -14197,7 +14197,7 @@ fn ltx_eros_auto_injects_distill_lora_per_pass() {
     let distill = write_fake_hf_lora(dir, repo, file);
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
 
     // Default: the distill LoRA is injected alone, at per-pass 1.0/0.4.
@@ -14273,7 +14273,7 @@ fn ltx25_dev_attaches_stage_two_refinement_and_distilled_does_not() {
     let adapter = write_fake_hf_lora_at(dir, repo, super::ltx::LTX25_BUNDLE_REVISION, file);
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let manifest = json!({
         "mlx": { "autoDistillLora": { "stage1Strength": 0.0, "stage2Strength": 1.0 } },
@@ -14398,7 +14398,7 @@ fn ltx25_refinement_adapter_only_resolves_at_the_pinned_bundle_revision() {
     write_fake_hf_lora(dir, repo, file);
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     let dev = request(json!({
         "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
@@ -14452,7 +14452,7 @@ fn ltx_distill_lora_missing_errors_and_base_model_is_noop() {
     )]);
     let settings = Settings {
         data_dir: dir.to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
 
     // Declared distill LoRA, but nothing on disk → actionable error (not silent noise).
@@ -14574,7 +14574,7 @@ fn ltx_i2v_strength_is_accepted_and_keyed_as_its_own_admission_axis() {
 #[cfg(target_os = "macos")]
 #[test]
 fn keyframe_conditioning_requires_both_frame_assets() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     // No sourceAssetId.
     let no_first = request(json!({
         "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
@@ -14600,7 +14600,7 @@ fn keyframe_conditioning_requires_both_frame_assets() {
 #[cfg(native_lane)]
 #[test]
 fn wan_flf_rejected_on_non_ti2v_engine() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     let req = request(json!({
         "projectId": "p", "model": "wan_2_2_t2v_14b", "prompt": "a fox",
         "mode": "first_last_frame",
@@ -14617,7 +14617,7 @@ fn wan_flf_rejected_on_non_ti2v_engine() {
 #[cfg(native_lane)]
 #[test]
 fn wan5_conditioning_rejects_stale_media_before_asset_io() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     for payload in [
         json!({
             "projectId": "p", "model": "wan_2_2", "prompt": "a fox",
@@ -16235,7 +16235,7 @@ mod candle_video_label_tests {
         write_lora_fixture(&lora, None);
         let settings = Settings {
             data_dir: data_dir.to_path_buf(),
-            ..Settings::from_env()
+            ..crate::test_env::offline_settings()
         };
         let request = request(json!({
             "projectId": "p",
@@ -16352,7 +16352,7 @@ mod candle_video_label_tests {
         // through: text_to_video, no source asset, no LoRA).
         let settings = Settings {
             backend_candle_enabled: true,
-            ..Settings::from_env()
+            ..crate::test_env::offline_settings()
         };
         let payload = json!({
             "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p"
@@ -16843,7 +16843,7 @@ mod candle_video_label_tests {
 
     #[test]
     fn candle_video_conditioning_matches_each_native_request_shape() {
-        let settings = crate::Settings::from_env();
+        let settings = crate::test_env::offline_settings();
         let project_path = std::path::Path::new("");
         // Text-to-video requests never build conditioning.
         for engine_id in ["wan2_2_ti2v_5b", "wan2_2_t2v_14b", "ltx_2_3_distilled"] {
@@ -17303,7 +17303,7 @@ async fn the_tag_survives_a_re_encode_and_dies_on_a_deliberate_strip() {
 /// the install's. The preference defaults to ON when the file is absent, which is what an empty
 /// scratch dir gives.
 fn upscale_settings(config_dir: &Path) -> Settings {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.config_dir = config_dir.to_path_buf();
     settings
 }
@@ -18053,7 +18053,7 @@ fn minimax_h3_never_degrades_to_a_fake_video() {
         .expect("temp dir");
     let settings = Settings {
         data_dir: data_dir_guard.path().to_path_buf(),
-        ..Settings::from_env()
+        ..crate::test_env::offline_settings()
     };
     // sc-19721: HERMETIC, and newly load-bearing. Before the pin bump the refusal short-circuited on
     // "engine not registered" and never touched the filesystem, so no env var could reach it. Now

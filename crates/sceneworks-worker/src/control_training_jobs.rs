@@ -488,7 +488,7 @@ mod imp {
             std::fs::create_dir_all(&dataset_root).expect("dataset root");
             std::fs::write(dataset_root.join("image.png"), b"present").expect("dataset image");
 
-            let mut settings = Settings::from_env();
+            let mut settings = crate::test_env::offline_settings();
             settings.data_dir = data_dir.clone();
             // No server listens here. Reaching heartbeat (and therefore any later weight download)
             // would produce an HTTP error instead of the confinement error asserted below.

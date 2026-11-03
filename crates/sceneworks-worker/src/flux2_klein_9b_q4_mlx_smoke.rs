@@ -40,19 +40,7 @@ const MODEL_ID: &str = "flux2_klein_9b";
 /// The hub cache root this smoke reads from: whatever the environment already points at, else the
 /// standard `~/.cache/huggingface/hub` that `huggingface_hub` downloads into.
 fn hub_cache_root() -> Option<PathBuf> {
-    for key in ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"] {
-        if let Ok(value) = std::env::var(key) {
-            if !value.trim().is_empty() {
-                return Some(PathBuf::from(value));
-            }
-        }
-    }
-    if let Ok(value) = std::env::var("HF_HOME") {
-        if !value.trim().is_empty() {
-            return Some(PathBuf::from(value).join("hub"));
-        }
-    }
-    Some(PathBuf::from(std::env::var("HOME").ok()?).join(".cache/huggingface/hub"))
+    super::smoke_support::hub_cache_root()
 }
 
 /// The shipped catalog entry for `model_id`, read straight from the embedded builtin manifest — the

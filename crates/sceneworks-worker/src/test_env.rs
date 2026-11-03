@@ -17,92 +17,9 @@
 // Not every target/feature combination exercises every helper here.
 #![allow(dead_code)]
 
-use std::sync::{Mutex, MutexGuard};
-
-/// The single lock every env-touching test in this crate serializes on. Crate-level ON PURPOSE —
-/// see the module docs. Do not add a second one.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-/// Take the shared env lock, holding it until the returned guard drops.
-///
-/// Use this directly when a test needs to *read* an env var (or call code that does) and must not
-/// have it changed underneath — the environment is process-global, so only holding the lock across
-/// the whole read-then-use makes that pair atomic. When the test also sets a var, prefer
-/// [`EnvVars::set`], which takes this lock for you.
-///
-/// Poisoning is recovered from: a panic in another env test must not cascade into a spurious
-/// failure here, and there is no guarded data to be left inconsistent — we want the exclusion only.
-///
-/// NOT reentrant. A test holding this must not also call [`temp_env_var`] / [`temp_env_vars`] /
-/// [`EnvVars::set`], which would self-deadlock.
-pub(crate) fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
-}
-
-/// Env vars pinned for as long as this guard lives, restored on drop. Holds [`env_lock`], so no
-/// other env test can observe or clobber the pinned values.
-///
-/// Restoring on `Drop` (rather than around a closure) means a panicking assertion still puts the
-/// environment back: a leaked `HF_HUB_CACHE` would otherwise silently re-point every later test in
-/// the process at the wrong cache.
-#[must_use = "the vars are restored when this guard drops; `let _ = EnvVars::set(..)` drops it \
-              immediately and pins nothing — bind it to a named `_env`-style local"]
-pub(crate) struct EnvVars {
-    restore: Vec<(String, Option<String>)>,
-    // Dropped after the `Drop` body below has restored the values, so the vars are never visible to
-    // the next lock holder in their pinned state.
-    _guard: MutexGuard<'static, ()>,
-}
-
-impl EnvVars {
-    /// Pin `vars` (an empty value ⇒ the var is REMOVED for the duration) until the guard drops.
-    ///
-    /// NOT reentrant — see [`env_lock`].
-    pub(crate) fn set(vars: &[(&str, &str)]) -> Self {
-        let guard = env_lock();
-        let restore = vars
-            .iter()
-            .map(|(key, value)| {
-                let previous = std::env::var(key).ok();
-                if value.is_empty() {
-                    std::env::remove_var(key);
-                } else {
-                    std::env::set_var(key, value);
-                }
-                ((*key).to_owned(), previous)
-            })
-            .collect();
-        Self {
-            restore,
-            _guard: guard,
-        }
-    }
-}
-
-impl Drop for EnvVars {
-    fn drop(&mut self) {
-        for (key, previous) in &self.restore {
-            match previous {
-                Some(prior) => std::env::set_var(key, prior),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-}
-
-/// Set `key` to `value` (empty ⇒ removed) for the duration of `body`, then restore.
-///
-/// NOT reentrant — nesting these self-deadlocks. A test needing two vars must use
-/// [`temp_env_vars`], which sets them under ONE acquisition.
-pub(crate) fn temp_env_var<T>(key: &str, value: &str, body: impl FnOnce() -> T) -> T {
-    temp_env_vars(&[(key, value)], body)
-}
-
-/// [`temp_env_var`] for several vars set together, under ONE acquisition of the shared lock.
-pub(crate) fn temp_env_vars<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
-    let _vars = EnvVars::set(vars);
-    body()
-}
+pub(crate) use sceneworks_core::test_env::{
+    env_lock, isolate_hf_cache, temp_env_var, temp_env_vars, EnvVars,
+};
 
 /// An unroutable URL. Port 0 is never listened on, so a request fails immediately and locally
 /// instead of depending on a stub's fidelity — a test that reaches the network fails loudly.
@@ -135,9 +52,15 @@ pub(crate) const OFFLINE_URL: &str = "http://127.0.0.1:0";
 /// pin those via [`EnvVars::set`].
 pub(crate) fn offline_settings() -> crate::Settings {
     crate::Settings {
-        api_url: OFFLINE_URL.to_owned(),
-        huggingface_base_url: OFFLINE_URL.to_owned(),
-        ..crate::Settings::from_env()
+        max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
+        max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
+        backend_mlx_enabled: true,
+        backend_candle_enabled: cfg!(feature = "backend-candle"),
+        utility_workers: 4,
+        poll_seconds: 2,
+        heartbeat_seconds: 10,
+        shutdown_timeout_seconds: 10,
+        ..crate::Settings::for_test(std::path::PathBuf::from("data"))
     }
 }
 
@@ -220,7 +143,7 @@ mod tests {
         install_tracing_interest_floor();
 
         #[derive(Clone, Default)]
-        struct Capture(std::sync::Arc<Mutex<Vec<u8>>>);
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
         impl std::io::Write for Capture {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 self.0

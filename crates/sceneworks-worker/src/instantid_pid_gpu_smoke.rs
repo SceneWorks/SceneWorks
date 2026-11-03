@@ -40,6 +40,7 @@
 //! cargo test -p sceneworks-worker --features backend-candle --release instantid_pid_gpu_smoke -- --ignored --nocapture
 //! ```
 
+use super::smoke_support::{env_or_allow_empty as env_or, image_std, save_png};
 use std::path::{Path, PathBuf};
 
 use gen_core::runtime::CancelFlag;
@@ -55,34 +56,10 @@ use runtime_cuda::providers::instantid::{
 const LIKENESS_FLOOR: f64 = 0.35;
 
 fn env_path(key: &str) -> PathBuf {
-    PathBuf::from(
-        std::env::var(key)
-            .unwrap_or_else(|_| panic!("set ${key}"))
-            .trim(),
-    )
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .map(|v| v.trim().to_string())
-        .unwrap_or_else(|_| default.to_string())
+    super::smoke_support::env_path(key)
 }
 
 /// Mean per-pixel std-dev — the cheap non-degenerate floor (an all-black / NaN decode collapses to ~0).
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
-}
 
 /// ArcFace cosine similarity between two 512-d identity embeddings (both come off the same face stack,
 /// so this is the InstantID identity-preservation metric: 1.0 = same face, ~0 = unrelated).
@@ -106,13 +83,6 @@ fn load_png(path: &Path) -> Image {
         height,
         pixels: img.into_raw(),
     }
-}
-
-fn save_png(img: &Image, path: &Path) {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone())
-        .expect("rgb buffer")
-        .save(path)
-        .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
 }
 
 fn base_request(w: u32, h: u32, use_pid: bool) -> InstantIdRequest {

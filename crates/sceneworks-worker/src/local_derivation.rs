@@ -388,7 +388,7 @@ mod tests {
     }
 
     fn settings(api_url: String, data_dir: &Path) -> Settings {
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.api_url = api_url;
         settings.worker_id = "w".into();
         settings.data_dir = data_dir.to_path_buf();

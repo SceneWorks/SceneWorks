@@ -24,46 +24,16 @@
 //! cargo test -p sceneworks-worker --features backend-candle --release zimage_pid_gpu_smoke -- --ignored --nocapture
 //! ```
 
+use super::smoke_support::{env_or_allow_empty as env_or, image_std, save_png};
 use std::path::{Path, PathBuf};
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, WeightsSource};
 
 fn env_path(key: &str) -> PathBuf {
-    PathBuf::from(
-        std::env::var(key)
-            .unwrap_or_else(|_| panic!("set ${key}"))
-            .trim(),
-    )
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .map(|v| v.trim().to_string())
-        .unwrap_or_else(|_| default.to_string())
+    super::smoke_support::env_path(key)
 }
 
 /// Mean per-pixel std-dev — the cheap non-degenerate floor (an all-black / NaN decode collapses to ~0).
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
-}
-
-fn save_png(img: &Image, path: &Path) {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone())
-        .expect("rgb buffer")
-        .save(path)
-        .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
-}
 
 fn render(spec: &LoadSpec, w: u32, h: u32, steps: u32, use_pid: bool) -> Image {
     let generator = crate::inference_runtime::load("z_image_turbo", spec)

@@ -34,32 +34,19 @@ use super::smoke_support::{env_or, image_std, DEGENERATE_STD_FLOOR_DEFAULT};
 /// Auto-discover the cached `SceneWorks/krea-2-turbo-mlx` q8 tier subdir (the packed transformer root the
 /// worker's `krea_model_subdir` resolves by default). `None` if the turnkey q8 tier hasn't been pulled.
 fn cached_q8_dir() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let snapshots = PathBuf::from(home)
-        .join(".cache/huggingface/hub/models--SceneWorks--krea-2-turbo-mlx/snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .find_map(|e| {
-            let q8 = e.path().join("q8");
-            q8.join("transformer/diffusion_pytorch_model.safetensors")
-                .is_file()
-                .then_some(q8)
-        })
+    super::smoke_support::cached_tier_dir(
+        "SceneWorks/krea-2-turbo-mlx",
+        "q8",
+        "transformer/diffusion_pytorch_model.safetensors",
+    )
 }
 
 /// Auto-discover the cached `SceneWorks/krea2-pose-controlnet-beta` overlay checkpoint.
 fn cached_overlay() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let snapshots = PathBuf::from(home)
-        .join(".cache/huggingface/hub/models--SceneWorks--krea2-pose-controlnet-beta/snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .find_map(|e| {
-            let f = e.path().join("control_step5000.safetensors");
-            f.is_file().then_some(f)
-        })
+    super::smoke_support::cached_snapshot("SceneWorks/krea2-pose-controlnet-beta", |root| {
+        root.join("control_step5000.safetensors").is_file()
+    })
+    .map(|root| root.join("control_step5000.safetensors"))
 }
 
 /// Load an RGB skeleton PNG into a gen_core `Image`.

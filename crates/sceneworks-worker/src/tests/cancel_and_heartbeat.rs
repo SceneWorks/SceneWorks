@@ -411,13 +411,7 @@ pub(crate) async fn spawn_analysis_cancel_stub() -> (String, std::sync::Arc<std:
         Json(worker_snapshot_json(&worker_id)).into_response()
     }
     let posts: Posts = Arc::new(Mutex::new(Vec::new()));
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-        .route(
-            "/api/v1/workers/:worker_id/heartbeat",
-            post(heartbeat_route),
-        )
+    let app = crate::test_api_stub::job_progress_heartbeat_routes(job_route, progress_route, heartbeat_route)
         .with_state(posts.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -548,13 +542,7 @@ async fn batched_analysis_posts_records_in_bounded_chunks() {
         Json(json!({ "stored": count })).into_response()
     }
     let bodies: Bodies = Arc::new(Mutex::new(Vec::new()));
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-        .route(
-            "/api/v1/workers/:worker_id/heartbeat",
-            post(heartbeat_route),
-        )
+    let app = crate::test_api_stub::job_progress_heartbeat_routes(job_route, progress_route, heartbeat_route)
         .route(
             "/api/v1/projects/p1/training/datasets/d1/subject-masks",
             post(sidecar_route),
@@ -728,13 +716,7 @@ async fn spawn_failing_heartbeat_stub() -> String {
         // error that heartbeat() propagates (it swallows only transport errors).
         (AxumStatusCode::CONFLICT, "stub heartbeat conflict").into_response()
     }
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-        .route(
-            "/api/v1/workers/:worker_id/heartbeat",
-            post(heartbeat_route),
-        )
+    let app = crate::test_api_stub::job_progress_heartbeat_routes(job_route, progress_route, heartbeat_route)
         .with_state(());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
