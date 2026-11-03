@@ -205,6 +205,117 @@ pub fn file_content_hash(path: &Path) -> std::io::Result<String> {
     crate::hashing::sha256_file(path)
 }
 
+/// Naming policy for an image copied without transcoding. Storage surfaces intentionally differ.
+#[derive(Debug, Clone, Copy)]
+pub enum ImageCopyNaming {
+    /// Dataset media retains its source extension; unknown/no-extension sources use the fallback.
+    SourceExtension(&'static str),
+    /// Keypoint sources use detected content, then a supported extension, then PNG.
+    Canonical,
+}
+
+/// The stored image and its content/naming metadata.
+#[derive(Debug)]
+pub struct IngestedImage {
+    pub path: std::path::PathBuf,
+    pub extension: String,
+    pub mime: &'static str,
+    pub source_kind: Option<ImageKind>,
+}
+
+#[derive(Debug)]
+pub enum IngestImageError {
+    Io(std::io::Error),
+    Transcode {
+        kind: ImageKind,
+        error: TranscodeError,
+    },
+}
+
+impl fmt::Display for IngestImageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(f),
+            Self::Transcode { kind, error } => write!(
+                f,
+                "Could not convert {} image to a supported format: {error}",
+                kind.label()
+            ),
+        }
+    }
+}
+impl std::error::Error for IngestImageError {}
+impl From<std::io::Error> for IngestImageError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Sniff once, transcode storage-unsupported formats, or copy the original bytes. Dataset media
+/// keeps its source extension (falling back to `.bin`), including unknown formats.
+pub fn ingest_image(source: &Path, dest_stem: &Path) -> Result<IngestedImage, IngestImageError> {
+    ingest_image_with_naming(source, dest_stem, ImageCopyNaming::SourceExtension("bin"))
+}
+
+/// The shared ingestion operation with a surface's explicit copy-naming policy. Transcoding uses
+/// the bounded platform converter, including its first-frame and HDR preview behavior.
+pub fn ingest_image_with_naming(
+    source: &Path,
+    dest_stem: &Path,
+    naming: ImageCopyNaming,
+) -> Result<IngestedImage, IngestImageError> {
+    let source_kind = sniff_image_kind_at(source);
+    let transcode_kind = source_kind.filter(|kind| !kind.is_natively_supported());
+    let source_extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let (extension, mime) = if transcode_kind.is_some() {
+        ("png".to_owned(), "image/png")
+    } else {
+        match naming {
+            ImageCopyNaming::SourceExtension(fallback) => (
+                source_extension.unwrap_or_else(|| fallback.to_owned()),
+                source_kind
+                    .map(|kind| kind.canonical().1)
+                    .unwrap_or("application/octet-stream"),
+            ),
+            ImageCopyNaming::Canonical => {
+                let canonical = source_kind
+                    .map(ImageKind::canonical)
+                    .or(match source_extension.as_deref() {
+                        Some("jpg" | "jpeg") => Some(("jpg", "image/jpeg")),
+                        Some("webp") => Some(("webp", "image/webp")),
+                        Some("png") => Some(("png", "image/png")),
+                        _ => None,
+                    })
+                    .unwrap_or(("png", "image/png"));
+                (canonical.0.to_owned(), canonical.1)
+            }
+        }
+    };
+    // Append rather than replace: callers supply an exact filename stem.
+    let mut filename = dest_stem.as_os_str().to_os_string();
+    filename.push(format!(".{extension}"));
+    let path = std::path::PathBuf::from(filename);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(kind) = transcode_kind {
+        transcode_to_png(source, &path)
+            .map_err(|error| IngestImageError::Transcode { kind, error })?;
+    } else {
+        std::fs::copy(source, &path)?;
+    }
+    Ok(IngestedImage {
+        path,
+        extension,
+        mime,
+        source_kind,
+    })
+}
+
 /// Failure converting an image to PNG.
 #[derive(Debug)]
 pub struct TranscodeError(pub String);
@@ -783,6 +894,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn image_ingestion_preserves_copy_policies_bytes_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.JPEG");
+        let bytes = b"\xff\xd8\xffcopy EXIF ICC unchanged";
+        std::fs::write(&source, bytes).unwrap();
+        let copied = ingest_image(&source, &dir.path().join("nested/target")).unwrap();
+        assert_eq!(copied.extension, "jpeg");
+        assert_eq!(std::fs::read(&copied.path).unwrap(), bytes);
+        let canonical = ingest_image_with_naming(
+            &source,
+            &dir.path().join("canonical"),
+            ImageCopyNaming::Canonical,
+        )
+        .unwrap();
+        assert_eq!(canonical.extension, "jpg");
+        assert_eq!(canonical.mime, "image/jpeg");
+        let unknown = dir.path().join("unknown");
+        std::fs::write(&unknown, b"unknown original").unwrap();
+        assert_eq!(
+            ingest_image(&unknown, &dir.path().join("dataset"))
+                .unwrap()
+                .extension,
+            "bin"
+        );
+        assert_eq!(
+            ingest_image_with_naming(
+                &unknown,
+                &dir.path().join("derived"),
+                ImageCopyNaming::SourceExtension("png")
+            )
+            .unwrap()
+            .extension,
+            "png"
+        );
+        assert_eq!(
+            ingest_image_with_naming(
+                &unknown,
+                &dir.path().join("keypoint"),
+                ImageCopyNaming::Canonical
+            )
+            .unwrap()
+            .mime,
+            "image/png"
+        );
+        assert!(matches!(
+            ingest_image(&dir.path().join("missing"), &dir.path().join("out")),
+            Err(IngestImageError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn image_ingestion_normalizes_non_storage_native_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        for (format, extension) in [
+            (image::ImageFormat::Bmp, "bmp"),
+            (image::ImageFormat::Gif, "gif"),
+            (image::ImageFormat::Tiff, "tiff"),
+        ] {
+            let src = dir.path().join(format!("source.{extension}"));
+            image::RgbImage::from_pixel(3, 2, image::Rgb([10, 20, 30]))
+                .save_with_format(&src, format)
+                .unwrap();
+            let result = ingest_image(&src, &dir.path().join(format!("out-{extension}"))).unwrap();
+            assert_eq!(result.extension, "png");
+            assert_eq!(result.mime, "image/png");
+            assert_eq!(image::open(result.path).unwrap().width(), 3);
+        }
+    }
+
+    #[test]
     fn rejects_audio_playlists_and_text_even_with_audio_names() {
         let dir = tempfile::tempdir().unwrap();
         for (index, payload) in [
@@ -1233,6 +1414,15 @@ mod tests {
             run_ffmpeg_to_png(&src, &dst).unwrap_or_else(|error| panic!("{extension}: {error}"));
             let image = image::open(&dst).unwrap();
             assert_eq!((image.width(), image.height()), (16, 12));
+            let backstop = crate::image_decode::decode_image_any(&src).unwrap();
+            assert_eq!((backstop.width(), backstop.height()), (16, 12));
+            let source_bytes = std::fs::read(&src).unwrap();
+            assert_eq!(
+                crate::image_decode::decode_image_bytes_any(&source_bytes)
+                    .unwrap()
+                    .width(),
+                16
+            );
         }
     }
 

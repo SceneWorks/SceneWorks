@@ -39,6 +39,7 @@ pub mod hf_repo_renames;
 pub mod hf_revision_supersessions;
 pub mod ideogram_caption;
 pub mod ids;
+pub mod image_decode;
 pub mod image_request;
 pub mod image_restoration;
 pub mod image_sampling_controls;

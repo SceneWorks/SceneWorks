@@ -418,6 +418,7 @@ use media_jobs::*;
 // `sceneworks_core::media_convert` routine (sips on macOS, ffmpeg elsewhere).
 mod image_decode;
 mod image_jobs;
+mod parquet_row;
 use image_jobs::*;
 
 /// Model-scoped enhancement TOKEN ceiling shared by API enqueue and worker/native parsing.

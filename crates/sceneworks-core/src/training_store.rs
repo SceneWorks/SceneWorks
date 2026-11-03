@@ -1033,34 +1033,13 @@ impl TrainingDatasetStore {
             // it lands in the dataset (sc-6143). Worker-derived outputs are PNG today, but routing this
             // copy through the same sniff-and-transcode chokepoint as every other ingestion path means
             // a producer that ever emits another format cannot slip an undecodable image into `images/`.
-            let source_kind = crate::media_convert::sniff_image_kind_at(&source);
-            let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
-            let extension = if needs_transcode {
-                "png".to_owned()
-            } else {
-                source
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .filter(|value| !value.is_empty())
-                    .map(|value| value.to_ascii_lowercase())
-                    .unwrap_or_else(|| "png".to_owned())
-            };
-            let relative_path = format!("images/{}.{extension}", repoint.item_id);
-            let target = root.join(&relative_path);
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            if needs_transcode {
-                let kind = source_kind.expect("needs_transcode implies a sniffed kind");
-                crate::media_convert::transcode_to_png(&source, &target).map_err(|error| {
-                    ProjectStoreError::BadRequest(format!(
-                        "Could not convert {} image to a supported format: {error}",
-                        kind.label()
-                    ))
-                })?;
-            } else {
-                fs::copy(&source, &target)?;
-            }
+            let ingested = crate::media_convert::ingest_image_with_naming(
+                &source,
+                &root.join("images").join(&repoint.item_id),
+                crate::media_convert::ImageCopyNaming::SourceExtension("png"),
+            )?;
+            let relative_path = format!("images/{}.{}", repoint.item_id, ingested.extension);
+            let target = ingested.path;
             // Drop the item's previous file if its extension (hence path) changed, to avoid orphans.
             let previous = root.join(&dataset.items[index].path);
             if previous != target && previous.exists() {
@@ -2243,36 +2222,12 @@ fn store_item_media(
     subdir: &str,
     stem: &str,
 ) -> ProjectStoreResult<(String, PathBuf)> {
-    let source_kind = crate::media_convert::sniff_image_kind_at(&source.path);
-    let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
-    let extension = if needs_transcode {
-        ".png".to_owned()
-    } else {
-        source
-            .path
-            .extension()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-            .map(|value| format!(".{}", value.to_ascii_lowercase()))
-            .unwrap_or_else(|| ".bin".to_owned())
-    };
-    let relative_path = format!("images/{subdir}{stem}{extension}");
-    let target_path = media_dir.join(format!("{subdir}{stem}{extension}"));
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if needs_transcode {
-        let kind = source_kind.expect("needs_transcode implies a sniffed kind");
-        crate::media_convert::transcode_to_png(&source.path, &target_path).map_err(|error| {
-            ProjectStoreError::BadRequest(format!(
-                "Could not convert {} image to a supported format: {error}",
-                kind.label()
-            ))
-        })?;
-    } else {
-        fs::copy(&source.path, &target_path)?;
-    }
-    Ok((relative_path, target_path))
+    let ingested = crate::media_convert::ingest_image(
+        &source.path,
+        &media_dir.join(format!("{subdir}{stem}")),
+    )?;
+    let relative_path = format!("images/{subdir}{stem}.{}", ingested.extension);
+    Ok((relative_path, ingested.path))
 }
 
 fn resolve_asset_source(
