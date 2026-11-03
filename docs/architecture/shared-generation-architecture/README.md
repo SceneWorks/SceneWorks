@@ -5,7 +5,7 @@ This is a design-only program. Its aim is to slim SceneWorks and its inference e
 | Document | Purpose |
 |---|---|
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Problem, goals, principles (AP1–AP13), numbered requirements, program acceptance tests, metrics, and **decisions required** (§10, DEC-1…19). |
-| [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | Target architecture, engine and SceneWorks designs, hook map, worked examples, migration and coordination (including the SW-F327 overlap ledger), validation tiers, roadmap (ENG-1…15, APP-1…7), and risks. |
+| [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | Target architecture, engine and SceneWorks designs, hook map, four boundary/state/memory design traces (§6.5–6.8), migration and coordination, validation tiers, roadmap (ENG-1…15 with ENG-4a/4b, APP-1…7), and risks. |
 | [REVIEW_LOG.md](REVIEW_LOG.md) | The disposition of every review finding, round by round. |
 | [evidence/](evidence/) | Eight read-only research reports and the round-0 internal reviews. Every factual claim is cited to these or to code, at inference `origin/main` `a43724b82` and SceneWorks `main` `a1d95e2c4`. |
 
@@ -21,10 +21,12 @@ This is a design-only program. Its aim is to slim SceneWorks and its inference e
 | [F](evidence/F-worker.md) | SceneWorks worker: lifecycle, engine boundary, lanes, admission paths, cache, cfg split |
 | [G](evidence/G-app-layers.md) | SceneWorks manifest, hand tables, request contracts, validation, web gating, persistence, tooling, LOC census |
 | [H](evidence/H-constraints.md) | Process rules, prior attempts, code-review themes, in-flight work, hazards, hardware |
-| [reviews/](evidence/reviews/) | Round-0 adversarial reviews (engine; SceneWorks and process) |
+| [reviews/](evidence/reviews/) | Round-0 adversarial reviews and the source-backed round-2 architecture review; subsequent re-review is recorded in the review log. |
 
 ## Status
 
-**Draft 0.2**, ready for review round 1. Round 0 consisted of two internal adversarial reviews: 69 findings, all 12 blockers accepted.
+**Draft 0.3**, revised under Michael's design-only instruction to address all nine round-2 findings. Round-0 and round-2 source reports remain historical evidence; [REVIEW_LOG.md](REVIEW_LOG.md) records the current dispositions. Requirements and plan now distinguish pass/stage/phase coordinates, typed boundary noise laws, solver/RNG state, preparation dependencies, concurrent memory and first-consumer admission. ENG-4 is split into primitive extraction/projection adoption (4a) and runtime scales/per-phase adapters (4b).
+
+No product/process decision in REQUIREMENTS §10 is implicitly approved by these edits. The low-res recipe details are a concrete proposal under DEC-10; the design traces are walkthroughs, not executed or measured proof. Re-review follows the revision on the same design branch.
 
 No CodeGraph features or items will be created until the design is approved. After approval, each roadmap feature is planned individually with `codegraph-plan`.

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.2.** It incorporates two internal adversarial reviews (69 findings; see [REVIEW_LOG.md](REVIEW_LOG.md)). It is ready for review round 1 with Michael. Nothing is approved. No tracker items exist, and none will be created until this document and the implementation plan are approved. |
+| **Status** | **Draft 0.3.** Revised to address all nine round-2 findings, in addition to the 69 round-0 findings (see [REVIEW_LOG.md](REVIEW_LOG.md)). These are proposed design resolutions, not implementation evidence or approval of the open decisions in §10. Design-only: no program tracker items or implementation will be created until the design is approved. |
 | **Date** | 2026-11-03 |
 | **Repositories** | SceneWorks (`main` @ `a1d95e2c4`) and inference (`origin/main` @ `a43724b82`). All citations refer to those revisions. |
 | **Companion** | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): target design, migration strategy and phased roadmap. |
@@ -142,7 +142,7 @@ Format: **ID — statement.** *Rationale and evidence.* **Accept:** observable a
 
 ### 6.1 Engine pipeline (PIPE)
 
-**PIPE-1 — Every generation route executes through one shared pipeline runner with a fixed stage model.** The stages run in this order:
+**PIPE-1 — Every generation route executes through one shared pipeline runner with a fixed stage vocabulary.** Plan compiles the complete run once; each pass then invokes the stages it needs in this order, with explicit dependencies on earlier pass outputs:
 - Plan
 - Prompt-prep
 - Encode
@@ -154,19 +154,24 @@ Format: **ID — statement.** *Rationale and evidence.* **Accept:** observable a
 - Decode
 - Output
 
-*C1; the stage model is derived from 14 family walks [B §2].* **Accept:** for every row of the route inventory (PIPE-18), a weights-free trace test shows the runner invoking the stages in order. No route has a hand-written `generate` that bypasses the runner.
+A **pass** has its own resolved schedules, prompt/conditioning bindings, init and decode policy. A **phase** is a slice within that pass. Stage results may be reused only when their declared dependencies match. Intermediate decode/re-encode and later prompt preparation remain runner-owned stage invocations, not hidden work in a transition or driver. The plan lists their residency and event visibility. This is a finite generation-stage vocabulary, not a general workflow language.
 
-**PIPE-2 — The request is compiled into a typed `RenderPlan` before any weights move.** The plan holds every decision a Feature may rewrite: per-phase, per-stream geometry; phases; schedule; guidance; conditioning requirements; decode; memory inputs; seeds; and output. **Accept:** for every route, a plan can be built, inspected and serialized without loading weights. Admission consumes the plan (ADM-3).
+Encode includes declared dependencies among encoder components, such as Qwen edit's vision features feeding its text encoder. Reference denotes subsequent latent/aligned conditioning; it must not force vision inputs needed by Encode to be produced afterward. Those component dependencies and lifetimes are explicit in the same plan.
+
+*C1; the stage model is derived from 14 family walks [B §2].* **Accept:** for every row of the route inventory (PIPE-18), a weights-free trace test shows the runner invoking the stages in dependency order. The Hires.fix trace preserves first-pass unenhanced prompts, final-pass enhancement/encoding, reference replacement and event ordering. No route has a hand-written `generate` that bypasses the runner.
+
+**PIPE-2 — The request is compiled into a typed `RenderPlan` before any weights move.** The plan holds every decision a Feature may rewrite: passes and their stage dependencies; per-phase, per-stream geometry; schedules and coupling; guidance; conditioning requirements; transitions and boundary estimates; decode; memory inputs; seeds; and output. After all rewrites, the complete plan is validated for applicability, legal grids and step domains, ordering cycles, ownership, sampling conventions, driver support, stage dependencies and history compatibility. A changed admission selection revalidates and re-prices the resolved plan before execution. **Accept:** for every route, a plan can be built, inspected and serialized without loading weights. Invalid combinations refuse before loading. Admission consumes that exact resolved plan (ADM-3).
 
 **PIPE-3 — Phases are first-class.** A phase is a span of the trajectory with optional overrides: per-stream geometry, model slot, adapter scales, guidance plan, solver and **solver-history policy** (`Carry` or `Reset`).
 - **Model-slot selection** may be a σ-keyed rule evaluated per model evaluation. Wan curated MoE selects the expert per evaluation by σ, including inside Heun and DPM++-SDE sub-evaluations (`mlx-gen-wan/src/pipeline/moe.rs:139-145,187-194`).
 - **Solver history is never carried across a geometry change or a re-noise.** It may be carried across a continue-with-same-geometry boundary. Wan native MoE carries UniPC history across the expert switch (`moe.rs:33-40`); Krea resets it per slice.
+- **Execution state is request-owned and outlives phase calls.** Carry requires the same solver implementation/variant, sampling convention and compatible schedule continuation; any explicitly supported conversion must declare and test its state mapping. Previous timestep intervals, driver caches and absolute stochastic draw coordinates have explicit lifetimes. Resetting solver history does not implicitly reset RNG position or an autoregressive cache. A pass boundary uses a declared legacy or new-stream RNG policy, never accidental local-index restart.
 - **The six existing mid-trajectory mechanisms (C6) become phase data** and their family-local implementations are deleted, each class (a) unless listed otherwise.
 
-**Accept:** a Tier 0 runner trace equals the legacy `denoise_moe` / `denoise_moe_curated` traces over a mocked backend. All six mechanisms are re-expressed and their local implementations deleted.
+**Accept:** a Tier 0 runner trace equals the legacy `denoise_moe` / `denoise_moe_curated` traces over a mocked backend. An inert split preserves the unsplit solver and stochastic draw trace; incompatible Carry refuses; geometry/re-noise resets history independently of RNG position. All six mechanisms are re-expressed and their local implementations deleted.
 
 **PIPE-4 — Schedules and transitions are explicit and typed.**
-- **Schedule span kinds** (⟂DEC-3):
+- **Per-pass schedule source kinds** (⟂DEC-3); all resolve to schedules sliced by pass-local executed outer-step ranges:
   - **global-sliced**: one schedule, contiguous slices (Krea, low-res start);
   - **fresh-per-pass**: ComfyUI `steps/denoise` semantics, from sc-20414;
   - **explicit table**: a baked per-phase σ table (LTX stage 1 runs to σ=0, then a baked 3-step stage-2 table, `mlx-gen-ltx/src/pipeline.rs:51-56,591`).
@@ -178,21 +183,23 @@ Format: **ID — statement.** *Rationale and evidence.* **Accept:** observable a
   - compositions of the above;
   - a **route-supplied transition** where a family's existing transition must stay bit-exact. LTX's dtype-preserving re-noise with pre-drawn stage noise is one example (`pipeline.rs:157-162`).
 - **Stream targeting:** every transition names the streams it applies to (LTX upsamples video but only re-noises audio, `pipeline.rs:1579-1588`).
+- **Boundary state is typed:** noisy `x_sigma`, a clean estimate with its evaluation provenance, or a route-specific state with a declared conversion. Re-noise-from-clean never accepts a noisy latent. The destination sampling convention supplies the noise scaling; flow and VE/EDM laws are distinct. The plan declares how any required estimate is obtained, including a read-only endpoint evaluation, its slot/adapter/guidance configuration, dtype, memory and evaluation cost. A cached intermediate solver estimate is not silently treated as an endpoint estimate.
 
-**Accept:** a weights-free conformance suite covers every span kind and transition kind, stream targeting, deterministic seeds and progress continuity.
+**Accept:** a weights-free conformance suite covers every schedule source and transition kind, stream targeting, flow versus VE/EDM noise laws, estimate provenance, deterministic seeds and progress continuity. A transition cannot double-noise by interpreting `x_sigma` as x0. Numerical and native-transition variants remain explicit under AP13.
 
 **PIPE-5 — Latents are stream bundles, and geometry-dependent state is derived per phase.**
 - **Streams:** a latent is a bundle keyed by stream (video, audio, joint rows). Each stream has its own `LatentSpace`, its own geometry (grid, frames, audio tokens or duration), its own schedule and its own σ.
   - H3 steps video and audio on two schedules (`mlx-gen-minimax-h3/src/denoise/mod.rs:1-13`).
   - LTX uses per-token time; the time input may be a per-token builder.
-- **Derived per phase and per stream:** RoPE and position ids, packed layouts, masks, cross-KV, AdaLN tables, grid-aligned conditioning, `mu`, and preview projection.
-- **The step-context cache** evicts on phase exit unless a later phase reuses the key.
+- **Derived per phase and per stream:** RoPE and position ids, packed layouts, masks, cross-KV, AdaLN tables, grid-aligned conditioning and preview projection. Schedule `mu`/shift is resolved per pass from its declared geometry policy, not recomputed implicitly when a phase changes geometry.
+- **Preparation dependencies are declared.** They include effective model/weight identity, conditioning identity, relevant adapter stack/scales and branch structure where those affect the result. Preparation receives request-scoped arguments, as forward does. Geometry-only caches can retain narrower keys. A prepared cache is request-scoped unless an immutable cross-request cache includes all dependencies.
+- **The step-context cache** evicts on phase exit unless a later phase reuses the complete dependency key; retained allocations remain priced.
 
-**Accept:** a geometry-changing phase on any supporting route produces the requested final size. The trace shows each step context built once per (geometry, model slot, conditioning) and evicted per the rule.
+**Accept:** a geometry-changing phase on any supporting route produces the requested final size. The trace shows correct cache reuse and invalidation for Krea base → adapter → base preparation, CFG-off → CFG-on, and interleaved requests; no stale fused conditioning is reused. Keys are built once per complete dependency set and evicted per the rule.
 
 **PIPE-6 — One sampling driver, identical in shape on both backends.**
 - **The driver owns:** solver lookup, per-evaluation cancellation, progress, preview counting, latent observation and span iteration.
-- **`StepInfo` carries:** phase, step, outer step, evaluation index and per-stream σ.
+- **`StepInfo` carries:** pass, phase, step, outer step, evaluation index and per-stream σ.
 - **Shared tensor-free code replaces** the duplicated pieces: schedule resolution, img2img start step, `mu` and shift, and the ≥6 candle `init_time_step` copies [A §10, P8-P11].
 - **User-visible progress stays in outer steps.** Per-evaluation accounting stays internal (⟂DEC-19).
 
@@ -224,7 +231,7 @@ Format: **ID — statement.** *Rationale and evidence.* **Accept:** observable a
 
 **PIPE-11 — Seeds follow a route-declared `SeedScheme`.**
 - **Today's derivations become named legacy schemes, preserved bit-exact.** These include `base.wrapping_add(i)` per image, LTX `seed ^ 0x5DEE_CE66`, candle `+1..+3`, and parity RNGs.
-- **New streams use one splitmix derivation with per-stream salts.** New streams are feature re-noise and new phases; the precedent is sc-20414's `DENOISE_PASS_RENOISE_SALT`.
+- **New noise streams use one splitmix derivation with per-stream salts.** Feature re-noise and recipe-introduced draws get named domains; adding an inert phase boundary does not create a new noise stream or restart existing draws. The precedent is sc-20414's `DENOISE_PASS_RENOISE_SALT`.
 - **The image-index → seed relation is exported per route.** It is the relation SceneWorks persists for regenerate and replay (`worker/src/image_jobs/stream.rs:441`).
 
 **Accept:** replay is bit-identical; the persisted per-image seeds are unchanged; no legacy scheme changes without a class (c) decision.
@@ -247,12 +254,12 @@ Format: **ID — statement.** *Rationale and evidence.* **Accept:** observable a
 
 **PIPE-15 — The engine has a typed error taxonomy and failure posture.**
 - **Errors are classed** as request-local, provider-poisoned or process-poisoned.
-- **Cleanup hooks run only for request-local errors.** A Metal error that poisons the process skips GPU work, consistent with the standing notes on `SubmissionsIgnored` and the GPU watchdog.
+- **GPU cleanup hooks run only for request-local errors.** A Metal error that poisons the process skips GPU work, consistent with the standing notes on `SubmissionsIgnored` and the GPU watchdog. Host-side accounting/claim release is unconditional and never retries poisoned GPU operations or masks the original error.
 - **Cancellation is typed** at every evaluation and phase boundary, and during loads and model-slot swaps (WGT-5).
 
 **Accept:** a Tier 0 fault-injection suite covers each class at each stage.
 
-**PIPE-16 — Streaming and incremental outputs are supported** for routes that produce them (Krea-realtime chunks, incremental video). **Accept:** Krea-realtime runs under the runner with chunked output delivered through the event sink.
+**PIPE-16 — Streaming and incremental outputs are supported** through runner-owned repeated chunk stage invocations and the event sink, with bounded buffering, cancellation, causal codec state and residency declared. At the cited baseline Krea-realtime generates a whole clip and then decodes it (`mlx-gen-krea-realtime/src/t2v.rs:12-16`); autoregressive latent chunks are not streamed decoded output. **Accept:** migrate that batch route unchanged and deliver chunked output through the runner in ENG-6. Reconcile the existing streaming epic when ENG-6 is planned: reuse any delivered implementation, or include its outstanding chunk-output/re-anchor requirements in ENG-6 with explicit ownership and dependencies. Validate chunk ordering, backpressure, cancellation and bounded retention. Do not report new chunk streaming as an existing capability preserved by a refactor, and do not silently remove it from the program's scope.
 
 **PIPE-17 — Telemetry flows through `gen-core-telemetry`** at stage, phase and lifecycle hooks. Existing telemetry fields stay stable (OPT-8). **Accept:** existing telemetry consumers see unchanged field names.
 
@@ -272,13 +279,13 @@ Format: **ID — statement.** *Rationale and evidence.* **Accept:** observable a
 
 and optional per-backend **`FeatureHooks`**, for model-internal hooks such as caches or attention perturbation.
 
-**Accept:** these are implemented as Features with no family-file edits: low-res start (FEAT-1), per-phase adapters and guidance, and Hires.fix (via the pixel round-trip transition, with VAE residency priced across phases).
+**Accept:** these are implemented as Features with no family-file edits: low-res start (FEAT-1), per-phase adapters and guidance, and Hires.fix (via pass-local stage bindings and the pixel round-trip transition, with all intermediate residency priced).
 
 **HOOK-3 — Features compose deterministically.**
-- **Phase-producing Features contribute boundaries.** The plan's phase list is the merged product of those boundaries. Each override axis has exactly one owning Feature per span. Conflicts are declared and refused at plan time with a typed reason.
+- **Pass producers establish stable schedule domains before targeted phase contributions.** Boundaries carry a pass identity and executed outer-step coordinate; stream-coupling rules supply the corresponding per-stream sigma. Ownership includes schedule policy, transition composition and history as well as geometry/model/adapters/guidance/solver. Within a pass, each override axis has one owner per stream/span; competing boundary operations need an explicit typed composition or refuse. Native route defaults expose only their declared override surfaces.
 - **Ordering at a shared hook point is declared**, never left to registration order.
 
-**Accept:** a conformance test covers pairwise composition of all registered Features on a synthetic route.
+**Accept:** a conformance test covers pairwise composition of all registered Features on a synthetic route, plus whole-active-set cycle/ownership validation. Worked plans cover low-res + Hires, Krea phases and a coincident Wan expert/geometry boundary. Every resulting pass is revalidated under PIPE-2; a registration order change cannot change the resolved plan.
 
 **HOOK-4 — Applicability is computed and exported.** For each route and backend, the engine computes which Features apply, why the others do not, and the parameter limits. That export is the UI-availability source for SceneWorks (REG-3, OPT-2). The worker's linked engine is authoritative at run time (REG-3). **Accept:** removing a Feature's structural precondition in a test flips availability in the export and the UI with no table edits.
 
@@ -330,11 +337,12 @@ Kit replacements that change operation order declare class (b) or (c). **Accept:
 ### 6.4 Backend layer (BACK)
 
 **BACK-1 — There is one `Linear` spine per backend.**
-- **Bases:** dense, MLX affine-packed tiers, GGML, GGUF k-quants, NVFP4, FP8/INT8 row, W4A8 and ConvRot.
+- **Bases:** dense, MLX affine-packed tiers, GGML, GGUF k-quants, NVFP4, FP8/INT8 row, W4A8, ConvRot and existing LLM-specific projection variants (including Prism). Extraction preserves their supported operations and formats; no tier or variant is dropped to simplify the spine.
 - **Plus:** dtype policy, residual adapters, a **request-scoped** scale context passed through the forward (PIPE-14), and a trainable mode.
 - **The llm crates use the same spine.**
+- **The backend primitive owner sits below both media and LLM runtimes.** A shared primitive must not create a media↔LLM dependency cycle. Its extraction migrates its consumers in the same feature, preserves platform feature partitions and does not introduce cross-backend dependencies.
 
-**Accept:** one Linear type per backend. The vendored candle copies created for IP and packed variants are deleted: `ip_dit` and `packed_dit`, plus `packed_te` (the named files total about 11.9k lines; [C] estimates about 20k including others `[M]`).
+**Accept:** one Linear spine per backend, including LLM projections, and an acyclic locked Cargo graph. ENG-4a owns extraction and media/LLM projection adoption; program-wide acceptance follows audio adoption in ENG-14. Later LLM adoption covers other runtime contracts. The vendored candle copies created for IP and packed variants are deleted in ENG-4b: `ip_dit` and `packed_dit`, plus `packed_te` (the named files total about 11.9k lines; [C] estimates about 20k including others `[M]`).
 
 **BACK-2 — There is one attention operation per backend.** Every block routes through it. It carries masks, budgeted and bounded execution, sparse modes, branch perturbations and the i32-overflow guard. **Accept:** no raw SDPA call remains outside it.
 
@@ -391,7 +399,7 @@ Families supply **declarations only**: a component lifetime graph across stages,
 - per-phase, per-stream geometry;
 - streamed or buffered output.
 
-The rung set is open. **Accept:** low-res start, multi-phase, video and audio-video plans are priced by one mechanism.
+The rung set is open. **Peak pricing is the maximum over execution points of the total distinct simultaneously live allocations in each budget domain.** Concurrent streams and joint workspaces are aggregated; aliases/shared weights are counted once. Transitions include source and destination buffers, endpoint estimates, pending materialization, codecs/upsamplers and retained contexts. Host and device budgets are not conflated; unified-memory allocations are counted once in their shared domain. **Accept:** low-res start, multi-phase, video and audio-video plans are priced by one mechanism. Pure fixtures cover two streams that fit separately but exceed the budget together, a transition peak greater than either steady phase, and alias deduplication.
 
 **MEM-4 — Equivalent-class Features stay within a declared, recorded quality bound.**
 - **Equivalent-class Features are output-preserving within a declared and recorded quality bound.** Tiled decode changes pixels (`gen-core/src/memory_strategy/decode_quality.rs`), so "output-preserving" cannot mean byte-identical here.
@@ -399,7 +407,7 @@ The rung set is open. **Accept:** low-res start, multi-phase, video and audio-vi
 
 **Accept:** admission decisions contain only equivalent-class selections.
 
-**MEM-5 — The runner drives today's `MemoryRequestScope` lifecycle** (47 implementations; `gen-core/src/memory_strategy/run.rs:191-217`) for every migrated route **until that route's rung is relocated**. **Accept:** admitted rungs keep applying after each migration; the Tier 1 peak-memory check shows no regression.
+**MEM-5 — The runner drives today's `MemoryRequestScope` lifecycle** (47 implementations; `gen-core/src/memory_strategy/run.rs:191-217`) for every migrated route **until that route's rung is relocated**. Each phase supplies its actual geometry, conditioning/mode and selected rungs under the admitted whole-plan reservation; a final-phase identity is never reused for a different phase. The first geometry-changing feature delivers that integration and conservative pricing for its adopted routes. **Accept:** scope-identity traces pass at each boundary, admitted rungs keep applying after each migration, and the Tier 1 peak-memory check shows no regression. Later admission unification is not a prerequisite for correcting these first-consumer inputs.
 
 **MEM-6 — The engine-side iOS admission and pricing system is relocated onto the shared memory geometry and plan.** That system is `ios_admission.rs`, per-family `ios_pricing/` and the solver quanta checks. Per-quantum OS-headroom checks stay as hooks. **Accept:** no per-family `ios_pricing` module remains; iOS admits from plan bytes.
 
@@ -522,7 +530,7 @@ Rules:
 
 **ADM-2 — Backend specifics sit behind `BackendBudget`:** probe, reclaimable bytes, margins and evict-to-reclaim, with one byte-denominated budget vocabulary. **Failure posture is a property of (backend × evidence basis), declared per route or derived.** It is not a per-backend constant: some MLX routes admit when unpriced today (`instantid.rs:285-288`; SenseNova). **Accept:** only `BackendBudget` implementations contain backend-conditional admission code.
 
-**ADM-3 — Admission consumes the `RenderPlan` and the route's memory contract**, including per-phase and per-stream geometry and Feature memory effects. It runs in two phases: Plan (before load) and Run (in-cache, warm/cold-aware). **Accept:** low-res start, multi-phase, video and audio-video plans are priced by one code path.
+**ADM-3 — Admission consumes the `RenderPlan` and the route's memory contract**, including concurrent live-set pricing (MEM-3) and Feature memory effects. It runs in two phases: Plan (before load) and Run (in-cache, warm/cold-aware). Every feature that first adds geometry, stages or allocations to a route updates its existing admission consumers in that feature; APP-4 later unifies those consumers. An existing estimator can remain unchanged only if a documented bound covers every additional live allocation over the supported settings. The admitted resolved plan is the plan executed; Run rechecks local budget/cache facts and any equivalent-feature reselection revalidates/re-prices the plan. **Accept:** budget-boundary decision tests and phase-scope traces pass when each adopted route first ships; low-res start, multi-phase, video and audio-video plans ultimately use one admission pipeline.
 
 **ADM-4 — Refusals are typed:** binding phase, bytes needed and available, and suggestions. **Accept:** no admission refusal is built as a bare string.
 
@@ -626,19 +634,23 @@ Pure admission and routing logic lives cfg-free in `sceneworks-core`, so it runs
 ### 6.16 First consumer: low-res start (FEAT)
 
 **FEAT-1 — "Low-res start" is an opt-in recipe-class Feature.**
-- **Behaviour:** it runs the first K steps at a reduced scale, then a resample and re-noise transition to full resolution.
-- **Availability:** it is offered on every route that supports a geometry-changing phase, and refused elsewhere with a typed reason.
+- **Behaviour:** it runs the first K **executed outer steps of the first denoising pass** at a reduced spatial scale, then obtains a clean endpoint estimate, resamples it and re-noises to that pass's boundary sigma at full pass geometry (PIPE-4). The recipe and schedule policy are versioned and persisted. Composed Hires.fix therefore applies low-res start to its base pass once; the refinement pass is unchanged.
+- **Parameter semantics (proposed under ⟂DEC-10):** active K satisfies `1 ≤ K < M`, where M is the selected pass's executed step count after img2img truncation. Zero, K ≥ M, non-finite scale, and M < 2 refuse; disabling the Feature is the byte-identical no-op. Scale is spatial only, finite and within 0.25–0.9 (default 0.5); frames, duration, audio geometry and count are unchanged. Each spatial dimension rounds down to its declared legal quantum, must meet its minimum and be smaller than its full-pass dimension; an invalid pair refuses rather than clamps. Nonrectangular legal-grid rules remain route-declared. The UI fraction uses M and reports the resolved dimensions.
+- **Schedule and switch:** keep the full pass's schedule and final-geometry `mu`/shift unchanged. No phase-local schedule shift. Obtain x0 through a read-only evaluation of the departing configuration at the actual boundary sigma, using that configuration's model-slot rule at that sigma; drivers may supply an equivalent endpoint estimator with conformance. Use the destination stream's noise-scaling law, a new domain-separated seed stream and Reset history. Additional evaluations appear in the execution report and pricing, not as extra user-visible outer steps.
+- **Availability:** it is offered on every route with the required spatial resize, read-only endpoint-estimate and transition support, and refused elsewhere with a typed reason. The predicate checks the **targeted pass's** mode/conditioning, legal parameters, stream coupling and active Features. Initially noise-start modes and img2img are supported; edit/reference/control inputs to that pass refuse until their shared conditioning rebuild is delivered in ENG-12/COMP-5. This excludes ordinary img2img's init image from the reference-mode refusal. A generated reference in a later, untargeted Hires refinement pass does not make the base pass ineligible. Any structurally unavoidable route exception is listed under DEC-13; the expected-route inventory cannot shrink silently.
 - **UI:**
   - a number field for K;
   - a linked slider showing K as a fraction of total steps, snapped to whole steps;
   - a scale control.
 - **Product choices** are recorded under ⟂DEC-10.
-- **Expected routes:** the feature that ships FEAT-1 on a route set lists, from the route inventory, which routes are expected to support it, so availability cannot pass vacuously.
+- **Expected routes:** the feature that ships FEAT-1 on a route set lists, from the route inventory, which routes are expected to support it, so availability cannot pass vacuously. Fixed native tables use their actual eligible boundaries; unsupported requested boundaries refuse.
 
 **Accept:**
 - Correct output size on every expected route.
-- Typed refusal on every other route.
-- The speedup is measured per PERF-3.
+- Correct plans/refusals for K=0/1/M−1/M, M=1, img2img truncation, minimum/non-square grids, AV spatial-only scaling and mode/composition restrictions. Disabled remains class (a); the active recipe is intentionally result-changing.
+- Replay of the same persisted recipe and seed is deterministic per backend under the same runtime; capture resolved pass, dimensions, K, schedule policy, transition version and seed derivation. Unknown recipe versions refuse through the existing versioned upgrader rules.
+- A bounded, declared prompt/seed set compares active low-res output with the full-resolution baseline per backend. Inspect prompt/content retention, structure, blur, seams and non-finite outputs, including img2img source retention where supported. Unusable results block availability on that route pending repair or an explicit DEC-13 decision; record quality observations alongside speed and memory. No requirement for active-recipe bit identity and no Cartesian quality campaign.
+- The speedup is measured per PERF-3, including endpoint-evaluation and transition costs. A benefit claim is made only where measurements and quality support it; the expected 1.5–1.7× is not a gate.
 
 ---
 
@@ -725,14 +737,14 @@ These are measured at baseline and again at every feature end. They are **goals,
 |---|---|---|---|---|
 | **DEC-1** | **Backend strategy.** Options (c) and (d) reverse the 2026-07-13 non-goal (`inference-rearchitecture.md:81`). | (a) status quo; (b) shared host math + identical layer-kit API; (c) backend-generic model code over a layer-level trait; (d) burn; (f) candle on Mac | **(b) everywhere, as BACK-1…4; (c) as the target end state, gated by the BACK-5 pilots.** Not (d): burn dropped its candle backend, its quantization is symmetric-only, and its iOS support is unproven. Not (f): no benchmark exists, and iOS is MLX-only [D §8]. (Medium-high for (b); medium for (c).) | BACK-5, G5, §8 |
 | **DEC-2** | **Lane scope.** | Include audio, LLM-as-encoder and training: now, later, or never | **Include all three, after the image/video core.** They hold the largest remaining copy sources. (Medium-high.) | XL-1/2, WGT-4, COMP-1 |
-| **DEC-3** | **Schedule span kinds.** | Global-sliced; fresh-per-pass; explicit table; all three | **All three.** LTX needs the explicit table; Krea and low-res start need slicing; chained recipes need fresh-per-pass. (High.) | PIPE-4 |
+| **DEC-3** | **Schedule source kinds.** | Global-sliced; fresh-per-pass; explicit table; all three | **All three.** Sources resolve per pass; phase ranges use that pass's executed outer-step coordinates and stream coupling. LTX needs explicit tables; Krea and low-res need slicing; chained recipes need fresh passes. (High.) | PIPE-1/3/4, HOOK-3 |
 | **DEC-4** | **sc-20414** (4,212 commits behind). | Port the executor; salvage parts; abandon | **Salvage its invariants, conformance testkit and ComfyUI pass-schedule math. Do not port `denoise_passes.rs` as a wire contract.** Separately decide whether `denoisePasses` becomes a fresh-per-pass Feature whose schema is derived from that contract (recommend yes, after APP-2). Review `sc-19048` and `sc-25327` for salvage. (High.) | PIPE-3/4 |
 | **DEC-5** | **SW-F327 coordination.** | Program waits for SW-F327; engine-only work now with SceneWorks halves gated; full parallel | **Inference-only (`[INF]`) items start now, behind unchanged worker-facing APIs. Every SceneWorks (`[SW]`) half waits for the SW-F327 PRs on the same files to merge.** Those PRs today are #3258, #3260, #3264, #3268 and #3270. Cards already in review land first; SGA re-baselines after them. No absorbing in-review cards. (High.) | MIG-7, all `[SW]` items |
 | **DEC-6** | **Structural guards:** static checks such as no raw SDPA outside the attention op, no per-family σ functions, no guidance combine in family files, no model-id literals in shared code. | Allow, inside the existing `architecture_tests.rs` (no new CI lane); forbid | **Allow.** On 2026-08-15 you banned "a static-analysis check · a lint rule · … an anti-drift guard". On 2026-10-11 you scoped that ban to memory and measurement gates, and said gates that prevent CI failures are wanted. You approved AST architecture checks for SW-F327 (E3, #3270 SW-6686). On 2026-10-23 you asked for a structural CI policy check. Without guards, consolidations regrew within 11 days. **If you forbid them,** each affected criterion is checked once by a grep recorded in the feature's terminal item. (Medium; this one is genuinely yours.) | PIPE-8/9, BACK-2, APPREG-2, PAT-5, TOOL-4 |
 | **DEC-7** | **Numerics classes (AP13).** | Bit-exact only; (a)/(b)/(c) classes | **(a)/(b)/(c).** Class (c) needs your sign-off per route. Each feature lists its expected (b) and (c) entries at planning. (High.) | PIPE-10, COMP-1/4, WGT-3 |
 | **DEC-8** | **Feature classes.** | Reuse the "approximation" regime; add a recipe class | **Recipe / equivalent (within a declared quality bound) / diagnostic.** Admission selects only equivalent-class Features. (High.) | HOOK-2, MEM-4 |
 | **DEC-9** | **Web validation mechanism.** | Server endpoint per change; core validator compiled to WebAssembly and run in the browser; hybrid (availability cached per (model, backend, mode) plus server round-trip for cross-field rules) | **WebAssembly-compiled core validator.** One Rust implementation, instant, works offline and over the RunPod proxy. Cost: wasm build and bundle size. **Fallback:** hybrid. (Medium.) | OPT-4 |
-| **DEC-10** | **Low-res start product choices.** | Coverage; modes; scale range; switch method | **Every supporting route. Noise-start modes plus img2img;** edit/reference/control are refused until COMP-5 rebuilds grid-aligned conditioning. **Scale slider 0.25–0.9, default 0.5. Switch by re-noising from the x0 estimate.** (Medium.) | FEAT-1 |
+| **DEC-10** | **Low-res start recipe v1.** | Coverage/modes; step domain; spatial scale/grid policy; switch and schedule policy; quality acceptance | **Every structurally supporting route; noise-start plus img2img.** Initially refuse edit/reference/control on the targeted pass until COMP-5. Target the first denoising pass once; `1 ≤ K < executed M`, default floor(M/2) with minimum 1 for M≥2. Spatial scale 0.25–0.9 (default 0.5), floor-to-quantum then validate. Keep the full-pass schedule/mu, use a read-only endpoint x0 estimate and destination noise-scaling law; additional evaluation is counted/priced. Fix these semantics in a persisted recipe version, with K/scale controls only. Require the bounded quality/replay checks in FEAT-1 as well as speed. **Proposed, not approved by this revision.** (Medium on quality/benefit; high on the need for explicit semantics.) | FEAT-1, PIPE-2/4/5, ADM-3 |
 | **DEC-11** | **Tracker naming in inference CI.** | Land the CodeGraph-key policy fix first; use `sc-` names | **Policy fix first, as a prerequisite PR.** (High.) | MIG-1 |
 | **DEC-12** | **Branch lifetime window.** | ≤4, ≤6 or ≤8 weeks | **≤6 weeks, with a re-plan if it is exceeded.** (Medium.) | MIG-1 |
 | **DEC-13** | **Routes that cannot change geometry or adapters per phase** (Mage watermark, merge-only adapters, fixed-grid planners), plus any driver refusal under PIPE-7. | Refuse; change product behaviour | **Refuse with a typed reason.** Each refusal is listed for your approval when its feature is planned. (High.) | HOOK-4, FEAT-1, PIPE-7 |
@@ -753,8 +765,10 @@ These are measured at baseline and again at every feature end. They are **goals,
 | **Route inventory** | The generated table of every (family, route, backend), with loop kind, owning feature and AP13 class (PIPE-18). |
 | **Family** | A model architecture lineage. After the program, it owns config, graph and primary structural declarations only. |
 | **RenderPlan** | The typed, weights-free compilation of a request. |
+| **Pass / schedule domain** | One ordered denoising invocation with stable identity, resolved per-stream schedules and stage bindings; later passes may consume earlier outputs. |
 | **Stream** | One latent of a bundle (video, audio, joint rows), with its own space, geometry, schedule and σ. |
-| **Phase / span / transition** | A trajectory segment with overrides; how its σ are chosen (sliced, fresh or explicit table); and the typed operation that enters it. |
+| **Phase / span / transition** | A pass-local executed outer-step range with overrides; its half-open coordinate range; and the typed boundary-state operation that enters it. Global, fresh and explicit describe the enclosing pass's schedule source. |
+| **BoundaryState / execution state** | A noisy latent, provenanced clean estimate or declared route state; and the separately request-owned solver history, RNG coordinates, driver caches and preparation state that survive slice calls. |
 | **FeatureSpec / FeatureHooks** | A Feature's tensor-free declaration, and its optional per-backend model-internal hooks. |
 | **Recipe / equivalent / diagnostic** | Feature classes: result-changing and user-chosen; within a declared quality bound and selectable by admission; observation only. |
 | **FamilyDriver** | The typed escape hatch for essential bespoke loops, verified by conformance tests over a forward seam. |
