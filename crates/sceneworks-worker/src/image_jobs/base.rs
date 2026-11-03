@@ -2521,9 +2521,7 @@ fn qwen_image_2_1_declared_tier_dir(
             !component.is_empty()
                 && *component != "*"
                 && !component.starts_with('.')
-                && component
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                && sceneworks_core::ids::is_safe_id(component)
         });
     match subdir {
         Some(component) => Some(root.join(component)),

@@ -1021,12 +1021,7 @@ async fn planning_root(
     project_id: &str,
     draft_id: &str,
 ) -> Result<PathBuf, ApiError> {
-    if draft_id.is_empty()
-        || draft_id.len() > 128
-        || !draft_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-    {
+    if !sceneworks_core::ids::is_safe_id_with_max(draft_id, 128) {
         return Err(ApiError::bad_request("Invalid film draft ID"));
     }
     Ok(project_path_for_id(state, project_id)

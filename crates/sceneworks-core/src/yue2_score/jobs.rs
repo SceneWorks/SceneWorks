@@ -652,11 +652,7 @@ fn check_text(field: &str, value: &str, max: usize) -> Result<(), Yue2JobError> 
 }
 
 fn check_id(field: &str, value: &str) -> Result<(), Yue2JobError> {
-    let safe = !value.trim().is_empty()
-        && value.len() <= 200
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    let safe = crate::ids::is_safe_id_with_max(value, 200);
     if !safe {
         return Err(error(INVALID_VALUE, field, "is not a valid id"));
     }
@@ -898,12 +894,7 @@ fn is_lower_hex(value: &str) -> bool {
 pub fn is_run_dir(rel: &str) -> bool {
     rel.strip_prefix(RUNS_DIR)
         .and_then(|rest| rest.strip_prefix('/'))
-        .is_some_and(|id| {
-            id.starts_with(RUN_ID_PREFIX)
-                && id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-        })
+        .is_some_and(|id| id.starts_with(RUN_ID_PREFIX) && crate::ids::is_safe_id(id))
 }
 
 /// The project-relative run directory of `run_id`.
@@ -929,12 +920,7 @@ pub fn transcription_id(run_id: &str) -> Option<String> {
 pub fn is_transcription_dir(rel: &str) -> bool {
     rel.strip_prefix(TRANSCRIPTIONS_DIR)
         .and_then(|rest| rest.strip_prefix('/'))
-        .is_some_and(|id| {
-            id.starts_with(RUN_ID_PREFIX)
-                && id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-        })
+        .is_some_and(|id| id.starts_with(RUN_ID_PREFIX) && crate::ids::is_safe_id(id))
 }
 
 fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {

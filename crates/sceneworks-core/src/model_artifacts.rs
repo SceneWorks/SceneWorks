@@ -1500,11 +1500,7 @@ fn validate_relative_path_allow_empty(
     path: &Path,
     label: &str,
 ) -> Result<(), ArtifactContractError> {
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
+    if !path.as_os_str().is_empty() && crate::safe_path::path_normal_components(path).is_err() {
         return Err(ArtifactContractError(format!(
             "{label} must be a confined relative path: {}",
             path.display()

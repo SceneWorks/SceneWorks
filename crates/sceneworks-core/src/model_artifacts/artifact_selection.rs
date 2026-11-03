@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The `<safe>` in the API/worker's managed `models/<safe>` download directory. Byte-identical to
-/// the API (`apps/rust-api/src/lib.rs::safe_download_dir`) and the worker
-/// (`sceneworks_worker::paths::safe_download_dir`); receipts written by either are read here.
+/// the API and worker, which re-export this implementation. Receipts written by either are
+/// read here, so this compatibility spelling is shared.
 pub fn safe_download_dir(value: &str) -> String {
     let mut output = String::new();
     let mut in_replacement = false;

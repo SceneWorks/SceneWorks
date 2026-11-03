@@ -3808,10 +3808,5 @@ pub(crate) fn trusted_adapter_files(
 /// (no `..`, root, drive prefix, or `.`), so joining it to an output dir cannot
 /// escape that dir.
 pub(crate) fn is_plain_relative_file(name: &str) -> bool {
-    let path = FsPath::new(name);
-    !name.is_empty()
-        && path.file_name().is_some()
-        && path
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    sceneworks_core::safe_path::relative_normal_components(name).is_ok()
 }

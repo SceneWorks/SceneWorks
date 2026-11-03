@@ -1369,17 +1369,34 @@ fn copy_lora_into_project(
             source_path.display()
         )));
     }
+    if crate::safe_path::is_link_or_reparse_point(&fs::symlink_metadata(&source_path)?) {
+        return Err(ProjectStoreError::BadRequest(
+            "LoRA source must not be a symlink".to_owned(),
+        ));
+    }
     assert_allowed_lora_source(project_path, data_dir, &source_path)?;
     let target_dir = project_path
         .join("loras")
         .join("characters")
         .join(character_id);
+    crate::safe_path::confine_under(
+        project_path,
+        &format!("loras/characters/{character_id}"),
+        crate::safe_path::Confinement::SymlinkSafe,
+    )?;
     fs::create_dir_all(&target_dir)?;
     let target = target_dir.join(
         source_path
             .file_name()
             .ok_or_else(|| ProjectStoreError::BadRequest("Invalid LoRA source path".to_owned()))?,
     );
+    if fs::symlink_metadata(&target)
+        .is_ok_and(|metadata| crate::safe_path::is_link_or_reparse_point(&metadata))
+    {
+        return Err(ProjectStoreError::BadRequest(
+            "LoRA destination must not be a symlink".to_owned(),
+        ));
+    }
     if fs::canonicalize(&source_path).ok() != fs::canonicalize(&target).ok() {
         if source_path.is_dir() {
             copy_dir_recursive(&source_path, &target)?;
@@ -1411,15 +1428,39 @@ fn assert_allowed_lora_source(
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> ProjectStoreResult<()> {
+    if fs::symlink_metadata(destination)
+        .is_ok_and(|metadata| crate::safe_path::is_link_or_reparse_point(&metadata))
+    {
+        return Err(ProjectStoreError::BadRequest(
+            "LoRA destination must not be a symlink".to_owned(),
+        ));
+    }
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
-        if source_path.is_dir() {
+        if fs::symlink_metadata(&destination_path)
+            .is_ok_and(|metadata| crate::safe_path::is_link_or_reparse_point(&metadata))
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "LoRA destination contains a symlink".to_owned(),
+            ));
+        }
+        let metadata = fs::symlink_metadata(&source_path)?;
+        if crate::safe_path::is_link_or_reparse_point(&metadata) {
+            return Err(ProjectStoreError::BadRequest(
+                "LoRA source contains a symlink".to_owned(),
+            ));
+        }
+        if metadata.is_dir() {
             copy_dir_recursive(&source_path, &destination_path)?;
-        } else {
+        } else if metadata.is_file() {
             fs::copy(&source_path, &destination_path)?;
+        } else {
+            return Err(ProjectStoreError::BadRequest(
+                "LoRA source must contain regular files".to_owned(),
+            ));
         }
     }
     Ok(())
@@ -1560,6 +1601,57 @@ fn camel_to_title(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn lora_copy_preserves_regular_nested_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/weights.safetensors"), b"fixture").unwrap();
+        copy_dir_recursive(&source, &target).unwrap();
+        assert_eq!(
+            fs::read(target.join("nested/weights.safetensors")).unwrap(),
+            b"fixture"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn lora_copy_rejects_nested_links_and_cycles() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let outside = temp.path().join("secret");
+        fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, source.join("escape")).unwrap();
+        let target = temp.path().join("target");
+        assert!(copy_dir_recursive(&source, &target).is_err());
+        assert!(!target.join("escape").exists());
+        fs::remove_file(source.join("escape")).unwrap();
+        std::os::unix::fs::symlink(&source, source.join("cycle")).unwrap();
+        assert!(copy_dir_recursive(&source, &target).is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn lora_copy_rejects_directory_junction() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret"), b"outside").unwrap();
+        let junction = source.join("junction");
+        assert!(std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .status()
+            .unwrap()
+            .success());
+        assert!(copy_dir_recursive(&source, &temp.path().join("target")).is_err());
+        fs::remove_dir(junction).unwrap();
+    }
+
     use super::*;
 
     /// A representative, fully populated character sidecar: nested `status`,

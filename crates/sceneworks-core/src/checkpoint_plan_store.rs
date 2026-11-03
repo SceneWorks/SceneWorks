@@ -1026,41 +1026,7 @@ pub fn validate_linked_relative_path(relative_path: &str) -> Result<(), Checkpoi
 ///
 /// The reason is a `&'static str` rather than a typed error so each caller can wrap it in its OWN
 /// refusal type without this function knowing about any of them.
-pub fn portable_relative_path_parts(relative_path: &str) -> Result<PathBuf, &'static str> {
-    if relative_path.trim().is_empty() {
-        return Err("empty");
-    }
-    if relative_path.contains('\\') {
-        return Err("must use '/' separators");
-    }
-    if relative_path.contains(':') {
-        return Err("must not contain ':'");
-    }
-    if relative_path.bytes().any(|byte| byte.is_ascii_control()) {
-        return Err("must not contain control characters");
-    }
-    // Named before the generic empty-component rule below so an absolute path is refused as what it
-    // is rather than as "a leading empty segment".
-    if relative_path.starts_with('/') {
-        return Err("must be relative");
-    }
-    // Split on '/' rather than walking `Path::components()`: components() silently NORMALISES
-    // `a//b` and a trailing `/.` away, so it would accept documents the contract validator (which
-    // splits) rejects. The looser reading is the one that has to go.
-    let mut out = PathBuf::new();
-    for part in relative_path.split('/') {
-        match part {
-            "" => return Err("empty path component"),
-            "." => return Err("contains '.'"),
-            ".." => return Err("contains '..'"),
-            part => out.push(part),
-        }
-    }
-    if out.as_os_str().is_empty() {
-        return Err("empty");
-    }
-    Ok(out)
-}
+pub use crate::safe_path::portable_relative_path_parts;
 
 fn validate_portable_relative_path(relative_path: &str) -> Result<PathBuf, CheckpointPlanError> {
     portable_relative_path_parts(relative_path).map_err(|reason| {

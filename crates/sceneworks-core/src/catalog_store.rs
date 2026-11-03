@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -657,19 +657,15 @@ impl CatalogProcessingLease {
         use fs2::FileExt as _;
 
         let lock_path = catalog.root.join(PROCESSING_LEASE_FILE);
-        if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(CatalogError::InvalidCatalog(
+        let file = crate::file_lock::open_regular_lock_file(&lock_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidInput {
+                CatalogError::InvalidCatalog(
                     "Catalog processing lock must be a regular file".to_owned(),
-                ));
+                )
+            } else {
+                CatalogError::Io(error)
             }
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path)?;
+        })?;
         let contended = fs2::lock_contended_error().raw_os_error();
         match file.try_lock_exclusive() {
             Ok(()) => Ok(Self { file }),
@@ -718,6 +714,30 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// Resolve a record's available local image with the same confinement for every consumer.
+    pub fn resolve_local_image(&self, record: &CatalogRecord) -> std::io::Result<PathBuf> {
+        let relative = record
+            .metadata
+            .pointer("/acquisition/cachePath")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                (!record.image_path.contains("://") && !record.image_path.trim().is_empty())
+                    .then_some(record.image_path.as_str())
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "catalog record has no local image",
+                )
+            })?;
+        Self::resolve_local_image_under(self.root(), relative)
+    }
+
+    /// Resolve an explicitly selected cache image or thumbnail under an attached catalog.
+    pub fn resolve_local_image_under(root: &Path, relative: &str) -> std::io::Result<PathBuf> {
+        crate::safe_path::resolve_local_file(root, &relative.replace('\\', "/"))
+    }
+
     pub fn create(root: impl AsRef<Path>, name: impl Into<String>) -> CatalogResult<Self> {
         let root = root.as_ref();
         let name = validated_name(name.into())?;
@@ -2484,8 +2504,6 @@ fn validate_record(record: &NewCatalogRecord) -> CatalogResult<()> {
 }
 
 fn validate_catalog_relative_path(path: &str, label: &str) -> CatalogResult<()> {
-    use std::path::Component;
-
     if path.trim().is_empty() || path.contains('\0') {
         return Err(CatalogError::InvalidCatalog(format!(
             "Catalog record {label} path is required"
@@ -2494,15 +2512,7 @@ fn validate_catalog_relative_path(path: &str, label: &str) -> CatalogResult<()> 
     // Interpret both separators so a catalog created on Unix cannot persist a
     // Windows traversal (or vice versa) that becomes dangerous after relocation.
     let portable = path.replace('\\', "/");
-    let path = Path::new(&portable);
-    let has_windows_prefix =
-        portable.as_bytes().get(1) == Some(&b':') || portable.starts_with("//");
-    if has_windows_prefix
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
+    if crate::safe_path::relative_normal_components(&portable).is_err() {
         return Err(CatalogError::InvalidCatalog(format!(
             "Catalog record {label} path must stay within the catalog root"
         )));
@@ -2576,13 +2586,10 @@ fn metadata_json_path(field: &str) -> CatalogResult<String> {
         ));
     }
     let segments = field.split('.').collect::<Vec<_>>();
-    if segments.iter().any(|segment| {
-        segment.is_empty()
-            || segment.len() > 64
-            || !segment
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    }) {
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || segment.len() > 64 || !crate::ids::is_safe_id(segment))
+    {
         return Err(CatalogError::InvalidCatalog(
             "Catalog metadata fields may contain ASCII letters, numbers, '_' and '-'".to_owned(),
         ));
@@ -3404,12 +3411,7 @@ fn validate_saved_view_id(id: &str) -> CatalogResult<()> {
 
 fn normalize_source_config(source: &mut CatalogSourceConfig) -> CatalogResult<()> {
     let kind = source.kind.trim();
-    if kind.is_empty()
-        || kind.len() > 64
-        || !kind
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
+    if kind.is_empty() || kind.len() > 64 || !crate::ids::is_safe_id(kind) {
         return Err(CatalogError::InvalidCatalog(
             "Catalog source kind has an invalid format".to_owned(),
         ));
@@ -4406,6 +4408,36 @@ fn directory_file_bytes(root: &Path) -> CatalogResult<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shared_catalog_image_resolver_preserves_paths_and_rejects_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("images")).unwrap();
+        fs::write(temp.path().join("images/image.jpg"), b"image fixture").unwrap();
+        for relative in ["images/image.jpg", "images\\image.jpg"] {
+            assert!(Catalog::resolve_local_image_under(temp.path(), relative).is_ok());
+        }
+        for relative in [
+            "../secret",
+            "/absolute",
+            "C:/absolute",
+            "images/../../secret",
+        ] {
+            assert!(Catalog::resolve_local_image_under(temp.path(), relative).is_err());
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn shared_catalog_image_resolver_rejects_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("catalog");
+        fs::create_dir(&root).unwrap();
+        let outside = temp.path().join("secret");
+        fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(outside, root.join("escape.jpg")).unwrap();
+        assert!(Catalog::resolve_local_image_under(&root, "escape.jpg").is_err());
+    }
+
     use super::*;
     use tempfile::tempdir;
 

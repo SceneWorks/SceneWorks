@@ -1839,11 +1839,7 @@ pub(crate) fn job_error_detail(job: &Value) -> &str {
 /// `[A-Za-z0-9_-]` (path separators, query metacharacters …) is rejected.
 pub(crate) fn valid_job_id(job_id: &str) -> Result<&str, String> {
     let job_id = job_id.trim();
-    if job_id.is_empty()
-        || !job_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-    {
+    if !sceneworks_core::ids::is_safe_id(job_id) {
         return Err(format!(
             "\"{job_id}\" is not a valid job id (expected letters, digits, '-' or '_')"
         ));
@@ -1952,10 +1948,7 @@ pub(crate) fn encode_media_path(path: &str) -> String {
 /// inline file request or a ticket-bearing result URL. Rejecting `%` also prevents a downstream
 /// decoder from turning single- or double-encoded traversal into route separators.
 pub(crate) fn valid_project_id(project_id: &str) -> bool {
-    !project_id.trim().is_empty()
-        && project_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    sceneworks_core::ids::is_safe_id(project_id)
 }
 
 /// Percent-encode one untrusted media-path segment.
@@ -1978,19 +1971,41 @@ fn encode_path_segment(segment: &str) -> String {
 
 /// The project-relative media path of a result asset, normalized for the
 /// `/files/*relative_path` route: prefers the sidecar's `file.path`, falls back
-/// to a top-level `path`, converts backslashes and strips any leading slash.
+/// to a top-level `path`, rejects absolute, parent and encoded traversal paths.
 pub(crate) fn asset_media_path(asset: &Value) -> Option<String> {
     let path = asset
         .pointer("/file/path")
         .and_then(Value::as_str)
         .or_else(|| asset.get("path").and_then(Value::as_str))?;
-    let normalized = path.replace('\\', "/");
-    let trimmed = normalized.trim_start_matches('/');
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
+    sceneworks_core::safe_path::portable_relative_path_parts(path).ok()?;
+    // Decode nested percent escapes with a stack: each reduction removes two bytes, so even
+    // deeply encoded hostile paths are checked in linear time. Retain the original filename.
+    let mut decoded = Vec::with_capacity(path.len());
+    for byte in path.bytes() {
+        decoded.push(byte);
+        while decoded.len() >= 3 {
+            let end = decoded.len();
+            if decoded[end - 3] != b'%' {
+                break;
+            }
+            let Some(high) = (decoded[end - 2] as char).to_digit(16) else {
+                break;
+            };
+            let Some(low) = (decoded[end - 1] as char).to_digit(16) else {
+                break;
+            };
+            decoded.truncate(end - 3);
+            decoded.push((high * 16 + low) as u8);
+        }
     }
+    if decoded.iter().filter(|&&byte| byte == b'/').count()
+        != path.bytes().filter(|&byte| byte == b'/').count()
+    {
+        return None;
+    }
+    sceneworks_core::safe_path::portable_relative_path_parts(&String::from_utf8_lossy(&decoded))
+        .ok()?;
+    Some(path.to_owned())
 }
 
 /// The mime type for an inline image block: the asset sidecar's recorded
@@ -2757,19 +2772,37 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn asset_media_path_prefers_file_path_and_normalizes() {
+    fn asset_media_path_prefers_file_path_and_confines_url_components() {
         // The persisted sidecar shape: the path lives at file.path.
         let sidecar = json!({ "id": "a1", "file": { "path": "assets/images/g1/img_0001.png" } });
         assert_eq!(
             asset_media_path(&sidecar).as_deref(),
             Some("assets/images/g1/img_0001.png")
         );
-        // Fallback to a top-level path; backslashes and a leading slash normalize.
-        let flat = json!({ "path": "\\assets\\images\\g1\\img_0001.png" });
         assert_eq!(
-            asset_media_path(&flat).as_deref(),
-            Some("assets/images/g1/img_0001.png")
+            asset_media_path(&json!({ "path": "assets/images/nested.png" })).as_deref(),
+            Some("assets/images/nested.png")
         );
+        assert_eq!(
+            asset_media_path(&json!({"path": "assets/50% done.png"})).as_deref(),
+            Some("assets/50% done.png")
+        );
+        for path in [
+            "../secret",
+            "a/../secret",
+            "/assets/x.png",
+            "\\assets\\x.png",
+            "C:/secret",
+            "%2e%2e/secret",
+            "%252e%252e/secret",
+            "%25%32%65%25%32%65/secret",
+            "a/%25252fsecret",
+            "a/%255csecret",
+            "a/%2500secret",
+            "a/%2fsecret",
+        ] {
+            assert_eq!(asset_media_path(&json!({ "path": path })), None, "{path}");
+        }
         assert_eq!(asset_media_path(&json!({ "id": "a1" })), None);
         assert_eq!(asset_media_path(&json!({ "path": "/" })), None);
     }

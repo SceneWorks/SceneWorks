@@ -25,7 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -177,10 +177,7 @@ fn validate_transcription_id(id: &str) -> Result<()> {
 
 /// An artifact-relative path is a plain relative path (no traversal, no absolute component).
 fn safe_artifact_rel(rel: &str) -> bool {
-    !rel.is_empty()
-        && Path::new(rel)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
+    crate::safe_path::relative_normal_components(rel).is_ok()
 }
 
 fn export_kind(path: &str) -> &'static str {

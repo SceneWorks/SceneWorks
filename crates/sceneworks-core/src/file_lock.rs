@@ -26,6 +26,51 @@ use std::io;
 
 use fs2::FileExt;
 
+/// Open a catalog lock without following a final symlink/reparse point, including a link
+/// substituted between metadata inspection and open. Callers retain their lock contention policy.
+pub fn open_regular_lock_file(path: &std::path::Path) -> io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lock must be a regular file",
+            ));
+        }
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x0000_0400 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lock must not be a reparse point",
+            ));
+        }
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "lock must be a regular file",
+        ));
+    }
+    Ok(file)
+}
+
 /// An acquired `fs2` advisory lock. Dropping it releases the lock explicitly.
 #[derive(Debug)]
 pub struct FileLock {
@@ -102,6 +147,44 @@ impl Drop for FileLock {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn regular_lock_opener_accepts_files_and_rejects_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("valid.lock");
+        assert!(open_regular_lock_file(&path).is_ok());
+        assert!(open_regular_lock_file(&path).is_ok());
+        assert!(open_regular_lock_file(temp.path()).is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn regular_lock_opener_refuses_directory_junction() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let link = temp.path().join("lock");
+        assert!(std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .status()
+            .unwrap()
+            .success());
+        assert!(open_regular_lock_file(&link).is_err());
+        std::fs::remove_dir(link).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn regular_lock_opener_refuses_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, b"untouched").unwrap();
+        let link = temp.path().join("lock");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(open_regular_lock_file(&link).is_err());
+        assert_eq!(std::fs::read(outside).unwrap(), b"untouched");
+    }
+
     use super::*;
 
     fn lock_file(path: &std::path::Path) -> File {
