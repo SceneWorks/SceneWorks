@@ -211,6 +211,43 @@ describe("DocumentReader authenticates its document fetch (sc-8810)", () => {
     expect(global.fetch.mock.calls[1][0]).not.toContain("second.json");
   });
 
+  it.each([401, 500, 200])("does not retarget or publish an old %s response after a replacement document commits", async (oldStatus) => {
+    const NativeAbortController = globalThis.AbortController;
+    const pendingAborts = [];
+    // Hold passive cleanup's abort to exercise the commit-to-cleanup ownership window.
+    class DeferredAbortController extends NativeAbortController {
+      abort(...args) { pendingAborts.push(() => super.abort(...args)); }
+    }
+    vi.stubGlobal("AbortController", DeferredAbortController);
+    let releaseFirst;
+    let releaseSecond;
+    global.fetch = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { releaseSecond = resolve; }))
+      .mockResolvedValue({ ok: true, json: async () => ({ segments: [{ type: "text", text: "wrong retry" }] }) });
+    const asset = (name) => ({ id: name, type: "document", projectId: "p1", file: { path: `assets/${name}.json`, mimeType: "application/json" } });
+    try {
+      setMediaTicket("same-ticket");
+      await act(async () => root.render(<AssetDetail asset={asset("first")} availableTags={[]} />));
+      await act(async () => root.render(<AssetDetail asset={asset("second")} availableTags={[]} />));
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      await act(async () => { releaseFirst({
+        ok: oldStatus === 200,
+        status: oldStatus,
+        json: async () => ({ segments: [{ type: "text", text: "stale first document" }] }),
+      }); });
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      expect(container.textContent).not.toContain("stale first document");
+      expect(container.textContent).not.toContain("wrong retry");
+      expect(container.textContent).not.toContain("Couldn't load document");
+      await act(async () => { releaseSecond({ ok: true, json: async () => ({ segments: [{ type: "text", text: "second document" }] }) }); });
+      expect(container.textContent).toContain("second document");
+    } finally {
+      pendingAborts.forEach((abort) => abort());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("fetches the document through a ticketed URL", async () => {
     setMediaTicket("d0cticket");
     global.fetch = vi.fn(async () => ({
