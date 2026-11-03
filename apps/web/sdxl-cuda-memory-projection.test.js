@@ -43,13 +43,14 @@ describe("SDXL CUDA browser evidence projection", () => {
     const url = pathToFileURL(`${temp}/`);
     try {
       expect(loadSdxlCudaMemoryProjection(url)).toBeNull();
+      expect(() => loadSdxlCudaMemoryProjection(url, { required: true })).toThrow(/projection unavailable/);
       const config = JSON.parse(read("config/sdxl-cuda-memory-endpoints.json"));
       mkdirSync(join(temp, "config/sdxl-cuda-memory-endpoint-evidence"), { recursive: true });
       for (const receipt of [config.pair.resident.source, config.pair.sequential.source, config.pair.summary]) {
         writeFileSync(join(temp, receipt.path), read(receipt.path));
       }
       writeFileSync(join(temp, "config/sdxl-cuda-memory-endpoints.json"), JSON.stringify(config));
-      expect(loadSdxlCudaMemoryProjection(url)).not.toBeNull();
+      expect(loadSdxlCudaMemoryProjection(url, { required: true })).not.toBeNull();
       config.pair.sequential.overallAllocatorEnvelopeBytes -= 1024;
       writeFileSync(join(temp, "config/sdxl-cuda-memory-endpoints.json"), JSON.stringify(config));
       expect(loadSdxlCudaMemoryProjection(url)).toBeNull();
