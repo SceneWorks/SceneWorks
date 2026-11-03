@@ -1,9 +1,5 @@
 use super::*;
 
-// Keep the behavior-preserving legacy root helper available to this module while all production
-// consumers enter through `model_source_library`; taking the function item constructs no root.
-const _: fn(&FsPath) -> PathBuf = huggingface_hub_cache_dir;
-
 use sceneworks_core::base_weights::{
     detect_base_weight_file, import_detection_supported, imported_model_primary_weight_file,
     BaseWeightDetection, ComponentRole,
@@ -3471,23 +3467,6 @@ fn converted_tier_real_bytes(tier_dir: &FsPath) -> u64 {
     total
 }
 
-/// Kill-switch for the model upload/import endpoint (sc-7081, epic 7080). Enabled as of sc-14019
-/// (epic 14015): a base-checkpoint import is now gated on the architecture-compatibility verdict of
-/// the base-weight detector ([`sceneworks_core::base_weights`]) via [`import_source_supported`] at
-/// queue time and the worker's `run_model_import_job` over the downloaded bytes. The gate accepts
-/// ONLY `(family, component, quant)` triples with a real loader today (`import_supported` — currently
-/// a dense-bf16 or descriptor-gated int8-per-row Krea 2 DiT, routed to the Krea engine via the S0d
-/// family path); every other file
-/// is refused with a typed reason (NEVER a silent fallback). Kept as a fn, not a `const`, so the
-/// guarded handler body stays reachable (no `unreachable_code`) and the switch is trivially
-/// re-flippable if a regression surfaces.
-fn model_import_enabled() -> bool {
-    true
-}
-
-const MODEL_IMPORT_DISABLED_DETAIL: &str = "Model import is temporarily disabled while native \
-     model support and conversion are being built. (LoRA import is unaffected.)";
-
 /// Import-compatibility gate for a base checkpoint (sc-14019, epic 14015): resolve the primary
 /// weight file under `source`, classify it with the base-weight detector, and refuse the import
 /// unless the verdict is one a real loader accepts today
@@ -3565,13 +3544,6 @@ async fn model_import_request(
     request: AxumRequest,
     repair_model_id: Option<String>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), Response> {
-    // sc-7081 (epic 7080): refuse before staging/queueing, covering both the JSON and
-    // multipart entrypoints. The route stays mounted so a direct API client gets an
-    // actionable 403 rather than a 404. See `model_import_enabled` for the rationale.
-    if !model_import_enabled() {
-        return Err(ApiError::forbidden(MODEL_IMPORT_DISABLED_DETAIL).into_response());
-    }
-
     let is_multipart = request
         .headers()
         .get(header::CONTENT_TYPE)
@@ -4144,7 +4116,7 @@ pub(crate) async fn queue_model_import_job(
         payload.repo = Some(validate_huggingface_repo(repo)?.to_owned());
     }
     // Licence acknowledgment, keyed on the repo the import will FETCH (sc-17227). This route had no
-    // licence logic at all — `model_import_enabled()` hard-returns `true` and nothing below reads
+    // licence logic at all and did not read
     // the catalog for the source — so `{"repo": "MiniMaxAI/MiniMax-H3"}` pulled the restricted
     // weights from upstream while `POST /api/v1/models/:id/download` was answering 403 for the same
     // bytes. The same predicate the raw jobs route uses, so there is one mechanism, not two.
@@ -4666,21 +4638,11 @@ pub(crate) async fn write_model_upload_field_to_staged_file(
     field: axum::extract::multipart::Field<'_>,
     filename: &str,
 ) -> Result<PathBuf, ApiError> {
-    let upload_dir = state
-        .settings
-        .data_dir
-        .join("cache")
-        .join("model-uploads")
-        .join(format!("upload-{}", Uuid::new_v4().simple()));
-    tokio::fs::create_dir_all(&upload_dir)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let temp_path = upload_dir.join(filename);
-    // sc-8886 (F-084): shared streaming writer. Cleanup removes the staged file AND its
-    // per-upload parent directory.
-    stream_multipart_field_to_file(
+    crate::uploads::stage_upload(
+        state,
         field,
-        &temp_path,
+        "model-uploads",
+        Some(filename),
         max_model_upload_bytes(),
         || {
             format!(
@@ -4688,18 +4650,11 @@ pub(crate) async fn write_model_upload_field_to_staged_file(
                 format_bytes(max_model_upload_bytes() as u64)
             )
         },
-        || cleanup_staged_model_upload(&temp_path),
     )
-    .await?;
-    Ok(temp_path)
+    .await
 }
 
-pub(crate) async fn cleanup_staged_model_upload(path: &FsPath) {
-    let _ = tokio::fs::remove_file(path).await;
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::remove_dir(parent).await;
-    }
-}
+pub(crate) use crate::uploads::cleanup_staged_upload as cleanup_staged_model_upload;
 
 pub(crate) fn model_family_inspection_error(error: SafetensorsHeaderError) -> ApiError {
     match error {

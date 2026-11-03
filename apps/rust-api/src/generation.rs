@@ -771,7 +771,7 @@ async fn validate_vector_source_asset(
         .pointer("/file/mimeType")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if media_type != "image" || !mime.starts_with("image/") || mime == "image/svg+xml" {
+    if !sceneworks_core::contracts::is_raster_image_asset(media_type, mime) {
         return Err(ApiError::bad_request(
             "sourceAssetId must name a raster image owned by projectId",
         ));
@@ -859,7 +859,7 @@ pub(crate) async fn validate_ordered_image_references(
             .pointer("/file/mimeType")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if media_type != "image" || !mime.starts_with("image/") || mime == "image/svg+xml" {
+        if !sceneworks_core::contracts::is_raster_image_asset(media_type, mime) {
             return Err(ApiError::bad_request(format!(
                 "reference {ordinal} ({asset_id}) must name a raster image owned by projectId"
             )));

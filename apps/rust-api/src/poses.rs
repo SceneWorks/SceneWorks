@@ -43,25 +43,8 @@ pub(crate) async fn create_pose_sources(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let mut sources = Vec::new();
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?
-    {
-        if field.name() != Some("file") {
-            continue;
-        }
-        let display_name = field.file_name().unwrap_or("image").to_owned();
-        let path = write_upload_field_to_dir(&state, field, POSE_UPLOADS_CACHE_DIR).await?;
-        sources.push(serde_json::json!({
-            "path": path.to_string_lossy(),
-            "displayName": display_name,
-        }));
-    }
-    if sources.is_empty() {
-        return Err(ApiError::bad_request("At least one image file is required"));
-    }
+    let sources =
+        crate::uploads::stage_image_sources(&state, &mut multipart, POSE_UPLOADS_CACHE_DIR).await?;
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({ "sources": sources })),

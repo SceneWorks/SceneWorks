@@ -73,6 +73,7 @@ pub mod moss_image_advanced;
 pub mod observability;
 pub mod payload_util;
 pub mod preview_support;
+pub mod process;
 pub mod project_store;
 pub mod safe_path;
 pub mod safetensors;

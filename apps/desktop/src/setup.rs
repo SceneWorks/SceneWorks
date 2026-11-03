@@ -2579,7 +2579,7 @@ fn candle_worker_slot(managed: &Managed) -> &Mutex<Option<CommandChild>> {
 
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
-    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+    i32::try_from(pid).is_ok_and(sceneworks_core::process::pid_alive)
 }
 
 /// File holding this launch's sidecar PIDs, used to reap orphans left by a prior
