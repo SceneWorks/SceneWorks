@@ -1,54 +1,11 @@
 use super::*;
 
-/// Maximum wall-clock lifetime of one FFmpeg child. Timeline exports and CPU transcodes can
-/// legitimately run much longer than model inference, so the default is deliberately generous;
-/// the important invariant is that a wedged child is finite. Operators can lower or raise it with
-/// `SCENEWORKS_FFMPEG_TIMEOUT_SECONDS`. Zero/invalid values fail closed to this bounded default
-/// rather than disabling the watchdog.
-const FFMPEG_EXECUTION_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
-/// An operator override remains finite and representable as a Tokio deadline. Seven days is far
-/// beyond a legitimate SceneWorks export while preventing a typo such as `u64::MAX` from either
-/// panicking in `Instant + Duration` or effectively disabling the watchdog.
-pub(crate) const FFMPEG_EXECUTION_TIMEOUT_MAX: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-const FFMPEG_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const FFMPEG_TIMEOUT_SECONDS_ENV: &str = "SCENEWORKS_FFMPEG_TIMEOUT_SECONDS";
-
-pub(crate) fn ffmpeg_execution_timeout_from(raw: Option<&str>) -> Duration {
-    raw.and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(FFMPEG_EXECUTION_TIMEOUT)
-        .min(FFMPEG_EXECUTION_TIMEOUT_MAX)
-}
-
-fn ffmpeg_execution_timeout() -> Duration {
-    ffmpeg_execution_timeout_from(std::env::var(FFMPEG_TIMEOUT_SECONDS_ENV).ok().as_deref())
-}
-
-fn ffmpeg_timeout_io_error(timeout: Duration) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::TimedOut,
-        format!("FFmpeg execution exceeded its {timeout:?} deadline."),
-    )
-}
-
-fn checked_deadline_from(now: tokio::time::Instant, timeout: Duration) -> tokio::time::Instant {
-    // If an exotic runtime Instant cannot represent even the capped duration, expiring immediately
-    // is safer than panicking or silently running without a deadline.
-    now.checked_add(timeout).unwrap_or(now)
-}
-
-pub(crate) fn ffmpeg_execution_deadline(requested: Duration) -> (tokio::time::Instant, Duration) {
-    let effective = if requested.is_zero() {
-        FFMPEG_EXECUTION_TIMEOUT
-    } else {
-        requested.min(FFMPEG_EXECUTION_TIMEOUT_MAX)
-    };
-    (
-        checked_deadline_from(tokio::time::Instant::now(), effective),
-        effective,
-    )
-}
+use sceneworks_core::media_process::ffmpeg_execution_timeout;
+#[cfg(test)]
+pub(crate) use sceneworks_core::media_process::{
+    ffmpeg_execution_deadline, ffmpeg_execution_timeout_from, ffmpeg_timeout_io_error,
+    FFMPEG_EXECUTION_TIMEOUT_MAX,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct TimelineExportRequest {
@@ -783,11 +740,7 @@ pub(crate) fn asset_is_image_source(asset: &Value) -> bool {
 /// the render paths do. Shared by both probes so a lane that points at a bundled ffmpeg cannot end
 /// up probing one binary and rendering with another.
 fn resolve_probe_program(ffmpeg: &str) -> String {
-    let configured = match std::env::var("SCENEWORKS_FFMPEG") {
-        Ok(path) if ffmpeg == "ffmpeg" && !path.trim().is_empty() => path,
-        _ => ffmpeg.to_owned(),
-    };
-    sceneworks_core::media_convert::resolve_ffmpeg_program(&configured).into_owned()
+    sceneworks_core::media_process::ffmpeg_program(ffmpeg)
 }
 
 /// Parse an ffmpeg `HH:MM:SS.ms` clock into seconds.
@@ -4149,338 +4102,65 @@ async fn run_ffmpeg_capture_stderr_inner(
             "FFmpeg command is empty.".to_owned(),
         ));
     };
-    // Let the host override the default ffmpeg binary via SCENEWORKS_FFMPEG. The
-    // desktop app sets this to the venv's bundled imageio-ffmpeg (it ships no
-    // system ffmpeg); the server stack / Docker leave it unset and use the
-    // caller's "ffmpeg" on PATH.
-    let configured_program = match std::env::var("SCENEWORKS_FFMPEG") {
-        Ok(path) if program.as_str() == "ffmpeg" && !path.trim().is_empty() => path,
-        _ => program.clone(),
-    };
-    // On Windows an ffmpeg reached through a symlink/reparse point (e.g. WinGet's
-    // `…\WinGet\Links\ffmpeg.exe` shim) cannot be launched under redirection-trust enforcement:
-    // CreateProcess returns ERROR_UNTRUSTED_MOUNT_POINT (os error 448), the same wall HF-cache
-    // symlinks hit in the model loaders. Resolve it to the real (non-reparse) target first; a
-    // no-op for a plain binary and on every other platform.
-    let resolved_program =
-        sceneworks_core::media_convert::resolve_ffmpeg_program(&configured_program);
-    let mut command = Command::new(resolved_program.as_ref());
-    command
-        .args(arguments)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    if stdin_chunks.is_some() {
-        command.stdin(Stdio::piped());
-    } else {
-        command.stdin(Stdio::null());
-    }
-    let mut child = command
-        // sc-8804/sc-21742: every ordinary timeout/heartbeat/cancel return explicitly kills and
-        // reaps below. Keep kill-on-drop as the panic/unwind backstop: a Tokio child otherwise keeps
-        // running after its handle is dropped and could continue writing a partial output file.
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| {
-            WorkerError::Engine(format!(
-                "Failed to start FFmpeg. Ensure ffmpeg is installed and on PATH: {error}"
-            ))
-        })?;
-
-    let mut stdin_task = stdin_chunks.map(|chunks| {
-        let mut stdin = child
-            .stdin
-            .take()
-            .expect("piped FFmpeg stdin is available after spawn");
-        crate::load_progress::spawn(async move {
-            for chunk in chunks {
-                stdin.write_all(&chunk).await?;
-            }
-            stdin.shutdown().await
-        })
-    });
-    let mut stderr = child.stderr.take();
-    let mut stderr_task = Some(crate::load_progress::spawn(async move {
-        let mut bytes = Vec::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.read_to_end(&mut bytes).await;
-        }
-        bytes
-    }));
-
-    let (deadline, execution_timeout) = ffmpeg_execution_deadline(execution_timeout);
-
-    let status = if let Some(context) = context {
+    let mut command = Command::new(sceneworks_core::media_process::ffmpeg_program(program));
+    command.args(arguments);
+    let control = async {
+        let Some(context) = context else {
+            return std::future::pending::<WorkerError>().await;
+        };
         let mut interval = tokio::time::interval(progress_report_interval(context.settings));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
-            tokio::select! {
-                status = child.wait() => match status {
-                    Ok(status) => break status,
-                    Err(error) => {
-                        let cleanup = stop_ffmpeg_child(
-                            &mut child,
-                            &mut stdin_task,
-                            &mut stderr_task,
-                        ).await;
-                        return Err(worker_error_with_cleanup(WorkerError::Io(error), cleanup));
-                    }
-                },
-                _ = tokio::time::sleep_until(deadline) => {
-                    let cleanup = stop_ffmpeg_child(
-                        &mut child,
-                        &mut stdin_task,
-                        &mut stderr_task,
-                    ).await;
-                    return Err(worker_error_with_cleanup(
-                        WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                        cleanup,
-                    ));
-                }
-                _ = interval.tick() => {
-                    let control = tokio::time::timeout_at(deadline, async {
-                        heartbeat(
-                            context.api,
-                            context.settings,
-                            WorkerStatus::Busy,
-                            Some(context.job_id),
-                        ).await?;
-                        Ok::<bool, WorkerError>(
-                            cancel_requested_peek(context.api, context.job_id).await,
-                        )
-                    }).await;
-                    match control {
-                        Err(_) => {
-                            let cleanup = stop_ffmpeg_child(
-                                &mut child,
-                                &mut stdin_task,
-                                &mut stderr_task,
-                            ).await;
-                            return Err(worker_error_with_cleanup(
-                                WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                                cleanup,
-                            ));
-                        }
-                        Ok(Err(error)) => {
-                            let cleanup = stop_ffmpeg_child(
-                                &mut child,
-                                &mut stdin_task,
-                                &mut stderr_task,
-                            ).await;
-                            return Err(worker_error_with_cleanup(error, cleanup));
-                        }
-                        Ok(Ok(true)) => {
-                            let cleanup = stop_ffmpeg_child(
-                                &mut child,
-                                &mut stdin_task,
-                                &mut stderr_task,
-                            ).await;
-                            if let Err(error) = mark_job_canceled(
-                                context.api,
-                                context.job_id,
-                                context.cancel_message,
-                            ).await {
-                                return Err(worker_error_with_cleanup(error, cleanup));
-                            }
-                            return Err(worker_error_with_cleanup(
-                                WorkerError::Canceled(context.cancel_message.to_owned()),
-                                cleanup,
-                            ));
-                        }
-                        Ok(Ok(false)) => {}
+            interval.tick().await;
+            if let Err(error) = heartbeat(
+                context.api,
+                context.settings,
+                WorkerStatus::Busy,
+                Some(context.job_id),
+            )
+            .await
+            {
+                return error;
+            }
+            if cancel_requested_peek(context.api, context.job_id).await {
+                return WorkerError::Canceled(context.cancel_message.to_owned());
+            }
+        }
+    };
+    let output = sceneworks_core::media_process::run_command(
+        command,
+        stdin_chunks,
+        execution_timeout,
+        control,
+        sceneworks_core::media_process::discard_stdout,
+    )
+    .await;
+    let output = match output {
+        Ok(output) => output,
+        Err(sceneworks_core::media_process::ProcessError::Control(error, cleanup)) => {
+            // The neutral runner has already killed and reaped before the terminal update.
+            if matches!(error, WorkerError::Canceled(_)) {
+                if let Some(context) = context {
+                    if let Err(error) =
+                        mark_job_canceled(context.api, context.job_id, context.cancel_message).await
+                    {
+                        return Err(worker_error_with_cleanup(error, cleanup));
                     }
                 }
             }
+            return Err(worker_error_with_cleanup(error, cleanup));
         }
-    } else {
-        match tokio::time::timeout_at(deadline, child.wait()).await {
-            Ok(Ok(status)) => status,
-            Ok(Err(error)) => {
-                let cleanup =
-                    stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                return Err(worker_error_with_cleanup(WorkerError::Io(error), cleanup));
-            }
-            Err(_) => {
-                let cleanup =
-                    stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                return Err(worker_error_with_cleanup(
-                    WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                    cleanup,
-                ));
-            }
+        Err(error @ sceneworks_core::media_process::ProcessError::Spawn(_)) => {
+            return Err(WorkerError::Engine(error.to_string()));
+        }
+        Err(sceneworks_core::media_process::ProcessError::Io(error)) => {
+            return Err(WorkerError::Io(error))
         }
     };
-
-    let stderr = match join_ffmpeg_task_until(&mut stderr_task, deadline).await {
-        Ok(stderr) => stderr,
-        Err(FfmpegTaskDeadlineError::TimedOut) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(worker_error_with_cleanup(
-                WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                cleanup,
-            ));
-        }
-        Err(FfmpegTaskDeadlineError::Join(error)) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(worker_error_with_cleanup(
-                task_join_error("ffmpeg stderr reader task", error),
-                cleanup,
-            ));
-        }
-    };
-    let stderr = String::from_utf8_lossy(&stderr);
-    if status.success() {
-        if stdin_task.is_some() {
-            let result = match join_ffmpeg_task_until(&mut stdin_task, deadline).await {
-                Ok(result) => result,
-                Err(FfmpegTaskDeadlineError::TimedOut) => {
-                    let cleanup =
-                        stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                    return Err(worker_error_with_cleanup(
-                        WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                        cleanup,
-                    ));
-                }
-                Err(FfmpegTaskDeadlineError::Join(error)) => {
-                    let cleanup =
-                        stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                    return Err(worker_error_with_cleanup(
-                        task_join_error("ffmpeg stdin writer task", error),
-                        cleanup,
-                    ));
-                }
-            };
-            result.map_err(WorkerError::Io)?;
-        }
-        return Ok(stderr.into_owned());
+    if let Some(detail) = output.failure_detail() {
+        return Err(WorkerError::Engine(detail));
     }
-    if stdin_task.is_some() {
-        match abort_ffmpeg_task_until(&mut stdin_task, deadline).await {
-            Ok(()) => {}
-            Err(FfmpegTaskDeadlineError::TimedOut) => {
-                let cleanup =
-                    stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                return Err(worker_error_with_cleanup(
-                    WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                    cleanup,
-                ));
-            }
-            Err(FfmpegTaskDeadlineError::Join(error)) => {
-                let cleanup =
-                    stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                return Err(worker_error_with_cleanup(
-                    task_join_error("ffmpeg stdin writer task", error),
-                    cleanup,
-                ));
-            }
-        }
-    }
-    let bounded = bounded_tail(&stderr, 10, 2000);
-    if bounded.trim().is_empty() {
-        Err(WorkerError::Engine(
-            "FFmpeg command failed without stderr output.".to_owned(),
-        ))
-    } else {
-        Err(WorkerError::Engine(bounded))
-    }
-}
-
-enum FfmpegTaskDeadlineError {
-    TimedOut,
-    Join(tokio::task::JoinError),
-}
-
-async fn join_ffmpeg_task_until<T>(
-    task: &mut Option<tokio::task::JoinHandle<T>>,
-    deadline: tokio::time::Instant,
-) -> Result<T, FfmpegTaskDeadlineError> {
-    let mut handle = task
-        .take()
-        .expect("FFmpeg pipe task exists until joined or aborted");
-    match tokio::time::timeout_at(deadline, &mut handle).await {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(error)) => Err(FfmpegTaskDeadlineError::Join(error)),
-        Err(_) => {
-            *task = Some(handle);
-            Err(FfmpegTaskDeadlineError::TimedOut)
-        }
-    }
-}
-
-async fn abort_ffmpeg_task_until<T>(
-    task: &mut Option<tokio::task::JoinHandle<T>>,
-    deadline: tokio::time::Instant,
-) -> Result<(), FfmpegTaskDeadlineError> {
-    let Some(mut handle) = task.take() else {
-        return Ok(());
-    };
-    handle.abort();
-    match tokio::time::timeout_at(deadline, &mut handle).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(error)) if error.is_cancelled() => Ok(()),
-        Ok(Err(error)) => Err(FfmpegTaskDeadlineError::Join(error)),
-        Err(_) => {
-            *task = Some(handle);
-            Err(FfmpegTaskDeadlineError::TimedOut)
-        }
-    }
-}
-
-fn task_cleanup_detail(label: &str, error: FfmpegTaskDeadlineError) -> String {
-    match error {
-        FfmpegTaskDeadlineError::TimedOut => {
-            format!("{label} did not stop within {FFMPEG_TEARDOWN_TIMEOUT:?}")
-        }
-        FfmpegTaskDeadlineError::Join(error) => format!("{label} failed to join: {error}"),
-    }
-}
-
-/// Explicitly terminate and reap the child, then stand down both pipe tasks. `kill_on_drop` remains
-/// a panic/unwind backstop, but ordinary timeout/heartbeat/cancel paths never rely on drop semantics
-/// and never leave a detached stdin or stderr task behind.
-async fn stop_ffmpeg_child(
-    child: &mut Child,
-    stdin_task: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
-    stderr_task: &mut Option<tokio::task::JoinHandle<Vec<u8>>>,
-) -> Option<String> {
-    let deadline = checked_deadline_from(tokio::time::Instant::now(), FFMPEG_TEARDOWN_TIMEOUT);
-    let mut details = Vec::new();
-    if let Err(error) = abort_ffmpeg_task_until(stdin_task, deadline).await {
-        details.push(task_cleanup_detail("FFmpeg stdin writer", error));
-    }
-    if let Err(error) = abort_ffmpeg_task_until(stderr_task, deadline).await {
-        details.push(task_cleanup_detail("FFmpeg stderr reader", error));
-    }
-
-    let mut child_reaped = false;
-    match child.try_wait() {
-        Ok(Some(_)) => child_reaped = true,
-        Ok(None) => {}
-        Err(error) => details.push(format!("could not inspect FFmpeg child status: {error}")),
-    }
-    if !child_reaped {
-        let kill_error = child.start_kill().err();
-        match tokio::time::timeout_at(deadline, child.wait()).await {
-            // `start_kill` can lose a benign child-exited race. A successful wait proves that race
-            // was safe and that the child was reaped, so the transient kill error is not reported.
-            Ok(Ok(_)) => {}
-            Ok(Err(wait_error)) => {
-                if let Some(kill_error) = kill_error {
-                    details.push(format!("could not kill FFmpeg child: {kill_error}"));
-                }
-                details.push(format!("could not reap FFmpeg child: {wait_error}"));
-            }
-            Err(_) => {
-                if let Some(kill_error) = kill_error {
-                    details.push(format!("could not kill FFmpeg child: {kill_error}"));
-                }
-                details.push(format!(
-                    "FFmpeg child was not reaped within {FFMPEG_TEARDOWN_TIMEOUT:?}"
-                ));
-            }
-        }
-    }
-
-    (!details.is_empty()).then(|| details.join("; "))
+    Ok(String::from_utf8_lossy(&output.stderr).into_owned())
 }
 
 fn worker_error_with_cleanup(error: WorkerError, cleanup: Option<String>) -> WorkerError {
@@ -4512,17 +4192,6 @@ fn worker_error_with_cleanup(error: WorkerError, cleanup: Option<String>) -> Wor
         // above keeps the cleanup failure observable while preserving the primary classification.
         other => other,
     }
-}
-
-fn io_error_with_cleanup(error: std::io::Error, cleanup: Option<String>) -> std::io::Error {
-    let Some(cleanup) = cleanup else {
-        return error;
-    };
-    tracing::error!(cleanup = %cleanup, "FFmpeg teardown reported an additional failure");
-    std::io::Error::new(
-        error.kind(),
-        format!("{error} FFmpeg cleanup also failed: {cleanup}"),
-    )
 }
 
 #[cfg(test)]
@@ -4564,61 +4233,26 @@ async fn run_ffmpeg_probe_command(command: Command) -> std::io::Result<std::proc
 /// The duration/frame-count probes used to call `Command::output()` directly. Keep their output
 /// contract while exposing the same explicit timeout → kill → reap lifecycle as the shared runner.
 pub(crate) async fn run_ffmpeg_probe_command_with_timeout(
-    mut command: Command,
+    command: Command,
     execution_timeout: Duration,
 ) -> std::io::Result<std::process::Output> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = command.spawn()?;
-    let mut stdin_task: Option<tokio::task::JoinHandle<std::io::Result<()>>> = None;
-    let mut stderr = child.stderr.take();
-    let mut stderr_task = Some(crate::load_progress::spawn(async move {
-        let mut bytes = Vec::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.read_to_end(&mut bytes).await;
-        }
-        bytes
-    }));
-
-    let (deadline, execution_timeout) = ffmpeg_execution_deadline(execution_timeout);
-    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(error)) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(io_error_with_cleanup(error, cleanup));
-        }
-        Err(_) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(io_error_with_cleanup(
-                ffmpeg_timeout_io_error(execution_timeout),
-                cleanup,
-            ));
-        }
-    };
-    let stderr = match join_ffmpeg_task_until(&mut stderr_task, deadline).await {
-        Ok(stderr) => stderr,
-        Err(FfmpegTaskDeadlineError::TimedOut) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(io_error_with_cleanup(
-                ffmpeg_timeout_io_error(execution_timeout),
-                cleanup,
-            ));
-        }
-        Err(FfmpegTaskDeadlineError::Join(error)) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(io_error_with_cleanup(
-                std::io::Error::other(format!("ffmpeg stderr reader task: {error}")),
-                cleanup,
-            ));
-        }
-    };
+    let output = sceneworks_core::media_process::run_command(
+        command,
+        None,
+        execution_timeout,
+        std::future::pending::<std::convert::Infallible>(),
+        sceneworks_core::media_process::discard_stdout,
+    )
+    .await
+    .map_err(|error| match error {
+        sceneworks_core::media_process::ProcessError::Spawn(error)
+        | sceneworks_core::media_process::ProcessError::Io(error) => error,
+        sceneworks_core::media_process::ProcessError::Control(never, _) => match never {},
+    })?;
     Ok(std::process::Output {
-        status,
+        status: output.status,
         stdout: Vec::new(),
-        stderr,
+        stderr: output.stderr,
     })
 }
 

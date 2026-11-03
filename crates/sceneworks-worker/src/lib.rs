@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use reqwest::header;
@@ -50,7 +49,7 @@ use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use tracing::Level;

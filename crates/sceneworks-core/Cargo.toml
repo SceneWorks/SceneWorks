@@ -10,6 +10,7 @@ publish = false
 test-support = []
 
 [dependencies]
+tokio = { version = "1.40", features = ["rt", "time", "process", "io-util", "macros"] }
 sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
 sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
 sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
