@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { legacySortedValue as canonicalize } from "./lib/canonical-json.mjs";
+import { sha256 as sha256Bytes, fileSha256 as sha256File } from "./lib/file-sha256.mjs";
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, createWriteStream, readFileSync } from "node:fs";
+import { createWriteStream, readFileSync } from "node:fs";
 import {
   appendFile, cp, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, statfs, writeFile,
 } from "node:fs/promises";
@@ -265,16 +267,9 @@ function exactKeys(value, expected, label) {
   }
 }
 
-function canonicalize(value) {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]));
-  }
-  return value;
-}
 
 function canonicalSha256(value) {
-  return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
+  return sha256Bytes(JSON.stringify(canonicalize(value)));
 }
 
 const DOWNLOADED_FILE_FIELDS = ["path", "bytes", "sha256", "lfsSha256", "commitSha"];
@@ -1255,11 +1250,6 @@ async function assertPathAbsent(target, label) {
   fail(`${label} still exists after recursive cleanup`);
 }
 
-async function sha256File(file) {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(file)) hash.update(chunk);
-  return hash.digest("hex");
-}
 
 export async function hashedFiles(root, { exclude = new Set() } = {}) {
   const requested = path.resolve(root);

@@ -1,5 +1,10 @@
 # sc-4422 / sc-4424 — InstantID angle-set kps reframing (validation record)
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 The Character-Studio InstantID angle set was reframed so the subject **fills the frame**
 (head-and-shoulders, shoulders retained) instead of the original small, low-in-frame face —
 the outputs are LoRA training data, so more character pixels = more training signal.

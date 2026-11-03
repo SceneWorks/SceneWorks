@@ -26,6 +26,7 @@ const AUDIT = path.join(ROOT, "config/inference-third-party-source.json");
 // restore it: a Windows sharing error on that restore poisoned the following full-suite retry.
 const CHECKER_INPUTS = [
   "scripts/check-license-coverage.mjs", "scripts/scan-inference-provenance.mjs",
+  "scripts/lib/jsonc.mjs", "scripts/lib/file-sha256.mjs",
   "config/manifests/builtin.models.jsonc", "config/inference-third-party-source.json",
   "config/inference-provenance-candidates.tsv", "config/inference-crate-prefixes.txt",
   "crates/sceneworks-worker/Cargo.toml", "Cargo.toml", "Cargo.lock", "package.json",

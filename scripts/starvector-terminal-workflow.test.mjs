@@ -123,7 +123,12 @@ if (process.argv.length === 1) {
   const registrationPath = path.join(process.env.SCENEWORKS_DATA_DIR, "fixture-worker.json");
   if (worker && process.env.STARVECTOR_TEST_FAIL_RELOAD === "1") process.exit(3);
   if (worker) {
-    const register = () => fs.writeFileSync(registrationPath, JSON.stringify({ id: process.env.SCENEWORKS_WORKER_ID, pid: process.pid }));
+    const register = () => {
+      // Publish a complete record: the API fixture may read concurrently.
+      const pending = registrationPath + "." + process.pid + ".tmp";
+      fs.writeFileSync(pending, JSON.stringify({ id: process.env.SCENEWORKS_WORKER_ID, pid: process.pid }));
+      fs.renameSync(pending, registrationPath);
+    };
     if (process.env.STARVECTOR_TEST_DEFER_REGISTRATION === "1") {
       const poll = setInterval(() => { if (fs.existsSync(registrationPath + ".polled")) { clearInterval(poll); register(); } }, 5);
     } else register();

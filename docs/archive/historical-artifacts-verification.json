@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "verifiedAt": "2026-11-03T14:24:20.604136+00:00",
+  "source": {
+    "repository": "SceneWorks/SceneWorks",
+    "commit": "a1d95e2c43eef4a34a3fe5bf420bb2cc2abe181f",
+    "tree": "41c774a49605c963e851c7803e45bd9e32a4d2e9",
+    "archiveUrl": "https://github.com/SceneWorks/SceneWorks/archive/a1d95e2c43eef4a34a3fe5bf420bb2cc2abe181f.tar.gz",
+    "retention": "Protected main ancestry; preserve repository history and published source revisions. This source archive is the maintained recoverable archive; no mutable branch name is a retrieval identity."
+  },
+  "manifestSha256": "2a43d7f8a3854979d5d0e5b97aa8adba73490a91c14d4e63e46bb2cf4e806985",
+  "remoteMainAncestry": {
+    "method": "GitHub compare API pinned source...main",
+    "status": "identical",
+    "baseCommit": "a1d95e2c43eef4a34a3fe5bf420bb2cc2abe181f",
+    "mergeBase": "a1d95e2c43eef4a34a3fe5bf420bb2cc2abe181f"
+  },
+  "retrieval": {
+    "method": "authenticated gh Git API commit + recursive tree + raw blobs",
+    "files": 150,
+    "bytes": 207824394,
+    "allEntriesVerifiedBeforeRemoval": true,
+    "checks": [
+      "remote commit/tree identity",
+      "complete nontruncated remote tree",
+      "every path/blob/mode/size binding",
+      "every SHA-256 and Git blob digest",
+      "every restored file byte-for-byte equal to its original tracked source",
+      "all 61 calibration frames match retained source-session SHA-256 receipts",
+      "memory-calibration-harness check --input docs/generated/memory-calibration-evidence.json --source-root RESTORED_ROOT passed"
+    ],
+    "groups": {
+      "design": {
+        "files": 12,
+        "bytes": 4004303
+      },
+      "calibration": {
+        "files": 61,
+        "bytes": 191889408
+      },
+      "experiments": {
+        "files": 16,
+        "bytes": 9872153
+      },
+      "nonruntime": {
+        "files": 1,
+        "bytes": 15343
+      },
+      "poses": {
+        "files": 46,
+        "bytes": 1886443
+      },
+      "spikes": {
+        "files": 14,
+        "bytes": 156744
+      }
+    }
+  },
+  "constraints": {
+    "newMeasurements": false,
+    "learnedExecution": false,
+    "historyRewritten": false,
+    "externalPublication": false
+  },
+  "reproduce": [
+    "node scripts/historical-artifacts.mjs restore --output RESTORED_ROOT",
+    "node scripts/historical-artifacts.mjs verify --root RESTORED_ROOT",
+    "node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json --source-root RESTORED_ROOT"
+  ]
+}

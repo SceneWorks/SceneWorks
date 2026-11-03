@@ -1,5 +1,10 @@
 # sc-3498 — Candle vs Python-Torch SDXL: validation + go/no-go
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 Epic 3494. Head-to-head of the Candle SDXL prototype against the Python-Torch
 diffusers path that `SdxlDiffusersAdapter` wraps (`StableDiffusionXLPipeline`),
 matched prompt/seed/dims/steps/guidance. Same GPU, run sequentially.
