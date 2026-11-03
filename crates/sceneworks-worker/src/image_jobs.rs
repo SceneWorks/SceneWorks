@@ -773,11 +773,12 @@ async fn run_image_generate_job_unexplained(
     // heavy load, with the same message the Python worker raised — instead of failing
     // deep in the engine's strict adapter loader. Network-type handling (peft LoKr AND third-party
     // LyCORIS both apply on MLX now, epic 3641) is done by routing + `classify_adapter` + the engine.
-    sceneworks_core::lora_family::validate_lora_compatibility(
+    sceneworks_core::lora_family::validate_lora_compatibility_with_manifest(
         &request.loras,
         Some(plan.family.as_str()),
         plan.adapter,
         Some(request.model.as_str()),
+        (!request.model_manifest_entry.is_empty()).then_some(&request.model_manifest_entry),
     )
     .map_err(WorkerError::InvalidPayload)?;
 

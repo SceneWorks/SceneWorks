@@ -805,7 +805,7 @@ pub fn minimax_h3_frame_count(raw_frames: u32) -> u32 {
 /// Whether `model` is a MiniMax-H3 family id (`minimax_h3`, `minimax_h3_ref`). Both partitions
 /// share one DiT geometry, so both ride [`minimax_h3_frame_count`].
 pub fn is_minimax_h3_model(model: &str) -> bool {
-    model.starts_with("minimax_h3")
+    crate::model_facts::is_family_with_legacy_prefix(model, "minimax-h3", "minimax_h3")
 }
 
 /// LTX-2.3 temporal stride: frames snap to the nearest `8k + 1`, minimum 9. Direct
@@ -861,17 +861,17 @@ pub fn mochi_frame_count(raw_frames: u32) -> u32 {
 
 /// Whether `model` is an LTX-2.3 family id (`ltx_2_3`, `ltx_2_3_eros`, …).
 pub fn is_ltx_model(model: &str) -> bool {
-    model.starts_with("ltx")
+    crate::model_facts::is_family_with_legacy_prefix(model, "ltx-video", "ltx")
 }
 
 /// Whether `model` is a Wan2.2 family id (`wan_2_2`, `wan_2_2_t2v_14b`, …).
 pub fn is_wan_model(model: &str) -> bool {
-    model.starts_with("wan")
+    crate::model_facts::is_family_with_legacy_prefix(model, "wan-video", "wan")
 }
 
 /// Whether `model` is a Mochi 1 family id (`mochi_1`, …). Epic 1788 / sc-11993.
 pub fn is_mochi_model(model: &str) -> bool {
-    model.starts_with("mochi")
+    crate::model_facts::is_family_with_legacy_prefix(model, "mochi", "mochi")
 }
 
 /// `limits.hardMaxDuration` (seconds) from a resolved manifest entry, or `None` for **no cap**.

@@ -4,6 +4,15 @@
 //! (submit-time field errors) and the worker (preflight + engine mapping) share, and the auxiliary
 //! catalog models the technique needs installed.
 
+/// Every advanced technique key parsed by this module.
+pub const TECHNIQUE_KEYS: &[&str] = &[
+    DEPTH_ANCHORING_WEIGHT_KEY,
+    DEPTH_ANCHORING_MODEL_KEY,
+    DEPTH_ANCHORING_MIN_T_KEY,
+    DEPTH_ANCHORING_MAX_T_KEY,
+    DEPTH_ANCHORING_EVERY_KEY,
+];
+
 use serde_json::Value;
 
 use super::{technique_value, TrainingConfig, TrainingPlanError, TrainingTarget};

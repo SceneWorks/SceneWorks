@@ -707,7 +707,7 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
     match (verdict.family.as_deref(), verdict.component, verdict.quant) {
         // --- Supported loaders: one arm per landed loader (add the next family/quant here) ---
         (
-            Some("krea_2"),
+            Some(crate::model_family::KREA_2),
             ComponentRole::Transformer,
             QuantFormat::Bf16
                 | QuantFormat::Int8TensorwisePerRow
@@ -721,21 +721,21 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         // transforms over the shared reader, so this gate names the family and the source codec and
         // nothing else. Dense/fp8 FLUX.2 single files are refused below: they have no import
         // loader, and admitting them here would claim a lane nothing serves.
-        (Some("flux2"), ComponentRole::Transformer, QuantFormat::Nvfp4) => Ok(()),
+        (Some(crate::model_family::FLUX2), ComponentRole::Transformer, QuantFormat::Nvfp4) => Ok(()),
         (
-            Some("sdxl"),
+            Some(crate::model_family::SDXL),
             ComponentRole::Checkpoint,
             QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32,
         ) => Ok(()),
         // sc-15036: a dense Mage-Flow DiT. Loadable only as a transformer component DIRECTORY —
         // the caller must additionally pass the directory shape through
         // [`is_mage_flow_transformer_dir`]; this triple gate cannot see the config sibling.
-        (Some("mage-flow"), ComponentRole::Transformer, QuantFormat::Bf16) => Ok(()),
+        (Some(crate::model_family::MAGE_FLOW), ComponentRole::Transformer, QuantFormat::Bf16) => Ok(()),
         // Dense or native ConvRot INT8 H3 DiT. The header-only INT8 classification is not codec
         // authority: H3SourceInventory validates every ConvRot descriptor and operand before the
         // plan can become runnable. Plain int8-per-row, affine Q8, and W4A8 fail that boundary.
         (
-            Some("minimax-h3"),
+            Some(crate::model_family::MINIMAX_H3),
             ComponentRole::Transformer,
             QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32 | QuantFormat::Int8TensorwisePerRow,
         ) => Ok(()),
@@ -755,7 +755,7 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
              refused rather than guessing at a loader."
                 .to_owned(),
         ),
-        (Some("flux3"), _, _) => Err("The 'flux3' family requires its pinned package directory with config, DiT, autoencoder and Qwen3-VL encoder. Install the base or distilled model from the catalog; a lone checkpoint file is not that package.".to_owned()),
+        (Some(crate::model_family::FLUX3), _, _) => Err("The 'flux3' family requires its pinned package directory with config, DiT, autoencoder and Qwen3-VL encoder. Install the base or distilled model from the catalog; a lone checkpoint file is not that package.".to_owned()),
         (Some(family), _, _)
             if !IMPORT_SUPPORTED_FAMILIES.contains(&family)
                 && !VIDEO_IMPORT_SUPPORTED_FAMILIES.contains(&family) =>
@@ -770,51 +770,51 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
                     .join(", ")
             ))
         }
-        (Some("flux2"), component, _) if component != ComponentRole::Transformer => Err(format!(
+        (Some(crate::model_family::FLUX2), component, _) if component != ComponentRole::Transformer => Err(format!(
             "Model import for the 'flux2' family requires a diffusion transformer, not a \
              {component} file."
         )),
-        (Some("flux2"), _, quant) => Err(format!(
+        (Some(crate::model_family::FLUX2), _, quant) => Err(format!(
             "Model import for the 'flux2' family supports the NVFP4 single-file Klein export, not \
              {quant}. Dense and fp8 FLUX.2 tiers are installed through the model catalog, not \
              imported."
         )),
-        (Some("krea_2"), component, _) if component != ComponentRole::Transformer => Err(format!(
+        (Some(crate::model_family::KREA_2), component, _) if component != ComponentRole::Transformer => Err(format!(
             "Model import for the 'krea_2' family requires a diffusion transformer, not a \
              {component} file."
         )),
-        (Some("sdxl"), component, _) if component != ComponentRole::Checkpoint => Err(format!(
+        (Some(crate::model_family::SDXL), component, _) if component != ComponentRole::Checkpoint => Err(format!(
             "Model import for the 'sdxl' family requires a fused checkpoint containing the UNet, \
              both text encoders, and VAE, not a {component} file."
         )),
-        (Some("mage-flow"), component, _) if component != ComponentRole::Transformer => {
+        (Some(crate::model_family::MAGE_FLOW), component, _) if component != ComponentRole::Transformer => {
             Err(format!(
                 "Model import for the 'mage-flow' family requires a diffusion transformer, not a \
                  {component} file."
             ))
         }
-        (Some("minimax-h3"), component, _) if component != ComponentRole::Transformer => {
+        (Some(crate::model_family::MINIMAX_H3), component, _) if component != ComponentRole::Transformer => {
             Err(format!(
                 "Model import for the 'minimax-h3' family requires the MiniMax-H3 diffusion \
                  transformer, not a {component} file. Its text encoder, tokenizer and VAEs are \
                  reused from the installed MiniMax-H3 model."
             ))
         }
-        (Some("krea_2"), _, quant) => Err(format!(
+        (Some(crate::model_family::KREA_2), _, quant) => Err(format!(
             "Model import for the 'krea_2' family supports dense bf16, descriptor-gated \
              int8-per-row, descriptor-gated scalar fp8, Kitchen MXFP8, or NVIDIA Kitchen NVFP4 \
              weights, not {quant}. Re-export the checkpoint in bf16."
         )),
-        (Some("sdxl"), _, quant) => Err(format!(
+        (Some(crate::model_family::SDXL), _, quant) => Err(format!(
             "Model import for the 'sdxl' family supports dense f16, bf16, or f32 fused checkpoints, \
              not {quant}."
         )),
-        (Some("mage-flow"), _, quant) => Err(format!(
+        (Some(crate::model_family::MAGE_FLOW), _, quant) => Err(format!(
             "Model import for the 'mage-flow' family supports a dense bf16 transformer, not \
              {quant}. A pre-quantized q4/q8 Mage-Flow tier is installed through the model catalog, \
              not imported."
         )),
-        (Some("minimax-h3"), _, quant) => Err(format!(
+        (Some(crate::model_family::MINIMAX_H3), _, quant) => Err(format!(
             "Model import for the 'minimax-h3' family supports dense f16, bf16, f32 or \
              descriptor-validated ConvRot INT8 transformer components, not {quant}."
         )),
@@ -1525,7 +1525,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         && any_key_contains(keys, "conditioner.embedders.1.model.")
         && any_key_contains(keys, "first_stage_model.")
     {
-        return Some("sdxl");
+        return Some(crate::model_family::SDXL);
     }
     // Z-Image (epic 1408): `context_refiner`/`noise_refiner`/`cap_embedder` are
     // unique. Shares the bare `layers.N.attention.qkv` fused-QKV layout with
@@ -1534,7 +1534,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         || any_key_contains(keys, "context_refiner.")
         || any_key_contains(keys, "cap_embedder.")
     {
-        return Some("z-image");
+        return Some(crate::model_family::Z_IMAGE);
     }
     // Krea 2 (epic 8588): the ComfyUI-native MMDiT export carries a unique
     // `txtfusion.` text-fusion tower (`txtfusion.{layerwise,refiner}_blocks`,
@@ -1544,7 +1544,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
     // (`model.diffusion_model.*`, native keys) — the diffusers-key snapshot layout
     // (`transformer_blocks.*`) is loaded by the Krea snapshot path, not here.
     if any_key_contains(keys, "txtfusion.") {
-        return Some("krea_2");
+        return Some(crate::model_family::KREA_2);
     }
     // MiniMax-H3 (epic 17137; import sc-26680): a single-stream DiT whose two-block text refiner
     // (`token_refiner.refiner_blocks.N`) and joint-audio input head (`audio_proj_in`) appear in no
@@ -1555,7 +1555,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         || any_key_contains(keys, "token_refiner.blocks."))
         && (any_key_contains(keys, "audio_proj_in.") || any_key_contains(keys, "audio_patch_proj."))
     {
-        return Some("minimax-h3");
+        return Some(crate::model_family::MINIMAX_H3);
     }
     // Ideogram 4 (epic 6561): single-stream `layers.N.attention.qkv` +
     // `adaln_modulation` (lowercase) + `feed_forward.w`, with the unique
@@ -1564,7 +1564,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         || any_key_contains(keys, "llm_cond_proj")
         || any_key_contains(keys, "adaln_proj.")
     {
-        return Some("ideogram");
+        return Some(crate::model_family::IDEOGRAM);
     }
     // LTX-Video 2.3 (epic 5481/5495): PixArt-style `transformer_blocks` +
     // `adaln_single` + `scale_shift_table`, with the unique audio-video
@@ -1574,7 +1574,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         || (any_key_contains(keys, "scale_shift_table")
             && any_key_contains(keys, "transformer_blocks"))
     {
-        return Some("ltx-video");
+        return Some(crate::model_family::LTX_VIDEO);
     }
     // FLUX3 (sc-26239): mode-specific image blocks + separate text blocks + shared single
     // stream. This classifies identity only; it does NOT add a single-file import loader.
@@ -1582,13 +1582,13 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         && any_key_contains(keys, "txt_mode_blocks.")
         && any_key_contains(keys, "single_blocks.")
     {
-        return Some("flux3");
+        return Some(crate::model_family::FLUX3);
     }
     // FLUX.2 (epic 6564): shared-modulation tensors across all blocks.
     if any_key_contains(keys, "double_stream_modulation_")
         || any_key_contains(keys, "single_stream_modulation.")
     {
-        return Some("flux2");
+        return Some(crate::model_family::FLUX2);
     }
     // Anima (epic 10512): Cosmos-Predict2 `diffusion_model.blocks.` with the
     // Cosmos triple `adaln_modulation_{self_attn,cross_attn,mlp}`; checked before
@@ -1597,7 +1597,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         || any_key_contains(keys, "adaln_modulation_cross_attn")
         || any_key_contains(keys, "adaln_modulation_mlp")
     {
-        return Some("anima");
+        return Some(crate::model_family::ANIMA);
     }
     // Wan 2.x (epic 5095): `blocks.N.{self_attn,cross_attn,ffn}` + per-block
     // `modulation`. The `.ffn.` + bare `modulation` pairing separates it from
@@ -1607,7 +1607,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         && any_key_contains(keys, ".ffn.")
         && any_key_contains(keys, "blocks.")
     {
-        return Some("wan-video");
+        return Some(crate::model_family::WAN_VIDEO);
     }
     // FLUX.1 and derivatives (longcat edit, chroma): double+single blocks with
     // `img_mod`/`txt_mod` per-block modulation (no shared-modulation tensors —
@@ -1616,7 +1616,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         && any_key_contains(keys, "single_blocks.")
         && (any_key_contains(keys, "img_mod") || any_key_contains(keys, "txt_mod"))
     {
-        return Some("flux");
+        return Some(crate::model_family::FLUX);
     }
     // Mage-Flow: a 12-block dual-stream MMDiT with explicit img/txt modulation linears.
     // Its broad `img_mlp`/`txt_mlp` + `add_q_proj` grammar overlaps Qwen-Image, so pin both the
@@ -1629,7 +1629,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         && any_key_contains(keys, ".img_mod.1.")
         && any_key_contains(keys, ".txt_mod.1.")
     {
-        return Some("mage-flow");
+        return Some(crate::model_family::MAGE_FLOW);
     }
     // Dual-stream MMDiT with `img_mlp`/`txt_mlp` + joint attention `add_q_proj`.
     // Among the families we ship as a single-file base this is Qwen-Image /
@@ -1641,7 +1641,7 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
         && !any_key_contains(keys, "context_embedder")
         && !any_key_contains(keys, ".ff_context.")
     {
-        return Some("qwen-image");
+        return Some(crate::model_family::QWEN_IMAGE);
     }
     None
 }

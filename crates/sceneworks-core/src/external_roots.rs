@@ -115,10 +115,184 @@ pub fn comfyui_base_dirs(roots: &[PathBuf]) -> Vec<(&'static str, PathBuf)> {
     dirs
 }
 
+/// Header-detection memo keyed by a canonical path and its size/mtime identity.
+/// Missing timestamps never prove an unchanged file; negative detections can be cached as `T`.
+pub struct ExternalScanCache<T> {
+    entries: std::collections::HashMap<PathBuf, CachedScan<T>>,
+}
+
+struct CachedScan<T> {
+    modified: Option<std::time::SystemTime>,
+    size: u64,
+    value: T,
+}
+
+impl<T> Default for ExternalScanCache<T> {
+    fn default() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl<T: Clone> ExternalScanCache<T> {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(
+        &self,
+        path: &std::path::Path,
+        modified: Option<std::time::SystemTime>,
+        size: u64,
+    ) -> Option<T> {
+        let entry = self.entries.get(path)?;
+        (entry.size == size && entry.modified? == modified?).then(|| entry.value.clone())
+    }
+
+    pub fn insert(
+        &mut self,
+        path: PathBuf,
+        modified: Option<std::time::SystemTime>,
+        size: u64,
+        value: T,
+    ) {
+        self.entries.insert(
+            path,
+            CachedScan {
+                modified,
+                size,
+                value,
+            },
+        );
+    }
+
+    pub fn retain_seen(&mut self, seen: &std::collections::HashSet<PathBuf>) {
+        self.entries.retain(|path, _| seen.contains(path));
+    }
+}
+
+/// Walk a canonical external subtree with the caller's container filter and bounds.
+/// Follow links only within the subtree, skip hidden entries (including linked aliases), and
+/// visit canonical directories once so cycles cannot consume the depth/file budget.
+pub fn walk_confined(
+    root: &std::path::Path,
+    max_depth: usize,
+    max_files: usize,
+    accepts: impl Fn(&std::path::Path) -> bool,
+) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![(root.to_path_buf(), 0_usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if !visited.insert(dir.clone()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if files.len() >= max_files {
+                tracing::warn!(root = %root.display(), limit = max_files, "external scan hit its file cap; remaining files ignored");
+                return files;
+            }
+            let path = entry.path();
+            if crate::lora_family::is_hidden_file(&path) {
+                continue;
+            }
+            let Ok(canonical) = std::fs::canonicalize(path) else {
+                continue;
+            };
+            if !canonical.starts_with(root) || crate::lora_family::is_hidden_file(&canonical) {
+                continue;
+            }
+            if canonical.is_dir() {
+                if depth < max_depth {
+                    stack.push((canonical, depth + 1));
+                }
+            } else if accepts(&canonical) {
+                files.push(canonical);
+            }
+        }
+    }
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn scan_cache_reuses_negative_results_but_not_missing_timestamps() {
+        let path = PathBuf::from("unknown.safetensors");
+        let stamp = std::time::SystemTime::UNIX_EPOCH;
+        let mut cache = ExternalScanCache::<Option<String>>::default();
+        cache.insert(path.clone(), Some(stamp), 10, None);
+        assert_eq!(cache.get(&path, Some(stamp), 10), Some(None));
+        assert_eq!(cache.get(&path, None, 10), None);
+        assert_eq!(cache.get(&path, Some(stamp), 11), None);
+        cache.retain_seen(&std::collections::HashSet::new());
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn confined_walk_preserves_filters_depth_and_file_bounds() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::create_dir_all(root.join("nested/deeper")).unwrap();
+        for file in [
+            "a.safetensors",
+            "b.gguf",
+            "skip.txt",
+            ".hidden.safetensors",
+            "nested/c.safetensors",
+            "nested/deeper/d.safetensors",
+        ] {
+            std::fs::write(root.join(file), b"metadata-only fixture").unwrap();
+        }
+        let accepts = |path: &Path| path.extension().is_some_and(|ext| ext == "safetensors");
+        let mut flat = walk_confined(&root, 0, 10, accepts);
+        flat.sort();
+        assert_eq!(flat, vec![root.join("a.safetensors")]);
+        let mut nested = walk_confined(&root, 1, 10, accepts);
+        nested.sort();
+        assert_eq!(
+            nested,
+            vec![
+                root.join("a.safetensors"),
+                root.join("nested/c.safetensors")
+            ]
+        );
+        assert_eq!(walk_confined(&root, 8, 1, accepts).len(), 1);
+        assert!(walk_confined(&root, 8, 0, accepts).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_walk_follows_internal_links_but_rejects_escape_hidden_and_cycles() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::create_dir_all(root.join(".hidden")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(root.join("real/one.safetensors"), b"header fixture").unwrap();
+        std::fs::write(root.join(".hidden/secret.safetensors"), b"hidden").unwrap();
+        std::fs::write(outside.join("escape.safetensors"), b"outside").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        symlink(root.join("real"), root.join("alias")).unwrap();
+        symlink(&root, root.join("real/cycle")).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let found = walk_confined(&root, 8, 20, |path| {
+            path.extension().is_some_and(|ext| ext == "safetensors")
+        });
+        assert_eq!(found, vec![root.join("real/one.safetensors")]);
+    }
 
     /// Build an OS-native path list the same way an operator's shell would.
     fn joined(paths: &[&str]) -> String {
