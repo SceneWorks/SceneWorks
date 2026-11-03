@@ -649,16 +649,8 @@ impl KreaTurboFit {
 }
 
 pub(crate) const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
-// sc-17097: the inference revision the shipped Krea phase curves are declared COMPATIBLE with. It must
-// stay equal to the manifest's `turboFit.inferenceRevision` - `candidate_exclusion` compares the two and
-// stales every optimized rung when they diverge.
-//
-// The curves were captured against `277f4238`; each evidence record keeps
-// that exact commit in its own `inferenceCommit` receipt, which is never rewritten (sc-16482: a receipt
-// testifies to its own run). This constant moved to the sc-15819 closeout pin only after verifying the
-// range is a single commit whose diff against BOTH `candle-gen-krea` and `gen-core/src/memory_strategy.rs`
-// is empty - the measured path and the calibration identity (ABI 3, fingerprint, deferred load shape) are
-// byte-for-byte unchanged, so the captures remain valid rather than merely re-stamped.
+// Krea curves retain their captured producer revision. New derived estimates instead use the
+// linked inference provenance; neither stamp is a runtime currency gate (sc-22738).
 
 #[derive(Clone, Debug)]
 pub(crate) struct KreaRuntimeEvidenceContext {
@@ -1816,8 +1808,8 @@ fn krea_turbo_fit_priced(
             ));
             anchor_derived.push((
                 selection,
-                MemoryEvidence {
-                    key: MemoryEvidenceKey {
+                sceneworks_core::memory_contracts::unverified_estimate(
+                    MemoryEvidenceKey {
                         model_family: "krea_2_turbo".to_owned(),
                         resolved_route: "krea_2_turbo".to_owned(),
                         backend: gen_core::MemoryBackend::Candle,
@@ -1832,25 +1824,11 @@ fn krea_turbo_fit_priced(
                         engaged_composition: engaged,
                         parameters,
                     },
-                    conformance: MemoryConformanceState::ImplementedUnverified,
-                    dimensions: MemoryEvidenceDimensions {
-                        static_implementation: MemoryEvidenceVerdict::Satisfied,
-                        declared_calibration: MemoryEvidenceVerdict::Missing,
-                        historical_verification: MemoryEvidenceVerdict::Missing,
-                        current_environment_verification: MemoryEvidenceVerdict::Missing,
-                        canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-                        exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-                    },
                     calibration_abi,
-                    calibration_fingerprint: calibration_fingerprint.to_owned(),
-                    sceneworks_revision: scene_works_revision.to_owned(),
-                    inference_revision: inference_revision.to_owned(),
-                    harness_version: String::new(),
+                    calibration_fingerprint.to_owned(),
+                    scene_works_revision.to_owned(),
                     predicted_peak_bytes,
-                    observed_peak_bytes: None,
-                    parity: MemoryParityContract::Exact,
-                    parity_result: MemoryParityResult::NotRun,
-                },
+                ),
             ));
             continue;
         };
@@ -2006,8 +1984,8 @@ fn krea_turbo_fit_priced(
         );
         estimates.push((
             *selection,
-            MemoryEvidence {
-                key: MemoryEvidenceKey {
+            sceneworks_core::memory_contracts::unverified_estimate(
+                MemoryEvidenceKey {
                     model_family: "krea_2_turbo".to_owned(),
                     resolved_route: "krea_2_turbo".to_owned(),
                     backend: gen_core::MemoryBackend::Candle,
@@ -2022,25 +2000,11 @@ fn krea_turbo_fit_priced(
                     engaged_composition: provider_contract.engaged_composition(selection.strategy),
                     parameters: selection.parameters,
                 },
-                conformance: MemoryConformanceState::ImplementedUnverified,
-                dimensions: MemoryEvidenceDimensions {
-                    static_implementation: MemoryEvidenceVerdict::Satisfied,
-                    declared_calibration: MemoryEvidenceVerdict::Missing,
-                    historical_verification: MemoryEvidenceVerdict::Missing,
-                    current_environment_verification: MemoryEvidenceVerdict::Missing,
-                    canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-                    exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-                },
                 calibration_abi,
-                calibration_fingerprint: calibration_fingerprint.to_owned(),
-                sceneworks_revision: scene_works_revision.to_owned(),
-                inference_revision: inference_revision.to_owned(),
-                harness_version: String::new(),
+                calibration_fingerprint.to_owned(),
+                scene_works_revision.to_owned(),
                 predicted_peak_bytes,
-                observed_peak_bytes: None,
-                parity: MemoryParityContract::Exact,
-                parity_result: MemoryParityResult::NotRun,
-            },
+            ),
         ));
     }
     let mut candidates = selections

@@ -9,7 +9,7 @@ import { createReadStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { performance } from "node:perf_hooks";
-import { ROOT, parseArgs, planRun, providerCommand, run } from "./measure-memory-catalog.mjs";
+import { ROOT, compiledInferencePin, parseArgs, planRun, providerCommand, run } from "./measure-memory-catalog.mjs";
 import { capturePlannedCase, logicalCaseId, planAnchor } from "./memory-calibration-harness.mjs";
 import { hashArtifactInventory, artifactInventoryReceipt } from "./hash-artifact-inventory.mjs";
 
@@ -557,7 +557,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (!relative.startsWith("..") && !path.isAbsolute(relative)) throw new Error("endpoint output must be outside both clean checkouts");
     if ((await run("git", ["status", "--porcelain"], { cwd: repo })).stdout.trim()) throw new Error(`dirty source checkout: ${repo}`);
   }
-  const pin = /INFERENCE_PIN: &str = "([a-f0-9]{40})"/.exec(await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8"))?.[1];
+  const pin = await compiledInferencePin();
   const inferenceHead = (await run("git", ["rev-parse", "HEAD"], { cwd: args.inferenceRepo })).stdout.trim();
   if (pin !== inferenceHead) throw new Error(`inference checkout ${inferenceHead} differs from compiled adapter pin ${pin}`);
   const { plan, rows } = await planRun({ ...args, ...(admittedReplay ? { campaign: `${args.campaign ?? "gi-3197"}-replay` } : {}), backend: "candle", anchors: ["sdxl:q4:candle"], models: ["sdxl"], skipCurrent: false });
