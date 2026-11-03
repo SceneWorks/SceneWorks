@@ -63,6 +63,14 @@ export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, 
   }, [draftId, onRunChange, onRuns, projectId, setNotice, token]);
 
   const [visible, setVisible] = useState(() => !document.hidden);
+  const visibleRef = useRef(screenActive && visible);
+  visibleRef.current = screenActive && visible;
+  useEffect(() => {
+    if (!screenActive || !visible) {
+      actionController.current?.abort();
+      setPending("");
+    }
+  }, [screenActive, visible]);
   useEffect(() => {
     const changed = () => setVisible(!document.hidden);
     document.addEventListener("visibilitychange", changed);
@@ -82,7 +90,7 @@ export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, 
     const controller = new AbortController();
     let timer;
     async function poll() {
-      await refresh(controller.signal);
+      if (visibleRef.current) await refresh(controller.signal);
       if (!controller.signal.aborted) timer = window.setTimeout(poll, 1000);
     }
     timer = window.setTimeout(poll, 1000);
@@ -101,7 +109,7 @@ export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, 
       if (controller.signal.aborted) return;
       if (updated?.locator?.draftId === draftId) onRunChange?.(updated, { select: true });
       setNotice(action === "cancel" ? "Cancellation requested. Completed takes and spent attempts are preserved." : action === "start" ? "Start requested. Checking saved inputs and worker availability." : "Resume requested. Checking saved attempts and worker availability.");
-      await refresh(controller.signal);
+      if (visibleRef.current) await refresh(controller.signal);
     } catch (error) {
       if (!controller.signal.aborted) setNotice(error.message);
     } finally {
