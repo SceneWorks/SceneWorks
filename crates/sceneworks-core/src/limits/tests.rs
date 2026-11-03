@@ -1,6 +1,7 @@
 use super::*;
 use crate::contracts::JsonObject;
 use crate::video_request::test_fixtures::builtin_video_models;
+use crate::video_request::{duration_limit_error, hard_min_duration};
 use serde_json::{json, Value};
 
 fn payload(value: Value) -> JsonObject {

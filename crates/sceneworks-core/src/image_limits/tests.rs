@@ -234,7 +234,7 @@ fn a_declared_cap_of_zero_says_this_model_takes_none() {
 #[test]
 fn a_bare_dimension_stride_stays_advisory_for_the_models_that_already_declared_one() {
     let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(include_str!(
-        "../../../config/manifests/builtin.models.jsonc"
+        "../../../../config/manifests/builtin.models.jsonc"
     )))
     .expect("builtin.models.jsonc parses");
     let models = manifest["models"].as_array().expect("models array");
