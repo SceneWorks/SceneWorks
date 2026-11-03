@@ -115,7 +115,8 @@ function run(env) {
       if (artifacts.length !== 1) throw new Error(`exactly one test executable required: ${pkg}`);
       const binary = artifacts[0].executable;
       const cases = CASES.filter(c => c.package === pkg);
-      for (const c of cases) evidence.cases.find(row => row.fqn === c.fqn).test_binary_sha256 = hash(readFileSync(binary));
+      const binarySha = hash(readFileSync(binary));
+      for (const c of cases) evidence.cases.find(row => row.fqn === c.fqn).test_binary_sha256 = binarySha;
       record();
       discover(command(binary, ['aesthetic', '--ignored', '--list'], `${pkg}-discovery.log`, 30_000), cases.map(c => c.fqn));
       for (const c of cases) {
