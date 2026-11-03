@@ -326,4 +326,3 @@ export function FirstRunProjectGate({ onCreate, disabled }) {
     </section>
   );
 }
-
