@@ -1,5 +1,6 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
-import { mediaResponse } from "../api/media.js";
+import { getMediaTicket, subscribeMediaTicket } from "../api.js";
+import { mediaResponseWithTicketRetry } from "../api/media.js";
 import { useAppContext, useAppStatic } from "../context/AppContext.js";
 import { useCaptureLifecycle } from "../useCaptureLifecycle.js";
 import { KpsOverlay } from "../components/KpsOverlay.jsx";
@@ -125,7 +126,7 @@ function KeypointLibraryPanel({ hidden, presets, loading, error, onDelete, delet
 // its own copy of the source image.
 function KeypointCapturePanel({ hidden, onSaved }) {
   const { token, requestedGpu, jobs = [], assets = [], characters = [] } = useAppContext();
-  const [source, setSource] = useState(null); // { path, displayName, previewUrl, sourceAssetId? }
+  const [source, setSource] = useState(null); // { path, displayName, previewUrl or sourceAsset, sourceAssetId? }
   const [extraction, setExtraction] = useState(null); // { kps, lowConfidence, sourceWidth, sourceHeight }
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -180,7 +181,7 @@ function KeypointCapturePanel({ hidden, onSaved }) {
   // Stage a source, seed the name, and fire the extraction. `previewUrl` backs the overlay
   // preview; `sourceAssetId` records provenance when the source was an existing asset.
   const beginExtraction = useCallback(
-    async ({ file, displayName, previewUrl, sourceAssetId, id }) => {
+    async ({ file, displayName, previewUrl, sourceAsset, sourceAssetId, id }) => {
       setError("");
       setExtraction(null);
       try {
@@ -190,7 +191,7 @@ function KeypointCapturePanel({ hidden, onSaved }) {
           throw new Error("Upload did not return a staged path.");
         }
         const label = displayName ?? staged.displayName ?? file.name ?? "image";
-        setSource({ path: staged.path, displayName: label, previewUrl, sourceAssetId });
+        setSource({ path: staged.path, displayName: label, previewUrl, sourceAsset, sourceAssetId });
         setName(stripExtension(label));
         const result = await startJob(id, "kps_extract", { sourcePath: staged.path });
         if (result?.error && current(id)) {
@@ -224,7 +225,8 @@ function KeypointCapturePanel({ hidden, onSaved }) {
   );
 
   // Asset / character pick (DatasetAddDialog onAdd): re-fetch the asset's bytes and stage them
-  // like an upload, so extraction + save are identical to the file path. Preview from its URL.
+  // like an upload, so extraction + save are identical to the file path. Keep the asset
+  // for the preview so media-ticket rotation does not stale a cached URL.
   const onAddAsset = useCallback(
     async (ids) => {
       const asset = assets.find((item) => item.id === ids?.[0]);
@@ -235,9 +237,8 @@ function KeypointCapturePanel({ hidden, onSaved }) {
       invalidate();
       const id = begin();
       setError("");
-      const url = assetUrl(asset);
       try {
-        const response = await mediaResponse(url);
+        const response = await mediaResponseWithTicketRetry(() => assetUrl(asset));
         if (!response.ok) {
           throw new Error(`Could not load the selected image (${response.status}).`);
         }
@@ -247,7 +248,7 @@ function KeypointCapturePanel({ hidden, onSaved }) {
         await beginExtraction({
           file,
           displayName: asset.displayName ?? asset.id,
-          previewUrl: url,
+          sourceAsset: asset,
           sourceAssetId: asset.id,
           id,
         });
@@ -294,7 +295,7 @@ function KeypointCapturePanel({ hidden, onSaved }) {
         {phase === "review" && extraction ? (
           <div className="keypoint-capture-review">
             <div className="keypoint-card-figure large">
-              <KpsOverlay kps={extraction.kps} imageUrl={source?.previewUrl} label="captured face landmarks" />
+              <KpsOverlay kps={extraction.kps} imageUrl={source?.sourceAsset ? assetUrl(source.sourceAsset) : source?.previewUrl} label="captured face landmarks" />
             </div>
             <div className="keypoint-capture-form">
               {hasUnsavedWork ? (
@@ -626,6 +627,7 @@ function stripExtension(filename) {
 // --- Screen -----------------------------------------------------------------
 
 export function KeyPointLibraryScreen() {
+  React.useSyncExternalStore(subscribeMediaTicket, getMediaTicket, getMediaTicket);
   const [activeTab, setActiveTab] = useState("library");
   const [deleteError, setDeleteError] = useState("");
   const [deletingPresetId, setDeletingPresetId] = useState(null);
