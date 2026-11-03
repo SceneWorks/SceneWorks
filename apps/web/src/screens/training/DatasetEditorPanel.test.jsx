@@ -395,11 +395,14 @@ describe("DatasetEditorPanel edit-pair references (sc-24161)", () => {
 
   // A stateful harness so a reorder really re-renders through the panel, the way TrainingStudio's
   // `setItemReferences` drives it.
-  function Harness({ referenceCap, initial, editPairsMode = false, onReferencesChange }) {
+  function Harness({ referenceCap, initial, editPairsMode = false, onReferencesChange, members = [target], allowHoldout = false }) {
     const [drafts, setDrafts] = React.useState(initial);
+    const [holdouts, setHoldouts] = React.useState({});
     const { props } = makeSessions();
-    props.datasetSession.memberAssets = [target];
-    props.config.imageAssets = [target, ...refs];
+    props.datasetSession.memberAssets = members;
+    props.config.imageAssets = [...members, ...refs];
+    props.captionSession.holdoutById = holdouts;
+    if (allowHoldout) props.captionSession.onToggleHoldout = (id, on) => setHoldouts((current) => ({ ...current, [id]: on }));
     return (
       <DatasetEditorPanel
         {...props}
@@ -451,6 +454,28 @@ describe("DatasetEditorPanel edit-pair references (sc-24161)", () => {
     expect(container.querySelector('textarea[aria-label="Caption for target.png"]').placeholder).toContain(
       "Edit instruction",
     );
+  });
+
+  it("retains reference order and holdout drafts when a large dataset's card unmounts", async () => {
+    const onReferencesChange = vi.fn();
+    const members = [target, ...Array.from({ length: 100 }, (_, index) => image(`member-${index}`))];
+    await act(async () => root.render(<Harness members={members} allowHoldout referenceCap={10}
+      initial={{ target: ["ref-a", "ref-b", "ref-c"] }} onReferencesChange={onReferencesChange} />));
+    await act(async () => button("Move Image 1 later").click());
+    const holdout = container.querySelector('.training-caption-card input[type="checkbox"]');
+    await act(async () => holdout.click());
+    expect(holdout.checked).toBe(true);
+    const viewport = container.querySelector(".training-caption-window");
+    const scroll = async (top) => act(async () => {
+      viewport.scrollTop = top;
+      viewport.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await scroll(352 * 50);
+    expect(container.querySelector('textarea[aria-label="Caption for target.png"]')).toBeNull();
+    await scroll(0);
+    expect(container.querySelector('.training-caption-card input[type="checkbox"]').checked).toBe(true);
+    await act(async () => button("Remove Image 1").click());
+    expect(onReferencesChange).toHaveBeenLastCalledWith("target", ["ref-a", "ref-c"]);
   });
 
   it("disables Add at the model's reference cap", async () => {

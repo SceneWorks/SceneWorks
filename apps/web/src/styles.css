@@ -20107,3 +20107,16 @@ pre.yue2-abc,
 .sidebar-collapsed .project-pill,
 .su-sidebar-collapsed .project-pill { justify-content: center; padding: 8px 0; }
 .sidebar-collapsed .sidebar-footer { display: flex; justify-content: center; padding: 8px 0 0; }
+
+/* Caption editing (F-203): bounded mounted cards with measured row heights. The
+   focused row stays mounted, and Tab reaches unmounted neighboring images. */
+.training-caption-window {
+  overflow: auto;
+  max-height: min(72vh, 900px);
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+}
+
+.training-caption-window-canvas {
+  position: relative;
+}

@@ -1,10 +1,12 @@
 #!/usr/bin/env node
+import { legacySortedValue as stable, legacySortedJson } from "./lib/canonical-json.mjs";
+import { sha256 as sha256Bytes, fileSha256 as sha256File } from "./lib/file-sha256.mjs";
 
 import { enterMacMetalExecution, metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { createReadStream, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -84,13 +86,6 @@ function physicalMlxExpectedRoles(outputs, includeRequest) {
   return includeRequest ? PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES;
 }
 
-function stable(value) {
-  if (Array.isArray(value)) return value.map(stable);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
-  }
-  return value;
-}
 
 function validateExactOutputReceipts(outputs, expectedRoles, label) {
   if (!Array.isArray(outputs) || outputs.length !== expectedRoles.length) {
@@ -400,10 +395,10 @@ async function writeImmutableReceipt(file, contents) {
   }
 }
 export function canonicalJson(value) {
-  return `${JSON.stringify(stable(value), null, 2)}\n`;
+  return legacySortedJson(value, { space: 2, newline: true });
 }
 function digest(value) {
-  return createHash("sha256").update(JSON.stringify(stable(value))).digest("hex");
+  return sha256Bytes(JSON.stringify(stable(value)));
 }
 function fail(message) {
   throw new Error(`memory-strategy calibration: ${message}`);
@@ -1273,11 +1268,6 @@ function validateSourceInputsAgainstRecord(record, session, sourceClaim, invento
   }
 }
 
-async function sha256File(file) {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(file)) hash.update(chunk);
-  return hash.digest("hex");
-}
 
 /** The receipt's physical path under the first root that holds it, or `null` when none does. */
 async function findReceiptPath(relativePath, roots) {
@@ -1768,18 +1758,15 @@ async function hashLtx25File(file, label, trustedRoot) {
   if (!relation || relation.startsWith("..") || path.isAbsolute(relation)) {
     fail(`${label} escaped the repository cache boundary at ${file}`);
   }
-  const hash = createHash("sha256");
   let bytes = 0;
+  let digest;
   try {
-    for await (const chunk of createReadStream(physical)) {
-      bytes += chunk.length;
-      hash.update(chunk);
-    }
+    digest = await sha256File(physical, { onChunk: chunk => { bytes += chunk.length; } });
   } catch (error) {
     fail(`hash ${label} at ${file}: ${error.message}`);
   }
   if (bytes !== metadata.size) fail(`${label} changed size while it was being hashed at ${file}`);
-  return { path: file, bytes, sha256: hash.digest("hex") };
+  return { path: file, bytes, sha256: digest };
 }
 
 export async function prepareLtx25CaptureArtifacts(
