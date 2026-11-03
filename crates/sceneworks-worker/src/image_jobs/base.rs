@@ -3998,7 +3998,7 @@ pub(super) fn candle_certified_load_spec(
             spec.components.get(*component_id).is_some_and(|source| {
                 certify(
                     Some(component_id),
-                    crate::conditioning_fit::weights_source_path(source),
+                    crate::weights_source::WeightsSourceExt::path(source),
                 )
             })
         })
@@ -5540,7 +5540,7 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     native_lane,
     test
 ))]
-fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<AdapterKind> {
+pub(crate) fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<AdapterKind> {
     let header = pin
         .read_unchanged(|file| {
             read_safetensors_header(file)
@@ -5606,14 +5606,14 @@ fn resolve_prepared_adapters(
     let mut pins = BTreeMap::<PathBuf, gen_core::PinnedWeightsFile>::new();
     for lora in &request.loras {
         let pin = resolve_prepared_adapter_file(lora, settings, &request.model)?;
-        let kind = classify_prepared_adapter(&pin)?;
+        let pin = crate::adapter_resolution::retain_adapter_pin(&mut pins, pin)?;
+        let kind = classify_prepared_adapter(pin)?;
         let scale = lora_weight(lora) as f32;
         specs.push(AdapterSpec::new(
             pin.loader_path().to_path_buf(),
             scale,
             kind,
         ));
-        pins.entry(pin.loader_path().to_path_buf()).or_insert(pin);
     }
     Ok(PreparedAdapters {
         specs,

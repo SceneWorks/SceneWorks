@@ -4725,7 +4725,7 @@ async fn known_lora_families_from_manifests(state: &AppState) -> Result<Vec<Stri
 }
 
 fn slugify_lora_id(value: &str) -> String {
-    sceneworks_core::slug::slugify(value, "lora", None).replace('-', "_")
+    sceneworks_core::slug::slugify_with(value, "lora", None, '_')
 }
 
 fn now_rfc3339() -> String {
@@ -5411,8 +5411,8 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     // Only a *named* count is bounded here: an omitted one resolves to the model's declared
     // `defaults.count` in `create_image_job`, like the size below.
     if let Some(count) = payload.count {
-        if !(1..=8).contains(&count) {
-            return Err(ApiError::bad_request("count must be between 1 and 8"));
+        if let Some(error) = sceneworks_core::image_request::image_count_error(count) {
+            return Err(ApiError::bad_request(error));
         }
     }
     // Only a *named* dimension is bounded here: an omitted side is resolved from the model's
@@ -5456,39 +5456,8 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     if let Some(height) = payload.height {
         validate_dimension_in(height, "height", shape_floor, MAX_IMAGE_DIMENSION)?;
     }
-    if payload.upscale.enabled {
-        if payload.upscale.engine.trim().is_empty() {
-            return Err(ApiError::bad_request("upscale.engine is required"));
-        }
-        if payload.upscale.is_iris() {
-            // Iris restoration (sc-25683) is sized by `upscale.scale` (default 4×, any positive
-            // factor), not `factor`; a non-default `factor` would be silently ignored, so refuse it.
-            if payload.upscale.factor != sceneworks_core::contracts::default_image_upscale_factor()
-            {
-                return Err(ApiError::bad_request(
-                    "upscale.factor is not a control of the Iris restoration engine; use upscale.scale",
-                ));
-            }
-            if payload.upscale.extra.contains_key("softness") {
-                return Err(ApiError::bad_request(
-                    "upscale.softness is not a control of the Iris restoration engine",
-                ));
-            }
-            payload
-                .upscale
-                .iris_params()
-                .map_err(|error| ApiError::bad_request(format!("upscale.{error}")))?;
-        } else {
-            if ![2, 4].contains(&payload.upscale.factor) {
-                return Err(ApiError::bad_request("upscale.factor must be 2 or 4"));
-            }
-            sceneworks_core::image_restoration::reject_iris_only_keys(
-                &payload.upscale.iris_controls(),
-                &payload.upscale.engine,
-            )
-            .map_err(|error| ApiError::bad_request(format!("upscale.{error}")))?;
-        }
-    }
+    payload.upscale.validate().map_err(ApiError::bad_request)?;
+
     Ok(())
 }
 
@@ -6277,16 +6246,8 @@ const MAX_IMAGE_DIMENSION: u32 = 4096;
 ///
 /// 16 because MOSS-Image accepts 16 px per side (Qwen-Image 2.1 starts at 32) and this
 /// check runs before preset/model resolution. It is the outer bound only — see
-/// [`HISTORICAL_MIN_IMAGE_DIMENSION`] for the per-model floor that still applies.
+/// the shared core image-request boundary for the per-model floor that still applies.
 const SHAPE_MIN_IMAGE_DIMENSION: u32 = 16;
-
-/// The per-model fallback floor applied in `create_image_job` to any image model that declares no
-/// `limits.minDimension` (sc-24113).
-///
-/// This is the 256 that `validate_image_job` used to enforce for everything, moved down one layer
-/// so that widening the shape check could not loosen a single already-shipped model: a request
-/// below 256 to a model with no declared floor is refused exactly as before, now naming the model.
-const HISTORICAL_MIN_IMAGE_DIMENSION: u32 = 256;
 
 /// Upper bound for video width/height — a lower backstop than images, matching
 /// the cap enforced when validating a video job request.

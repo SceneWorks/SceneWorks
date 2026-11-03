@@ -1325,7 +1325,7 @@ pub(super) async fn generate_candle_video_using(
     } else if is_ltx {
         resolve_ltx_adapters(settings, request)?
     } else {
-        Vec::new()
+        PreparedVideoAdapters::default()
     };
     if is_wan {
         let built_in = if wan_lightning_on(engine_id, request)
@@ -2638,7 +2638,7 @@ async fn generate_candle_wan_vace_engine(
     engine_id: &'static str,
     model_dir: PathBuf,
     adapter: &'static str,
-    adapters: Vec<AdapterSpec>,
+    adapters: PreparedVideoAdapters,
 ) -> WorkerResult<(DecodedVideo, Value)> {
     let track_id = request.person_track_id.as_deref().ok_or_else(|| {
         WorkerError::InvalidPayload(

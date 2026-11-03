@@ -339,7 +339,7 @@ impl CandleStrictControl for Flux2StrictControl {
             let transformer = self.base.join("transformer");
             let vae = self.base.join("vae");
             if transformer.is_dir() && vae.is_dir() {
-                overlays.push(crate::conditioning_fit::weights_source_path(text_encoder));
+                overlays.push(crate::weights_source::WeightsSourceExt::path(text_encoder));
                 overlays.push(vae.as_path());
                 return ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
                     "FLUX.2-dev",

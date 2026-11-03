@@ -1053,6 +1053,7 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
             "open_regular_lock_file",
         ),
         ("crates/sceneworks-core/src/slug.rs", "slugify"),
+        ("crates/sceneworks-core/src/slug.rs", "slugify_with"),
         (
             "crates/sceneworks-core/src/slug.rs",
             "slugify_worker_id_part",

@@ -1386,20 +1386,14 @@ async fn spawn_tree_stub_with_bodies(
 /// / `run_lora_download_job` (which fetch into `snapshots/main` via `ensure_hf_files_cached(…, "main", …)`)
 /// otherwise land in the real cache — this is what wrote the krea-2-raw-mlx `snapshots/main` dummy
 /// weights. Mirrors the model_jobs / audio_jobs co-requisite seam tests' `isolate_hf_cache`.
-fn isolate_hf_cache() -> crate::test_env::EnvVars {
-    crate::test_env::EnvVars::set(&[
-        ("HF_HUB_CACHE", ""),
-        ("HUGGINGFACE_HUB_CACHE", ""),
-        ("HF_HOME", ""),
-    ])
-}
+
 
 #[tokio::test]
 async fn model_download_fails_when_the_tier_resolves_no_files() {
     // sc-9909: installing a quant tier whose weights aren't published yet (sc-8513 rollout) resolves
     // ZERO files. That must FAIL with a clear message rather than silently "succeed" and leave an
     // empty cache + a stale completion marker.
-    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
+    let _env = crate::test_env::isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     let (base_url, posts) = spawn_empty_tree_stub().await;
     let mut settings = test_settings(base_url.clone(), None);
@@ -1449,7 +1443,7 @@ async fn model_download_fails_when_one_declared_pattern_matches_nothing() {
     // sc-12283: `allow_pattern_matches` ORs across the filter, so a tier whose transformer matched but
     // whose `tokenizer/*` matched NOTHING passed the aggregate zero-file check, downloaded, completed
     // and wrote an install marker — an "installed" tier that cannot load. This is the #850 shape.
-    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
+    let _env = crate::test_env::isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     // The repo satisfies q8/transformer/* and q8/vae/* but has NO q8/tokenizer/* at all. Sizes are
     // token — the stub serves them verbatim, and this test is about the filter, not the transfer.
@@ -1522,7 +1516,7 @@ async fn lora_download_fails_when_the_declared_adapter_is_absent() {
     // the repo (renamed upstream / typo'd entry / unpublished) resolved zero files, downloaded
     // nothing, and reported the job COMPLETED — while the catalog still read "not installed", because
     // the install probe finds an empty cache. A success post for a fetch of nothing is the bug.
-    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
+    let _env = crate::test_env::isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     // The repo exists but holds a DIFFERENT adapter than the one declared.
     let (base_url, posts) =
@@ -1567,7 +1561,7 @@ async fn lora_download_fails_when_one_of_several_declared_files_is_absent() {
     // sc-12288: `create_lora_download_job` accepts an explicit `files` LIST and the filter ORs across
     // it, so a multi-file adapter that landed one half and not the other passes the aggregate
     // zero-file check and completes as a torn install. Same gap as sc-12283, LoRA side.
-    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
+    let _env = crate::test_env::isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("high_noise.safetensors", 8)]).await;
     let mut settings = test_settings(base_url.clone(), None);
@@ -1631,7 +1625,7 @@ async fn lora_download_fails_when_one_of_several_declared_files_is_absent() {
 
 #[tokio::test]
 async fn model_download_rejects_a_path_escaping_revision_before_any_network() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let temp = tempdir().expect("tempdir creates");
     // An unreachable API proves validation fires BEFORE any heartbeat / tree-resolve I/O: with the
     // guard the job errors on the revision; without it, the first thing that happens is a heartbeat
@@ -1664,7 +1658,7 @@ async fn model_download_rejects_a_path_escaping_revision_before_any_network() {
 
 #[tokio::test]
 async fn lora_download_rejects_a_path_escaping_revision_before_any_network() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let temp = tempdir().expect("tempdir creates");
     let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
     settings.data_dir = temp.path().to_path_buf();
@@ -1694,7 +1688,7 @@ async fn lora_download_rejects_a_path_escaping_revision_before_any_network() {
 
 #[tokio::test]
 async fn lora_import_rejects_a_path_escaping_revision() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let temp = tempdir().expect("tempdir creates");
     // Imports heartbeat / post progress BEFORE the HF branch validates, so give them a live stub; the
     // rejection must still come from the revision validator, not a transport error.
@@ -1728,7 +1722,7 @@ async fn lora_import_rejects_a_path_escaping_revision() {
 
 #[tokio::test]
 async fn model_import_rejects_a_path_escaping_revision() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let temp = tempdir().expect("tempdir creates");
     let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let mut settings = test_settings(base_url.clone(), None);
@@ -2333,7 +2327,7 @@ impl ManagedImportFixture {
 /// selectable through the plan route.
 #[tokio::test]
 async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let fixture = managed_import_fixture(base_url).await;
     let expected = sha256_hex(&fixture.source);
@@ -2463,7 +2457,7 @@ async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
 /// variant's identity over bytes the registration does not describe.
 #[tokio::test]
 async fn an_install_under_a_registered_variant_id_is_confirmed_against_its_registration() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let variant_id = "nvfp4-krea-2-turbo";
     assert!(
@@ -2517,7 +2511,7 @@ async fn an_install_under_a_registered_variant_id_is_confirmed_against_its_regis
 /// for a refusal that never checked a digest at all.
 #[tokio::test]
 async fn a_hash_mismatched_managed_import_leaves_no_partial_install() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let fixture = managed_import_fixture(base_url).await;
     // The digest the ingest will actually compute over the bytes it staged, derived here from the
@@ -2568,7 +2562,7 @@ async fn a_hash_mismatched_managed_import_leaves_no_partial_install() {
 /// leave nothing behind.
 #[tokio::test]
 async fn a_cancelled_managed_import_leaves_no_partial_install() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let base_url = spawn_cancelling_job_stub().await;
     let fixture = managed_import_fixture(base_url).await;
     let api = ApiClient::new(&fixture.settings);
@@ -2634,7 +2628,7 @@ fn h3_import_job_for_partition(
 /// builds for the arm tests, pinned here against the real job.
 #[tokio::test]
 async fn managed_h3_dit_import_stamps_a_selectable_video_entry() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let fixture = managed_import_fixture_with_id(base_url, "my_h3_finetune").await;
     let source = fixture.settings.data_dir.join("models/incoming/my-h3");
@@ -2719,7 +2713,7 @@ async fn managed_h3_dit_import_stamps_a_selectable_video_entry() {
 /// provider would map it unbound — so the job refuses and nothing is installed or registered.
 #[tokio::test]
 async fn an_h3_directory_with_a_stray_weight_file_is_refused_and_nothing_is_installed() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let fixture = managed_import_fixture_with_id(base_url, "stray_h3").await;
     let source = fixture.settings.data_dir.join("models/incoming/stray-h3");
@@ -2749,7 +2743,7 @@ async fn an_h3_directory_with_a_stray_weight_file_is_refused_and_nothing_is_inst
 
 #[tokio::test]
 async fn h3_import_registration_requires_exact_task_compatibility() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     for (index, declaration, accepted) in [
         (0, json!({}), false),
@@ -2832,7 +2826,7 @@ fn write_sdxl_negative_source(path: &std::path::Path) {
 
 #[tokio::test]
 async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_path() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (api_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     for kind in ["managed", "remote", "linked"] {
         for declaration_on_entry in [false, true] {
@@ -2923,7 +2917,7 @@ async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_pat
 
 #[tokio::test]
 async fn linked_family_preflight_refuses_before_components_without_invalidating_an_existing_owner() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (url,posts) = spawn_tree_stub_with_files(vec![]).await;
     let fixture = managed_import_fixture_with_id(url,"refused_h3_alias").await;
     write_sdxl_negative_source(&fixture.source);
@@ -2961,7 +2955,7 @@ async fn linked_family_preflight_refuses_before_components_without_invalidating_
 
 #[tokio::test]
 async fn all_h3_ingestion_workers_produce_equivalent_assemblies_and_original_bytes() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let seed = tempdir().unwrap();
     let native = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
         seed.path(),
@@ -3081,7 +3075,7 @@ async fn all_h3_ingestion_workers_produce_equivalent_assemblies_and_original_byt
 
 #[tokio::test]
 async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let seed = tempdir().unwrap();
     crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(seed.path());
     let original = std::fs::read(seed.path().join("diffusion_pytorch_model.safetensors")).unwrap();
@@ -3200,7 +3194,7 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
 
 #[tokio::test]
 async fn h3_import_reports_missing_or_unresolvable_residents_without_publication() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (url,posts) = spawn_tree_stub_with_files(vec![]).await;
     for missing in [false,true] {
         let fixture = managed_import_fixture_with_id(url.clone(),&format!("missing_h3_residents_{missing}")).await;
@@ -3229,7 +3223,7 @@ async fn h3_import_reports_missing_or_unresolvable_residents_without_publication
 
 #[tokio::test]
 async fn manually_rerunning_a_snapshot_is_not_authenticated_import_recovery() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     // This generic control-plane stub deliberately has no server-stored ModelImport ancestry.
     // Real new-ID/multihop success is exercised by rust-api tests::import_repair against mounted
     // retry routes and the actual utility worker, not by manually rerunning this snapshot.
@@ -3249,7 +3243,7 @@ async fn manually_rerunning_a_snapshot_is_not_authenticated_import_recovery() {
 
 #[tokio::test]
 async fn h3_manifest_publication_failure_rolls_back_and_can_retry() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (url, _) = spawn_tree_stub_with_files(vec![]).await;
     let fixture = managed_import_fixture_with_id(url, "publish_retry_h3").await;
     let source = fixture.settings.data_dir.join("models/incoming/h3");
@@ -3285,7 +3279,7 @@ async fn h3_manifest_publication_failure_rolls_back_and_can_retry() {
 
 #[tokio::test]
 async fn a_refused_linked_h3_alias_cannot_invalidate_an_existing_models_unchanged_plan() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (url, posts) = spawn_tree_stub_with_files(vec![]).await;
     let fixture = managed_import_fixture_with_id(url, "linked_h3_owner").await;
     let source = fixture.settings.data_dir.join("models/incoming/shared_h3");
@@ -3357,7 +3351,7 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                 .build()
                 .unwrap()
                 .block_on(async {
-                    let _env = isolate_hf_cache();
+                    let _env = crate::test_env::isolate_hf_cache();
                     let (url, posts) = spawn_tree_stub_with_files(vec![]).await;
                     let fixture = managed_import_fixture_with_id(url, "upload_retry_h3").await;
                     let seed = tempdir().unwrap();
@@ -3473,7 +3467,7 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
 
 #[tokio::test]
 async fn convrot_h3_worker_import_stamps_only_inventory_proven_native_precision() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let seed = tempdir().unwrap();
     let native = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
         seed.path(),

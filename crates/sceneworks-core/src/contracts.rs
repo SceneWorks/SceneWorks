@@ -844,9 +844,47 @@ impl ImageUpscaleRequest {
             .collect()
     }
 
+    /// Shared API/worker upscale boundary. Disabled controls remain inert.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.engine.trim().is_empty() {
+            return Err("upscale.engine is required".into());
+        }
+        if self.is_iris() {
+            if self.factor != default_image_upscale_factor() {
+                return Err("upscale.factor is not a control of the Iris restoration engine; use upscale.scale".into());
+            }
+            if self.extra.contains_key("softness") {
+                return Err(
+                    "upscale.softness is not a control of the Iris restoration engine".into(),
+                );
+            }
+            self.iris_params()
+                .map_err(|error| format!("upscale.{error}"))?;
+        } else {
+            image_upscale_factor(u64::from(self.factor))
+                .map_err(|_| "upscale.factor must be 2 or 4".to_owned())?;
+            crate::image_restoration::reject_iris_only_keys(&self.iris_controls(), &self.engine)
+                .map_err(|error| format!("upscale.{error}"))?;
+        }
+        Ok(())
+    }
+
     /// The parsed Iris restoration controls (a typed refusal for a malformed one).
     pub fn iris_params(&self) -> Result<crate::image_restoration::IrisRestoreParams, String> {
         crate::image_restoration::parse_iris_restore_params(&self.iris_controls())
+    }
+}
+
+/// The discrete scales supported by the non-Iris image upscalers.
+pub fn image_upscale_factor(factor: u64) -> Result<u8, String> {
+    match factor {
+        2 | 4 => Ok(factor as u8),
+        other => Err(format!(
+            "Image upscale supports only factor 2 or 4 (got {other})."
+        )),
     }
 }
 

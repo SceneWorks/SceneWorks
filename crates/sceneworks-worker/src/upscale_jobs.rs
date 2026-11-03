@@ -954,12 +954,7 @@ where
 /// unsupported factor now fails loudly instead of being silently coerced to 2x, which produced a
 /// quietly-different output at a different resolution.
 fn resolve_image_upscale_factor(factor: u64) -> WorkerResult<u8> {
-    match factor {
-        2 | 4 => Ok(factor as u8),
-        other => Err(WorkerError::InvalidPayload(format!(
-            "Image upscale supports only factor 2 or 4 (got {other})."
-        ))),
-    }
+    sceneworks_core::contracts::image_upscale_factor(factor).map_err(WorkerError::InvalidPayload)
 }
 
 pub(crate) async fn run_image_upscale_job(

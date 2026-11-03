@@ -147,18 +147,7 @@ pub(crate) fn cached_tier_dir(
 
 /// The shipped manifest entry for one catalog model id.
 pub(crate) fn shipped_manifest_entry(model_id: &str) -> serde_json::Map<String, Value> {
-    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin.models.jsonc parses");
-    manifest
-        .get("models")
-        .and_then(Value::as_array)
-        .expect("models array")
-        .iter()
-        .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("no manifest entry for {model_id}"))
-        .clone()
+    crate::test_env::shipped_catalog_entry(model_id)
 }
 
 /// The `Quant` a tier token names, or `None` for the dense tier. Mirrors what

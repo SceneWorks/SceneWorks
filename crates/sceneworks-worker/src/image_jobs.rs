@@ -585,6 +585,15 @@ async fn run_image_generate_job_unexplained(
             .unwrap_or_default(),
     )
     .map_err(WorkerError::InvalidPayload)?;
+    sceneworks_core::image_request::validate_image_request_payload(
+        &job.payload,
+        &job.payload
+            .get("modelManifestEntry")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
     let request = ImageRequest::from_payload(&job.payload);
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
@@ -2017,67 +2026,6 @@ pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
     sceneworks_core::lora_family::declared_adapter_file(lora)
 }
 
-/// Resolve the exact adapter file inference will load. Attribution calls this same function before
-/// hashing, so the digest cannot drift onto a sibling checkpoint or an unconfined client path.
-#[cfg(any(native_lane, test))]
-fn resolve_adapter_file(lora: &Value, settings: &Settings, model: &str) -> WorkerResult<PathBuf> {
-    let raw = lora_path(lora)
-        .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
-    let path = crate::normalize_app_managed_lora_path(settings, &raw)?;
-    let file = sceneworks_core::lora_family::resolve_adapter_for_model(
-        &path,
-        declared_adapter_file(lora),
-        model,
-    )
-    .ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "LoRA selected file is missing, invalid or outside its adapter root: {}",
-            path.display()
-        ))
-    })?;
-    if !file.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "LoRA file is missing: {}",
-            file.display()
-        )));
-    }
-    Ok(file)
-}
-
-/// Resolve and pin the exact adapter entry inference will load. Directory-valued imports are first
-/// confined as directories, then their selected child is independently pinned and confined so a
-/// child symlink cannot inherit trust from its parent.
-#[cfg(native_lane)]
-fn resolve_prepared_adapter_file(
-    lora: &Value,
-    settings: &Settings,
-    model: &str,
-) -> WorkerResult<gen_core::PinnedWeightsFile> {
-    let raw = lora_path(lora)
-        .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
-    let confined = crate::normalize_app_managed_lora_path(settings, &raw)?;
-    let candidate = sceneworks_core::lora_family::resolve_adapter_for_model(
-        &confined,
-        declared_adapter_file(lora),
-        model,
-    )
-    .ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "LoRA selected file is missing, invalid or outside its adapter root: {}",
-            confined.display()
-        ))
-    })?;
-    // Legacy direct-file routes have always owned the original lexical entry, so a symlink
-    // retarget between selection and dispatch must still invalidate their prepared token.
-    // Confinement and shared selection above remain mandatory before retaining that entry.
-    let candidate = if !matches!(model, "flux3_klein" | "flux3_klein_base") && !confined.is_dir() {
-        raw
-    } else {
-        candidate
-    };
-    crate::paths::pin_app_managed_model_file(settings, &candidate, "LoRA file")
-}
-
 /// Opt-in test access to the exact prepared resolver used by MOSS. Keep both
 /// specs and source pins alive; this does not relax official model validation.
 #[cfg(all(feature = "test-support", native_lane))]
@@ -2089,22 +2037,11 @@ pub(crate) fn prepared_adapter_selection_for_test(
     Ok((prepared.specs, prepared.pins))
 }
 
-/// The exact weight parser used by every adapter lane and by the gallery attribution renderer.
-#[cfg(any(native_lane, test))]
-fn lora_weight(lora: &Value) -> f64 {
-    lora.get("weight")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        // Last resort only — the API always stamps a weight onto the spec. Matches the API/web
-        // default (`DEFAULT_LORA_WEIGHT`) so a weightless payload can't apply at a scale no
-        // surface would have shown.
-        .unwrap_or(1.0)
-}
-
-#[cfg(any(native_lane, test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 fn existing_lora_install_marker(lora: &Value, settings: &Settings, file: &Path) -> Option<PathBuf> {
     // Explicit HF catalog downloads execute from the shared hub cache, while their durable receipt
     // lives under data/loras/<catalog-id>. Prefer that trusted app-owned receipt when it names the
@@ -2391,7 +2328,7 @@ pub(crate) fn workflow_source(
 /// payload to build from — but the base generation's envelope alone would describe an image that was
 /// never written. The overlay is what makes the difference honest, and it is the *applied* record
 /// rather than the requested one: `write_upscaled_asset`'s caller normalizes the engine id (anything
-/// unknown, including the dropped `aura-sr`, becomes `real-esrgan`) and clamps the factor to 2 or 4,
+/// unknown, including the dropped `aura-sr`, becomes `real-esrgan`) and validates the factor as 2 or 4,
 /// and it is that pass the file came out of. It is the same `Value` the fact's
 /// `rawAdapterSettings.upscale` records, so a shared image and its sidecar cannot disagree.
 ///
@@ -3021,7 +2958,7 @@ pub(crate) fn write_image_asset(
         // output through `write_upscaled_asset` and keeps the base as its own retained asset, so a
         // `upscale.enabled: true` from the request would describe, on this file, a pass this file
         // never received — and describe it in the REQUESTED terms, which `apply_inline_upscale`
-        // then clamps (factor to 2/4) and normalizes (a dropped engine to `real-esrgan`). Naming a
+        // then validates (factor 2/4) and normalizes (a dropped engine to `real-esrgan`). Naming a
         // dropped engine at an unoffered factor is worse than saying nothing: sc-15952 prefills the
         // studio from this. The variant's own envelope carries the pass that actually ran, which is
         // the same reasoning `upscaled_workflow_share` applies from the other side.
@@ -3142,7 +3079,11 @@ async fn apply_inline_upscale(
         )
         .await;
     }
-    let factor: u8 = if request.upscale.factor == 4 { 4 } else { 2 };
+    request
+        .upscale
+        .validate()
+        .map_err(WorkerError::InvalidPayload)?;
+    let factor = request.upscale.factor;
     let engine_id = normalize_upscale_engine(&request.upscale.engine);
     let softness = request.upscale.softness();
     // The generate payload carries the *generation* model's manifest, not an upscaler one; pass Null
@@ -3724,27 +3665,7 @@ pub(crate) async fn begin_image_cancel(
 /// Deterministic placeholder pixels: a vertical gradient from a per-seed base colour
 /// to white, exactly `width * height * 3` RGB8 bytes.
 fn stub_rgb8(width: u32, height: u32, seed: i64) -> Vec<u8> {
-    let seed = seed as u64;
-    let base = [
-        (seed & 0xFF) as u8,
-        ((seed >> 8) & 0xFF) as u8,
-        ((seed >> 16) & 0xFF) as u8,
-    ];
-    let span = height.saturating_sub(1).max(1) as f32;
-    let mut buffer = Vec::with_capacity((width as usize) * (height as usize) * 3);
-    for y in 0..height {
-        let t = y as f32 / span;
-        let row = [lerp(base[0], t), lerp(base[1], t), lerp(base[2], t)];
-        for _ in 0..width {
-            buffer.extend_from_slice(&row);
-        }
-    }
-    buffer
-}
-
-fn lerp(a: u8, t: f32) -> u8 {
-    let a = a as f32;
-    (a + (255.0 - a) * t).round().clamp(0.0, 255.0) as u8
+    crate::util::gradient_rgb8(width, height, seed)
 }
 
 // ---------------------------------------------------------------------------
@@ -4083,3 +4004,11 @@ pub(crate) async fn run_image_detail_job(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(target_os = "macos")]
+use tier_resolver::qwen_control_tier_subdir;
+
+#[cfg(native_lane)]
+use crate::adapter_resolution::resolve_prepared_adapter_file;
+#[cfg(any(test, native_lane))]
+use crate::adapter_resolution::{lora_weight, resolve_adapter_file};
