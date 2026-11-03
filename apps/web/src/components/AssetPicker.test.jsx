@@ -651,7 +651,9 @@ describe("character import recovery", () => {
       { id: "b", type: "image", projectId: "p", displayName: "B" },
     ]} onImport={onImport} onClose={onClose} />));
     const options = document.body.querySelectorAll('.asset-picker-grid [role="option"]');
+    expect([...options].every((option) => option.classList.contains("asset-tile-windowed"))).toBe(true);
     await act(async () => { options[0].click(); options[1].click(); });
+    expect(options[0].getAttribute("aria-selected")).toBe("true");
     await act(async () => [...document.body.querySelectorAll("button")].find((b) => b.textContent.trim() === "Import 2").click());
     expect(document.body.textContent).toContain("Attached 1 of 2");
     expect(onClose).not.toHaveBeenCalled();
