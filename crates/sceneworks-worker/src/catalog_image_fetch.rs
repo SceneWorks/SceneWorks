@@ -22,7 +22,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::future::Future;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1842,7 +1842,6 @@ where
         .map(|artifact_root| artifact_root.join(TEMP_DIRECTORY))
         .unwrap_or_else(|| parent.join(TEMP_DIRECTORY));
     std::fs::create_dir_all(&temp_directory)?;
-    let temp = temp_directory.join(format!("{}.tmp", uuid::Uuid::new_v4()));
     let temp_metadata = std::fs::symlink_metadata(&temp_directory)?;
     if temp_metadata.file_type().is_symlink() || !temp_metadata.is_dir() {
         return Err(CatalogImageFetchError::InvalidOptions(format!(
@@ -1850,60 +1849,22 @@ where
             temp_directory.display()
         )));
     }
-    let result = (|| -> CatalogImageFetchResult<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        sync_parent_directory(&temp);
-        before_rename()?;
-        if !replace && path.exists() {
-            return Err(CatalogImageFetchError::Io(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("cache destination already exists: {}", path.display()),
-            )));
-        }
-        match std::fs::rename(&temp, path) {
-            Ok(()) => {
-                sync_parent_directory(path);
-                Ok(())
-            }
-            Err(error) if path.exists() => {
-                if replace {
-                    Err(CatalogImageFetchError::Io(std::io::Error::new(
-                        error.kind(),
-                        format!(
-                            "atomic cache replacement failed while preserving {}: {error}",
-                            path.display()
-                        ),
-                    )))
-                } else {
-                    Err(CatalogImageFetchError::Io(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        format!(
-                            "cache destination appeared during atomic write: {} ({error})",
-                            path.display()
-                        ),
-                    )))
-                }
-            }
-            Err(error) => Err(error.into()),
-        }
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(temp);
-    }
-    result
+    sceneworks_core::fsutil::write_atomic_with(
+        path,
+        bytes,
+        sceneworks_core::fsutil::AtomicWriteOptions {
+            replace,
+            temp_directory: Some(&temp_directory),
+            ..Default::default()
+        },
+        before_rename,
+    )
+    .map_err(CatalogImageFetchError::Io)
 }
 
+// Other cache state transitions retain their existing best-effort sync policy.
 fn sync_parent_directory(path: &Path) {
-    if let Some(parent) = path.parent() {
-        if let Ok(directory) = File::open(parent) {
-            let _ = directory.sync_all();
-        }
-    }
+    let _ = sceneworks_core::fsutil::sync_parent_directory(path);
 }
 
 fn completion_marker_path(catalog: &Catalog, record_id: &str) -> CatalogImageFetchResult<PathBuf> {
@@ -2249,6 +2210,25 @@ mod tests {
             .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .expect("encode fixture");
         bytes
+    }
+
+    #[test]
+    fn no_replace_preserves_destination_that_appears_after_staging() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("image.bin");
+        let error =
+            atomic_write_with_hook(&path, b"loser", false, || std::fs::write(&path, b"winner"))
+                .expect_err("another publisher wins");
+        assert!(
+            matches!(error, CatalogImageFetchError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"winner");
+        assert_eq!(
+            std::fs::read_dir(root.path().join(TEMP_DIRECTORY))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[test]

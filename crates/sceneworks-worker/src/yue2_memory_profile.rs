@@ -262,17 +262,8 @@ impl StageBoundary {
         let requested_at = now_secs();
         let value = json!({"sequence": self.sequence, "stage": stage, "requestedAt": requested_at,
             "processId": std::process::id()});
-        let temp = self.dir.join("request.tmp");
-        let mut file = std::fs::File::create(&temp).expect("create stage request");
-        writeln!(file, "{value}").expect("write stage request");
-        file.sync_all().expect("sync stage request");
-        drop(file);
-        match std::fs::remove_file(&request) {
-            Ok(()) => (),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => panic!("remove previous stage request: {error}"),
-        }
-        std::fs::rename(temp, request).expect("publish stage request");
+        sceneworks_core::fsutil::write_atomic(&request, format!("{value}\n").as_bytes())
+            .expect("publish stage request");
         let deadline = Instant::now() + timeout;
         loop {
             if let Ok(bytes) = std::fs::read(&ack) {
@@ -644,9 +635,11 @@ mod tests {
             "sampleAt": request["requestedAt"].as_f64().unwrap() + 1.0,
             "sampleBytes": 42, "sampleSerial": 2, "sampler": "metal-watchdog",
         });
-        let temp = dir.join("ack.tmp");
-        std::fs::write(&temp, serde_json::to_vec(&ack).unwrap()).unwrap();
-        std::fs::rename(temp, dir.join("ack.json")).unwrap();
+        sceneworks_core::fsutil::write_atomic(
+            &dir.join("ack.json"),
+            &serde_json::to_vec(&ack).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]

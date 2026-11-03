@@ -1592,18 +1592,11 @@ fn write_interleaved_document(
         "segments": segments,
     });
     let media_path = project_path.join(&media_rel);
-    if let Some(parent) = media_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let temp_path = media_path.with_extension("tmp.json");
-    std::fs::write(
-        &temp_path,
-        serde_json::to_vec_pretty(&document_body)
+    sceneworks_core::fsutil::write_atomic(
+        &media_path,
+        &serde_json::to_vec_pretty(&document_body)
             .map_err(|error| WorkerError::InvalidPayload(format!("serialize document: {error}")))?,
     )?;
-    std::fs::rename(&temp_path, &media_path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temp_path);
-    })?;
 
     let display_name: String = {
         let trimmed: String = prompt.chars().take(56).collect();

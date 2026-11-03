@@ -702,23 +702,12 @@ async fn remove_non_directory_file(path: &Path) -> WorkerResult<()> {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn sync_parent_directory(path: &Path) -> WorkerResult<()> {
-    #[cfg(unix)]
-    {
-        let parent = path.parent().map(Path::to_path_buf).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!("download target {} has no parent", path.display()))
-        })?;
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
-            std::fs::File::open(parent)?.sync_all()?;
-            Ok(())
-        })
-        .await
-        .map_err(|error| task_join_error("download directory sync", error))?
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
+    let path = path.to_path_buf();
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
+        Ok(sceneworks_core::fsutil::sync_parent_directory(&path)?)
+    })
+    .await
+    .map_err(|error| task_join_error("download directory sync", error))?
 }
 
 #[derive(Debug, Clone)]
