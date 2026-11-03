@@ -146,3 +146,18 @@ Reviewed `3bc17e3a0..1a5500bdb`. Full report: [round4-claude.md](evidence/review
 | C4-06 | MINOR | The withdrawn calendar leaves DEC-12 unenforceable. Proposal: restore per-feature ranges and an aggregate range, labelled low-confidence `[L]`, with assumptions. | **Accepted.** Per-feature ranges and an aggregate range restored as `[L]` (PLAN §9.2 and §9.4), with assumptions and the main uncertainty named. |
 | C4-07 | MINOR | Streaming product delivery belongs to its existing epic. SGA owns the runner chunk contract and migration of the existing path. List the epic in the MIG-7 ledger. | **Accepted.** PIPE-16 and the ENG-6 row give SGA the runner chunk contract and the existing path. Streaming delivery stays with its epic, now listed in the MIG-7 ledger. |
 | C4-08 | MINOR | README evidence row is stale. ENG-17's round-0 row needs an inline "superseded by R2-06" marker. | **Accepted.** README evidence row updated; ENG-17 row marked as superseded. |
+
+## Round 5: Codex review of draft 0.4 (2026-11-03)
+
+Reviewed Claude's design revision `2576499e03`. Full report: [round5-codex.md](evidence/reviews/round5-codex.md). This review checks the round-4 delta rather than reopening the original architectural direction.
+
+**Keep the split, simpler pricing, clearer requirements and separate streaming product ownership. Confidence: high.** No new broad architecture blocker; two major clarifications and two minor findings remain Open. The optional estimator and transition pricing need the precise contracts below before their implementation. The default endpoint estimator remains the recommendation.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| R5-01 | MAJOR | Transition pricing lists resident weights and shape deltas but does not explicitly include executing component/evaluation workspace or define the basis of existing peak evidence. | **Open.** Price transition operations with existing aggregate stage evidence plus additional coexisting buffers; distinguish total versus activation-only evidence and avoid joint-stream double-counting. No per-allocation graph or new campaign. |
+| R5-02 | MAJOR | `PreviousEvaluation` skips an integration without defining multi-evaluation solver, state/draw, post-step and K/progress semantics; the percentage saving is unmeasured. | **Open.** Define either retained-primary-estimate or terminal-step-replacement semantics, solver applicability and persisted estimator identity. Keep endpoint evaluation default; use the bounded comparison after the algorithm is defined. |
+| R5-03 | MINOR | Mock-only chunk acceptance conflicts with HOOK-1's production-user requirement; the existing streaming owner is still a placeholder. | **Open.** CodeGraph identifies SW-F148 (`sc-8432`), open and spike-gated, with NO-GO allowed. Name that owner and resolve production adoption/NO-GO without moving streaming product scope into SGA. |
+| R5-04 | MINOR | Stale live-set terminology remains, and the restored calendar counts 17 pre-pilot engine features instead of 16. | **Open.** Align remaining wording with `PricingPlan` and correct the count. The 24-node roadmap graph is acyclic; estimates remain low-confidence planning inputs. |
+
+Design-only. No requirements/plan changes, implementation, builds, model execution, CI dispatches or tracker items in round 5.
