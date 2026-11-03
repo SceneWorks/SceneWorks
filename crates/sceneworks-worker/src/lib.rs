@@ -519,12 +519,9 @@ use face_analysis_jobs::*;
 // dataset's content-hash-keyed mask sidecar for the masked-loss trainer.
 mod subject_mask_jobs;
 use subject_mask_jobs::*;
-// sc-4407 — the shared, generator-agnostic face-likeness scorer (epic 4406): the backbone identity-
-// likeness component the Angles (sc-4409) / Poses (sc-4410) / With-Character (sc-4411) surfaces call as
-// a post-pass over a finished generation. Its public seam (`FaceLikenessScorer`) has no production
-// caller YET — the consuming surfaces are separate stories — so allow the unused seam here; the pure
-// scoring core is exercised by the module's unit tests and the seam by the ignored real-weight test.
-#[allow(dead_code)]
+// Shared face-likeness scorer for native comparison jobs and generation post-passes.
+// Portable builds retain its pure scoring and metadata contracts in unit tests.
+#[cfg(any(test, native_lane))]
 mod face_likeness;
 // sc-4415 — on-demand "compare image to another" likeness tool (epic 4406): scores a CANDIDATE asset
 // against a SOURCE identity reference asset through the shared `face_likeness` scorer. Lives in
