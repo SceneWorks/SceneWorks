@@ -256,6 +256,22 @@ describe("makeCreateJob", () => {
       unregister();
     });
 
+    it("returns the library failure to a batch without scheduling a detached retry", async () => {
+      apiFetch.mockRejectedValue(unavailableRejection());
+      const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+      const unregister = setModelLibraryHandler(gate.block);
+      const creator = makeCreateJob({
+        definition: CREATE_JOB_DEFINITIONS.image, token: "", project, requestedGpu: "auto",
+        setJobs: vi.fn(), setError: vi.fn(),
+      });
+      const result = await creator.withResult([{ prompt: "x" }]);
+      expect(result.error).toContain("external model library");
+      expect(gate.getState().status).toBe("blocked");
+      await gate.retry();
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      unregister();
+    });
+
     it("leaves no queued submission behind when the prompt is cancelled", async () => {
       apiFetch.mockRejectedValue(unavailableRejection());
       const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });

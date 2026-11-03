@@ -72,15 +72,20 @@ export function makeCreateJob({
   beforeCreate,
   afterCreate,
 }) {
-  return async function createJob(...args) {
+  async function execute(args, options = {}) {
+    const { shouldContinue = () => true, detailed = false } = options;
+    if (!shouldContinue()) return { cancelled: true };
     if (!project) {
-      setError("Create or open a project first.");
-      return null;
+      const message = "Create or open a project first.";
+      setError(message);
+      return { error: message };
     }
     try {
       if (beforeCreate && (await beforeCreate(...args)) === false) {
-        return null;
+        return { error: "Job creation was canceled before submission." };
       }
+      // A batch may be stopped while its shared confirmation is open.
+      if (!shouldContinue()) return { cancelled: true };
       const job = await apiFetch(definition.path, token, {
         method: "POST",
         body: JSON.stringify(definition.buildBody(args, project, requestedGpu)),
@@ -88,16 +93,24 @@ export function makeCreateJob({
       afterCreate?.(job, ...args);
       setJobs((items) => upsertJobNewest(items, job));
       setError("");
-      return job;
+      return { job };
     } catch (err) {
-      // A model installed on a currently-unavailable library is recoverable, not a failure to
-      // report: hand the prompt this exact submission as the action to resume. The prompt owns
-      // single-fire, so a reconnect can never turn one blocked click into two jobs.
-      if (handleModelLibraryRejection(err, () => createJob(...args))) {
-        return null;
-      }
-      setError(err.message);
-      return null;
+      // A batch accounts for each submission itself. A detached recovery retry could
+      // enqueue after it stops and would escape that accounting, so detailed callers
+      // receive the reason and may start a new run after resolving the library issue.
+      const message = err?.message || (typeof err === "string" ? err : "Could not create job.");
+      const prompted = handleModelLibraryRejection(err, detailed ? null : () => createJob(...args));
+      if (!prompted) setError(message);
+      return detailed ? { error: message } : {};
     }
-  };
+  }
+
+  async function createJob(...args) {
+    const result = await execute(args);
+    return result.job ?? null;
+  }
+  // Opt-in result and cancellation contract for callers that own a multi-job run.
+  // Ordinary callers retain the historical job-or-null return and recovery behavior.
+  createJob.withResult = (args, options = {}) => execute(args, { ...options, detailed: true });
+  return createJob;
 }

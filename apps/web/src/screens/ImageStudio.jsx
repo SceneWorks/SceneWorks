@@ -3104,7 +3104,12 @@ export function ImageStudio() {
           if (n > 1) request.prompts = chunk.map((item) => buildBatchJobRequest(item.prompt, { resolution }).prompt);
         }
         if (stopped()) break;
-        const job = await createImageJob(request);
+        const result = createImageJob.withResult
+          ? await createImageJob.withResult([request], { shouldContinue: () => !stopped() })
+          : { job: await createImageJob(request) };
+        if (result.cancelled) break;
+        const { job } = result;
+        const failure = result.error || "Job creation returned no job ID.";
         if (stopped()) {
           if (job?.id) jobAction(job, "cancel");
           if (!owner.disposed && batchOwnerRef.current === owner && batchProjectRef.current === owner.projectId) {
@@ -3115,7 +3120,7 @@ export function ImageStudio() {
                 replaceBatchRun({ ...current, submitted: current.submitted + n,
                   activeJobIds: [...current.activeJobIds, job.id], sizes: { ...current.sizes, [job.id]: n } });
               } else {
-                replaceBatchRun(recordBatchEnqueueFailure(current, n, "Job creation returned no job ID."));
+                replaceBatchRun(recordBatchEnqueueFailure(current, n, failure));
               }
             }
           }
@@ -3132,7 +3137,7 @@ export function ImageStudio() {
                 activeJobIds: [...current.activeJobIds, job.id],
                 sizes: { ...current.sizes, [job.id]: n },
               }
-            : recordBatchEnqueueFailure(current, n, "Job creation returned no job ID."),
+            : recordBatchEnqueueFailure(current, n, failure),
         );
       } catch (error) {
         if (owner.disposed || batchOwnerRef.current !== owner || batchProjectRef.current !== owner.projectId) break;

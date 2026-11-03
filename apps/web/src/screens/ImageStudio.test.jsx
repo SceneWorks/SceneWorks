@@ -13,6 +13,8 @@ vi.mock("../api.js", async (importOriginal) => {
 });
 
 import { AppContext } from "../context/AppContext.js";
+import { apiFetch } from "../api.js";
+import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../createJob.js";
 import {
   buildStructuredPromptRecipe,
   parseMagicPromptCaption,
@@ -236,6 +238,7 @@ describe("Image Studio batch cardinality admission", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
+    vi.mocked(apiFetch).mockReset().mockResolvedValue({});
     ({ container, root } = mountRoot());
   });
 
@@ -393,6 +396,49 @@ describe("Image Studio batch cardinality admission", () => {
     expect(container.querySelector(".batch-run-progress").textContent).toContain("2/3 done · 2 failed");
     expect(container.querySelector(".batch-run-progress").textContent).toContain("first failure");
     expect(container.querySelector(".batch-run-progress").textContent).toContain("last failure");
+  });
+
+  it("retains actual creator errors across a successful submission", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo\nthree",
+    }));
+    let posts = 0;
+    vi.mocked(apiFetch).mockImplementation(async (path) => {
+      if (path !== "/api/v1/image/jobs") return {};
+      posts += 1;
+      if (posts === 1) throw new Error("admission rejected");
+      if (posts === 3) throw new Error("network unavailable");
+      return { id: "ok", status: "queued" };
+    });
+    const setError = vi.fn();
+    const createImageJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image,
+      project: { id: "project_1", name: "My Project" }, token: "token", requestedGpu: "",
+      setJobs: vi.fn(), setError });
+    await render(baseContext({ createImageJob }));
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await vi.waitFor(() => expect(posts).toBe(3));
+    expect(setError.mock.calls.map(([message]) => message)).toEqual(["admission rejected", "", "network unavailable"]);
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("2/3 done · 2 failed");
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("admission rejected");
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("network unavailable");
+  });
+
+  it("does not post after a project switch while creator confirmation is pending", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo",
+    }));
+    let confirm;
+    const beforeCreate = vi.fn(() => new Promise((resolve) => { confirm = resolve; }));
+    const createImageJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image,
+      project: { id: "project_1", name: "My Project" }, token: "token", requestedGpu: "",
+      setJobs: vi.fn(), setError: vi.fn(), beforeCreate });
+    const context = baseContext({ createImageJob });
+    await render(context);
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    expect(beforeCreate).toHaveBeenCalledTimes(1);
+    await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+    await act(async () => confirm(true));
+    expect(vi.mocked(apiFetch).mock.calls.filter(([path]) => path === "/api/v1/image/jobs")).toHaveLength(0);
   });
 
   it("accounts for and cancels a job returned after Stop", async () => {
