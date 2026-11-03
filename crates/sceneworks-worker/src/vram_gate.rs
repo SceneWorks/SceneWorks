@@ -244,12 +244,7 @@ pub(crate) fn requested_tier_key(
             .and_then(|mlx| mlx.get("quantize"))
             .and_then(quant_int)
     });
-    match raw {
-        None => "q8",
-        Some(bits) if bits <= 0 => "bf16",
-        Some(bits) if bits <= 4 => "q4",
-        Some(_) => "q8",
-    }
+    crate::payload::tier_for_bits(raw, "q8")
 }
 
 /// Predicted peak VRAM (GB) for `tier_key` from the manifest `candle` block:

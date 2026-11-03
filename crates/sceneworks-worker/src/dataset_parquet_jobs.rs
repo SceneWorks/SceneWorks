@@ -53,8 +53,8 @@ pub(crate) async fn run_dataset_parquet_import_job(
     let project_root = PathBuf::from(required_payload_string(&job.payload, "projectRoot")?);
     let dataset_root = PathBuf::from(required_payload_string(&job.payload, "datasetRoot")?);
     let source_path = PathBuf::from(required_payload_string(&job.payload, "sourcePath")?);
-    let url_column = required_payload_string(&job.payload, "urlColumn")?.to_owned();
-    let caption_column = required_payload_string(&job.payload, "captionColumn")?.to_owned();
+    let url_column = required_payload_text(&job.payload, "urlColumn")?.to_owned();
+    let caption_column = required_payload_text(&job.payload, "captionColumn")?.to_owned();
     let dataset_version = payload_u32(&job.payload, "datasetVersion", 0);
     let max_items = payload_usize(&job.payload, "maxItems", 1_000).clamp(
         1,

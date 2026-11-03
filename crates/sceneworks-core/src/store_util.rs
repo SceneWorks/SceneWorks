@@ -194,6 +194,19 @@ pub(crate) fn is_safe_id(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
 }
 
+/// Required string field; whitespace and empty strings are validated by each store's domain rules.
+pub(crate) fn required_str<'a>(value: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
+    required_str_with(value, key, || format!("Missing required field: {key}"))
+}
+
+pub(crate) fn required_str_with<'a>(
+    value: &'a Value,
+    key: &str,
+    message: impl FnOnce() -> String,
+) -> ProjectStoreResult<&'a str> {
+    optional_str(value, key).ok_or_else(|| ProjectStoreError::BadRequest(message()))
+}
+
 pub(crate) fn optional_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
@@ -348,6 +361,25 @@ mod tests {
                     assert_eq!(actual, expected, "catalog {pragma}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn required_strings_preserve_domain_text_and_diagnostics() {
+        let value = serde_json::json!({"raw":"  text  ","empty":"","wrong":7});
+        assert_eq!(super::required_str(&value, "raw").unwrap(), "  text  ");
+        assert_eq!(super::required_str(&value, "empty").unwrap(), "");
+        for key in ["wrong", "missing"] {
+            assert_eq!(
+                super::required_str(&value, key).unwrap_err().to_string(),
+                format!("Missing required field: {key}")
+            );
+            assert_eq!(
+                super::required_str_with(&value, key, || "Display Name is required".into())
+                    .unwrap_err()
+                    .to_string(),
+                "Display Name is required"
+            );
         }
     }
 

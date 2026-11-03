@@ -155,22 +155,16 @@ fn sensenova_mlx_tier_key(request: &ImageRequest, weights_dir: &Path) -> &'stati
         // A flat `modelPath` has no tier basename: fall back to the requested/declared MLX bit
         // width, the same reading `vram_gate::requested_tier_key` performs (that module is compiled
         // only on the candle lane, so it cannot be called from here).
-        _ => match request
-            .advanced
-            .get("mlxQuantize")
-            .and_then(json_to_i64)
-            .or_else(|| {
+        _ => crate::payload::tier_for_bits(
+            request.quant_bits().or_else(|| {
                 request
                     .model_manifest_entry
                     .get("mlx")
                     .and_then(|mlx| mlx.get("quantize"))
-                    .and_then(json_to_i64)
-            }) {
-            None => "q8",
-            Some(bits) if bits <= 0 => "bf16",
-            Some(bits) if bits <= 4 => "q4",
-            Some(_) => "q8",
-        },
+                    .and_then(quant_int)
+            }),
+            "q8",
+        ),
     }
 }
 
@@ -633,22 +627,12 @@ pub(crate) async fn run_vqa_job(
         ));
     }
     let model_id = sensenova_model_id(&request);
-    let question = job
-        .payload
-        .get("question")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let question = crate::payload::trimmed_string(job.payload.get("question"))
         .ok_or_else(|| {
             WorkerError::InvalidPayload("Visual question answering requires a question.".to_owned())
         })?
         .to_owned();
-    let source_asset_id = job
-        .payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let source_asset_id = crate::payload::trimmed_string(job.payload.get("sourceAssetId"))
         .ok_or_else(|| {
             WorkerError::InvalidPayload(
                 "Visual question answering requires a source image asset.".to_owned(),
@@ -1013,11 +997,7 @@ fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> In
             .get("thinkMode")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        system_message: advanced
-            .get("systemMessage")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        system_message: crate::payload::trimmed_string(advanced.get("systemMessage"))
             .map(str::to_owned)
             .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned()),
         seed: resolve_seed(request, 0),
@@ -1785,12 +1765,7 @@ fn image_to_chw01_candle(img: &Image, min_pixels: i64, max_pixels: i64) -> Worke
 /// The SenseNova-U1 repo (manifest `repo` else the default), for the document telemetry.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn model_repo_for(request: &ImageRequest) -> String {
-    request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model)
                 .unwrap_or("sensenova/SenseNova-U1-8B-MoT")
@@ -1822,23 +1797,9 @@ fn interleave_resolution_snap(width: i64, height: i64) -> (i32, i32) {
 /// cross-platform (it is pure string logic), so it compiles under `test` off macOS too.
 #[cfg(any(target_os = "macos", test, feature = "backend-candle"))]
 fn strip_reasoning(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("<think>") {
-        out.push_str(&rest[..start]);
-        match rest[start..].find("</think>") {
-            // Complete block: drop `<think>…</think>` and continue after it.
-            Some(end) => rest = &rest[start + end + "</think>".len()..],
-            // Dangling/unclosed block (truncated by max_new_tokens): drop everything from
-            // `<think>` on.
-            None => {
-                rest = "";
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
-    out.trim().to_owned()
+    crate::text_clean::strip_think_blocks(text, crate::text_clean::ThinkPolicy::DropUnclosed)
+        .trim()
+        .to_owned()
 }
 
 /// `safe_int` over a top-level payload field: parse (int / float / numeric string) else `default`,

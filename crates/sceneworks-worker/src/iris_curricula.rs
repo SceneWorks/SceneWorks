@@ -200,6 +200,14 @@ impl IrisPlanRefusal {
     }
 }
 
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn training_config_refusal(error: crate::WorkerError) -> IrisPlanRefusal {
+    IrisPlanRefusal {
+        kind: "invalid".to_owned(),
+        message: error.to_string(),
+    }
+}
+
 /// The engine-resolved receipts of an Iris plan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedIrisPlan(Value);
@@ -252,7 +260,8 @@ pub fn resolve_iris_plan(
                 subject_mask_path: None,
             })
             .collect(),
-        config: crate::training_jobs::engine_training_config(plan),
+        config: crate::training_jobs::engine_training_config(plan)
+            .map_err(training_config_refusal)?,
         output_dir: PathBuf::from(&plan.output.output_dir),
         file_name: plan.output.file_name.clone(),
         trigger_words: plan.output.trigger_words.clone(),
@@ -271,7 +280,8 @@ pub fn resolve_iris_config(
     backbone_dir: &Path,
     config: &sceneworks_core::training::TrainingConfig,
 ) -> Result<ResolvedIrisPlan, IrisPlanRefusal> {
-    let mut engine = crate::training_jobs::map_engine_config(config);
+    let mut engine =
+        crate::training_jobs::map_engine_config(config).map_err(training_config_refusal)?;
     if config
         .advanced
         .get("mixedPrecision")

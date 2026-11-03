@@ -20,6 +20,10 @@
 //! see `DEFAULT_REFINE_MAX_NEW_TOKENS`.
 
 use super::*;
+#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+pub(crate) use crate::text_clean::clean_json_output;
+#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+use crate::text_clean::{first_ci, strip_reasoning_and_fence};
 
 // The prompt-refinement / magic-prompt checkpoint — the coherent Anubis-8B (sc-6550 bake-off). It
 // serves BOTH the free-text "Refine my prompt" rewrite AND the Ideogram magic-prompt JSON caption:
@@ -620,32 +624,6 @@ fn finalize_refined_output(raw: &str, emits_json: bool, model_id: Option<&str>) 
     }
 }
 
-/// Shared prelude for cleaning a model reply: strip `<think>…</think>` reasoning blocks, drop the
-/// text before an orphan closing tag, and unwrap a single wrapping ```…``` code fence. Both
-/// [`clean_refine_output`] (which then strips surrounding quotes) and [`clean_json_output`] (which
-/// then isolates the outermost `{ … }` span) build on this identical prelude, so it lives in one
-/// place (F-116).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn strip_reasoning_and_fence(text: &str) -> String {
-    let mut text = strip_think_blocks(text.trim()).trim().to_owned();
-    // An orphan closing tag (no matching open): keep only what follows the last one.
-    if let Some(pos) = last_ci(&text, "</think>") {
-        text = text[pos + "</think>".len()..].trim().to_owned();
-    }
-    // A wrapping ```…``` code fence: drop the fence lines.
-    if text.starts_with("```") && text.ends_with("```") {
-        let lines: Vec<&str> = text.lines().collect();
-        if lines.len() >= 2 {
-            text = lines[1..lines.len() - 1].join("\n").trim().to_owned();
-        }
-    }
-    text
-}
-
 /// Strip `<think>…</think>` reasoning blocks, a wrapping code fence, and matching surrounding quotes
 /// from the model reply. Port of the Python `clean_output` (regex-free: the tags are ASCII, matched
 /// case-insensitively without lowercasing the whole — Unicode-safe — string).
@@ -669,70 +647,6 @@ fn clean_refine_output(text: &str) -> String {
         }
     }
     text
-}
-
-/// Remove every `<think>…</think>` pair (case-insensitive, spanning newlines). An unmatched open tag
-/// leaves the remainder untouched — matching the Python non-greedy regex, which simply does not match.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn strip_think_blocks(input: &str) -> String {
-    const OPEN: &str = "<think>";
-    const CLOSE: &str = "</think>";
-    let mut out = String::with_capacity(input.len());
-    let mut rest = input;
-    loop {
-        match first_ci(rest, OPEN) {
-            Some(open) => {
-                out.push_str(&rest[..open]);
-                let after_open = &rest[open + OPEN.len()..];
-                match first_ci(after_open, CLOSE) {
-                    Some(close) => rest = &after_open[close + CLOSE.len()..],
-                    None => {
-                        out.push_str(&rest[open..]);
-                        return out;
-                    }
-                }
-            }
-            None => {
-                out.push_str(rest);
-                return out;
-            }
-        }
-    }
-}
-
-/// Byte offset of the first case-insensitive occurrence of an ASCII `needle`. Offsets land on ASCII
-/// tag boundaries, so callers can slice safely even when the surrounding text is Unicode.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn first_ci(haystack: &str, needle: &str) -> Option<usize> {
-    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
-    if n.is_empty() || n.len() > h.len() {
-        return None;
-    }
-    (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
-}
-
-/// Byte offset of the last case-insensitive occurrence of an ASCII `needle`.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
-    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
-    if n.is_empty() || n.len() > h.len() {
-        return None;
-    }
-    (0..=h.len() - n.len())
-        .rev()
-        .find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -1069,22 +983,6 @@ pub(crate) fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core
     })
 }
 
-/// Reduce a magic-prompt reply to its JSON object: strip `<think>` blocks and a wrapping code fence
-/// (reusing the refine cleanup), then take the outermost `{ … }` span so leading/trailing prose from
-/// a small model is dropped. The caller parses + validates; here we only isolate the object.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-pub(crate) fn clean_json_output(text: &str) -> String {
-    let text = strip_reasoning_and_fence(text);
-    match (text.find('{'), text.rfind('}')) {
-        (Some(start), Some(end)) if end > start => text[start..=end].to_owned(),
-        _ => text,
-    }
-}
-
 // ----------------------------------------------------------------------------------------------
 // Job handler — native MLX on macOS (sc-5552 / sc-7158) and candle on the Windows candle build
 // (sc-5525 / sc-7404). The body is backend-agnostic: `core_llm::load_for_model` resolves whichever
@@ -1156,9 +1054,7 @@ pub(crate) async fn run_prompt_refine_job(
             None => payload
                 .get("imagePath")
                 .or_else(|| payload.get("referencePath"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
+                .and_then(crate::payload::trimmed_value_str)
                 .map(str::to_owned)
                 .into_iter()
                 .collect(),
@@ -1212,11 +1108,7 @@ pub(crate) async fn run_prompt_refine_job(
     // `None` for every other task.
     let qwen_rewriter = (task == RefineTask::QwenImageRewrite)
         .then(|| crate::qwen_prompt_rewrite::Rewriter::for_reference_count(image_refs.len()));
-    let model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let model = crate::payload::trimmed_string(payload.get("model"))
         .map(str::to_owned)
         // A rewrite defaults to its own selected checkpoint, not to the generic Anubis refiner.
         // An explicit `payload.model` still wins, which is how the real-weight smoke pins a local
@@ -1273,12 +1165,8 @@ pub(crate) async fn run_prompt_refine_job(
             build_image_describe_messages(style, multi_reference)
         }
         RefineTask::MagicPrompt => {
-            let aspect_ratio = payload
-                .get("aspectRatio")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("1:1");
+            let aspect_ratio =
+                crate::payload::trimmed_string(payload.get("aspectRatio")).unwrap_or("1:1");
             build_magic_prompt_messages(&original_prompt, aspect_ratio)
         }
         // sc-22713: the composed planning request IS the user turn; the embedded asset carries the

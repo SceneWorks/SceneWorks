@@ -1016,11 +1016,7 @@ pub(crate) async fn run_image_upscale_job(
     // mirroring the video path). A missing factor still defaults to 2x.
     let factor: u8 =
         resolve_image_upscale_factor(payload.get("factor").and_then(Value::as_u64).unwrap_or(2))?;
-    let engine = payload
-        .get("engine")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    let engine = crate::payload::trimmed_string(payload.get("engine"))
         .unwrap_or("real-esrgan")
         .to_lowercase();
     // Canonical engine id. The Rust upscaler serves Real-ESRGAN (`ort`: CoreML on Mac / CUDA off-Mac,

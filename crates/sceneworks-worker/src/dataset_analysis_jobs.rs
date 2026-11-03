@@ -78,12 +78,7 @@ pub(crate) async fn run_dataset_analysis_job(
             "Dataset analysis job has no items to embed.".to_owned(),
         ));
     }
-    let model_name_or_path = job
-        .payload
-        .get("modelNameOrPath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let model_name_or_path = crate::payload::trimmed_string(job.payload.get("modelNameOrPath"))
         .unwrap_or(CLIP_EMBEDDER_MODEL)
         .to_owned();
     let weights_dir =
@@ -284,12 +279,7 @@ fn analysis_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            let caption_hash = item
-                .object
-                .get("captionHash")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
+            let caption_hash = crate::payload::trimmed_string(item.object.get("captionHash"))
                 .map(str::to_owned)
                 .unwrap_or_else(|| sceneworks_core::dataset_quality::caption_hash(&caption_text));
             let image_path = item.image_path()?;

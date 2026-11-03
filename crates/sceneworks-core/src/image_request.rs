@@ -193,6 +193,11 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
+    /// Explicit quantization bits, before model-specific defaults or tier validation.
+    pub fn quant_bits(&self) -> Option<i64> {
+        crate::payload_util::optional_i64(&self.advanced, "mlxQuantize")
+    }
+
     /// The prompt image `index` of this job rendered: `prompt` for an ordinary request, and
     /// `prompts[index % prompts.len()]` for a native prompt batch (prompt-minor order — the engine
     /// renders the whole prompt list once per `count` repetition).

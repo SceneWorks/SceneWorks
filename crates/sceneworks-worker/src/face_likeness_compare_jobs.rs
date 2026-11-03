@@ -86,11 +86,7 @@ use serde_json::Value;
 ))]
 fn load_compare_images(settings: &Settings, job: &JobSnapshot) -> WorkerResult<(Image, Image)> {
     let payload = &job.payload;
-    let project_id = payload
-        .get("projectId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
+    let project_id = crate::payload::trimmed_string(payload.get("projectId"))
         .or(job.project_id.as_deref())
         .ok_or_else(|| {
             WorkerError::InvalidPayload(
@@ -131,14 +127,11 @@ fn load_compare_images(settings: &Settings, job: &JobSnapshot) -> WorkerResult<(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn required_asset_id<'a>(payload: &'a JsonObject, field: &str) -> WorkerResult<&'a str> {
-    payload
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!("face likeness compare needs a {field}"))
-        })
+    crate::payload::required_trimmed_str(
+        payload,
+        field,
+        &format!("face likeness compare needs a {field}"),
+    )
 }
 
 /// Build the scorer from the SOURCE face, score the CANDIDATE, and return the standard result object
@@ -368,7 +361,7 @@ mod tests {
         assert!(required_asset_id(&payload, "sourceAssetId").is_err());
         payload.insert("sourceAssetId".to_owned(), json!("   "));
         assert!(required_asset_id(&payload, "sourceAssetId").is_err());
-        payload.insert("sourceAssetId".to_owned(), json!("asset_42"));
+        payload.insert("sourceAssetId".to_owned(), json!("  asset_42  "));
         assert_eq!(
             required_asset_id(&payload, "sourceAssetId").unwrap(),
             "asset_42"
