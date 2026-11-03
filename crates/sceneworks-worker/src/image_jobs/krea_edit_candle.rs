@@ -383,12 +383,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
     .await?;
     strategy_spec = strategy_spec.with_offload_policy(offload_policy);
     // Telemetry `repo` — the manifest `repo` else the Krea 2 Raw default.
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model).unwrap_or("SceneWorks/krea-2-raw-mlx")
         })

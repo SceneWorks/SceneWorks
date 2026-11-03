@@ -1806,21 +1806,7 @@ fn video_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        // Stamped by update_job before posting (sc-4172).
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 // The shared standalone-audio-reference resolver (sc-17160 / sc-18650). Not an engine family: it is
@@ -2169,15 +2155,10 @@ fn resolve_dense_adapters(
 /// / `resolve_scail2_quant`).
 #[cfg(target_os = "macos")]
 fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
-    match request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
-        Some(bits) if bits <= 0 => None,
-        Some(bits) if bits <= 4 => Some(Quant::Q4),
-        Some(_) => Some(Quant::Q8),
-        None => Some(Quant::Q4),
+    match crate::payload::tier_for_bits(request.quant_bits(), "q4") {
+        "bf16" => None,
+        "q4" => Some(Quant::Q4),
+        _ => Some(Quant::Q8),
     }
 }
 

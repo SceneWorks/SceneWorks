@@ -2209,17 +2209,9 @@ fn existing_lora_install_marker(lora: &Value, settings: &Settings, file: &Path) 
     let repo = source
         .and_then(|source| source.get("repo"))
         .or_else(|| lora.get("repo"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .and_then(crate::payload::trimmed_value_str);
     if provider == Some("huggingface") {
-        if let (Some(id), Some(repo)) = (
-            lora.get("id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-            repo,
-        ) {
+        if let (Some(id), Some(repo)) = (crate::payload::trimmed_string(lora.get("id")), repo) {
             let candidate = settings
                 .data_dir
                 .join("loras")
@@ -3781,12 +3773,7 @@ fn stub_raw_settings(request: &ImageRequest) -> JsonObject {
 /// The asset `family`: the resolved model manifest entry wins (the UI sends it), else
 /// the linked mlx-gen descriptor's family on macOS, else empty.
 fn resolve_family(request: &ImageRequest) -> String {
-    if let Some(family) = request
-        .model_manifest_entry
-        .get("family")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    if let Some(family) = crate::payload::trimmed_string(request.model_manifest_entry.get("family"))
     {
         return family.to_owned();
     }
@@ -3835,21 +3822,7 @@ pub(crate) fn image_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        // Stamped by update_job before posting (sc-4172).
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 pub(crate) fn backend_label(gpu_id: &str) -> &str {

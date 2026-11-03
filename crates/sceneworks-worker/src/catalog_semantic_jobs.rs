@@ -9,6 +9,7 @@
     allow(dead_code)
 )]
 
+use crate::text_clean::clean_fenced_json_output as clean_json_output;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
@@ -225,26 +226,6 @@ pub fn parse_normalized_vision_result(text: &str) -> Result<NormalizedVisionResu
             .map(|(value, confidence)| ConfidentTag { value, confidence })
             .collect(),
     })
-}
-
-fn clean_json_output(text: &str) -> String {
-    let trimmed = text.trim();
-    let unfenced = if trimmed.starts_with("```") && trimmed.ends_with("```") {
-        let after_header = trimmed
-            .find('\n')
-            .map(|index| &trimmed[index + 1..])
-            .unwrap_or(trimmed);
-        after_header
-            .strip_suffix("```")
-            .unwrap_or(after_header)
-            .trim()
-    } else {
-        trimmed
-    };
-    match (unfenced.find('{'), unfenced.rfind('}')) {
-        (Some(start), Some(end)) if end >= start => unfenced[start..=end].to_owned(),
-        _ => unfenced.to_owned(),
-    }
 }
 
 fn normalize_token(value: &str) -> String {
@@ -754,21 +735,17 @@ async fn generate_vision_json(
             run_vision_generation(model, &request, &job_id)
         },
     );
-    tokio::pin!(generation);
-    loop {
-        tokio::select! {
-            result = &mut generation => return result,
-            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                if crate::shutdown_requested()
-                    || crate::cancel_requested_peek(api, &job.id).await
-                {
-                    cancel.cancel();
-                    return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-                }
-                crate::heartbeat(api, settings, sceneworks_core::contracts::WorkerStatus::Busy, Some(&job.id)).await?;
-            }
-        }
+    // The cache-thread reply resolves only after native generation has stopped. Never drop that
+    // reply future on cancel: the caller still owns the catalog-processing lease until this join.
+    let (canceled, result) =
+        crate::StreamSupervisor::new(cancel, generation, std::time::Duration::from_secs(2), None)
+            .wait(api, settings, &job.id)
+            .await?;
+    if canceled {
+        crate::mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
+    result
 }
 
 fn apply_vision_outcome(
@@ -919,26 +896,25 @@ async fn fetch_catalog_images_with_heartbeat(
     options: &crate::catalog_image_fetch::CatalogImageFetchOptions,
     processing: &CatalogProcessingLease,
 ) -> WorkerResult<crate::catalog_image_fetch::CatalogImageFetchReport> {
-    use sceneworks_core::contracts::WorkerStatus;
-
+    let cancel = gen_core::CancelFlag::new();
     let fetch = crate::catalog_image_fetch::fetch_attached_catalog_images_under_processing_lease(
-        registry, catalog_id, options, processing,
+        registry, catalog_id, options, processing, &cancel,
     );
-    tokio::pin!(fetch);
-    let mut interval = tokio::time::interval(crate::progress_report_interval(settings));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            result = &mut fetch => {
-                return result
-                    .map_err(|error| WorkerError::Engine(format!("catalog image fetch failed: {error}")));
-            }
-            _ = interval.tick() => {
-                crate::heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await?;
-                crate::check_cancel(api, job_id, CANCEL_MESSAGE).await?;
-            }
-        }
+    // Cancel stops admission at the next bounded fetch batch, drains its active downloads and
+    // finishes the fetch future before its compatibility lock or the outer processing lease drops.
+    let (canceled, result) = crate::StreamSupervisor::new(
+        cancel.clone(),
+        fetch,
+        crate::progress_report_interval(settings),
+        None,
+    )
+    .wait(api, settings, job_id)
+    .await?;
+    if canceled {
+        crate::mark_job_canceled(api, job_id, CANCEL_MESSAGE).await?;
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
+    result.map_err(|error| WorkerError::Engine(format!("catalog image fetch failed: {error}")))
 }
 
 #[cfg(any(
@@ -1319,12 +1295,7 @@ pub(crate) async fn run_catalog_analysis_job(
 ) -> WorkerResult<()> {
     use sceneworks_core::contracts::{JobStatus, ProgressStage, WorkerStatus};
 
-    let catalog_id = job
-        .payload
-        .get("catalogId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let catalog_id = crate::payload::trimmed_string(job.payload.get("catalogId"))
         .ok_or_else(|| {
             WorkerError::InvalidPayload("catalog analysis requires catalogId".to_owned())
         })?
@@ -2265,8 +2236,9 @@ mod tests {
             .nth(1)
             .and_then(|body| body.split("fn run_embedding_pass_blocking").next())
             .expect("fetch helper source");
-        assert!(fetch.contains("crate::heartbeat("));
-        assert!(fetch.contains("crate::check_cancel("));
+        assert!(fetch.contains("crate::StreamSupervisor::new("));
+        assert!(fetch.contains(".wait(api, settings, job_id)"));
+        assert!(fetch.contains("crate::mark_job_canceled(api, job_id, CANCEL_MESSAGE)"));
         let handler = source
             .split("pub(crate) async fn run_catalog_analysis_job")
             .nth(1)

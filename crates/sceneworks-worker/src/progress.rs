@@ -734,6 +734,20 @@ pub(crate) fn progress_payload(
     }
 }
 
+/// Shared GPU/analysis constructor; the utility constructor keeps its CPU defaults.
+pub(crate) fn progress_payload_for_backend(
+    status: JobStatus,
+    stage: ProgressStage,
+    progress: f64,
+    message: &str,
+    result: Option<JsonObject>,
+    backend: &str,
+) -> ProgressRequest {
+    let mut payload = progress_payload(status, stage, progress, message, None, result, None);
+    payload.backend = Some(backend.to_owned());
+    payload
+}
+
 pub(crate) fn number_from_f64(value: f64) -> ContractNumber {
     Number::from_f64(value).unwrap_or_else(|| Number::from(0))
 }
@@ -741,6 +755,33 @@ pub(crate) fn number_from_f64(value: f64) -> ContractNumber {
 #[cfg(test)]
 mod shutdown_flag_tests {
     use super::*;
+
+    #[test]
+    fn backend_progress_constructor_preserves_shared_defaults() {
+        let result = Some(JsonObject::from_iter([("count".to_owned(), json!(3))]));
+        let mut expected = progress_payload(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.25,
+            "working",
+            None,
+            result.clone(),
+            None,
+        );
+        expected.backend = Some("candle".to_owned());
+        let actual = progress_payload_for_backend(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.25,
+            "working",
+            result,
+            "candle",
+        );
+        assert_eq!(
+            serde_json::to_value(actual).expect("actual"),
+            serde_json::to_value(expected).expect("expected")
+        );
+    }
 
     /// sc-9618: outside a scoped job the task-local is unset, so a consumer loop's checkpoint reads
     /// "no shutdown" and keeps running (never spuriously cancels a job in a unit test).

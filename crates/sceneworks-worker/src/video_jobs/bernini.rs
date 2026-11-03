@@ -207,18 +207,6 @@ pub(crate) fn resolve_bernini_tier_dir_and_quant(
     }
 }
 
-/// Parse `advanced.mlxQuantize` (int or numeric string) for the Bernini tier selector — the raw bits
-/// the tier order keys on (the video lane's twin of the image lane's `resolve_bernini_image_quant`
-/// bits). `resolve_bernini_quant` maps the same value to a `Quant`; this keeps the tier selection and
-/// the legacy load-time quant in sync off one source.
-#[cfg(target_os = "macos")]
-fn bernini_quant_bits(request: &VideoRequest) -> Option<i64> {
-    request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-}
-
 /// On-demand fetch of a non-default Bernini quant-matrix tier subdir (sc-9945, mirrors
 /// [`ensure_wan_tier_present`]). The macOS default download is the lean `q4/` tier; a job that opts into
 /// a heavier tier (`mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`) pulls just that subdir from the FIXED
@@ -440,7 +428,7 @@ pub(super) async fn generate_bernini(
     // sc-9945: fetch the requested quant tier subdir (q8/bf16) if it isn't the shipped q4 default, then
     // descend into it — a pre-packed tier loads with `quant = None` (config sidecars authoritative); a
     // legacy flat snapshot keeps load-time quant.
-    let bits = bernini_quant_bits(request);
+    let bits = request.quant_bits();
     ensure_bernini_tier_present(api, settings, job, bits).await?;
     // Video lane: no explicit pick defaults q4-first (sc-10859 OOM carve-out), unlike the image lane.
     let (model_dir, quant) = resolve_bernini_tier_dir_and_quant(
@@ -611,10 +599,7 @@ pub(super) async fn generate_candle_bernini(
         resolve_candle_bernini_conditioning(api, settings, job, request, project_path).await?;
     // Select the published tier subfolder + matching load quant (sc-11003): parse `mlxQuantize` (int
     // or numeric string) the same way the still lane does, defaulting to bf16 dense.
-    let tier_bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let tier_bits = request.quant_bits();
     let (model_dir, quant) =
         crate::image_jobs::resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
     let adapters = resolve_wan_adapters(settings, request, engine_id)?;

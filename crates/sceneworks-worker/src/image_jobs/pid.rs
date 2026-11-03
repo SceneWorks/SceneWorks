@@ -287,26 +287,17 @@ fn resolve_pid_weights(
         .and_then(Value::as_object);
     let repo = ckpt_cfg
         .and_then(|c| c.get("repo"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .unwrap_or(default_repo);
     // Validate a per-request filename override EARLY — before the cache check below — so a traversal /
     // non-plain-component filename is rejected with a field-pointed `InvalidPayload` rather than silently
     // ignored when the repo happens not to be cached (sc-8821 / F-019). `None` ⇒ use the tier default.
     let filename_override = ckpt_cfg
         .and_then(|c| c.get("filename"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(|s| safe_weight_filename(s, "advanced.pidCheckpoint.filename"))
         .transpose()?;
-    let gemma_repo = request
-        .advanced
-        .get("pidGemma")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    let gemma_repo = crate::payload::trimmed_string(request.advanced.get("pidGemma"))
         .unwrap_or(PID_GEMMA_REPO);
 
     // Both snapshots must be cached, or fall through to the native VAE (no partial/half-loaded PiD).
