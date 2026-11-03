@@ -1,3 +1,4 @@
+import { backoffDelay } from "../retry.js";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   apiFetch,
@@ -194,7 +195,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
           "media-ticket",
           "media authorization: couldn't obtain a media ticket, so thumbnails, previews, and downloads may fail to load. Retrying in the background.",
         );
-        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        const delay = backoffDelay(attempt, { baseMs: 1000, maxMs: 30000 });
         attempt += 1;
         timer = window.setTimeout(acquire, delay);
       }
@@ -250,7 +251,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
           "access-probe",
           "access check: couldn't reach the host to determine whether a password is required. Retrying in the background.",
         );
-        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        const delay = backoffDelay(attempt, { baseMs: 1000, maxMs: 30000 });
         attempt += 1;
         timer = window.setTimeout(probe, delay);
       }
@@ -411,7 +412,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
             ? "access check: the host is temporarily refusing password attempts from this device after too many failures. Retrying in the background."
             : "access check: couldn't reach the host to confirm the saved password. Retrying in the background.",
         );
-        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        const delay = backoffDelay(attempt, { baseMs: 1000, maxMs: 30000 });
         attempt += 1;
         timer = window.setTimeout(verify, delay);
       }

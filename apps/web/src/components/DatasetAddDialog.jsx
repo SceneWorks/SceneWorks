@@ -1,3 +1,4 @@
+import { titleForAsset } from "../assetTitle.js";
 import React, { useMemo, useState } from "react";
 import { isLibraryAsset } from "../constants.js";
 import { assetMatchesCharacter } from "../characterMembership.js";
@@ -5,9 +6,6 @@ import { AssetThumbnail, assetCanRenderAsImage } from "./assetMedia.jsx";
 import { FileDropzone } from "./FileDropzone.jsx";
 import { Modal } from "./Modal.jsx";
 
-function assetTitle(asset) {
-  return asset?.displayName ?? asset?.title ?? asset?.name ?? asset?.id ?? "Untitled asset";
-}
 
 const TABS = [
   ["file", "File"],
@@ -35,7 +33,7 @@ function CandidateGrid({ assets, selectedIds, onToggle, emptyLabel }) {
             type="button"
           >
             <AssetThumbnail asset={asset} />
-            <span>{assetTitle(asset)}</span>
+            <span>{titleForAsset(asset)}</span>
           </button>
         );
       })}

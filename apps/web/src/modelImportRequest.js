@@ -1,9 +1,10 @@
+import { bytesToGib } from "./modelCache.js";
 import { licenseAckRefusalMessage, licenseAcknowledgmentBlocked, requiresLicenseAcknowledgment } from "./licenseAcknowledgment.js";
 
 const maxModelUploadBytes = 256 * 1024 * 1024 * 1024;
 
 function uploadLimitLabel(bytes) {
-  const gib = bytes / (1024 * 1024 * 1024);
+  const gib = bytesToGib(bytes);
   return Number.isInteger(gib) ? `${gib}GB` : `${gib.toFixed(1)}GB`;
 }
 

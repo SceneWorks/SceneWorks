@@ -21,7 +21,7 @@ import {
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 import { appConfirm } from "../appConfirm.jsx";
-import { formatBytes } from "../formatting.js";
+import { formatBytes, formatTierBytes, downloadSizeText } from "../formatting.js";
 import {
   availabilityBadge,
   cacheEligibilityBadge,
@@ -109,27 +109,10 @@ function isSupersededLoraImport(job, completedTimes) {
   return Boolean(completedAt) && terminalStatuses.has(job.status) && job.status !== "completed" && completedAt.localeCompare(job.createdAt ?? "") > 0;
 }
 
-function downloadSizeText(model) {
-  if (!model.downloadSizeLabel) {
-    return "Unavailable";
-  }
-  return model.downloadSizeEstimated ? `~${model.downloadSizeLabel}` : model.downloadSizeLabel;
-}
 
 // Human-readable size for a per-tier byte count (sc-8509). The catalog gives per-variant sizes as
 // raw `downloadSizeBytes` numbers (unlike the model-level `downloadSizeLabel` string), so the tier
 // panel formats them here. Binary units (GiB-based) to match the model-level label's convention.
-function formatTierSize(bytes) {
-  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) {
-    return "Size unavailable";
-  }
-  const gb = bytes / (1024 * 1024 * 1024);
-  if (gb >= 1) {
-    return `${gb.toFixed(1)} GiB`;
-  }
-  const mb = bytes / (1024 * 1024);
-  return `${mb.toFixed(0)} MiB`;
-}
 
 // Conversion status text, keyed off the catalog's `mlxConversionState`. Turnkey ("ready") models
 // fetch their weights automatically on first generation; convert-required models need the native
@@ -474,7 +457,7 @@ function ModelTierDownloadPanel({
                 </span>
               </label>
               <span className="model-tier-size">
-                {formatTierSize(variant.footprint?.diskSizeBytes ?? variant.downloadSizeBytes)}
+                {formatTierBytes(variant.footprint?.diskSizeBytes ?? variant.downloadSizeBytes)}
               </span>
               {/* sc-12279: a TORN tier (some of its files present, some not) is not the same as an
                   absent one — the API already distinguishes them via `cacheState`, but this row used to
@@ -1123,7 +1106,7 @@ export function ModelManagerScreen() {
     const tierName = tierLabel(tier);
     const sizeClause =
       sizeBytes != null
-        ? `This permanently frees about ${formatTierSize(sizeBytes)} and removes`
+        ? `This permanently frees about ${formatTierBytes(sizeBytes)} and removes`
         : "This permanently removes";
     const message = [
       `Delete the ${tierName} tier of "${model.name ?? model.id}"?`,
@@ -1322,7 +1305,7 @@ export function ModelManagerScreen() {
     const missingRequiredFiles = Array.isArray(model.missingRequiredFiles) ? model.missingRequiredFiles : [];
     const localDownloadJob = cleanupOnly || installed ? null : downloadJobs.find((job) => job.status !== "completed");
     const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
-    const downloadSize = downloadSizeText(model);
+    const downloadSize = downloadSizeText(model, "Unavailable");
     const unassociated = !model.family;
     const capabilities = Array.isArray(model.capabilities)
       ? model.capabilities.filter((capability) => !RETIRED_MODEL_CAPABILITIES.has(capability))

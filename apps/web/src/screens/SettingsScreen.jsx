@@ -119,7 +119,7 @@ function fractionToPercent(fraction) {
 // preserve a reported zero while distinguishing an absent reading from zero.
 function telemetryBytesToGib(bytes) {
   if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return null;
-  return bytes / (1024 * 1024 * 1024);
+  return bytesToGib(bytes);
 }
 
 function telemetryGibLabel(bytes, digits = 1) {

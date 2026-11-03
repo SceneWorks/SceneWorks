@@ -1,3 +1,4 @@
+import { formatMiB } from "../formatting.js";
 import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
@@ -179,15 +180,6 @@ function isGpuWorker(worker) {
   return worker.gpuId && worker.gpuId !== "cpu" && Array.isArray(worker.capabilities) && worker.capabilities.includes("gpu");
 }
 
-function formatMemory(mb) {
-  if (!Number.isFinite(mb)) {
-    return "Unknown";
-  }
-  if (mb >= 1024) {
-    return `${(mb / 1024).toFixed(1)} GiB`;
-  }
-  return `${Math.round(mb)} MiB`;
-}
 
 function boundedPercent(value) {
   if (!Number.isFinite(value)) {
@@ -235,11 +227,11 @@ function WorkerCard({ worker }) {
       <div className="worker-stat-grid">
         <span>
           <small>Available</small>
-          <strong>{formatMemory(freeMb)}</strong>
+          <strong>{formatMiB(freeMb)}</strong>
         </span>
         <span>
           <small>Memory</small>
-          <strong>{Number.isFinite(usedMb) && Number.isFinite(totalMb) ? `${formatMemory(usedMb)} / ${formatMemory(totalMb)}` : "Unknown"}</strong>
+          <strong>{Number.isFinite(usedMb) && Number.isFinite(totalMb) ? `${formatMiB(usedMb)} / ${formatMiB(totalMb)}` : "Unknown"}</strong>
         </span>
         <span>
           <small>Load</small>

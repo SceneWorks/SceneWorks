@@ -1,3 +1,4 @@
+import { downloadSizeText } from "../formatting.js";
 import React from "react";
 import { WorkerProgressCard } from "./WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
@@ -19,12 +20,6 @@ import { terminalStatuses } from "../constants.js";
 //   offers         — models to offer for download (downloadOffersFor in modelEligibility.js).
 //   downloadJobs   — model_download jobs, to show progress for an in-flight offer.
 //   onDownload(model) / onOpenModels() / onOpenQueue() / onCancelJob(job) — wired from context.
-function offerSizeText(model) {
-  if (!model?.downloadSizeLabel) {
-    return "Size unavailable";
-  }
-  return model.downloadSizeEstimated ? `~${model.downloadSizeLabel}` : model.downloadSizeLabel;
-}
 
 export function ModelAvailabilityGate({
   ready,
@@ -82,7 +77,7 @@ export function ModelAvailabilityGate({
                   <div className="model-availability-offer-head">
                     <span>
                       <strong>{model.name ?? model.id}</strong>
-                      <small>{offerSizeText(model)}</small>
+                      <small>{downloadSizeText(model, "Size unavailable")}</small>
                     </span>
                     <button
                       disabled={!onDownload || Boolean(job)}

@@ -57,7 +57,7 @@ function ModeChip({ mode, label, extra = null, className = "" }) {
  * One running audio run, pinned above the run groups. A trimmed progress row — status chip,
  * title, message, a 6px track and Cancel / Queue — rather than the full worker card.
  */
-export function AudioInflightStrip({ run, onCancel, onOpenQueue }) {
+function AudioInflightStrip({ run, onCancel, onOpenQueue }) {
   const { job } = run;
   const { workersById, visibleWorkers } = useAppLive();
   const takes = audioExpectedTakes(job);
@@ -207,7 +207,7 @@ export function AudioTakeCard({
 }
 
 /** One generation run: the header (mode / model / settings chips / time / Run again) + its takes. */
-export function AudioRunGroup({
+function AudioRunGroup({
   run,
   loadedTakeId,
   playing,
