@@ -26538,7 +26538,8 @@
           // Reclaiming them is tracked on sc-17636 (S11), which owns delete/size coverage.
           //
           // `resources.imageUpscalers.real-esrgan.x{2,4}` still records the `.pth` provenance —
-          // `scripts/spikes/sc3489_export_reference.py` reproduces these ONNX files from it —
+          // Restore `scripts/spikes/sc3489_export_reference.py` from
+          // docs/archive/historical-artifacts.md to reproduce these ONNX files from it —
           // but provenance is metadata, not something every user needs on disk.
           //
           // The revision is byte-for-byte the worker's own `ONNX_REVISION`

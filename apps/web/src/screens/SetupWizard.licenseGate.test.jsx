@@ -218,6 +218,30 @@ describe("SetupWizard license gate (sc-17227 / sc-17137 review)", () => {
     expect(retry.disabled).toBe(false);
   });
 
+  it("recovers when acknowledgment is clicked before initial terms load", async () => {
+    let hydrate;
+    apiFetchMock.mockImplementation((path, _token, options) => {
+      if (path.endsWith("/license-acknowledgment") && !options?.method) {
+        return new Promise((resolve) => { hydrate = resolve; });
+      }
+      if (options?.method === "PUT") {
+        serverAcks.add("flux1_dev");
+        return Promise.resolve({ acknowledged: true });
+      }
+      return Promise.resolve({ id: "job-1", type: "model_download" });
+    });
+    await render([GATED_MODEL]);
+    const checkbox = await tickLicenseAck();
+    expect(checkbox.checked).toBe(false);
+    expect(serverAcks.has("flux1_dev")).toBe(false);
+    await act(async () => hydrate({ acknowledged: false, termsSha256: "current" }));
+    await tickLicenseAck();
+    expect(checkbox.checked).toBe(true);
+    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/models/flux1_dev/license-acknowledgment", "tok", {
+      method: "PUT", headers: { "If-Match": '"current"' },
+    });
+  });
+
   it("downloads a gated model after persisting acceptance of the reviewed terms", async () => {
     await render([GATED_MODEL]);
     const checkbox = await tickLicenseAck();

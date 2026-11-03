@@ -16,7 +16,7 @@ beforeEach(() => {
   put.mockReset().mockResolvedValue({ acknowledged: true });
   remove.mockReset().mockResolvedValue({ acknowledged: false });
 });
-afterEach(async () => { await unmountRoot(root, container); vi.restoreAllMocks(); });
+afterEach(async () => { if (root) await unmountRoot(root, container); vi.restoreAllMocks(); });
 it("hydrates server acceptance without browser storage, writes through, and reloads changed terms/token", async () => {
   await render();
   expect(get).toHaveBeenCalledWith("licensed", "context-token");
@@ -55,6 +55,9 @@ it("cannot accept before current server terms hydrate", async () => {
   expect(state.licenseAcks.licensed).toBe(false);
   await act(async () => hydrate({ acknowledged: false, termsSha256: "terms-sha" }));
   expect(state.licenseAcks.licensed).toBe(false);
+  await act(async () => state.setLicenseAck("licensed", true));
+  expect(put).toHaveBeenCalledWith("licensed", "context-token", "terms-sha");
+  expect(state.licenseAcks.licensed).toBe(true);
 });
 it("serializes a slow acceptance before withdrawal and ignores its obsolete response", async () => {
   let accept;
@@ -77,4 +80,40 @@ it("refuses to accept newer server terms than the displayed catalog notice", asy
   expect(put).not.toHaveBeenCalled();
   expect(state.licenseAcks.licensed).toBe(false);
   expect(state.licenseAckError).toContain("review the current license terms");
+});
+
+it("hydrates terms without resurrecting an acknowledgment withdrawn during the GET", async () => {
+  let hydrate;
+  get.mockImplementation(() => new Promise((resolve) => { hydrate = resolve; }));
+  await render();
+  await act(async () => state.setLicenseAck("licensed", false));
+  await act(async () => hydrate({ acknowledged: true, termsSha256: "terms-sha" }));
+  expect(state.licenseAcks.licensed).toBe(false);
+  expect(window.localStorage.getItem("sceneworks-license-ack:licensed")).toBeNull();
+  await act(async () => state.setLicenseAck("licensed", true));
+  expect(put).toHaveBeenCalledWith("licensed", "context-token", "terms-sha");
+});
+
+it("ignores obsolete hydration after token, terms, model, or unmount changes", async () => {
+  const pending = [];
+  get.mockImplementation((id, token) => new Promise((resolve) => pending.push({ id, token, resolve })));
+  await render();
+  await render({ token: "new-token", models: [{ ...model, licenseNotice: "terms 2" }] });
+  await act(async () => pending[0].resolve({ acknowledged: true, termsSha256: "old" }));
+  expect(state.licenseAcks.licensed).not.toBe(true);
+  await act(async () => state.setLicenseAck("licensed", true));
+  expect(put).not.toHaveBeenCalled();
+  await act(async () => pending[1].resolve({ acknowledged: false, termsSha256: "new" }));
+  await act(async () => state.setLicenseAck("licensed", true));
+  expect(put).toHaveBeenCalledWith("licensed", "new-token", "new");
+  await render({ token: "new-token", models: [{ ...model, id: "other" }] });
+  await act(async () => pending[2].resolve({ acknowledged: true, termsSha256: "other" }));
+  expect(state.licenseAcks.licensed).toBeUndefined();
+  expect(state.licenseAcks.other).toBe(true);
+  await render({ token: "last", models: [model] });
+  window.localStorage.removeItem("sceneworks-license-ack:licensed");
+  await unmountRoot(root, container);
+  root = null;
+  await act(async () => pending[3].resolve({ acknowledged: true, termsSha256: "late" }));
+  expect(window.localStorage.getItem("sceneworks-license-ack:licensed")).toBeNull();
 });

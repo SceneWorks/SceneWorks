@@ -1,11 +1,11 @@
 #!/usr/bin/env node
+import { fileSha256 } from "./lib/file-sha256.mjs";
 // Issue 3197. Exactly two cold SDXL q4 renders, using the maintained catalog artifact resolver
 // and calibration capture protocol. Dispatch-only; never imported by a normal-CI inference test.
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFile, writeFile, mkdir, realpath, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { performance } from "node:perf_hooks";
@@ -406,7 +406,7 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
   const state = path.join(workDir, "owned-app-state"); await mkdir(state, { recursive: true });
   const port = await new Promise((resolve, reject) => { const server = createServer(); server.once("error", reject); server.listen(0, "127.0.0.1", () => { const value = server.address().port; server.close((error) => error ? reject(error) : resolve(value)); }); });
   const workerId = `sdxl-replay-${process.env.GITHUB_RUN_ID ?? process.pid}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`;
-  const hashFile = async (file) => { const digest = createHash("sha256"); for await (const bytes of createReadStream(file)) digest.update(bytes); return digest.digest("hex"); };
+  const hashFile = fileSha256;
   const receipt = { schemaVersion: 1, profile: "sdxl-cuda-admitted-replay", status: "running", inferencePin: pin,
     inferenceSource,
     apiBinary: { path: apiBinary, sha256: await hashFile(apiBinary) },
