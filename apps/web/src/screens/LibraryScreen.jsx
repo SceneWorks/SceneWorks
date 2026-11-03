@@ -144,9 +144,11 @@ export function LibraryScreen() {
     }
   }
 
-  const imageCount = libraryAssets.filter((asset) => asset.type === "image").length;
-  const videoCount = libraryAssets.filter((asset) => asset.type === "video").length;
-  const uploadCount = libraryAssets.filter((asset) => asset.type === "upload").length;
+  const { imageCount, videoCount, uploadCount } = useMemo(() => ({
+    imageCount: libraryAssets.filter((asset) => asset.type === "image").length,
+    videoCount: libraryAssets.filter((asset) => asset.type === "video").length,
+    uploadCount: libraryAssets.filter((asset) => asset.type === "upload").length,
+  }), [libraryAssets]);
   const availableTags = useMemo(() => [...new Set(libraryAssets.flatMap((asset) => (Array.isArray(asset.tags) ? asset.tags : [])))].sort(), [libraryAssets]);
 
   return (

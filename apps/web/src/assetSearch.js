@@ -10,4 +10,3 @@ export function assetMatchesSearch(asset, needle) {
   const tags = Array.isArray(asset.tags) ? asset.tags.join(" ") : "";
   return `${displayName} ${prompt} ${tags}`.toLowerCase().includes(needle);
 }
-
