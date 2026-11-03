@@ -42,6 +42,7 @@ license-file = "LICENSE"
 # Pinned once here so all crates resolve the same version and the JSON envelope
 # stays consistent across the api / worker / desktop sidecars.
 [workspace.dependencies]
+if-addrs = "0.13"
 # Common versions and shared features live here. Members retain additive features and target
 # gates: in particular sha2/asm is Apple ARM-only, and desktop's futures-util/tokio defaults
 # stay disabled. Default-off roots let members opt into defaults without Cargo ignoring a

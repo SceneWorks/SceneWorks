@@ -24,7 +24,7 @@ futures-util = { workspace = true, default-features = true }
 # get_job_result's ticket URLs point at the host the client actually used (sc-10290).
 # Pinned to rmcp's `http` major so the injected `Parts` type unifies.
 http = "1"
-if-addrs = "0.13"
+if-addrs.workspace = true
 # Per-segment percent-encoding of project-relative media paths before they are
 # spliced into `/files/*relative_path` URLs (sc-10279 defensive hardening).
 percent-encoding = "2.3"
