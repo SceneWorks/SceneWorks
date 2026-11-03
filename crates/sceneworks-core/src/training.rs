@@ -5288,6 +5288,10 @@ mod tests {
             resolve_item_path(root, "/absolute.png"),
             Err(TrainingPlanError::InvalidConfig(_))
         ));
+        assert!(
+            resolve_item_path(root, "images\\photo.png").is_err(),
+            "persisted dataset items use portable separators"
+        );
         // A safe relative path resolves under the dataset root using the host separator (the plan is
         // built + consumed on the same machine). Build the expectation the same way so the assertion
         // holds on Windows too — a hardcoded `/dataset/images/photo.png` only matches on `/`-sep hosts.

@@ -912,11 +912,21 @@ mod tests {
         let depth = &item.model_options["depth"];
         assert_eq!(
             depth["path"],
-            json!(root.path().join("sidecars").join("a.depth.npy"))
+            json!(root
+                .path()
+                .join("sidecars")
+                .join("a.depth.npy")
+                .canonicalize()
+                .unwrap())
         );
         assert_eq!(
             depth["mask_path"],
-            json!(root.path().join("sidecars").join("a.mask.png"))
+            json!(root
+                .path()
+                .join("sidecars")
+                .join("a.mask.png")
+                .canonicalize()
+                .unwrap())
         );
         assert_eq!(depth["scale"], json!(0.001));
         assert_eq!(depth["max_depth"], json!(80.0));
@@ -932,7 +942,12 @@ mod tests {
         assert_eq!(pair.model_options.len(), 1);
         assert_eq!(
             pair.model_options["degraded_image"],
-            json!(root.path().join("sidecars").join("a.degraded.png"))
+            json!(root
+                .path()
+                .join("sidecars")
+                .join("a.degraded.png")
+                .canonicalize()
+                .unwrap())
         );
         let clean = task_item(
             IrisObjective::Restoration,
@@ -950,6 +965,16 @@ mod tests {
         let escape: sceneworks_core::contracts::ExtraFields =
             serde_json::from_value(json!({"irisDepth": {"path": "../x.npy"}})).unwrap();
         assert!(task_item(IrisObjective::Depth, root.path(), image.clone(), &escape).is_err());
+        let native_separator: sceneworks_core::contracts::ExtraFields =
+            serde_json::from_value(json!({"irisDepth": {"path": "sidecars\\a.depth.npy"}}))
+                .unwrap();
+        assert!(task_item(
+            IrisObjective::Depth,
+            root.path(),
+            image.clone(),
+            &native_separator
+        )
+        .is_err());
         let gone: sceneworks_core::contracts::ExtraFields =
             serde_json::from_value(json!({"irisDepth": {"path": "sidecars/none.npy"}})).unwrap();
         assert!(task_item(IrisObjective::Depth, root.path(), image, &gone).is_err());
