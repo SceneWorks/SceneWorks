@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listFilmRuns } from "../../api/films.js";
-import { assetCanRenderAsVideo, assetDisplayUrl, posterUrl } from "../assetMedia.jsx";
+import { AssetMedia, assetCanRenderAsVideo } from "../assetMedia.jsx";
 import {
   analyzeFilmTake,
   decideFilmTake,
@@ -299,7 +299,7 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
                     return (
                       <article className="ve-film-take" key={attempt.attempt}>
                         <header><strong>Attempt {attempt.attempt}</strong><span>{attempt.rejection ? "Rejected" : isSavedCut ? "Current saved cut" : isGenerationSelected ? "Generation selection" : "History"}</span></header>
-                        {asset && assetCanRenderAsVideo(asset) ? <video aria-label={`${shot.shotId} attempt ${attempt.attempt} preview`} controls poster={posterUrl(asset)} preload="metadata" src={assetDisplayUrl(asset)} /> : <div className="ve-film-take-missing">Preview unavailable · asset {attempt.take.assetId}</div>}
+                        {asset && assetCanRenderAsVideo(asset) ? <AssetMedia aria-label={`${shot.shotId} attempt ${attempt.attempt} preview`} asset={asset} controls preload="metadata" /> : <div className="ve-film-take-missing">Preview unavailable · asset {attempt.take.assetId}</div>}
                         <dl><dt>Asset</dt><dd>{attempt.take.assetId}</dd><dt>Job</dt><dd>{attempt.jobId || "unknown"}</dd><dt>Model</dt><dd>{attempt.take.model}</dd><dt>Seed</dt><dd>{attempt.take.seed ?? "random"}</dd></dl>
                         {attempt.rejection ? <p>Rejected {attempt.rejection.at}: {attempt.rejection.reason}</p> : null}
                         <div className="ve-film-actions">

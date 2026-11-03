@@ -16,3 +16,13 @@ export function catalogThumbnailUrl(catalogId, recordId) {
 // Ticket-bearing media URLs may be data/blob URLs as well as API files. Preserve
 // the browser Response/stream contract and caller-owned status/body consumption.
 export const mediaResponse = (url, options) => fetchResource(url, options);
+
+// Retry only an unauthorized in-flight read whose caller can regenerate the URL
+// with a newer ticket. Never mutate caller-owned blob/data/external URLs.
+export async function mediaResponseWithTicketRetry(makeUrl, options) {
+  const initial = makeUrl();
+  const response = await mediaResponse(initial, options);
+  if (response.status !== 401 || options?.signal?.aborted) return response;
+  const current = makeUrl();
+  return current && current !== initial ? mediaResponse(current, options) : response;
+}
