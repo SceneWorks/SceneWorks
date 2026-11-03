@@ -244,26 +244,16 @@ fn whisper_base_fresh_install_pinned_layout_smoke() {
 
     let settings = crate::Settings {
         api_url: "http://127.0.0.1:1".to_owned(),
-        access_token: None,
-        data_dir: data_dir.path().to_path_buf(),
         config_dir: data_dir.path().join("config"),
         worker_id: "sc-13797".to_owned(),
         gpu_id: "gpu-0".to_owned(),
-        is_child_worker: false,
-        poll_seconds: 1,
         heartbeat_seconds: 5,
-        shutdown_timeout_seconds: 1,
         huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
         huggingface_token: std::env::var("HF_TOKEN").ok(),
-        credentials: Vec::new(),
         max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
         max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
-        allow_private_lora_urls: false,
-        utility_workers: 1,
         backend_mlx_enabled: true,
-        backend_candle_enabled: false,
-        gpu_memory_limit_bytes: 0,
-        external_model_roots: Vec::new(),
+        ..crate::Settings::for_test(data_dir.path().to_path_buf())
     };
 
     // ── Provision the pinned snapshot through the REAL download executor (online), filtered to the

@@ -401,26 +401,14 @@ fn real_esrgan_candle_real_weights_upscales() {
 fn upscale_test_settings(data_dir: &std::path::Path) -> crate::Settings {
     crate::Settings {
         api_url: "http://127.0.0.1".to_owned(),
-        access_token: None,
-        data_dir: data_dir.to_path_buf(),
         config_dir: data_dir.join("config"),
         worker_id: "test-worker".to_owned(),
         gpu_id: "gpu-0".to_owned(),
-        is_child_worker: false,
-        poll_seconds: 1,
-        heartbeat_seconds: 1,
-        shutdown_timeout_seconds: 1,
         huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
-        huggingface_token: None,
-        credentials: Vec::new(),
         max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
         max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
-        allow_private_lora_urls: false,
-        utility_workers: 1,
         backend_mlx_enabled: true,
-        backend_candle_enabled: false,
-        gpu_memory_limit_bytes: 0,
-        external_model_roots: Vec::new(),
+        ..crate::Settings::for_test(data_dir.to_path_buf())
     }
 }
 
@@ -805,7 +793,7 @@ mod resolve_onnx_tests {
     }
 
     fn settings_at(data_dir: PathBuf) -> crate::Settings {
-        let mut settings = crate::Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = data_dir;
         settings
     }
@@ -943,7 +931,7 @@ mod resolve_seedvr2_tests {
     }
 
     fn settings_at(data_dir: PathBuf) -> crate::Settings {
-        let mut settings = crate::Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = data_dir;
         settings
     }

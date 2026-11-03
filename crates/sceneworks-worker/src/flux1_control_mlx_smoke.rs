@@ -31,11 +31,7 @@ use gen_core::{
 use super::smoke_support::{env_or, image_std, DEGENERATE_STD_FLOOR_DEFAULT};
 
 fn env_path(key: &str) -> PathBuf {
-    PathBuf::from(
-        std::env::var(key)
-            .unwrap_or_else(|_| panic!("set ${key}"))
-            .trim(),
-    )
+    super::smoke_support::env_path(key)
 }
 
 /// A synthetic single-channel-ish control fixture (a smooth top-to-bottom luminance ramp broadcast to
