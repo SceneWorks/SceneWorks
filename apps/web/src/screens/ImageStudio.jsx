@@ -1,4 +1,3 @@
-import { apiFetch } from "../api.js";
 import { mossAdvancedDefaults } from "../mossImageAdvanced.js";
 import { mossAdvancedIssue, mossPositivePromptIssue } from "../mossImageAdvancedValidation.js";
 import { isMossImage, isMossEdit, mossEditDefaults, mossDefaults, mossWireOptions, mossAccelerated, mossComponentState, mossPresetWithOrdinarySettings, mossEditWireOptions, mossEditReferenceIds, mossEditControlsError } from "../mossImage.js";
@@ -352,6 +351,7 @@ export function ImageStudio() {
     imageCaption,
     imageDescribe,
     createModelDownloadJob,
+    downloadConditionalComponents,
     createLoraDownloadJob,
     createLoraImportJob,
     deleteAsset,
@@ -545,9 +545,7 @@ export function ImageStudio() {
   async function downloadMossAcceleration() {
     setMossDownload({ busy: true, error: "", jobs: [] });
     try {
-      const result = await apiFetch(`/api/v1/models/${model}/conditional-components/${mossComponents.purpose}/download`, token, {
-        method: "POST", body: JSON.stringify({ licenseAcknowledged: true }),
-      });
+      const result = await downloadConditionalComponents(model, mossComponents.purpose);
       setMossDownload({ busy: false, error: "", jobs: result.jobs ?? [] });
     } catch (error) {
       setMossDownload({ busy: false, error: error.message, jobs: [] });
