@@ -226,12 +226,7 @@ struct ManifestLock {
 impl ManifestLock {
     fn acquire(manifest_path: &Path) -> WorkerResult<Self> {
         let lock_path = manifest_lock_path(manifest_path);
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
+        let mut file = sceneworks_core::file_lock::open_regular_lock_file(&lock_path)?;
         let deadline = std::time::Instant::now() + MANIFEST_LOCK_TIMEOUT;
         // fs2 signals lock contention with a platform-specific error: `EWOULDBLOCK`
         // (`ErrorKind::WouldBlock`) on Unix, but `ERROR_LOCK_VIOLATION` (raw OS 33,
@@ -239,11 +234,10 @@ impl ManifestLock {
         // Windows case and would mis-propagate a real, retryable contention as a hard
         // error (sc-8843). Compare by RAW OS CODE against fs2's own contention error,
         // which is correct on every platform.
-        let contended = fs2::lock_contended_error().raw_os_error();
         loop {
             match FileLock::try_exclusive_retryable(file) {
                 Ok(lock) => return Ok(Self { _lock: lock }),
-                Err((handle, error)) if error.raw_os_error() == contended => {
+                Err((handle, error)) if sceneworks_core::file_lock::is_contended(&error) => {
                     file = handle;
                     if std::time::Instant::now() >= deadline {
                         return Err(WorkerError::Io(std::io::Error::new(

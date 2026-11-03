@@ -1,10 +1,6 @@
 //! The guard every `fs2` advisory lock holder in this workspace releases through, so no holder
 //! releases by `close(2)` alone.
 //!
-//! (`catalog_store::CatalogProcessingLease` keeps its own equivalent `Drop`, written first when
-//! sc-22738 was diagnosed there; it holds the same `LOCK_UN` invariant and its own regression
-//! test.)
-//!
 //! `flock(2)` locks belong to the OPEN FILE DESCRIPTION, not to the descriptor and not to the
 //! process. `fork(2)` hands a child a reference to that same description, so closing the owner's
 //! descriptor only drops ONE reference: while any concurrently forked child still holds the
@@ -25,6 +21,12 @@ use std::fs::File;
 use std::io;
 
 use fs2::FileExt;
+
+/// Classify advisory-lock contention without confusing an error lacking an OS code with it.
+pub fn is_contended(error: &io::Error) -> bool {
+    let code = fs2::lock_contended_error().raw_os_error();
+    error.kind() == io::ErrorKind::WouldBlock || code.is_some() && error.raw_os_error() == code
+}
 
 /// Open a catalog lock without following a final symlink/reparse point, including a link
 /// substituted between metadata inspection and open. Callers retain their lock contention policy.
@@ -68,6 +70,17 @@ pub struct FileLock {
 }
 
 impl FileLock {
+    /// Open a regular lock file without truncating it, then wait for exclusive ownership.
+    /// Parent creation, timeout/retry and cancellation policies remain with the caller.
+    pub fn open_exclusive(path: &std::path::Path) -> io::Result<Self> {
+        Self::exclusive(open_regular_lock_file(path)?)
+    }
+
+    /// Open a regular lock file and refuse immediately if another owner holds it.
+    pub fn try_open_exclusive(path: &std::path::Path) -> io::Result<Self> {
+        Self::try_exclusive(open_regular_lock_file(path)?)
+    }
+
     /// Block until the exclusive lock is held.
     pub fn exclusive(file: File) -> io::Result<Self> {
         FileExt::lock_exclusive(&file)?;
@@ -137,6 +150,31 @@ impl Drop for FileLock {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn open_exclusive_preserves_bytes_and_refuses_reentrant_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("guard.lock");
+        std::fs::write(&path, b"existing lock metadata").unwrap();
+        let owner = FileLock::open_exclusive(&path).unwrap();
+        let error = FileLock::try_open_exclusive(&path).unwrap_err();
+        assert!(is_contended(&error));
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing lock metadata");
+        let inherited = owner.inherited_descriptor().unwrap();
+        drop(owner);
+        let next = FileLock::try_open_exclusive(&path).unwrap();
+        drop(next);
+        drop(inherited);
+        assert!(FileLock::open_exclusive(&directory.path().join("absent/guard.lock")).is_err());
+    }
+
+    #[test]
+    fn contention_classifier_rejects_unrelated_and_codeless_errors() {
+        assert!(is_contended(&fs2::lock_contended_error()));
+        assert!(is_contended(&io::ErrorKind::WouldBlock.into()));
+        assert!(!is_contended(&io::ErrorKind::PermissionDenied.into()));
+        assert!(!is_contended(&io::Error::other("unrelated")));
+    }
 
     #[test]
     fn regular_lock_opener_accepts_files_and_rejects_directories() {

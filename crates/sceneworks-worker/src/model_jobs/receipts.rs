@@ -3,14 +3,7 @@ const ARTIFACT_PROVENANCE_SCHEMA_VERSION: u32 = 1;
 const ARTIFACT_PROVENANCE_LOCK: &str = ".sceneworks-artifact-provenance.lock";
 
 fn lock_app_managed_receipt(root: &Path) -> std::io::Result<FileLock> {
-    FileLock::exclusive(
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(root.join(ARTIFACT_PROVENANCE_LOCK))?,
-    )
+    FileLock::open_exclusive(&root.join(ARTIFACT_PROVENANCE_LOCK))
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]

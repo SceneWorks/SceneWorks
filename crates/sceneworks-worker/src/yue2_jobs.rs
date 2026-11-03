@@ -1280,12 +1280,7 @@ impl RunClaim {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)?;
+        let file = sceneworks_core::file_lock::open_regular_lock_file(&path)?;
         let lock = sceneworks_core::file_lock::FileLock::try_exclusive(file).map_err(|error| {
             WorkerError::InvalidPayload(format!(
                 "yue2: the run {} is claimed by another active job ({error}); it cannot run or \

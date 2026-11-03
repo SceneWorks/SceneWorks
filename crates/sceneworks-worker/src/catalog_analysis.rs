@@ -466,11 +466,9 @@ impl CatalogAnalysisLease {
         let mut files = Vec::new();
         for name in [FETCH_LOCK_FILE, ANALYSIS_LOCK_FILE] {
             let path = catalog.root().join(name);
-            let file = sceneworks_core::file_lock::open_regular_lock_file(&path)?;
-            let contended = fs2::lock_contended_error().raw_os_error();
-            match FileLock::try_exclusive(file) {
+            match FileLock::try_open_exclusive(&path) {
                 Ok(lock) => files.push(lock),
-                Err(error) if error.raw_os_error() == contended => {
+                Err(error) if sceneworks_core::file_lock::is_contended(&error) => {
                     return Err(CatalogAnalysisError::Busy(format!(
                         "Catalog {} already has active fetch or analysis work.",
                         catalog.descriptor().id

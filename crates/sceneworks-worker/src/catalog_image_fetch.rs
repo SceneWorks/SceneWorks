@@ -663,13 +663,12 @@ impl CatalogFetchLease {
                 CatalogImageFetchError::Io(error)
             }
         })?;
-        let contended = fs2::lock_contended_error().raw_os_error();
         match FileLock::try_exclusive(file) {
             Ok(lock) => Ok(Self {
                 _processing: processing,
                 _file: lock,
             }),
-            Err(error) if error.raw_os_error() == contended => {
+            Err(error) if sceneworks_core::file_lock::is_contended(&error) => {
                 Err(CatalogImageFetchError::Busy(format!(
                     "Catalog {} already has an active image fetch.",
                     catalog.descriptor().id

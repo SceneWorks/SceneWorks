@@ -128,22 +128,16 @@ mod download_lock {
             if let Some(parent) = lock_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .open(&lock_path)?;
+            let mut file = sceneworks_core::file_lock::open_regular_lock_file(&lock_path)?;
             let deadline = Instant::now() + DOWNLOAD_LOCK_TIMEOUT;
             // fs2 signals contention with a platform-specific error (`EWOULDBLOCK` on
             // Unix, `ERROR_LOCK_VIOLATION` on Windows); compare by RAW OS CODE against
             // fs2's own contention error so retry-vs-fail is correct on every platform
             // (same posture as `manifest::ManifestLock`, sc-8843).
-            let contended = fs2::lock_contended_error().raw_os_error();
             loop {
                 match FileLock::try_exclusive_retryable(file) {
                     Ok(lock) => return Ok(Self { _lock: lock }),
-                    Err((handle, error)) if error.raw_os_error() == contended => {
+                    Err((handle, error)) if sceneworks_core::file_lock::is_contended(&error) => {
                         file = handle;
                         if Instant::now() >= deadline {
                             return Err(WorkerError::Io(std::io::Error::new(

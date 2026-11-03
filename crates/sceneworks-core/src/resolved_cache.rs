@@ -23,7 +23,7 @@ pub use retention::{
     RetentionHold, RetentionReport, SourceLifecycleSelector,
 };
 
-use crate::file_lock::FileLock;
+use crate::file_lock::{is_contended as is_lock_contended, FileLock};
 use crate::model_artifacts::{
     ActiveArtifactLease, ArtifactAvailability, ArtifactCompleteness, ArtifactIdentity,
     ArtifactLocation, ArtifactProvenance, ClosureFileStat, ModelArtifactResolver,
@@ -3197,19 +3197,7 @@ fn open_lock_file(path: &Path) -> Result<File, ResolvedCacheError> {
             )));
         }
     }
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(Into::into)
-}
-
-fn is_lock_contended(error: &std::io::Error) -> bool {
-    let fs2_contended = fs2::lock_contended_error().raw_os_error();
-    error.kind() == std::io::ErrorKind::WouldBlock
-        || fs2_contended.is_some() && error.raw_os_error() == fs2_contended
+    crate::file_lock::open_regular_lock_file(path).map_err(Into::into)
 }
 
 /// Everything [`ResolvedModelArtifact::validate`] proves except what needs the bundle to exist.

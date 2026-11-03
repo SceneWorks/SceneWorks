@@ -321,7 +321,6 @@ fn resolve_conversion_managed_roots(data_dir: &Path) -> WorkerResult<ConversionM
 
 fn lock_conversion_file(file: std::fs::File, path: &Path, shared: bool) -> WorkerResult<FileLock> {
     let deadline = std::time::Instant::now() + CONVERSION_LOCK_TIMEOUT;
-    let contended = fs2::lock_contended_error().raw_os_error();
     let mut file = file;
     loop {
         let result = if shared {
@@ -331,7 +330,7 @@ fn lock_conversion_file(file: std::fs::File, path: &Path, shared: bool) -> Worke
         };
         match result {
             Ok(lock) => return Ok(lock),
-            Err((handle, error)) if error.raw_os_error() == contended => {
+            Err((handle, error)) if sceneworks_core::file_lock::is_contended(&error) => {
                 file = handle;
                 if std::time::Instant::now() >= deadline {
                     return Err(WorkerError::Io(std::io::Error::new(
