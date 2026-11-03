@@ -120,13 +120,16 @@ function run(env) {
       record();
       discover(command(binary, ['aesthetic', '--ignored', '--list'], `${pkg}-discovery.log`, 30_000), cases.map(c => c.fqn));
       for (const c of cases) {
+        const row = evidence.cases.find(row => row.fqn === c.fqn);
+        row.status = 'running'; record();
         const text = command(binary, [c.fqn, '--exact', '--ignored', '--nocapture', '--test-threads=1'], `${c.fixture}-execution.log`, 60_000);
         const result = validateExecution(text, 0, c, manifest.fixtures[c.fixture]);
-        Object.assign(evidence.cases.find(row => row.fqn === c.fqn), { status: 'passed', result }); record();
+        Object.assign(row, { status: 'passed', result }); record();
       }
     }
     evidence.status = 'passed'; record();
   } catch (error) {
+    for (const row of evidence.cases) if (row.status === 'running') row.status = 'failed';
     evidence.status = 'failed'; evidence.error = error.message; record(); throw error;
   }
 }
