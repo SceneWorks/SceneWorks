@@ -128,7 +128,7 @@ async fn a_retention_checkpoint_never_blocks_the_caller_that_starts_it() {
     // sc-19706 folded the promotion drain into the SAME maintenance slot, so the anchor is the
     // slot rather than the retention handle, and the rule now covers both occupants: a promotion
     // copies and hashes a whole bundle, which is if anything worse to sit behind than a sweep.
-    let source = include_str!("../lib.rs");
+    let source = include_str!("../worker_loop.rs");
     let loop_body = source
         .split_once("let mut maintenance_task =")
         .expect("the poll loop keeps the maintenance handle in a local")
@@ -280,7 +280,7 @@ async fn worker_startup_reclaims_abandoned_import_staging_without_blocking_the_c
 
     // The call site. `sweep_staging` shipped with no caller at all, so the rule is BOTH that
     // startup runs it and that it does not sit on the claim path.
-    let source = include_str!("../lib.rs");
+    let source = include_str!("../worker_loop.rs");
     let startup = source
         .split_once("let mut next_retention_checkpoint =")
         .expect("the poll loop seeds its retention deadline")
