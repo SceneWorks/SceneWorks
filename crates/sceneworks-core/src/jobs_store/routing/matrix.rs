@@ -125,7 +125,25 @@ const WEB_SIMPLE_VIDEO: &str =
     include_str!("../../../../../apps/web/src/simple/SimpleVideoStudio.jsx");
 const WEB_VIDEO_VALIDATION: &str =
     include_str!("../../../../../apps/web/src/videoStudioValidation.js");
-const WEB_VIDEO_STUDIO: &str = include_str!("../../../../../apps/web/src/screens/VideoStudio.jsx");
+// The studio owner was split; keep the same provenance key over every moved source.
+const WEB_VIDEO_STUDIO: &str = concat!(
+    include_str!("../../../../../apps/web/src/screens/VideoStudio.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoAdvancedPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoGenerationSettings.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoPromptComposer.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoReviewPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoSourcePanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useLtx25Controls.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoExecutionTier.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoModeSelection.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoModelSelection.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoPresetState.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoRecipeReplay.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoReferences.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoSubmission.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoTurboControls.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/videoTierHelpers.js"),
+);
 const WEB_SIMPLE_AUDIO: &str =
     include_str!("../../../../../apps/web/src/simple/simpleAudioParts.jsx");
 const WEB_SIMPLE_AUDIO_STUDIO: &str =
