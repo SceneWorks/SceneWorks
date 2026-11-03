@@ -409,6 +409,9 @@ pub(crate) struct PreparedTrainingInputs {
     directory: Option<tempfile::TempDir>,
     ownership_lock: Option<FileLock>,
     snapshots: BTreeMap<PreparedBundleKey, PathBuf>,
+    cancel: Option<gen_core::CancelFlag>,
+    #[cfg(test)]
+    copy_checkpoint: Option<Box<dyn FnMut(PreparedBundleCheckpoint) -> WorkerResult<()> + Send>>,
     #[cfg(test)]
     materialization_count: usize,
     #[cfg(test)]
@@ -663,7 +666,17 @@ impl PreparedTrainingInputs {
             "{ordinal:06}-{}.safetensors",
             contract.key.expected_sha256
         ));
-        copy_and_verify_prepared_bundle(&contract.key, &staged)?;
+        let cancel = self.cancel.as_ref();
+        copy_and_verify_prepared_bundle(&contract.key, &staged, |checkpoint| {
+            check_prepared_input_cancel(cancel)?;
+            #[cfg(test)]
+            if let Some(hook) = &mut self.copy_checkpoint {
+                hook(checkpoint)?;
+            }
+            #[cfg(not(test))]
+            let _ = checkpoint;
+            check_prepared_input_cancel(cancel)
+        })?;
         std::fs::rename(&staged, &final_path).map_err(|error| {
             WorkerError::Io(std::io::Error::new(
                 error.kind(),
@@ -752,9 +765,27 @@ impl PreparedTrainingInputs {
     }
 }
 
+const PREPARED_INPUT_CANCEL_MESSAGE: &str = "LoRA training canceled before it started.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreparedBundleCheckpoint {
+    Copy,
+    Verify,
+}
+
+fn check_prepared_input_cancel(cancel: Option<&gen_core::CancelFlag>) -> WorkerResult<()> {
+    if cancel.is_some_and(gen_core::CancelFlag::is_cancelled) {
+        return Err(WorkerError::Canceled(
+            PREPARED_INPUT_CANCEL_MESSAGE.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn copy_and_verify_prepared_bundle(
     key: &PreparedBundleKey,
     staged_path: &Path,
+    mut checkpoint: impl FnMut(PreparedBundleCheckpoint) -> WorkerResult<()>,
 ) -> WorkerResult<()> {
     let mut source = std::fs::File::open(&key.source_path).map_err(|error| {
         WorkerError::InvalidPayload(format!(
@@ -784,6 +815,9 @@ fn copy_and_verify_prepared_bundle(
     let (actual_sha256, size) = sceneworks_core::hashing::try_sha256_reader_with(
         &mut source,
         |size, event| {
+            if let sceneworks_core::hashing::ReadEvent::Before = event {
+                checkpoint(PreparedBundleCheckpoint::Copy)?;
+            }
             if let sceneworks_core::hashing::ReadEvent::After(chunk) = event {
                 if chunk.is_empty() {
                     return Ok(());
@@ -828,6 +862,7 @@ fn copy_and_verify_prepared_bundle(
             ),
         ))
     })?;
+    checkpoint(PreparedBundleCheckpoint::Verify)?;
     if size != key.expected_size || actual_sha256 != key.expected_sha256 {
         return Err(WorkerError::InvalidPayload(format!(
             "Training item LTX prepared bundle failed its stored size/SHA-256 integrity check: {}.",
@@ -918,60 +953,217 @@ impl PreparedTrainingRun {
     }
 }
 
-/// Weights-free preflight shared by dry and real execution. It binds the serialized plan's exact
-/// kernel/base identity to an active trainer descriptor, constructs the same typed request the real
-/// path will submit, and validates its complete config/item surface without loading model weights.
-#[cfg(native_lane)]
+/// Fully owned, weights-free result. The no-backend build only validates and closes inputs.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+type TrainingPreflight = PreparedTrainingRun;
+#[cfg(not(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+)))]
+type TrainingPreflight = ();
+
+/// Synchronous entry point for rank processes and metadata-only contract tests.
+#[cfg(any(
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ),
+    test
+))]
 pub(crate) fn preflight_training_run(
     settings: &Settings,
     plan: &TrainingPlan,
     masks_pending: bool,
-) -> WorkerResult<PreparedTrainingRun> {
-    validate_training_plan(settings, plan)?;
-    let engine_id = validate_training_target_config(plan)?;
-    let mut prepared_inputs = PreparedTrainingInputs::default();
-    let request =
-        match training_request_from_plan(settings, plan, &mut prepared_inputs, masks_pending) {
-            Ok(request) => request,
-            Err(error) => return finish_prepared_input_operation(Err(error), prepared_inputs),
-        };
-    if let Err(error) = validate_weights_free_training_request(plan, engine_id, &request) {
-        drop(request);
-        return finish_prepared_input_operation(Err(error), prepared_inputs);
-    }
-    Ok(PreparedTrainingRun {
-        engine_id,
-        request,
-        prepared_inputs,
-    })
+) -> WorkerResult<TrainingPreflight> {
+    preflight_training_run_with_inputs(
+        settings,
+        plan,
+        masks_pending,
+        PreparedTrainingInputs::default(),
+    )
 }
 
-/// The default neither-backend build never claims a native training job. Keep its plan validator
-/// available for compilation/tests without pretending an absent runtime registry can validate an
-/// engine request.
-#[cfg(not(native_lane))]
-fn preflight_training_run(
+fn preflight_training_run_with_inputs(
     settings: &Settings,
     plan: &TrainingPlan,
     masks_pending: bool,
-) -> WorkerResult<()> {
-    validate_training_plan(settings, plan)?;
-    validate_training_target_config(plan)?;
-    preflight_subject_mask_paths(settings, plan, masks_pending)?;
-    // This build cannot construct a typed engine request, but it still verifies each stored
-    // prepared-bundle receipt exactly once before accepting a dry-run plan.
-    let mut prepared_inputs = PreparedTrainingInputs::default();
-    let operation = (|| {
-        for item in &plan.dataset.items {
-            prepared_inputs.resolve_model_options(
-                settings,
-                &plan.dataset.root_path,
-                &item.extra,
-            )?;
+    mut prepared_inputs: PreparedTrainingInputs,
+) -> WorkerResult<TrainingPreflight> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        validate_training_plan(settings, plan)?;
+        let engine_id = validate_training_target_config(plan)?;
+        let request =
+            match training_request_from_plan(settings, plan, &mut prepared_inputs, masks_pending) {
+                Ok(request) => request,
+                Err(error) => return finish_prepared_input_operation(Err(error), prepared_inputs),
+            };
+        if let Err(error) = validate_weights_free_training_request(plan, engine_id, &request) {
+            drop(request);
+            return finish_prepared_input_operation(Err(error), prepared_inputs);
         }
+        Ok(PreparedTrainingRun {
+            engine_id,
+            request,
+            prepared_inputs,
+        })
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        validate_training_plan(settings, plan)?;
+        validate_training_target_config(plan)?;
+        preflight_subject_mask_paths(settings, plan, masks_pending)?;
+        // This build cannot construct a typed engine request, but it still verifies each stored
+        // prepared-bundle receipt exactly once before accepting a dry-run plan.
+        let operation = (|| {
+            for item in &plan.dataset.items {
+                prepared_inputs.resolve_model_options(
+                    settings,
+                    &plan.dataset.root_path,
+                    &item.extra,
+                )?;
+            }
+            Ok(())
+        })();
+        finish_prepared_input_operation(operation, prepared_inputs)
+    }
+}
+
+fn finish_training_preflight<T>(
+    prepared: TrainingPreflight,
+    operation: WorkerResult<T>,
+) -> WorkerResult<T> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        prepared.finish(operation)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let () = prepared;
+        operation
+    }
+}
+
+/// Own the completed snapshots separately from the heartbeat task's unit result.
+/// Its error/cancel teardown discards task outputs. Keeping ownership here lets
+/// the async caller explicitly merge cleanup errors with its primary failure.
+/// If that caller is dropped, the last owner cleans any unclaimed completed set.
+#[derive(Default)]
+struct TrainingPreflightHandoff(std::sync::Mutex<Option<TrainingPreflight>>);
+impl TrainingPreflightHandoff {
+    fn take(&self) -> Option<TrainingPreflight> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+impl Drop for TrainingPreflightHandoff {
+    fn drop(&mut self) {
+        if let Some(prepared) = self
+            .0
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            if let Err(error) = finish_training_preflight(prepared, Ok(())) {
+                tracing::error!(event = "training_preflight_abandoned_cleanup_failed", %error,
+                    "could not remove unclaimed training input snapshots");
+            }
+        }
+    }
+}
+
+async fn preflight_training_run_async(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    plan: &TrainingPlan,
+    masks_pending: bool,
+) -> WorkerResult<TrainingPreflight> {
+    let owned_settings = settings.clone();
+    let owned_plan = plan.clone();
+    preflight_training_run_async_using(api, settings, job_id, move |cancel| {
+        preflight_training_run_with_inputs(
+            &owned_settings,
+            &owned_plan,
+            masks_pending,
+            PreparedTrainingInputs {
+                cancel: Some(cancel),
+                ..Default::default()
+            },
+        )
+    })
+    .await
+}
+
+async fn preflight_training_run_async_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    prepare: impl FnOnce(gen_core::CancelFlag) -> WorkerResult<TrainingPreflight> + Send + 'static,
+) -> WorkerResult<TrainingPreflight> {
+    let cancel = gen_core::CancelFlag::new();
+    let handoff = std::sync::Arc::new(TrainingPreflightHandoff::default());
+    let task_handoff = handoff.clone();
+    let task_cancel = cancel.clone();
+    let task = crate::load_progress::spawn_blocking(move || {
+        let prepared = prepare(task_cancel.clone())?;
+        if let Err(error) = check_prepared_input_cancel(Some(&task_cancel)) {
+            return finish_training_preflight(prepared, Err(error));
+        }
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
+        let prepared = {
+            let mut prepared = prepared;
+            prepared.request.cancel = task_cancel;
+            prepared
+        };
+        *task_handoff
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(prepared);
         Ok(())
-    })();
-    finish_prepared_input_operation(operation, prepared_inputs)
+    });
+    let outcome = run_blocking_with_heartbeat(
+        api,
+        settings,
+        job_id,
+        Some(cancel.clone()),
+        PREPARED_INPUT_CANCEL_MESSAGE,
+        "Training input preflight",
+        no_cancel_ack(),
+        task,
+    )
+    .await;
+    match (outcome, handoff.take()) {
+        (Ok(()), Some(prepared)) => match check_prepared_input_cancel(Some(&cancel)) {
+            Ok(()) => Ok(prepared),
+            Err(error) => finish_training_preflight(prepared, Err(error)),
+        },
+        (Err(error), Some(prepared)) => finish_training_preflight(prepared, Err(error)),
+        (Err(error), None) => Err(error),
+        (Ok(()), None) => Err(WorkerError::Engine(
+            "Training input preflight returned no result.".to_owned(),
+        )),
+    }
 }
 
 fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static str> {
@@ -2261,10 +2453,18 @@ async fn run_training_dry_run(
         ),
     )
     .await?;
-    #[cfg(native_lane)]
-    preflight_training_run(settings, plan, masks_pending)?.close()?;
-    #[cfg(not(native_lane))]
-    preflight_training_run(settings, plan, masks_pending)?;
+    let prepared =
+        preflight_training_run_async(api, settings, &job.id, plan, masks_pending).await?;
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    prepared.close()?;
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    let () = prepared;
     let item_count = plan.dataset.items.len();
     update_job(
         api,
@@ -3176,7 +3376,7 @@ where
         ),
     )
     .await?;
-    preflight_training_run(settings, plan, false)
+    preflight_training_run_async(api, settings, &job.id, plan, false).await
 }
 
 #[cfg(native_lane)]
@@ -4754,7 +4954,7 @@ mod tests {
         drop(inherited);
     }
 
-    fn test_settings(data_dir: &Path) -> Settings {
+    pub(super) fn test_settings(data_dir: &Path) -> Settings {
         Settings {
             api_url: "http://127.0.0.1".to_owned(),
             config_dir: data_dir.join("config"),
@@ -5234,7 +5434,7 @@ mod tests {
     /// A complete resolved plan as the API serializes it, parameterized by the
     /// fields the worker glue reads. `baseModelPath` is a path that does not exist,
     /// so `baseModelInstalled` is false unless a test overrides it.
-    fn plan_json(
+    pub(super) fn plan_json(
         data_dir: &Path,
         kernel: &str,
         base_model: &str,
@@ -11645,3 +11845,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "training_jobs/prepared_async_tests.rs"]
+mod prepared_async_tests;
