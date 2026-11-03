@@ -207,7 +207,7 @@ pub(crate) async fn run_dataset_analysis_job(
     );
 
     // Hand the spawned blocking task to the shared scaffold (sc-8836, F-034): it owns the
-    // `CancelJoinGuard`, the per-item progress select loop (with the sc-8835 cancel/heartbeat
+    // `StreamSupervisor`, the per-item progress loop (with the sc-8835 cancel/heartbeat
     // handling), the saving update, and the sidecar POST. Only the endpoint/space/messages and the
     // record → payload fold differ here.
     let dataset_id = required_payload_string(&job.payload, "datasetId")?.to_owned();
@@ -271,88 +271,36 @@ fn analysis_embedding_records_payload(records: &[AnalysisEmbeddingRecord]) -> Ve
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn analysis_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<AnalysisItem>> {
-    let dataset_root = payload
-        .get("datasetRoot")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Dataset analysis payload.datasetRoot must be an app-managed dataset path."
-                    .to_owned(),
-            )
-        })?;
-    let items = payload
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Dataset analysis payload.items must be an array.".to_owned(),
-            )
-        })?;
-    items
-        .iter()
-        .map(|item| {
-            let object = item.as_object().ok_or_else(|| {
-                WorkerError::InvalidPayload("Dataset analysis item must be an object.".to_owned())
-            })?;
-            let item_id = object
-                .get("itemId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "Dataset analysis item is missing itemId.".to_owned(),
-                    )
-                })?;
-            let content_hash = object
-                .get("contentHash")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Dataset analysis item {item_id} is missing contentHash."
-                    ))
-                })?
-                .to_owned();
-            let caption_text = object
+    parse_dataset_items(
+        settings,
+        payload,
+        "Dataset analysis",
+        DatasetItemPolicy::Strict,
+        |item| {
+            let content_hash = item.required("contentHash")?.to_owned();
+            let caption_text = item
+                .object
                 .get("captionText")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            let caption_hash = object
+            let caption_hash = item
+                .object
                 .get("captionHash")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned)
                 .unwrap_or_else(|| sceneworks_core::dataset_quality::caption_hash(&caption_text));
-            let image_path = object
-                .get("imagePath")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Dataset analysis item {item_id} is missing imagePath."
-                    ))
-                })?;
-            let image_path = resolve_dataset_item_path(
-                settings,
-                dataset_root,
-                image_path,
-                &format!("Dataset analysis item {item_id} imagePath"),
-            )?;
+            let image_path = item.image_path()?;
             Ok(AnalysisItem {
                 image_path,
                 content_hash,
                 caption_text,
                 caption_hash,
             })
-        })
-        .collect()
+        },
+    )
 }
 
 #[cfg(any(

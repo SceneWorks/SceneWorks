@@ -50,11 +50,13 @@ pub enum CatalogImageFetchError {
     Sqlite(rusqlite::Error),
     InvalidOptions(String),
     Busy(String),
+    Canceled,
 }
 
 impl std::fmt::Display for CatalogImageFetchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Canceled => formatter.write_str("Catalog image fetch canceled."),
             Self::Catalog(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Json(error) => write!(formatter, "{error}"),
@@ -682,12 +684,14 @@ pub(crate) async fn fetch_attached_catalog_images_under_processing_lease(
     catalog_id: &str,
     options: &CatalogImageFetchOptions,
     processing: &CatalogProcessingLease,
+    cancel: &gen_core::CancelFlag,
 ) -> CatalogImageFetchResult<CatalogImageFetchReport> {
     fetch_attached_catalog_images_with_lease(
         registry,
         catalog_id,
         options,
         Some(processing),
+        Some(cancel),
         |url, fetch_options| async move {
             fetch_public_source_url_bytes_with_options(&url, &fetch_options).await
         },
@@ -705,7 +709,8 @@ where
     F: Fn(String, PublicSourceUrlFetchOptions) -> Fut + Clone,
     Fut: Future<Output = WorkerResult<Vec<u8>>>,
 {
-    fetch_attached_catalog_images_with_lease(registry, catalog_id, options, None, fetcher).await
+    fetch_attached_catalog_images_with_lease(registry, catalog_id, options, None, None, fetcher)
+        .await
 }
 
 async fn fetch_attached_catalog_images_with_lease<F, Fut>(
@@ -713,12 +718,14 @@ async fn fetch_attached_catalog_images_with_lease<F, Fut>(
     catalog_id: &str,
     options: &CatalogImageFetchOptions,
     processing: Option<&CatalogProcessingLease>,
+    cancel: Option<&gen_core::CancelFlag>,
     fetcher: F,
 ) -> CatalogImageFetchResult<CatalogImageFetchReport>
 where
     F: Fn(String, PublicSourceUrlFetchOptions) -> Fut + Clone,
     Fut: Future<Output = WorkerResult<Vec<u8>>>,
 {
+    fetch_cancel_checkpoint(cancel)?;
     validate_options(options)?;
     let mut catalog = registry.open_attached(catalog_id)?;
     let _lease = match processing {
@@ -753,6 +760,8 @@ where
     let mut target_reached = false;
 
     loop {
+        fetch_cancel_checkpoint(cancel)?;
+        tokio::task::yield_now().await;
         let page = catalog.page_records_after(cursor, options.page_size)?;
         if page.records.is_empty() {
             break;
@@ -760,9 +769,11 @@ where
         cursor = page.next_cursor;
         let mut candidate_index = 0;
         while candidate_index < page.records.len() {
+            fetch_cancel_checkpoint(cancel)?;
             let mut pending = Vec::new();
             while candidate_index < page.records.len() && pending.len() < permit_backed_concurrency
             {
+                fetch_cancel_checkpoint(cancel)?;
                 let mut record = page.records[candidate_index].clone();
                 candidate_index += 1;
                 checkpoint.counts.candidates = checkpoint.counts.candidates.saturating_add(1);
@@ -892,10 +903,12 @@ where
                     record,
                     options.clone(),
                     Arc::clone(&semaphore),
+                    cancel,
                     fetcher.clone(),
                 )
             });
             for outcome in join_all(futures).await {
+                fetch_cancel_checkpoint(cancel)?;
                 let mut record = outcome.record;
                 let prior = acquisition_state(&record);
                 checkpoint.counts.retries = checkpoint
@@ -968,6 +981,13 @@ where
     Ok(CatalogImageFetchReport { checkpoint })
 }
 
+fn fetch_cancel_checkpoint(cancel: Option<&gen_core::CancelFlag>) -> CatalogImageFetchResult<()> {
+    if cancel.is_some_and(gen_core::CancelFlag::is_cancelled) {
+        return Err(CatalogImageFetchError::Canceled);
+    }
+    Ok(())
+}
+
 struct FetchOutcome {
     record: CatalogRecord,
     attempts: u32,
@@ -993,6 +1013,7 @@ async fn fetch_candidate<F, Fut>(
     record: CatalogRecord,
     options: CatalogImageFetchOptions,
     semaphore: Arc<Semaphore>,
+    cancel: Option<&gen_core::CancelFlag>,
     fetcher: F,
 ) -> FetchOutcome
 where
@@ -1035,6 +1056,15 @@ where
     };
     let mut attempts = 0;
     loop {
+        if cancel.is_some_and(gen_core::CancelFlag::is_cancelled) {
+            return FetchOutcome {
+                record,
+                attempts,
+                result: Err(WorkerError::Canceled(
+                    "Catalog image fetch canceled.".to_owned(),
+                )),
+            };
+        }
         attempts += 1;
         match fetcher(url.clone(), fetch_options).await {
             Ok(bytes) => {
@@ -1044,7 +1074,10 @@ where
                     result: Ok(FetchedDownload { bytes, permit }),
                 };
             }
-            Err(_error) if attempts <= options.max_retries => {
+            Err(_error)
+                if attempts <= options.max_retries
+                    && !cancel.is_some_and(gen_core::CancelFlag::is_cancelled) =>
+            {
                 let multiplier = 1_u64 << attempts.saturating_sub(1).min(8);
                 let delay = options
                     .retry_backoff_ms
@@ -2259,6 +2292,86 @@ mod tests {
         assert_eq!((verified.width, verified.height), (8, 6));
         assert_eq!(verified.extension, "png");
         assert_eq!(verified.content_hash.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn canceled_fetch_drains_in_flight_batch_before_releasing_lease() {
+        let (_root, registry, id) = catalog_fixture();
+        let cancel = gen_core::CancelFlag::new();
+        let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let options = CatalogImageFetchOptions::default();
+        let result = fetch_attached_catalog_images_with_lease(
+            &registry,
+            &id,
+            &options,
+            None,
+            Some(&cancel),
+            {
+                let cancel = cancel.clone();
+                let drained = drained.clone();
+                let registry = registry.clone();
+                let id = id.clone();
+                move |_url, _options| {
+                    let cancel = cancel.clone();
+                    let drained = drained.clone();
+                    let registry = registry.clone();
+                    let id = id.clone();
+                    async move {
+                        cancel.cancel();
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        let catalog = registry.open_attached(&id).expect("catalog");
+                        assert!(
+                            CatalogFetchLease::acquire(&catalog).is_err(),
+                            "lease stays held while download winds down"
+                        );
+                        drained.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(png(8, 8))
+                    }
+                }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(CatalogImageFetchError::Canceled)));
+        assert!(drained.load(std::sync::atomic::Ordering::SeqCst));
+        let catalog = registry.open_attached(&id).expect("catalog");
+        assert!(
+            CatalogFetchLease::acquire(&catalog).is_ok(),
+            "lease releases after the active batch stopped"
+        );
+        assert_eq!(
+            catalog.page_records(0, 1).expect("record")[0].image_path,
+            "images/pq_test"
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_fetch_does_not_retry_failed_in_flight_downloads() {
+        let (_root, registry, id) = catalog_fixture();
+        let cancel = gen_core::CancelFlag::new();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = fetch_attached_catalog_images_with_lease(
+            &registry,
+            &id,
+            &CatalogImageFetchOptions::default(),
+            None,
+            Some(&cancel),
+            {
+                let cancel = cancel.clone();
+                let calls = calls.clone();
+                move |_url, _options| {
+                    let cancel = cancel.clone();
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        cancel.cancel();
+                        Err(WorkerError::Engine("mock download failed".to_owned()))
+                    }
+                }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(CatalogImageFetchError::Canceled)));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     fn catalog_fixture() -> (TempDir, CatalogRegistry, String) {

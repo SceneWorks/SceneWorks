@@ -392,7 +392,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
         });
 
     // Hand the spawned blocking task to the shared scaffold (sc-8836, F-034): it owns the
-    // `CancelJoinGuard`, the per-item progress select loop (with the sc-8835 cancel/heartbeat
+    // `StreamSupervisor`, the per-item progress loop (with the sc-8835 cancel/heartbeat
     // handling), the saving update, and the sidecar POST. Only the endpoint/space/messages and the
     // record → payload fold differ here.
     let dataset_id = required_payload_string(&job.payload, "datasetId")?.to_owned();
@@ -462,76 +462,20 @@ fn face_analysis_items(
     settings: &Settings,
     payload: &JsonObject,
 ) -> WorkerResult<Vec<FaceAnalysisItem>> {
-    let dataset_root = payload
-        .get("datasetRoot")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Dataset face analysis payload.datasetRoot must be an app-managed dataset path."
-                    .to_owned(),
-            )
-        })?;
-    let items = payload
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Dataset face analysis payload.items must be an array.".to_owned(),
-            )
-        })?;
-    items
-        .iter()
-        .map(|item| {
-            let object = item.as_object().ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "Dataset face analysis item must be an object.".to_owned(),
-                )
-            })?;
-            let item_id = object
-                .get("itemId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "Dataset face analysis item is missing itemId.".to_owned(),
-                    )
-                })?;
-            let content_hash = object
-                .get("contentHash")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Dataset face analysis item {item_id} is missing contentHash."
-                    ))
-                })?
-                .to_owned();
-            let image_path = object
-                .get("imagePath")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Dataset face analysis item {item_id} is missing imagePath."
-                    ))
-                })?;
-            let image_path = resolve_dataset_item_path(
-                settings,
-                dataset_root,
-                image_path,
-                &format!("Dataset face analysis item {item_id} imagePath"),
-            )?;
+    parse_dataset_items(
+        settings,
+        payload,
+        "Dataset face analysis",
+        DatasetItemPolicy::Strict,
+        |item| {
+            let content_hash = item.required("contentHash")?.to_owned();
+            let image_path = item.image_path()?;
             Ok(FaceAnalysisItem {
                 image_path,
                 content_hash,
             })
-        })
-        .collect()
+        },
+    )
 }
 
 #[cfg(any(
