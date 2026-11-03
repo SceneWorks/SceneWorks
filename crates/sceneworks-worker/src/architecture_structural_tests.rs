@@ -1011,21 +1011,74 @@ fn helper_fingerprint(function: &syn::ItemFn) -> String {
 
 // This inventory must shrink when another tracked consolidation removes a copy. Reintroducing
 // it at the old path must then fail just like a copy in a new file.
-const LEGACY_HELPER_COPIES: &[(&str, &str)] = &[
-    ("crates/sceneworks-worker/src/paths.rs", "safe_download_dir"),
-    ("apps/rust-api/src/lib.rs", "safe_download_dir"),
-    ("apps/desktop/src/settings.rs", "normalize_host"),
-];
+const LEGACY_HELPER_COPIES: &[(&str, &str)] = &[("apps/desktop/src/settings.rs", "normalize_host")];
 
 #[test]
 fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
-    // These helpers already have a shared core owner. The safe-download wrappers are the
-    // pre-existing consolidation surface, not permission for a fourth implementation.
+    // Each implementation has a shared core owner; compatibility wrappers delegate there.
     let canonical = [
         (
             "crates/sceneworks-core/src/model_artifacts/artifact_selection.rs",
             "safe_download_dir",
         ),
+        ("crates/sceneworks-core/src/ids.rs", "is_safe_id"),
+        ("crates/sceneworks-core/src/ids.rs", "is_safe_id_with_max"),
+        (
+            "crates/sceneworks-core/src/safe_path.rs",
+            "portable_relative_path_parts",
+        ),
+        (
+            "crates/sceneworks-core/src/safe_path.rs",
+            "relative_normal_components",
+        ),
+        (
+            "crates/sceneworks-core/src/safe_path.rs",
+            "path_normal_components",
+        ),
+        (
+            "crates/sceneworks-core/src/safe_path.rs",
+            "is_link_or_reparse_point",
+        ),
+        ("crates/sceneworks-core/src/safe_path.rs", "confine_under"),
+        (
+            "crates/sceneworks-core/src/safe_path.rs",
+            "resolve_local_file",
+        ),
+        (
+            "crates/sceneworks-core/src/safe_path.rs",
+            "is_safe_media_path",
+        ),
+        (
+            "crates/sceneworks-core/src/file_lock.rs",
+            "open_regular_lock_file",
+        ),
+        (
+            "crates/sceneworks-core/src/slug.rs",
+            "slugify_worker_id_part",
+        ),
+        ("crates/sceneworks-core/src/hashing.rs", "hex"),
+        ("crates/sceneworks-core/src/hashing.rs", "hex_prefix"),
+        ("crates/sceneworks-core/src/hashing.rs", "sha256_bytes"),
+        (
+            "crates/sceneworks-core/src/hashing.rs",
+            "update_sha256_with",
+        ),
+        ("crates/sceneworks-core/src/hashing.rs", "update_sha256"),
+        (
+            "crates/sceneworks-core/src/hashing.rs",
+            "sha256_reader_with",
+        ),
+        (
+            "crates/sceneworks-core/src/hashing.rs",
+            "try_sha256_reader_with",
+        ),
+        ("crates/sceneworks-core/src/hashing.rs", "sha256_reader"),
+        (
+            "crates/sceneworks-core/src/hashing.rs",
+            "sha256_reader_retry",
+        ),
+        ("crates/sceneworks-core/src/hashing.rs", "sha256_file"),
+        ("crates/sceneworks-core/src/hashing.rs", "random_hex"),
         (
             "crates/sceneworks-core/src/hf_home.rs",
             "safe_repo_dir_name",
@@ -1083,6 +1136,49 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         }
     }
     fn delegates_to_core(function: &syn::ItemFn, name: &str, in_core: bool) -> bool {
+        // The async file adapter owns heartbeat/load progress around one blocking core call.
+        // It may not quietly grow a local streaming implementation again.
+        if function.sig.asyncness.is_some() && name == "sha256_file" {
+            #[derive(Default)]
+            struct HashAdapter {
+                core: usize,
+                spawn: usize,
+                heartbeat: usize,
+                loops: bool,
+            }
+            impl<'ast> Visit<'ast> for HashAdapter {
+                fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                    if let Expr::Path(target) = call.func.as_ref() {
+                        let path = target.path.to_token_stream().to_string();
+                        match path.as_str() {
+                            "sceneworks_core :: hashing :: sha256_file" => self.core += 1,
+                            "crate :: load_progress :: spawn_blocking" => self.spawn += 1,
+                            "heartbeat_while_blocking" => self.heartbeat += 1,
+                            _ => {}
+                        }
+                    }
+                    visit::visit_expr_call(self, call);
+                }
+                fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+                    self.loops = true;
+                    visit::visit_expr_for_loop(self, node);
+                }
+                fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+                    self.loops = true;
+                    visit::visit_expr_while(self, node);
+                }
+                fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
+                    self.loops = true;
+                    visit::visit_expr_loop(self, node);
+                }
+            }
+            let mut adapter = HashAdapter::default();
+            adapter.visit_block(&function.block);
+            return adapter.core == 1
+                && adapter.spawn == 1
+                && adapter.heartbeat == 1
+                && !adapter.loops;
+        }
         let [syn::Stmt::Expr(expression, _)] = function.block.stmts.as_slice() else {
             return false;
         };
@@ -1091,6 +1187,15 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
                 return false;
             };
             value.as_ref()
+        } else {
+            expression
+        };
+        // Domain error adaptation does not duplicate the shared implementation.
+        let expression = if let Expr::MethodCall(call) = expression {
+            if call.method != "map_err" {
+                return false;
+            }
+            call.receiver.as_ref()
         } else {
             expression
         };
@@ -1188,6 +1293,26 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         delegates_to_core(&forwarding, "safe_download_dir", false),
         "a compatibility delegate is not a helper implementation copy"
     );
+    let adapter = function(
+        &std::fs::read_to_string(root.join("crates/sceneworks-worker/src/downloads.rs")).unwrap(),
+        "sha256_file",
+    );
+    assert!(delegates_to_core(&adapter, "sha256_file", false));
+    let mut copied_stream = adapter.clone();
+    copied_stream.block.stmts.insert(
+        0,
+        syn::parse_quote! { for byte in bytes { consume(byte); } },
+    );
+    assert!(
+        !delegates_to_core(&copied_stream, "sha256_file", false),
+        "a lifecycle wrapper cannot contain a copied streaming loop"
+    );
+    let mapped: syn::ItemFn = syn::parse_quote! {
+        fn random_hex(bytes: usize) -> Result<String, Error> {
+            crate::hashing::random_hex(bytes).map_err(Error::from)
+        }
+    };
+    assert!(delegates_to_core(&mapped, "random_hex", true));
     let mut associated = Functions(Vec::new());
     associated.visit_file(&parse(&format!(
         "struct NewOwner; impl NewOwner {{ {} }}",
@@ -1198,5 +1323,75 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         helper_fingerprint(&source),
         helper_fingerprint(&associated.0[0]),
         "an associated helper must not hide the same copy"
+    );
+}
+
+#[test]
+fn confinement_policy_has_one_core_type_and_the_shared_function_uses_it() {
+    const OWNER: &str = "crates/sceneworks-core/src/safe_path.rs";
+    fn definitions(source: &str) -> Vec<String> {
+        #[derive(Default)]
+        struct Definitions(Vec<String>);
+        impl<'ast> Visit<'ast> for Definitions {
+            fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+                let variants: Vec<_> = item.variants.iter().map(|v| v.ident.to_string()).collect();
+                if item.ident == "Confinement" || variants == ["Lexical", "SymlinkSafe"] {
+                    self.0.push(item.ident.to_string());
+                }
+                visit::visit_item_enum(self, item);
+            }
+            fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+                if item.ident == "Confinement" {
+                    self.0.push(item.ident.to_string());
+                }
+                visit::visit_item_struct(self, item);
+            }
+            fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+                if item.ident == "Confinement" {
+                    self.0.push(item.ident.to_string());
+                }
+                visit::visit_item_type(self, item);
+            }
+        }
+        let mut definitions = Definitions::default();
+        definitions.visit_file(&parse(source));
+        definitions.0
+    }
+    let root = root();
+    let mut owners = Vec::new();
+    for member in read_manifest(&root.join("Cargo.toml"))["workspace"]["members"]
+        .as_array()
+        .unwrap()
+    {
+        for path in rust_sources(&root.join(member.as_str().unwrap()).join("src")) {
+            for name in definitions(&std::fs::read_to_string(&path).unwrap()) {
+                owners.push((
+                    path.strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    name,
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        owners,
+        [(OWNER.to_owned(), "Confinement".to_owned())],
+        "confinement policy must use the core type instead of a copied or renamed contract"
+    );
+    let _: fn(&Path, &str, sceneworks_core::safe_path::Confinement) -> std::io::Result<PathBuf> =
+        sceneworks_core::safe_path::confine_under;
+    assert_eq!(
+        definitions("enum Renamed { Lexical, SymlinkSafe }"),
+        ["Renamed"]
+    );
+    assert_eq!(
+        definitions("mod nested { struct Confinement; }"),
+        ["Confinement"]
+    );
+    assert!(
+        definitions("const PROSE: &str = \"enum Confinement { Lexical, SymlinkSafe }\";")
+            .is_empty()
     );
 }
