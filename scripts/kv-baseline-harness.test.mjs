@@ -1446,7 +1446,7 @@ test("CLI entrypoint executes from a space/Unicode path and imports without runn
   // only the actual module and its static inputs, not any CLI implementation.
   const root = await mkdtemp(path.join(path.resolve("scripts"), "kv CLI 雪-"));
   try {
-    for (const file of ["scripts/kv-baseline-harness.mjs", "config/kv-baseline-quality-contract.json",
+    for (const file of ["scripts/kv-baseline-harness.mjs", "scripts/lib/canonical-json.mjs", "scripts/lib/file-sha256.mjs", "config/kv-baseline-quality-contract.json",
       "config/kv-baseline-quality-contract.json.sha256", "packages/schemas/kv-baseline-receipt.schema.json"]) {
       const destination = path.join(root, file);
       await mkdir(path.dirname(destination), { recursive: true });

@@ -1,5 +1,10 @@
 # Epic 3494 — Candle SDXL Windows feasibility spike (GO, with hardening)
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 **Decision: GO.** Hugging Face **Candle** is a viable Rust-native Windows/CUDA SDXL
 inference path — proven end-to-end on RTX PRO 6000 Blackwell (sm_120). It builds,
 runs sm_120, and produces correct 1024² SDXL images through a worker-shaped contract.

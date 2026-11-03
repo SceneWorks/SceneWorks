@@ -1,5 +1,10 @@
 # sc-3497 — Candle SDXL txt2img prototype behind a worker-shaped seam: PASS
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 Epic 3494. A narrow Candle-backed SDXL txt2img prototype runs on Windows/CUDA
 (Blackwell sm_120), produces a real PNG, emits worker-style progress, and writes
 through a SceneWorks-worker-shaped asset/reporting contract. Unsupported request
