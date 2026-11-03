@@ -75,5 +75,9 @@ describe("DatasetAddDialog Character tab (sc-8857)", () => {
     const cards = characterCards();
     expect(cards).toContain("Approved Reference");
     expect(cards).not.toContain("Unrelated");
+    const card = document.body.querySelector('.dataset-add-grid [role="option"]');
+    expect(card.classList.contains("asset-tile-windowed")).toBe(true);
+    act(() => card.click());
+    expect(card.getAttribute("aria-selected")).toBe("true");
   });
 });

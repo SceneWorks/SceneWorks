@@ -1,3 +1,4 @@
+import { backoffDelay } from "./retry.js";
 // Small initial-path preference seam. Sharing disclosure copy loads with its interaction.
 import { putUiPreferences } from "./uiPreferences.js";
 const EMBED_STORAGE_KEY = "sceneworks-embed-workflow";
@@ -88,7 +89,7 @@ export async function persistWorkflowEmbedPreference(
   let lastError = new Error("The preference write was never attempted.");
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (attempt > 0) {
-      await wait(delayMs * 2 ** (attempt - 1));
+      await wait(backoffDelay(attempt - 1, { baseMs: delayMs, maxMs: Infinity }));
     }
     try {
       await putUiPreferences(patch);

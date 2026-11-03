@@ -1148,6 +1148,8 @@ async fn lora_url_import_honors_cancel_on_progress_tick() {
     .expect_err("cancel request interrupts the URL import on the report tick");
 
     assert!(matches!(error, WorkerError::Canceled(_)));
+    assert!(!temp.path().join("cancel-target/style.safetensors").exists());
+    assert!(temp.path().join("cancel-target/style.safetensors.partial").is_file());
     assert_eq!(
         job_gets.load(Ordering::SeqCst),
         0,

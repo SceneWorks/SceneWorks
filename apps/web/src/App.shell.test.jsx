@@ -691,7 +691,7 @@ describe("SceneWorks app shell", () => {
     }
   });
 
-  it("keeps Queue prompt churn out of static context while submitting the latest prompt and view (sc-13633)", async () => {
+  it("keeps queue filters while omitting the placeholder composer (sc-13633)", async () => {
     const providedValues = [];
     let staticConsumerRenders = 0;
     const OriginalProvider = AppStaticContext.Provider;
@@ -735,31 +735,10 @@ describe("SceneWorks app shell", () => {
       expect(staticAfterNavigation.createPlaceholderJob).toBe(createJobBeforeNavigation);
       expect(staticConsumerRenders).toBe(consumerRendersBeforeNavigation);
 
-      const promptInput = container.querySelector("#queue-job-prompt");
-      const providerRendersBeforeTyping = providedValues.length;
-      await changeField(promptInput, "Latest local Queue prompt");
-
-      // Prompt state belongs to QueueScreen: typing neither re-renders App's provider
-      // nor wakes an unrelated static-only consumer.
-      expect(providedValues.length).toBe(providerRendersBeforeTyping);
-      expect(staticConsumerRenders).toBe(consumerRendersBeforeNavigation);
-      expect(providedValues.at(-1).createPlaceholderJob).toBe(createJobBeforeNavigation);
-
-      const form = container.querySelector(".job-composer");
-      await act(async () => {
-        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      });
-      await settle();
-
-      const request = global.fetch.mock.calls.find(
-        ([url, options]) =>
-          new URL(url).pathname.endsWith("/jobs") && options?.method === "POST",
-      );
-      expect(request).toBeTruthy();
-      expect(JSON.parse(request[1].body).payload).toEqual({
-        prompt: "Latest local Queue prompt",
-        createdFrom: "Queue",
-      });
+      expect(container.querySelector("#queue-job-prompt")).toBeNull();
+      expect(container.querySelector(".job-composer")).toBeNull();
+      expect(container.querySelector("#queue-gpu")).toBeTruthy();
+      expect(container.querySelector("#project-filter")).toBeTruthy();
     } finally {
       AppStaticContext.Provider = OriginalProvider;
     }

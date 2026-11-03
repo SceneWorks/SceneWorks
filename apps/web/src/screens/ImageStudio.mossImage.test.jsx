@@ -58,6 +58,7 @@ function baseContext(overrides = {}) {
     assets: REFS,
     characters: [],
     createImageJob: vi.fn(async () => ({ id: "job-1" })),
+    downloadConditionalComponents: vi.fn(async () => ({ jobs: [] })),
     createPreset: vi.fn(async (payload) => ({ id: payload.id })),
     refinePrompt: vi.fn(),
     qwenRewritePrompt: vi.fn(async () => ({ refinedPrompt: "a long descriptive prompt" })),
@@ -189,9 +190,9 @@ describe("MOSS Image Studio", () => {
   expect(ctx.createImageJob.mock.calls[0][0].prompts).toBeUndefined();
  });
  it("gates optional precision packages and reports download errors",async()=>{
-  await render(); await click(field(container,"8-step acceleration")); await advanced(); await act(async()=>setSelect(field(container,"Acceleration precision"),"full_fp32"));
-  expect(generateButton().disabled).toBe(true); apiFetch.mockRejectedValueOnce(new Error("component acquisition failed")); await click(buttonWithText("Download 8-step components")); expect(container.textContent).toContain("component acquisition failed");
-  expect(apiFetch).toHaveBeenLastCalledWith(expect.stringContaining("moss_dmd_full_fp32/download"),"test-token",expect.objectContaining({method:"POST"}));
+  const ctx = await render(); await click(field(container,"8-step acceleration")); await advanced(); await act(async()=>setSelect(field(container,"Acceleration precision"),"full_fp32"));
+  expect(generateButton().disabled).toBe(true); ctx.downloadConditionalComponents.mockRejectedValueOnce(new Error("component acquisition failed")); await click(buttonWithText("Download 8-step components")); expect(container.textContent).toContain("component acquisition failed");
+  expect(ctx.downloadConditionalComponents).toHaveBeenLastCalledWith("moss_image_sft", "moss_dmd_full_fp32");
  });
  it.each(["moss_image_base", "moss_image_sft"])("hydrates %s edit controls and exact repeated ordered slots through actual normal/batch submit", async(model)=>{
   const editable = {...installed(model), conditionalPurposes:{moss_image_edit:{installState:"installed"}}};

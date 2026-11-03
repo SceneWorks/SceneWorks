@@ -2949,6 +2949,36 @@ fn ltx_lora_target(
             ]),
         );
     }
+    let mut ui = object(json!({
+        "label": name,
+        "description": description,
+        "recommendedFor": ["character", "style"],
+        "datasetModality": if is_ltx_2_5 { "video" } else { "image" }
+    }));
+    if is_ltx_2_5 {
+        ui.insert("subjectRestrictedNormalLoss".to_owned(), json!(false));
+        ui.insert(
+            "noVideoLossWorkflows".to_owned(),
+            json!(depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS),
+        );
+        ui.insert("ltxWorkflowPlans".to_owned(), json!({
+            "i2v_lora": {"video":{"isGenerated":true,"conditions":[{"type":"firstFrame","probability":0.5}]},"audio":{"isGenerated":true,"conditions":[]}},
+            "t2v_lora": {"video":{"isGenerated":true,"conditions":[]},"audio":{"isGenerated":true,"conditions":[]}},
+            "v2a_lora": {"video":{"isGenerated":false,"conditions":[]},"audio":{"isGenerated":true,"conditions":[]}},
+            "a2v_lora": {"video":{"isGenerated":true,"conditions":[]},"audio":{"isGenerated":false,"conditions":[]}},
+            "t2a_lora": {"video":null,"audio":{"isGenerated":true,"conditions":[]}},
+            "video_extend_lora": {"video":{"isGenerated":true,"conditions":[{"type":"prefix","probability":1,"temporalBoundary":8}]},"audio":{"isGenerated":true,"conditions":[]}},
+            "video_inpainting_lora": {"video":{"isGenerated":true,"conditions":[{"type":"mask","probability":1,"tensorKey":"video_mask"}]},"audio":null},
+            "video_outpainting_lora": {"video":{"isGenerated":true,"conditions":[{"type":"spatialCrop","probability":1,"spatialRegion":[0,0,288,576]}]},"audio":null},
+            "video_suffix_lora": {"video":{"isGenerated":true,"conditions":[{"type":"suffix","probability":1,"temporalBoundary":8}]},"audio":{"isGenerated":true,"conditions":[]}},
+            "audio_extend_lora": {"video":null,"audio":{"isGenerated":true,"conditions":[{"type":"prefix","probability":1,"temporalBoundary":8}]}},
+            "audio_inpainting_lora": {"video":null,"audio":{"isGenerated":true,"conditions":[{"type":"mask","probability":1,"tensorKey":"audio_mask"}]}},
+            "audio_suffix_lora": {"video":null,"audio":{"isGenerated":true,"conditions":[{"type":"suffix","probability":1,"temporalBoundary":8}]}},
+            "av2av_ic_lora": {"video":{"isGenerated":true,"conditions":[{"type":"reference","probability":1,"tensorKey":"video_reference"}]},"audio":{"isGenerated":true,"conditions":[{"type":"reference","probability":1,"tensorKey":"audio_reference"}]}},
+            "v2v_ic_lora": {"video":{"isGenerated":true,"conditions":[{"type":"reference","probability":1,"tensorKey":"video_reference"},{"type":"firstFrame","probability":0.2}]},"audio":null},
+            "a2a_ic_lora": {"video":null,"audio":{"isGenerated":true,"conditions":[{"type":"reference","probability":1,"tensorKey":"audio_reference"}]}}
+        }));
+    }
     TrainingTarget {
         id: id.to_owned(),
         name: name.to_owned(),
@@ -2978,12 +3008,7 @@ fn ltx_lora_target(
             extra: ExtraFields::new(),
         },
         limits,
-        ui: object(json!({
-            "label": name,
-            "description": description,
-            "recommendedFor": ["character", "style"],
-            "datasetModality": if is_ltx_2_5 { "video" } else { "image" }
-        })),
+        ui,
         extra: ExtraFields::new(),
     }
 }

@@ -334,12 +334,13 @@ pub(crate) async fn ensure_cached_file_verified(
     let _lock = DownloadLock::acquire_async(target).await?;
     let expected_size = match expected_size {
         Some(size) => Some(size),
-        None => remote_content_length(context.client, url).await?,
+        None if expected_sha256.and_then(normalize_sha256).is_some() => None,
+        None => remote_content_length(context, url).await?,
     };
     if let Ok(metadata) = tokio::fs::metadata(target).await {
         if expected_size
-            .map(|expected| metadata.len() == expected)
-            .unwrap_or(true)
+            .map(|expected| metadata.is_file() && metadata.len() == expected)
+            .unwrap_or(expected_sha256.and_then(normalize_sha256).is_some())
         {
             // A cached file that already matches the expected length still gets its
             // digest checked so a size-colliding tampered artifact can't be reused.
@@ -384,17 +385,26 @@ pub(crate) async fn ensure_cached_file_verified(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-async fn remote_content_length(client: &reqwest::Client, url: &str) -> WorkerResult<Option<u64>> {
+async fn remote_content_length(
+    context: &DownloadContext<'_>,
+    url: &str,
+) -> WorkerResult<Option<u64>> {
     // `url` is built from trusted operator/runtime configuration
     // (`Settings::huggingface_base_url`) plus validated HF path pieces. User-provided source URLs
     // use the separate `download_source_url` path with SSRF checks.
-    let response = match client.head(url).send().await {
-        Ok(response) => response,
-        Err(_) => return Ok(None),
-    };
+    let response = with_hf_auth(context.settings, context.client.head(url))
+        .await
+        .send()
+        .await?;
     if response.status().is_success() {
         Ok(response.content_length().filter(|value| *value > 0))
+    } else if matches!(
+        response.status(),
+        StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
+    ) {
+        Ok(None)
     } else {
+        response.error_for_status()?;
         Ok(None)
     }
 }
@@ -475,23 +485,7 @@ pub(crate) async fn ensure_hf_cached_file(
     file: &str,
     target: &Path,
 ) -> WorkerResult<PathBuf> {
-    let snapshot = HuggingFaceSnapshot::resolve(
-        context.client,
-        context.settings,
-        repo,
-        revision,
-        &[file.to_owned()],
-    )
-    .await?;
-    let Some(snapshot_file) = snapshot
-        .files
-        .into_iter()
-        .find(|candidate| candidate.path == file)
-    else {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Hugging Face file {file} not found in {repo}."
-        )));
-    };
+    let snapshot_file = resolve_single_hf_file(context, repo, revision, file).await?;
     ensure_cached_file_verified(
         context,
         &snapshot_file.download_url,
@@ -504,6 +498,30 @@ pub(crate) async fn ensure_hf_cached_file(
         snapshot_file.sha256.as_deref(),
     )
     .await
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+async fn resolve_single_hf_file(
+    context: &DownloadContext<'_>,
+    repo: &str,
+    revision: &str,
+    file: &str,
+) -> WorkerResult<SnapshotFile> {
+    let snapshot = HuggingFaceSnapshot::resolve(
+        context.client,
+        context.settings,
+        repo,
+        revision,
+        &[file.to_owned()],
+    )
+    .await?;
+    snapshot
+        .files
+        .into_iter()
+        .find(|candidate| candidate.path == file)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("Hugging Face file {file} not found in {repo}."))
+        })
 }
 
 /// Resolve one Hugging Face file into `target` without ever exposing an in-progress
@@ -527,23 +545,7 @@ pub(crate) async fn ensure_hf_cached_file_atomically(
     file: &str,
     target: &Path,
 ) -> WorkerResult<PathBuf> {
-    let snapshot = HuggingFaceSnapshot::resolve(
-        context.client,
-        context.settings,
-        repo,
-        revision,
-        &[file.to_owned()],
-    )
-    .await?;
-    let Some(snapshot_file) = snapshot
-        .files
-        .into_iter()
-        .find(|candidate| candidate.path == file)
-    else {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Hugging Face file {file} not found in {repo}."
-        )));
-    };
+    let snapshot_file = resolve_single_hf_file(context, repo, revision, file).await?;
     ensure_cached_file_verified_atomically(
         context,
         &snapshot_file.download_url,
@@ -574,7 +576,8 @@ pub(crate) async fn ensure_cached_file_verified_atomically(
 ) -> WorkerResult<PathBuf> {
     let expected_size = match expected_size {
         Some(size) => Some(size),
-        None => remote_content_length(context.client, url).await?,
+        None if expected_sha256.and_then(normalize_sha256).is_some() => None,
+        None => remote_content_length(context, url).await?,
     };
     let expected_sha256 = expected_sha256.and_then(normalize_sha256);
     // Do not replace a weak `is_file()` cache hit with another weak publication.
@@ -619,10 +622,6 @@ pub(crate) async fn ensure_cached_file_verified_atomically(
     Ok(target.to_path_buf())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 fn partial_download_path(target: &Path) -> PathBuf {
     let mut name = target
         .file_name()
@@ -654,53 +653,14 @@ async fn cached_file_matches_expected(
     Ok(sha256_file(context.api, context.settings, context.job_id, path).await? == expected_sha256)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 async fn promote_partial_download(partial: &Path, target: &Path) -> WorkerResult<()> {
-    // POSIX rename replaces the prior entry atomically. Windows does not permit
-    // replacing an existing destination with `rename`, so its fallback removes
-    // only a fully verified old entry after the partial file has been synced.
-    #[cfg(not(windows))]
-    {
-        tokio::fs::rename(partial, target).await?;
-        Ok(())
-    }
-    #[cfg(windows)]
-    {
-        remove_non_directory_file(target).await?;
-        tokio::fs::rename(partial, target).await?;
-        Ok(())
-    }
+    // Tokio delegates to std::fs::rename, which uses MOVEFILE_REPLACE_EXISTING
+    // on Windows as well as rename on Unix. Never remove the old destination:
+    // a failed replacement must leave the previous complete file available.
+    tokio::fs::rename(partial, target).await?;
+    Ok(())
 }
 
-#[cfg(all(
-    windows,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
-async fn remove_non_directory_file(path: &Path) -> WorkerResult<()> {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) if metadata.is_dir() => Err(WorkerError::InvalidPayload(format!(
-            "cannot atomically publish download because {} is a directory",
-            path.display()
-        ))),
-        Ok(_) => {
-            tokio::fs::remove_file(path).await?;
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 async fn sync_parent_directory(path: &Path) -> WorkerResult<()> {
     let path = path.to_path_buf();
     crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
@@ -782,7 +742,7 @@ impl HuggingFaceSnapshot {
                 .send()
                 .await?
                 .error_for_status()?;
-            next_url = next_page_url(response.headers());
+            next_url = validated_next_page_url(base_url, response.headers())?;
             let payload = response.json::<Value>().await?;
             let entries = if let Some(entries) = payload.as_array() {
                 entries.clone()
@@ -886,6 +846,32 @@ fn next_page_url(headers: &reqwest::header::HeaderMap) -> Option<String> {
         }
     }
     None
+}
+
+fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+fn validated_next_page_url(
+    base: &str,
+    headers: &header::HeaderMap,
+) -> WorkerResult<Option<String>> {
+    let Some(next) = next_page_url(headers) else {
+        return Ok(None);
+    };
+    let base = reqwest::Url::parse(base)
+        .map_err(|_| WorkerError::InvalidPayload("invalid HF base URL".into()))?;
+    let next = base
+        .join(&next)
+        .map_err(|_| WorkerError::InvalidPayload("invalid HF pagination URL".into()))?;
+    if !same_origin(&base, &next) || !next.username().is_empty() || next.password().is_some() {
+        return Err(WorkerError::InvalidPayload(
+            "HF pagination URL must retain its origin".into(),
+        ));
+    }
+    Ok(Some(next.to_string()))
 }
 
 pub(crate) fn snapshot_file_from_entry(
@@ -1012,19 +998,49 @@ async fn download_file(
     label: &str,
     progress: &mut DownloadProgress<'_>,
 ) -> WorkerResult<()> {
-    download_file_inner(context, url, dest, expected_size, label, progress).await?;
-    if let Some(expected) = expected_sha256 {
-        // Surface a "Verifying…" line for a large shard whose hash can outlast the stale-worker
-        // timeout, holding the bar at the transfer's current fraction so it doesn't regress
-        // (sc-13856). Best-effort — a failed progress POST must not fail the download.
-        if expected_size.is_some_and(|size| size >= VERIFY_PROGRESS_MIN_BYTES) {
-            let _ = update_job(
-                context.api,
-                context.job_id,
-                progress.verifying_payload(label),
-            )
-            .await;
-        }
+    let streamed_digest = download_file_inner(
+        context,
+        url,
+        dest,
+        expected_size,
+        label,
+        progress,
+        &DownloadTransport::HuggingFace,
+    )
+    .await?;
+    verify_completed_download(
+        context,
+        dest,
+        expected_size,
+        expected_sha256,
+        streamed_digest.as_deref(),
+        label,
+        progress,
+    )
+    .await
+}
+
+async fn verify_completed_download(
+    context: &DownloadContext<'_>,
+    dest: &Path,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+    streamed_digest: Option<&str>,
+    label: &str,
+    progress: &DownloadProgress<'_>,
+) -> WorkerResult<()> {
+    // Hashing a large legacy/416-complete entry needs the same visible phase and
+    // heartbeat wrapper as verification of a freshly streamed file.
+    if expected_size.unwrap_or(tokio::fs::metadata(dest).await?.len()) >= VERIFY_PROGRESS_MIN_BYTES
+    {
+        let _ = update_job(
+            context.api,
+            context.job_id,
+            progress.verifying_payload(label),
+        )
+        .await;
+    }
+    if let Some(expected) = expected_sha256.or(streamed_digest) {
         verify_file_sha256(
             context.api,
             context.settings,
@@ -1034,6 +1050,9 @@ async fn download_file(
             label,
         )
         .await?;
+    } else {
+        // A complete legacy/416 partial has size evidence but no transfer digest.
+        sha256_file(context.api, context.settings, context.job_id, dest).await?;
     }
     Ok(())
 }
@@ -1076,8 +1095,26 @@ pub(crate) async fn sha256_file(
     job_id: &str,
     path: &Path,
 ) -> WorkerResult<String> {
+    Ok(format!(
+        "{:x}",
+        download_hash_state_raw(api, settings, job_id, path)
+            .await?
+            .finalize()
+    ))
+}
+
+async fn download_hash_state(context: &DownloadContext<'_>, path: &Path) -> WorkerResult<Sha256> {
+    download_hash_state_raw(context.api, context.settings, context.job_id, path).await
+}
+
+async fn download_hash_state_raw(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    path: &Path,
+) -> WorkerResult<Sha256> {
     let path = path.to_path_buf();
-    let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
+    let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<Sha256> {
         use std::io::Read;
         let mut file = std::fs::File::open(&path).map_err(WorkerError::Io)?;
         let mut hasher = Sha256::new();
@@ -1089,9 +1126,55 @@ pub(crate) async fn sha256_file(
             }
             hasher.update(&buffer[..read]);
         }
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hasher)
     });
     heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
+}
+
+enum DownloadTransport<'a> {
+    HuggingFace,
+    Source {
+        client: &'a reqwest::Client,
+        bearer: Option<&'a str>,
+        max_bytes: u64,
+    },
+}
+
+impl DownloadTransport<'_> {
+    fn max_bytes(&self) -> u64 {
+        match self {
+            Self::HuggingFace => u64::MAX,
+            Self::Source { max_bytes, .. } => *max_bytes,
+        }
+    }
+
+    async fn send(
+        &self,
+        context: &DownloadContext<'_>,
+        url: &str,
+        offset: u64,
+    ) -> WorkerResult<reqwest::Response> {
+        let range = (offset > 0).then(|| format!("bytes={offset}-"));
+        match self {
+            Self::HuggingFace => {
+                let mut request = context.client.get(url);
+                if let Some(range) = range {
+                    request = request.header(header::RANGE, range);
+                }
+                Ok(with_hf_auth(context.settings, request).await.send().await?)
+            }
+            Self::Source { client, bearer, .. } => {
+                send_source_url_with_redirects(
+                    context.settings,
+                    url,
+                    client,
+                    *bearer,
+                    range.as_deref(),
+                )
+                .await
+            }
+        }
+    }
 }
 
 /// Download a single file to `dest` (resumable via HTTP Range), reporting transfer
@@ -1104,7 +1187,10 @@ async fn download_file_inner(
     expected_size: Option<u64>,
     label: &str,
     progress: &mut DownloadProgress<'_>,
-) -> WorkerResult<()> {
+    transport: &DownloadTransport<'_>,
+) -> WorkerResult<Option<String>> {
+    let mut expected_size = expected_size;
+    let mut restarted_after_416 = false;
     if context.fresh_download {
         let removed_bytes = remove_incomplete_download(dest, expected_size).await?;
         if removed_bytes > 0 {
@@ -1119,32 +1205,107 @@ async fn download_file_inner(
     // never counts as no-progress (any partial file already beats it).
     loop {
         let existing_bytes = existing_download_bytes(dest, expected_size).await?;
-        if expected_size.is_some_and(|size| existing_bytes == size) {
-            return Ok(());
+        if expected_size.is_some_and(|size| existing_bytes == size)
+            && tokio::fs::try_exists(dest).await?
+        {
+            return Ok(None);
         }
-        let mut request = context.client.get(url);
-        if existing_bytes > 0 {
-            request = request.header(header::RANGE, format!("bytes={existing_bytes}-"));
-        }
-        let response = with_hf_auth(context.settings, request).await.send().await?;
+        let mut response = match transport.send(context, url, existing_bytes).await {
+            Ok(response) => response,
+            Err(_) if resume.take_network_resume() => continue,
+            Err(error) => return Err(error),
+        };
         let status = response.status();
         if status == StatusCode::RANGE_NOT_SATISFIABLE && existing_bytes > 0 {
-            if let Some(expected) = expected_size {
-                return Err(WorkerError::InvalidPayload(download_size_mismatch_message(
-                    label,
-                    existing_bytes,
-                    expected,
-                )));
+            let total = response
+                .headers()
+                .get(header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|value| value.strip_prefix("bytes */"))
+                .and_then(|value| value.parse::<u64>().ok());
+            if total.is_some_and(|total| {
+                total == existing_bytes
+                    && total <= transport.max_bytes()
+                    && expected_size
+                        .map(|expected| expected == total)
+                        .unwrap_or(true)
+            }) {
+                return Ok(None);
+            }
+            // Missing/contradictory totals are no proof of completeness. Restart once
+            // without Range, never promote the unverified partial on a bare 416.
+            if !restarted_after_416 {
+                tokio::fs::remove_file(dest).await?;
+                progress.reset_to_on_disk(0);
+                restarted_after_416 = true;
+                continue;
             }
         }
         if !status.is_success() {
-            return Err(WorkerError::Http(response.error_for_status().unwrap_err()));
+            response.error_for_status()?;
+            return Err(WorkerError::InvalidPayload(format!(
+                "download returned unexpected HTTP status {status}"
+            )));
         }
         let appending = existing_bytes > 0 && status == StatusCode::PARTIAL_CONTENT;
         if existing_bytes > 0 && !appending {
             progress.reset_to_on_disk(0);
         }
-        let mut response = response;
+        let range_size = if status == StatusCode::PARTIAL_CONTENT {
+            let range = response
+                .headers()
+                .get(header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok());
+            let (start, end, total) = range.and_then(parse_content_range).ok_or_else(|| {
+                WorkerError::InvalidPayload("download returned an invalid Content-Range".into())
+            })?;
+            if start != existing_bytes
+                || expected_size
+                    .zip(total)
+                    .is_some_and(|(size, total)| size != total)
+                || response
+                    .content_length()
+                    .is_some_and(|length| length != end - start + 1)
+            {
+                return Err(WorkerError::InvalidPayload(
+                    "download returned a different resume range".into(),
+                ));
+            }
+            total
+        } else {
+            None
+        };
+        let response_size = if let Some(remaining) = response.content_length() {
+            Some(
+                remaining
+                    .checked_add(if appending { existing_bytes } else { 0 })
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "download declared an overflowing length".into(),
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        expected_size = expected_size.or(range_size).or(response_size);
+        if expected_size.is_some_and(|total| total > transport.max_bytes())
+            || existing_bytes > transport.max_bytes()
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{label} exceeds the {} limit",
+                format_bytes(transport.max_bytes())
+            )));
+        }
+        if progress.total_bytes.is_none() {
+            progress.total_bytes = expected_size;
+        }
+        let mut hasher = if appending {
+            download_hash_state(context, dest).await?
+        } else {
+            Sha256::new()
+        };
+        let mut written_bytes = if appending { existing_bytes } else { 0 };
         let mut output = if appending {
             tokio::fs::OpenOptions::new()
                 .create(true)
@@ -1169,7 +1330,15 @@ async fn download_file_inner(
                 chunk = response.chunk() => {
                     match chunk {
                         Ok(Some(chunk)) => {
+                            let next = written_bytes.saturating_add(chunk.len() as u64);
+                            if next > transport.max_bytes() || expected_size.is_some_and(|expected| next > expected) {
+                                drop(output);
+                                let _ = tokio::fs::remove_file(dest).await;
+                                return Err(WorkerError::InvalidPayload(format!("{label} exceeds its declared size or byte limit")));
+                            }
                             output.write_all(&chunk).await?;
+                            hasher.update(&chunk);
+                            written_bytes = next;
                             progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
                         }
                         Ok(None) => break,
@@ -1205,11 +1374,14 @@ async fn download_file_inner(
             if let Some(expected) = expected_size {
                 let written = tokio::fs::metadata(dest).await?.len();
                 if written == expected {
-                    return Ok(());
+                    return Ok(Some(format!("{:x}", hasher.finalize())));
                 }
                 if written < expected && resume.take_network_resume() {
                     continue;
                 }
+            }
+            if expected_size.is_none() && resume.take_network_resume() {
+                continue;
             }
             return Err(error);
         }
@@ -1221,7 +1393,7 @@ async fn download_file_inner(
         if let Some(expected) = expected_size {
             let written = tokio::fs::metadata(dest).await?.len();
             if written == expected {
-                return Ok(());
+                return Ok(Some(format!("{:x}", hasher.finalize())));
             }
             if written < expected && resume.take_network_resume() {
                 continue;
@@ -1233,7 +1405,7 @@ async fn download_file_inner(
                 label, written, expected,
             )));
         }
-        return Ok(());
+        return Ok(Some(format!("{:x}", hasher.finalize())));
     }
 }
 
@@ -1354,10 +1526,9 @@ pub(crate) async fn download_snapshot_into_cache(
         }
         let etag = header_value(&head, "x-linked-etag")
             .or_else(|| header_value(&head, "etag"))
-            .map(|value| normalize_etag(&value))
-            .filter(|value| !value.is_empty())
+            .and_then(|value| normalize_etag(&value))
             .unwrap_or_else(|| blob_fallback_name(&file.path));
-        let blob_path = blobs_dir.join(&etag);
+        let blob_path = safe_join(&blobs_dir, &etag)?;
         let _lock = DownloadLock::acquire_async(&blob_path).await?;
         progress.record_existing_file(&blob_path, file.size).await?;
         download_file(
@@ -1444,26 +1615,40 @@ fn header_value(response: &reqwest::Response, name: &str) -> Option<String> {
 
 /// Strip the surrounding quotes and any weak-validator prefix HTTP/HF put around an
 /// ETag, leaving the bare blob name huggingface_hub uses.
-fn normalize_etag(raw: &str) -> String {
-    raw.trim()
-        .trim_start_matches("W/")
-        .trim_matches('"')
-        .to_owned()
+fn normalize_etag(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    let value = if let Some(weak) = value.strip_prefix("W/") {
+        weak.strip_prefix('"')?.strip_suffix('"')?
+    } else if value.starts_with('"') {
+        value.strip_prefix('"')?.strip_suffix('"')?
+    } else {
+        // HF metadata also exposes bare digest identifiers in X-Linked-Etag.
+        value
+    };
+    // One bounded portable component; exclude Windows device names and alternate streams.
+    let reserved = value
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let device = matches!(reserved.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (reserved.len() == 4
+            && (reserved.starts_with("COM") || reserved.starts_with("LPT"))
+            && reserved.as_bytes()[3].is_ascii_digit());
+    (!value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && !value.ends_with('.')
+        && !device
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')))
+    .then(|| value.to_owned())
 }
 
-/// Blob name when the server returns no etag (a non-HF stub or an endpoint that
-/// omits ETag): a filesystem-safe rendering of the repo path. Keeps the download
-/// working; only weakens cross-app dedup for that one file.
 fn blob_fallback_name(path: &str) -> String {
-    path.chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    format!("path-{:x}", Sha256::digest(path.as_bytes()))
 }
 
 /// Materialize a snapshot entry pointing at its blob, returning whether it
@@ -1541,7 +1726,7 @@ pub(crate) async fn download_source_url(
     let target_path = target_dir.join(file_name);
 
     // Attach a stored credential matching the source host. Bearer tokens ride an
-    // Authorization header (dropped on cross-host redirects below); query tokens
+    // Authorization header (dropped on cross-origin redirects below); query tokens
     // are baked into the request URL and never carried onto a redirect target. The
     // secret is resolved lazily (env/file-store, or the macOS desktop socket on
     // first use) so a no-credential install never touches the keychain (sc-5891).
@@ -1573,149 +1758,100 @@ pub(crate) async fn download_source_url(
             format_bytes(max_bytes)
         )));
     }
-    let started_bytes = existing_download_bytes(&target_path, total_bytes).await?;
-    if total_bytes.is_some_and(|total| total > 0 && started_bytes == total) {
-        return Ok(());
+    let _lock = DownloadLock::acquire_async(&target_path).await?;
+    let partial = partial_download_path(&target_path);
+    let _partial_lock = DownloadLock::acquire_async(&partial).await?;
+    if let Ok(metadata) = tokio::fs::metadata(&target_path).await {
+        if !metadata.is_file() {
+            return Err(WorkerError::InvalidPayload(
+                "sourceUrl destination is not a file".into(),
+            ));
+        }
+        if total_bytes.is_some_and(|total| metadata.len() == total) {
+            // A complete existing entry remains available throughout verification.
+            let progress = DownloadProgress::new(
+                source_label,
+                metadata.len(),
+                total_bytes,
+                progress_report_interval(context.settings),
+            );
+            verify_completed_download(
+                context,
+                &target_path,
+                total_bytes,
+                None,
+                None,
+                source_label,
+                &progress,
+            )
+            .await?;
+            return Ok(());
+        }
+        if !context.fresh_download
+            && metadata.len() <= max_bytes
+            && total_bytes
+                .map(|total| metadata.len() < total)
+                .unwrap_or(true)
+            && !tokio::fs::try_exists(&partial).await?
+        {
+            // Legacy final paths may be either partials or a previous complete
+            // version. Copy their resume candidate; never remove the old entry
+            // before a verified replacement succeeds.
+            let source = target_path.clone();
+            let staging = partial.clone();
+            let task = crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
+                std::fs::copy(source, staging)?;
+                Ok(())
+            });
+            heartbeat_while_blocking(
+                context.api,
+                context.settings,
+                context.job_id,
+                "source staging copy",
+                task,
+            )
+            .await?;
+        }
+        // Unknown/mismatched legacy targets are never cache hits. The shared
+        // stream must establish completion before replacing the visible entry.
     }
+    let started_bytes = existing_download_bytes(&partial, total_bytes).await?;
     let mut progress = DownloadProgress::new(
-        source_url,
+        source_label,
         started_bytes,
         total_bytes,
         progress_report_interval(context.settings),
     );
-    let mut resume = DownloadResumeState::new(!context.fresh_download);
-    loop {
-        let existing_bytes = existing_download_bytes(&target_path, total_bytes).await?;
-        let range_header = (existing_bytes > 0).then(|| format!("bytes={existing_bytes}-"));
-        let response = send_source_url_with_redirects(
-            context.settings,
-            &request_url,
-            &client,
-            bearer,
-            range_header.as_deref(),
-        )
-        .await;
-        let mut response = match response {
-            Ok(response) => response,
-            Err(_error) if resume.take_network_resume() => continue,
-            Err(error) => return Err(redact_source_url_error("sourceUrl GET failed", error)),
-        };
-        if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-            let range_total = response
-                .headers()
-                .get(header::CONTENT_RANGE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(content_range_total);
-            if total_bytes
-                .or(range_total)
-                .is_some_and(|total| total > 0 && existing_bytes == total)
-            {
-                return Ok(());
-            }
-        }
-        response = response
-            .error_for_status()
-            .map_err(|error| redact_reqwest_source_url_error("sourceUrl GET failed", error))?;
-        let appending = existing_bytes > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
-        if existing_bytes > 0 && !appending {
-            progress.reset_to_on_disk(0);
-        }
-        let expected_bytes = total_bytes.or_else(|| {
-            response.content_length().map(|remaining| {
-                if appending {
-                    existing_bytes + remaining
-                } else {
-                    remaining
-                }
-            })
-        });
-        if expected_bytes.is_some_and(|total| total > max_bytes) {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{source_label} sourceUrl exceeds the {} limit",
-                format_bytes(max_bytes)
-            )));
-        }
-        let mut output = if appending {
-            tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&target_path)
-                .await?
-        } else {
-            tokio::fs::File::create(&target_path).await?
-        };
-        let mut interval = tokio::time::interval(progress.report_interval());
-        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        interval.tick().await;
-        progress.reset_stall_clock();
-        let mut transfer_error = None;
-        let mut stalled = false;
-        loop {
-            tokio::select! {
-                chunk = response.chunk() => {
-                    match chunk {
-                        Ok(Some(chunk)) => {
-                            output.write_all(&chunk).await?;
-                            progress.record_transferred(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-                            if progress.downloaded_bytes() > max_bytes {
-                                return Err(WorkerError::InvalidPayload(format!(
-                                    "{source_label} sourceUrl exceeds the {} limit",
-                                    format_bytes(max_bytes)
-                                )));
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(error) => {
-                            transfer_error = Some(error);
-                            break;
-                        }
-                    }
-                }
-                _ = interval.tick() => {
-                    report_download_progress(context, &progress).await?;
-                    if resume.stall_timeout.is_some_and(|timeout| {
-                        progress.is_stalled(timeout, DOWNLOAD_STALL_MIN_PROGRESS)
-                    }) {
-                        stalled = true;
-                        break;
-                    }
-                }
-            }
-        }
-        output.flush().await?;
-        if stalled {
-            let on_disk = existing_download_bytes(&target_path, total_bytes).await?;
-            resume.record_stall(&format!("{source_label} sourceUrl"), on_disk)?;
-            continue;
-        }
-        if let Some(error) = transfer_error {
-            if resume.take_network_resume() {
-                continue;
-            }
-            return Err(redact_reqwest_source_url_error(
-                "sourceUrl body failed",
-                error,
-            ));
-        }
-        if let Some(expected) = expected_bytes {
-            let written = tokio::fs::metadata(&target_path).await?.len();
-            if written == expected {
-                return Ok(());
-            }
-            if written < expected && resume.take_network_resume() {
-                continue;
-            }
-            if written > expected {
-                let _ = tokio::fs::remove_file(&target_path).await;
-            }
-            return Err(WorkerError::InvalidPayload(download_size_mismatch_message(
-                &format!("{source_label} sourceUrl"),
-                written,
-                expected,
-            )));
-        }
-        return Ok(());
-    }
+    let transport = DownloadTransport::Source {
+        client: &client,
+        bearer,
+        max_bytes,
+    };
+    let streamed_digest = download_file_inner(
+        context,
+        &request_url,
+        &partial,
+        total_bytes,
+        source_label,
+        &mut progress,
+        &transport,
+    )
+    .await
+    .map_err(|error| redact_source_url_error("sourceUrl transfer failed", error))?;
+    verify_completed_download(
+        context,
+        &partial,
+        total_bytes,
+        None,
+        streamed_digest.as_deref(),
+        source_label,
+        &progress,
+    )
+    .await?;
+    tokio::fs::File::open(&partial).await?.sync_all().await?;
+    promote_partial_download(&partial, &target_path).await?;
+    sync_parent_directory(&target_path).await?;
+    Ok(())
 }
 
 fn redact_reqwest_source_url_error(context: &str, error: reqwest::Error) -> WorkerError {
@@ -1752,7 +1888,7 @@ pub(crate) fn credential_for_host<'a>(
 /// (the download client uses `Policy::none()` so we control each hop). Every
 /// redirect target is re-validated for SSRF (scheme + host/DNS), then fetched
 /// with a client pinned to the validated socket addresses. The bearer
-/// `Authorization` header is dropped on any cross-host hop so a token never
+/// `Authorization` header is dropped on any cross-origin hop so a token never
 /// leaks to a CDN. Returns the final non-redirect response without
 /// `error_for_status`, so the caller can still inspect
 /// `RANGE_NOT_SATISFIABLE`.
@@ -1764,9 +1900,6 @@ async fn send_source_url_with_redirects(
     range_header: Option<&str>,
 ) -> WorkerResult<reqwest::Response> {
     let mut current_url = initial_url.to_owned();
-    let mut current_host = reqwest::Url::parse(&current_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
     let mut bearer = bearer.map(str::to_owned);
     let mut client = initial_client.clone();
     for _ in 0..=MAX_SOURCE_URL_REDIRECTS {
@@ -1795,17 +1928,18 @@ async fn send_source_url_with_redirects(
         let next = base.join(location).map_err(|_| {
             WorkerError::InvalidPayload("sourceUrl redirect target was invalid".to_owned())
         })?;
-        if !matches!(next.scheme(), "http" | "https") {
+        if !matches!(next.scheme(), "http" | "https")
+            || !next.username().is_empty()
+            || next.password().is_some()
+        {
             return Err(WorkerError::InvalidPayload(
                 "sourceUrl redirect must use http or https".to_owned(),
             ));
         }
-        let next_host = next.host_str().map(str::to_ascii_lowercase);
-        if next_host != current_host {
-            // Cross-host redirect: never carry the bearer token to a new origin.
+        if !same_origin(&base, &next) {
+            // Never carry the bearer token across a scheme, host, or port change.
             bearer = None;
         }
-        current_host = next_host;
         current_url = next.to_string();
         client = source_url_client_for_url(settings, &next).await?;
     }
@@ -1835,13 +1969,11 @@ pub(crate) fn build_source_url_client(
     url: &reqwest::Url,
     validated_addrs: Option<&[SocketAddr]>,
 ) -> WorkerResult<reqwest::Client> {
-    let mut builder = apply_download_timeouts(
-        reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()),
-    );
-    if let (Some(host), Some(addrs)) = (url.host_str(), validated_addrs) {
-        builder = builder.resolve_to_addrs(host, addrs);
-    }
-    Ok(builder.build()?)
+    build_pinned_source_url_client(
+        url,
+        validated_addrs,
+        &PublicSourceUrlFetchOptions::default(),
+    )
 }
 
 /// Fetch one untrusted, public image URL from a metadata dataset into memory.
@@ -2016,19 +2148,28 @@ where
     F: FnOnce(String, u16) -> Fut,
     Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
 {
-    tokio::time::timeout(
-        options.connect_timeout,
-        public_source_url_client_with_resolver(url, options, resolver),
-    )
-    .await
-    .map_err(|_| WorkerError::InvalidPayload("dataset image DNS resolution timed out".to_owned()))?
+    let addrs = bounded_source_url_addresses(url, options.connect_timeout, resolver).await?;
+    build_public_source_url_client(url, &addrs, options)
 }
 
-async fn public_source_url_client_with_resolver<F, Fut>(
+async fn bounded_source_url_addresses<F, Fut>(
     url: &reqwest::Url,
-    options: &PublicSourceUrlFetchOptions,
+    timeout: Duration,
     resolver: F,
-) -> WorkerResult<reqwest::Client>
+) -> WorkerResult<Vec<SocketAddr>>
+where
+    F: FnOnce(String, u16) -> Fut,
+    Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
+    tokio::time::timeout(timeout, source_url_addresses(url, resolver))
+        .await
+        .map_err(|_| WorkerError::InvalidPayload("source URL DNS resolution timed out".into()))?
+}
+
+async fn source_url_addresses<F, Fut>(
+    url: &reqwest::Url,
+    resolver: F,
+) -> WorkerResult<Vec<SocketAddr>>
 where
     F: FnOnce(String, u16) -> Fut,
     Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
@@ -2039,7 +2180,7 @@ where
         ));
     };
     let port = url.port_or_known_default().unwrap_or(443);
-    let addrs = if let Ok(address) = host.parse::<IpAddr>() {
+    let addrs = if let Ok(address) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
         validate_public_ip(address)
             .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
         vec![SocketAddr::new(address, port)]
@@ -2057,12 +2198,20 @@ where
         }
         resolved
     };
-    build_public_source_url_client(url, &addrs, options)
+    Ok(addrs)
 }
 
 fn build_public_source_url_client(
     url: &reqwest::Url,
     addrs: &[SocketAddr],
+    options: &PublicSourceUrlFetchOptions,
+) -> WorkerResult<reqwest::Client> {
+    build_pinned_source_url_client(url, Some(addrs), options)
+}
+
+fn build_pinned_source_url_client(
+    url: &reqwest::Url,
+    addrs: Option<&[SocketAddr]>,
     options: &PublicSourceUrlFetchOptions,
 ) -> WorkerResult<reqwest::Client> {
     let host = url.host_str().ok_or_else(|| {
@@ -2075,7 +2224,9 @@ fn build_public_source_url_client(
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(options.connect_timeout)
         .read_timeout(options.read_timeout);
-    builder = builder.resolve_to_addrs(host, addrs);
+    if let Some(addrs) = addrs {
+        builder = builder.resolve_to_addrs(host, addrs);
+    }
     Ok(builder.build()?)
 }
 
@@ -2482,10 +2633,17 @@ pub(crate) async fn lora_source_content_length(
     Ok(None)
 }
 
-pub(crate) fn content_range_total(value: &str) -> Option<u64> {
-    value
-        .rsplit_once('/')
-        .and_then(|(_, total)| total.trim().parse::<u64>().ok())
+fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
+    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let (start, end): (u64, u64) = (start.parse().ok()?, end.parse().ok()?);
+    end.checked_sub(start)?.checked_add(1)?;
+    let total = if total == "*" {
+        None
+    } else {
+        Some(total.parse::<u64>().ok()?)
+    };
+    (start <= end && total.map(|total| end < total).unwrap_or(true)).then_some((start, end, total))
 }
 
 pub(crate) async fn validate_lora_url_dns(
@@ -2495,30 +2653,14 @@ pub(crate) async fn validate_lora_url_dns(
     if settings.allow_private_lora_urls {
         return Ok(None);
     }
-    let Some(host) = url.host_str() else {
-        return Err(WorkerError::InvalidPayload(
-            "LoRA sourceUrl host is not allowed".to_owned(),
-        ));
-    };
-    let port = url.port_or_known_default().unwrap_or(443);
-    if let Ok(address) = host.parse::<IpAddr>() {
-        validate_public_ip(address)
-            .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
-        return Ok(Some(vec![SocketAddr::new(address, port)]));
-    }
-    let mut addrs = Vec::new();
-    for address in tokio::net::lookup_host((host, port)).await? {
-        validate_public_ip(address.ip())
-            .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
-        addrs.push(address);
-    }
-    if addrs.is_empty() {
-        Err(WorkerError::InvalidPayload(
-            "LoRA sourceUrl host did not resolve".to_owned(),
-        ))
-    } else {
-        Ok(Some(addrs))
-    }
+    Ok(Some(
+        bounded_source_url_addresses(url, HTTP_CONNECT_TIMEOUT, |host, port| async move {
+            tokio::net::lookup_host((host.as_str(), port))
+                .await
+                .map(|addresses| addresses.collect())
+        })
+        .await?,
+    ))
 }
 
 pub(crate) async fn report_download_progress(
@@ -2921,7 +3063,7 @@ mod resolve_hf_component_file_tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 mod atomic_cache_publication_tests {
     use super::*;
     use axum::{
@@ -3145,6 +3287,154 @@ mod atomic_cache_publication_tests {
             bytes
         );
         assert!(!partial_download_path(&target).exists());
+        server.abort();
+    }
+    #[tokio::test]
+    async fn unknown_size_digest_verified_cache_does_not_require_a_head_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("verified");
+        let bytes = b"verified cache bytes";
+        tokio::fs::write(&target, bytes).await.unwrap();
+        let settings = test_settings(dir.path().to_path_buf());
+        let api = ApiClient::new(&settings);
+        let client = streaming_download_client();
+        let context = DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "fixture",
+            cancel_message: "canceled",
+            fresh_download: false,
+        };
+        let sha = format!("{:x}", Sha256::digest(bytes));
+        for atomic in [false, true] {
+            let result = if atomic {
+                ensure_cached_file_verified_atomically(
+                    &context,
+                    "http://127.0.0.1:1/offline",
+                    &target,
+                    "fixture",
+                    None,
+                    Some(&sha),
+                )
+                .await
+            } else {
+                ensure_cached_file_verified(
+                    &context,
+                    "http://127.0.0.1:1/offline",
+                    &target,
+                    "fixture",
+                    None,
+                    Some(&sha),
+                )
+                .await
+            };
+            assert_eq!(result.unwrap(), target);
+            assert_eq!(tokio::fs::read(&target).await.unwrap(), bytes);
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_size_existing_file_is_downloaded_and_head_errors_are_not_evidence() {
+        for head_failure in [false, true] {
+            let app = Router::new().route(
+                "/component",
+                get(|| async { b"verified replacement".to_vec() }).head(move || async move {
+                    if head_failure {
+                        StatusCode::BAD_GATEWAY
+                    } else {
+                        StatusCode::METHOD_NOT_ALLOWED
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("component");
+            tokio::fs::write(&target, b"untrusted partial")
+                .await
+                .unwrap();
+            let settings = test_settings(dir.path().to_path_buf());
+            let api = ApiClient::new(&settings);
+            let client = streaming_download_client();
+            let context = DownloadContext {
+                api: &api,
+                client: &client,
+                settings: &settings,
+                job_id: "fixture",
+                cancel_message: "canceled",
+                fresh_download: false,
+            };
+            let result = ensure_cached_file_verified(
+                &context,
+                &format!("http://{address}/component"),
+                &target,
+                "fixture",
+                None,
+                None,
+            )
+            .await;
+            if head_failure {
+                assert!(result.is_err());
+                assert_eq!(
+                    tokio::fs::read(&target).await.unwrap(),
+                    b"untrusted partial"
+                );
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    tokio::fs::read(&target).await.unwrap(),
+                    b"verified replacement"
+                );
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn both_single_hf_callers_share_resolution_and_verification() {
+        use axum::Json;
+        let bytes = b"single file bytes";
+        let sha = format!("{:x}", Sha256::digest(bytes));
+        let app = Router::new().route("/api/models/owner/repo/tree/main", get(move || {
+            let sha = sha.clone(); async move { Json(serde_json::json!([{"type":"file", "path":"component", "size":bytes.len(), "lfs":{"oid":sha}}])) }
+        })).route("/owner/repo/resolve/main/component", get(move || async move { bytes.to_vec() }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = test_settings(dir.path().to_path_buf());
+        settings.huggingface_base_url = format!("http://{address}");
+        let api = ApiClient::new(&settings);
+        let client = streaming_download_client();
+        let context = DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "fixture",
+            cancel_message: "canceled",
+            fresh_download: false,
+        };
+        let target = dir.path().join("non-atomic");
+        ensure_hf_cached_file(&context, "owner/repo", "main", "component", &target)
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), bytes);
+        let target = dir.path().join("atomic");
+        ensure_hf_cached_file_atomically(&context, "owner/repo", "main", "component", &target)
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), bytes);
+        assert!(
+            resolve_single_hf_file(&context, "owner/repo", "main", "missing")
+                .await
+                .is_err()
+        );
         server.abort();
     }
 }
@@ -3413,5 +3703,190 @@ mod managed_predictor_metadata_tests {
         assert!(bad.enforce_managed_identity(pin).is_err());
         snapshot.files[0].path = "other.safetensors".into();
         assert!(snapshot.enforce_managed_identity(pin).is_err());
+    }
+}
+
+#[cfg(test)]
+mod integrity_regression_tests {
+    use super::*;
+
+    #[test]
+    fn etags_are_bounded_portable_components_and_fallbacks_do_not_collide() {
+        for raw in [
+            "../escaped",
+            "/tmp/escaped",
+            "C:\\escaped",
+            "..",
+            ".",
+            "CON",
+            "lpt1.txt",
+            "name:",
+            "name.",
+            "\"bad/name\"",
+            "W/\"../bad\"",
+            "W/not-quoted",
+            "\"unterminated",
+        ] {
+            assert_eq!(normalize_etag(raw), None, "{raw}");
+        }
+        assert_eq!(normalize_etag(&"a".repeat(129)), None);
+        assert_eq!(
+            normalize_etag("W/\"abc-def_123\""),
+            Some("abc-def_123".into())
+        );
+        let root = tempfile::tempdir().unwrap();
+        for raw in ["../escaped", "/abs", "a/b", "a_b", ".."] {
+            let fallback = blob_fallback_name(raw);
+            assert_eq!(
+                safe_join(root.path(), &fallback).unwrap().parent(),
+                Some(root.path())
+            );
+        }
+        assert_ne!(blob_fallback_name("a/b"), blob_fallback_name("a_b"));
+    }
+
+    #[test]
+    fn pagination_rejects_foreign_origins_and_credentials() {
+        for next in [
+            "https://attacker.test/page",
+            "http://hf.test/page",
+            "https://hf.test:444/page",
+            "https://user@hf.test/page",
+        ] {
+            let mut headers = header::HeaderMap::new();
+            headers.insert(
+                header::LINK,
+                format!("<{next}>; rel=\"next\"").parse().unwrap(),
+            );
+            assert!(
+                validated_next_page_url("https://hf.test", &headers).is_err(),
+                "{next}"
+            );
+        }
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::LINK,
+            "</api/page?cursor=two>; rel=next".parse().unwrap(),
+        );
+        assert_eq!(
+            validated_next_page_url("https://hf.test", &headers).unwrap(),
+            Some("https://hf.test/api/page?cursor=two".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn promotion_replaces_existing_file_and_failure_retains_old_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let partial = dir.path().join("target.partial");
+        tokio::fs::write(&target, b"old-complete").await.unwrap();
+        assert!(promote_partial_download(&partial, &target).await.is_err());
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"old-complete");
+        tokio::fs::write(&partial, b"new-complete").await.unwrap();
+        promote_partial_download(&partial, &target).await.unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"new-complete");
+        assert!(!partial.exists());
+        let target_dir = dir.path().join("directory-target");
+        tokio::fs::create_dir(&target_dir).await.unwrap();
+        tokio::fs::write(&partial, b"valid-staging").await.unwrap();
+        assert!(promote_partial_download(&partial, &target_dir)
+            .await
+            .is_err());
+        assert!(target_dir.is_dir());
+        assert_eq!(tokio::fs::read(&partial).await.unwrap(), b"valid-staging");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_failed_replacement_preserves_old_target_and_staging() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let partial = dir.path().join("target.partial");
+        tokio::fs::write(&target, b"old-complete").await.unwrap();
+        tokio::fs::write(&partial, b"new-complete").await.unwrap();
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&target)
+            .unwrap();
+        assert!(promote_partial_download(&partial, &target).await.is_err());
+        drop(locked);
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"old-complete");
+        assert_eq!(tokio::fs::read(&partial).await.unwrap(), b"new-complete");
+    }
+
+    #[test]
+    fn resume_ranges_validate_numeric_and_unknown_totals() {
+        assert_eq!(parse_content_range("bytes 2-4/5"), Some((2, 4, Some(5))));
+        assert_eq!(parse_content_range("bytes 2-4/*"), Some((2, 4, None)));
+        for value in [
+            "bytes 4-2/5",
+            "bytes 2-5/5",
+            "bits 2-4/5",
+            "bytes */5",
+            "bytes 2-4/bad",
+            "bytes 0-18446744073709551615/*",
+        ] {
+            assert_eq!(parse_content_range(value), None);
+        }
+    }
+
+    #[test]
+    fn credential_origin_includes_scheme_and_effective_port() {
+        let base = reqwest::Url::parse("https://hf.test/a").unwrap();
+        for next in [
+            "http://hf.test/a",
+            "https://hf.test:444/a",
+            "https://other.test/a",
+        ] {
+            assert!(!same_origin(&base, &reqwest::Url::parse(next).unwrap()));
+        }
+        assert!(same_origin(
+            &base,
+            &reqwest::Url::parse("https://hf.test:443/b").unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn literal_ipv6_is_validated_without_dns() {
+        async fn reject_dns(_: String, _: u16) -> std::io::Result<Vec<SocketAddr>> {
+            panic!("literal addresses must never use DNS");
+        }
+        for (host, allowed) in [("2606:4700:4700::1111", true), ("::1", false)] {
+            let url = reqwest::Url::parse(&format!("https://[{host}]/file.safetensors")).unwrap();
+            let result =
+                bounded_source_url_addresses(&url, Duration::from_secs(1), reject_dns).await;
+            assert_eq!(result.is_ok(), allowed);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_dns_resolver_times_out_and_rejects_mixed_address_sets() {
+        let url = reqwest::Url::parse("https://example.com/file.safetensors").unwrap();
+        let error = bounded_source_url_addresses(&url, Duration::from_millis(10), |_, _| async {
+            std::future::pending::<std::io::Result<Vec<SocketAddr>>>().await
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(
+            bounded_source_url_addresses(&url, Duration::from_secs(1), |_, _| async {
+                Ok(vec![
+                    "1.1.1.1:443".parse().unwrap(),
+                    "127.0.0.1:443".parse().unwrap(),
+                ])
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            bounded_source_url_addresses(&url, Duration::from_secs(1), |_, _| async {
+                Ok(vec!["1.1.1.1:443".parse().unwrap()])
+            })
+            .await
+            .unwrap(),
+            vec!["1.1.1.1:443".parse::<SocketAddr>().unwrap()]
+        );
     }
 }

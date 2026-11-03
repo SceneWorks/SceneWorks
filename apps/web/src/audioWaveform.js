@@ -1,3 +1,4 @@
+import { getAudioContextCtor } from "./audioContext.js";
 import { useEffect, useState } from "react";
 import { assetCanRenderAsAudio, assetUrl } from "./components/assetMedia.jsx";
 
@@ -120,17 +121,12 @@ const inflightDecodes = new Map();
 const failedAssetIds = new Set();
 
 // Test seam: drop the module-level caches so a suite can exercise a fresh decode.
-export function resetAudioPeakCache() {
-  peakCache.clear();
-  inflightDecodes.clear();
-  failedAssetIds.clear();
-}
 
 function audioContextCtor() {
   if (typeof window === "undefined") {
     return null;
   }
-  return window.AudioContext ?? window.webkitAudioContext ?? null;
+  return getAudioContextCtor();
 }
 
 async function decodeAssetPeaks(asset) {

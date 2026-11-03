@@ -1,3 +1,4 @@
+import { blobToImage } from "../imageDimensions.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Stage, Layer, Group, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
@@ -389,13 +390,6 @@ export function closeConfirmMessage({ dirty, aiOpPending }) {
   return null;
 }
 
-export async function consumeEditorLaunch({ launch, confirmDiscard, openAsset, clearLaunch }) {
-  if (!launch?.assetId || !(await confirmDiscard())) return false;
-  await openAsset(launch.assetId);
-  clearLaunch?.();
-  return true;
-}
-
 export function createEditorLaunchGuard() {
   let activeId = null;
   return {
@@ -723,6 +717,8 @@ export function workingToPngFile(work, filename, { documentRef = globalThis.docu
     const base = (work.source.name || "image").replace(/\.[^./\\]+$/, "");
     const name = filename || `${base}.png`;
     canvas.toBlob((blob) => {
+      canvas.width = 0;
+      canvas.height = 0;
       if (!blob) {
         reject(new Error("Could not encode the working image."));
         return;
@@ -1029,18 +1025,6 @@ export function blankCanvasDims(aspectKey, longSide) {
 // this way (rather than an <img crossOrigin> against the file URL) guarantees the
 // Konva canvas is never tainted — later crop/export (sc-2430/sc-2434) need to read
 // pixels back. Resolves { image, objectUrl }; caller owns revoking objectUrl.
-function blobToImage(blob) {
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(blob);
-    const image = new Image();
-    image.onload = () => resolve({ image, objectUrl });
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      reject(new Error("Could not decode image"));
-    };
-    image.src = objectUrl;
-  });
-}
 
 function colorKeyMaskCanvasForImage(image, seed, options) {
   const canvas = document.createElement("canvas");
@@ -1076,8 +1060,8 @@ function canvasToPngBlob(canvas) {
 // Decode an editor source and, only when it exceeds the conservative WebKit
 // canvas ceiling, rasterize it directly into a bounded surface before any Konva
 // or export canvas is allocated. The caller owns the returned object URL.
-async function blobToEditorImage(blob) {
-  const decoded = await blobToImage(blob);
+async function blobToEditorImage(blob, options) {
+  const decoded = await blobToImage(blob, options);
   const dimensions = boundedEditorCanvasDimensions(
     decoded.image.naturalWidth,
     decoded.image.naturalHeight,
@@ -1107,11 +1091,13 @@ async function blobToEditorImage(blob) {
     );
   } finally {
     URL.revokeObjectURL(decoded.objectUrl);
+    canvas.width = 0;
+    canvas.height = 0;
   }
   if (!resizedBlob) {
     throw new Error("Could not prepare this large image for the editor.");
   }
-  const resized = await blobToImage(resizedBlob);
+  const resized = await blobToImage(resizedBlob, options);
   return {
     ...resized,
     blob: resizedBlob,
@@ -1204,6 +1190,19 @@ function revokeLayerUrls(layers) {
   for (const layer of layers ?? []) {
     if (layer?.objectUrl) URL.revokeObjectURL(layer.objectUrl);
   }
+}
+
+// Wait for every layer so successful decodes remain owned even if another fails.
+export async function collectCropLayers(layers, decode, isCurrent) {
+  const results = await Promise.allSettled(layers.map(decode));
+  const cropped = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure || !isCurrent()) {
+    revokeLayerUrls(cropped);
+    if (failure && isCurrent()) throw failure.reason;
+    return null;
+  }
+  return cropped;
 }
 
 export function ImageEditor() {
@@ -1305,7 +1304,7 @@ export function ImageEditor() {
   }, []);
   const [accCollapsed, setAccCollapsed] = useState(false);
   const [layersOpen, setLayersOpen] = useState(true);
-  // One undo checkpoint per opacity DRAG (mirrors LayersPanel): the first change of
+  // One undo checkpoint per opacity DRAG: the first change of
   // a gesture snapshots; subsequent ticks coalesce until pointer-up resets it.
   const layerOpacityGestureRef = useRef(false);
 
@@ -1579,6 +1578,14 @@ export function ImageEditor() {
   // live decoded images for unchanged layers and revokes the URLs it drops).
   const workingRef = useRef(null);
   const mountedRef = useRef(false);
+  const openGeneration = useRef(0);
+  const openController = useRef(null);
+  const invalidateOpen = useCallback(() => {
+    openGeneration.current += 1;
+    openController.current?.abort();
+    openController.current = null;
+    return openGeneration.current;
+  }, []);
   // Live mirrors of the snapshot-relevant state so a synchronous checkpoint can
   // capture the pre-operation state without stale-closure surprises.
   const editsRef = useRef(edits);
@@ -1813,9 +1820,15 @@ export function ImageEditor() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      invalidateOpen();
       revokeLayerUrls(workingRef.current?.layers);
     };
-  }, []);
+  }, [invalidateOpen]);
+
+  useEffect(() => {
+    setStatus((current) => current.loading ? { ...current, loading: false } : current);
+    return () => { invalidateOpen(); };
+  }, [activeProject?.id, invalidateOpen]);
 
   const fitToView = useCallback(() => {
     if (!working || !stageSize.width || !stageSize.height) return;
@@ -1868,8 +1881,8 @@ export function ImageEditor() {
   // Replace the whole working document with a fresh single-layer stack from one
   // decoded bitmap (open / blank / crop / color / AI result). Revokes the evicted
   // layers' object URLs first. The single-layer stack is the degenerate case that
-  // reproduces the pre-layers single-bitmap behavior; multi-layer creation is the
-  // layers panel (sc-6118).
+  // reproduces the pre-layers single-bitmap behavior; the layer controls rendered
+  // by this editor create and manage multi-layer stacks (sc-6118).
   const installWorkingImage = useCallback(
     (image, objectUrl, blob, source) => {
       revokeLayerUrls(workingRef.current?.layers);
@@ -2150,10 +2163,14 @@ export function ImageEditor() {
   }, []);
 
   const openFromBlob = useCallback(
-    async (blob, source) => {
+    async (blob, source, generation = invalidateOpen()) => {
+      const isCurrent = () => mountedRef.current && generation === openGeneration.current;
+      const controller = openController.current ?? new AbortController();
+      openController.current = controller;
+      let prepared;
       setStatus({ loading: true, error: "" });
       try {
-        const prepared = await blobToEditorImage(blob);
+        prepared = await blobToEditorImage(blob, { signal: controller.signal });
         // Keep the bytes we opened (sc-15954). The blob is retained by reference — no copy — and
         // `installedBlob` is the identity token `editorDownloadPlan` compares the layer stack
         // against. Note it is `prepared.blob`, not `blob`: a source over EDITOR_CANVAS_MAX_SIDE is
@@ -2168,6 +2185,10 @@ export function ImageEditor() {
           hasAlpha = imageBytesCarryAlpha(new Uint8Array(await blob.arrayBuffer()));
         } catch {
           hasAlpha = false;
+        }
+        if (!isCurrent()) {
+          URL.revokeObjectURL(prepared.objectUrl);
+          return false;
         }
         setWorkingHasAlpha(hasAlpha);
         setEditTransparentChoice(null);
@@ -2189,15 +2210,22 @@ export function ImageEditor() {
         setSavedAssetId(null);
         resetHistory();
         setStatus({ loading: false, error: "" });
+        return true;
       } catch (err) {
-        setStatus({ loading: false, error: err.message || "Could not open image" });
+        if (prepared?.objectUrl) URL.revokeObjectURL(prepared.objectUrl);
+        if (isCurrent()) setStatus({ loading: false, error: err.message || "Could not open image" });
+        return false;
       }
     },
-    [installWorkingImage, resetHistory],
+    [installWorkingImage, resetHistory, invalidateOpen],
   );
 
   const openAsset = useCallback(
     async (assetId) => {
+      const generation = invalidateOpen();
+      const controller = new AbortController();
+      openController.current = controller;
+      const isCurrent = () => mountedRef.current && generation === openGeneration.current;
       const asset = imageAssets.find((item) => item.id === assetId);
       if (!asset) return;
       const url = assetUrl(asset);
@@ -2207,19 +2235,20 @@ export function ImageEditor() {
       }
       setStatus({ loading: true, error: "" });
       try {
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: controller.signal });
         if (!res.ok) throw new Error(`Failed to load asset (${res.status})`);
         const blob = await res.blob();
+        if (!isCurrent()) return;
         await openFromBlob(blob, {
           kind: "asset",
           assetId: asset.id,
           name: asset.displayName ?? asset.id,
-        });
+        }, generation);
       } catch (err) {
-        setStatus({ loading: false, error: err.message || "Could not load asset" });
+        if (isCurrent() && !isAbortError(err)) setStatus({ loading: false, error: err.message || "Could not load asset" });
       }
     },
-    [imageAssets, openFromBlob],
+    [imageAssets, openFromBlob, invalidateOpen],
   );
 
   // sc-8730: consume the App-level Image Editor launch channel. When something outside
@@ -2261,21 +2290,28 @@ export function ImageEditor() {
   // point of a blank layout is to draw boxes and generate from them.
   const newBlankLayout = useCallback(
     async ({ width, height }) => {
+      const generation = invalidateOpen();
       const canvas = document.createElement("canvas");
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, width, height);
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+      let blob;
+      try {
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, width, height);
+        blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+      } finally {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+      if (!mountedRef.current || generation !== openGeneration.current) return;
       if (!blob) {
         setStatus({ loading: false, error: "Could not create the canvas." });
         return;
       }
-      await openFromBlob(blob, { kind: "blank", name: "Untitled layout" });
-      setTool("boxes");
+      if (await openFromBlob(blob, { kind: "blank", name: "Untitled layout" }, generation)) setTool("boxes");
     },
-    [openFromBlob],
+    [openFromBlob, invalidateOpen],
   );
 
   async function createBlankLayout() {
@@ -2431,10 +2467,12 @@ export function ImageEditor() {
         canvas.getContext("2d").drawImage(layer.image, 0, 0);
         const base = (work.source.name || "image").replace(/\.[^./\\]+$/, "");
         canvas.toBlob(
-          (blob) =>
-            blob
-              ? resolve(new File([blob], filename || `${base}.png`, { type: "image/png" }))
-              : reject(new Error("Could not encode the layer.")),
+          (blob) => {
+            canvas.width = 0;
+            canvas.height = 0;
+            if (blob) resolve(new File([blob], filename || `${base}.png`, { type: "image/png" }));
+            else reject(new Error("Could not encode the layer."));
+          },
           "image/png",
         );
       }),
@@ -2534,25 +2572,30 @@ export function ImageEditor() {
     // Crop every layer in document space. Per-layer transforms are baked into the
     // new bitmap so the result matches the visible composition; layer compositing
     // metadata remains intact and the baked transform is reset below.
+    const generation = openGeneration.current;
     let cropped;
     try {
-      cropped = await Promise.all(
-        working.layers.map(async (layer) => {
-          const canvas = document.createElement("canvas");
-          canvas.width = sw;
-          canvas.height = sh;
+      cropped = await collectCropLayers(working.layers, async (layer) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = sw;
+        canvas.height = sh;
+        try {
           const ctx = canvas.getContext("2d");
           drawLayerIntoCrop(ctx, layer, { x: sx, y: sy, width: sw, height: sh }, straighten);
           const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
           if (!blob) throw new Error("Could not encode the crop.");
           const { image, objectUrl } = await blobToImage(blob);
           return { id: layer.id, image, objectUrl, blob };
-        }),
-      );
+        } finally {
+          canvas.width = 0;
+          canvas.height = 0;
+        }
+      }, () => mountedRef.current && workingRef.current === working && generation === openGeneration.current);
     } catch (err) {
-      setStatus({ loading: false, error: err.message || "Could not crop the layers." });
+      setStatus({ loading: false, error: err?.message || "Could not crop the layers." });
       return;
     }
+    if (!cropped) return;
     checkpoint();
     const oldLayers = workingRef.current.layers;
     needsFitRef.current = true;
@@ -2668,7 +2711,13 @@ export function ImageEditor() {
     const canvas = document.createElement("canvas");
     canvas.width = work.width;
     canvas.height = work.height;
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    let blob;
+    try {
+      blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    } finally {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
     if (!blob) {
       setStatus({ loading: false, error: "Could not create the layer." });
       return;
@@ -3366,7 +3415,9 @@ export function ImageEditor() {
       });
       if (!proceed) return;
     }
+    invalidateOpen();
     revokeLayerUrls(workingRef.current?.layers);
+    workingRef.current = null;
     setWorking(null);
     setEdits([]);
     setDirty(false);
@@ -3374,7 +3425,7 @@ export function ImageEditor() {
     setAiOp(null);
     resetHistory();
     setStatus({ loading: false, error: "" });
-  }, [resetHistory]);
+  }, [resetHistory, invalidateOpen]);
 
   // Warn before a browser CLOSE/REFRESH that would drop unsaved edits OR an in-flight AI op
   // (sc-2434 / sc-8850 / sc-11968). Under keep-alive an in-app navigation away does NOT

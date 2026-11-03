@@ -1,10 +1,11 @@
+import { isImageUpload } from "../uploadFiles.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE_URL, apiFetch, isAbortError, withMediaTicket } from "../api.js";
 import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetThumbnail } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { useAppContext, useAppStatic } from "../context/AppContext.js";
+import { useAppLive, useAppStatic } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { POSE_DETECT_MODEL_ID } from "../constants.js";
 import { downloadOffersFor, modelInstallComplete, poseDetectModelUsable } from "../modelEligibility.js";
@@ -127,13 +128,13 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
     assets = [],
     characters = [],
     requestedGpu,
-    jobs = [],
     models = [],
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
     createModelDownloadJob,
     jobAction,
     setActiveView,
-  } = useAppContext();
+  } = useAppStatic();
+  const { jobs = [] } = useAppLive();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [sources, setSources] = useState([]); // selected source asset records
   const [phase, setPhase] = useState("idle"); // idle | detecting | review
@@ -157,7 +158,7 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
   // asset) — the worker reads it by path and deletes it after detection (epic 2282).
   const handleImport = useCallback(
     async (files) => {
-      const images = Array.from(files).filter((file) => file.type?.startsWith("image/"));
+      const images = Array.from(files).filter((file) => isImageUpload(file));
       if (!images.length) return;
       setImporting(true);
       try {

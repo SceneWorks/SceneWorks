@@ -1,3 +1,4 @@
+import { useDismissOnOutsideOrEscape } from "../hooks/useDismissOnOutsideOrEscape.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icons.jsx";
 
@@ -117,27 +118,7 @@ export function StylePicker({
 
   const searching = query.trim().length > 0;
 
-  useEffect(() => {
-    if (!open) {
-      return undefined;
-    }
-    function onDocMouseDown(event) {
-      if (!containerRef.current?.contains(event.target)) {
-        setOpen(false);
-      }
-    }
-    function onDocKey(event) {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDocMouseDown);
-    document.addEventListener("keydown", onDocKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onDocKey);
-    };
-  }, [open]);
+  useDismissOnOutsideOrEscape(containerRef, open, setOpen);
 
   // On open, jump straight to the current selection's group (level 2) so "change" is one step, and
   // move focus into the search box so the whole flow is keyboard-usable. On close, reset transient

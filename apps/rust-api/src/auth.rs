@@ -97,6 +97,21 @@ fn throttled_response() -> Response {
         .into_response()
 }
 
+/// Outermost browser boundary, including CORS preflight. Keeping token auth
+/// inside CORS preserves CORS headers on valid-origin authentication failures.
+pub(crate) async fn browser_control(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if let Err(error) =
+        validate_browser_request(&request, &state.allowed_hosts, &state.settings.cors_origins)
+    {
+        return error.into_response();
+    }
+    next.run(request).await
+}
+
 pub(crate) async fn access_control(
     State(state): State<AppState>,
     // `Option<…>` so unit tests that drive the router via `oneshot` (no connect info)
@@ -351,4 +366,118 @@ fn token_from_headers(headers: &HeaderMap) -> String {
 
 pub(crate) fn token_digest(token: &[u8]) -> [u8; 32] {
     Sha256::digest(token).into()
+}
+
+/// Single local-peer predicate for host-path operations. Callers supply their
+/// existing typed refusal so model/checkpoint UI recovery contracts stay intact.
+pub(crate) fn require_local_peer(
+    peer: Option<SocketAddr>,
+    rejection: impl FnOnce() -> ApiError,
+) -> Result<(), ApiError> {
+    if peer.is_some_and(|addr| addr.ip().is_loopback()) {
+        Ok(())
+    } else {
+        Err(rejection())
+    }
+}
+
+pub(crate) fn local_only(peer: Option<SocketAddr>) -> Result<(), ApiError> {
+    require_local_peer(peer, || {
+        ApiError::forbidden(
+            "Host paths can only be selected from SceneWorks running on this machine",
+        )
+    })
+}
+
+fn validate_browser_request(
+    request: &Request<axum::body::Body>,
+    hosts: &[String],
+    origins: &[String],
+) -> Result<(), ApiError> {
+    let path = request.uri().path();
+    if !(path.starts_with("/api/") || path == "/mcp" || path.starts_with("/mcp/")) {
+        return Ok(());
+    }
+    let headers = request.headers();
+    let forbidden = || ApiError::forbidden("Request Host or Origin is not allowed");
+    if headers.get_all(header::HOST).iter().count() > 1
+        || headers.get_all(header::ORIGIN).iter().count() > 1
+    {
+        return Err(forbidden());
+    }
+    let authority = headers
+        .get(header::HOST)
+        .map(|h| h.to_str().ok())
+        .unwrap_or_else(|| request.uri().authority().map(|a| a.as_str()));
+    if let Some(host) = authority {
+        if !sceneworks_mcp::forwarded_authority_is_allowed(host, hosts) {
+            return Err(forbidden());
+        }
+    } else if headers.contains_key(header::HOST) || headers.contains_key(header::ORIGIN) {
+        return Err(forbidden());
+    }
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let origin = origin.to_str().map_err(|_| forbidden())?;
+        if origins.iter().any(|allowed| allowed == origin) {
+            return Ok(());
+        }
+        let uri: axum::http::Uri = origin.parse().map_err(|_| forbidden())?;
+        if !matches!(uri.scheme_str(), Some("http" | "https"))
+            || uri.path_and_query().is_some_and(|pq| pq.as_str() != "/")
+        {
+            return Err(forbidden());
+        }
+        let origin_authority = uri.authority().ok_or_else(forbidden)?;
+        if !sceneworks_mcp::forwarded_authority_is_allowed(origin_authority.as_str(), hosts) {
+            return Err(forbidden());
+        }
+        let request_authority: axum::http::uri::Authority = authority
+            .ok_or_else(forbidden)?
+            .parse()
+            .map_err(|_| forbidden())?;
+        let default_port = if uri.scheme_str() == Some("https") {
+            443
+        } else {
+            80
+        };
+        if !origin_authority
+            .host()
+            .eq_ignore_ascii_case(request_authority.host())
+            || origin_authority.port_u16().unwrap_or(default_port)
+                != request_authority.port_u16().unwrap_or(default_port)
+        {
+            return Err(forbidden());
+        }
+    }
+    Ok(())
+}
+
+/// Empty legacy bodies remain supported; any supplied media type must be JSON.
+/// Non-empty bodies without a JSON media type are refused before decoding.
+pub(crate) fn require_json_content_type(
+    headers: &HeaderMap,
+    has_body: bool,
+) -> Result<(), ApiError> {
+    let content_type = headers.get(header::CONTENT_TYPE);
+    if !has_body && content_type.is_none() {
+        return Ok(());
+    }
+    let valid = content_type
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value == "application/json"
+                || (value.starts_with("application/") && value.ends_with("+json"))
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(ApiError {
+            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            detail: "Content-Type must be application/json".into(),
+            code: None,
+            context: None,
+        })
+    }
 }

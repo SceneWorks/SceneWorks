@@ -146,7 +146,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
   );
 
   const uploadTrainingDatasetItem = useCallback(
-    async (file, projectId = activeProject?.id) => {
+    async (file, projectId = activeProject?.id, { signal } = {}) => {
       if (!projectId) {
         throw new Error("Create or open a project first.");
       }
@@ -155,6 +155,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       return apiFetch(`/api/v1/projects/${projectId}/training/uploads`, token, {
         method: "POST",
         body: form,
+        signal,
       });
     },
     [token, activeProject],

@@ -1,11 +1,7 @@
 //! F-040 (sc-11236): the `/mcp` streamable-HTTP transport must re-validate the
-//! `Host` header (DNS-rebinding defense). `/mcp` rides the API's `access_control`
-//! middleware, but that gate performs NO Host/Origin validation — so in the
-//! loopback / loopback-trust / no-token desktop posture a malicious web page could
-//! DNS-rebind a victim's browser onto `/mcp`. These tests drive the mounted
-//! service with raw HTTP/1.1 requests carrying spoofed / legitimate Host headers
-//! and assert the transport 403s a disallowed Host while accepting the loopback
-//! (and, in remote mode, the configured LAN) host.
+//! `Host` header (DNS-rebinding defense). The API middleware and MCP transport
+//! both validate browser trust. These tests also mount
+//! the transport alone so it cannot silently regress to rmcp's allow-all mode.
 
 use axum::Router;
 use sceneworks_mcp::{mcp_allowed_hosts, streamable_http_service_with_hosts, ApiClientConfig};
@@ -120,19 +116,41 @@ async fn remote_bind_accepts_configured_lan_host_and_rejects_others() {
 }
 
 #[tokio::test]
-async fn wildcard_bind_without_operator_hosts_disables_check() {
-    // Wildcard bind with no override: the reachable interface IPs can't be
-    // enumerated, so the Host check is disabled (empty allow-list ⇒ allow all) to
-    // avoid locking out LAN clients — the mandatory LAN access token is the control
-    // there. This documents/guards that deliberate fallback.
-    assert!(
-        mcp_allowed_hosts("0.0.0.0", 8000, &[]).is_empty(),
-        "wildcard bind without operator hosts yields an empty (disabled) allow-list"
-    );
-    let authority = serve_mcp(mcp_allowed_hosts("0.0.0.0", 8000, &[])).await;
-    assert_ne!(
+async fn wildcard_bind_without_operator_hosts_retains_rebinding_protection() {
+    let hosts = mcp_allowed_hosts("0.0.0.0", 8000, &[]);
+    assert!(!hosts.is_empty());
+    let authority = serve_mcp(hosts).await;
+    assert_eq!(get_mcp_status(&authority, "anything.example").await, 403);
+    assert_ne!(get_mcp_status(&authority, "localhost:8000").await, 403);
+    let authority = serve_mcp(Vec::new()).await;
+    assert_eq!(
         get_mcp_status(&authority, "anything.example").await,
         403,
-        "with the check disabled, any Host is accepted (token-gated deployment)"
+        "empty constructor input cannot disable protection"
     );
+}
+
+#[tokio::test]
+async fn allowed_lan_host_rejects_foreign_origin_and_accepts_matching_origin() {
+    let authority = serve_mcp(mcp_allowed_hosts(
+        "0.0.0.0",
+        8000,
+        &["studio.local:8000".into()],
+    ))
+    .await;
+    // Inject an additional header through this raw HTTP helper, preserving the
+    // selected Host. No tool/API/model execution is involved.
+    for (origin, forbidden) in [
+        ("http://evil.example", true),
+        ("null", true),
+        ("http://studio.local:8000", false),
+    ] {
+        let host = format!("studio.local:8000\r\nOrigin: {origin}");
+        let status = get_mcp_status(&authority, &host).await;
+        if forbidden {
+            assert_eq!(status, 403, "{origin}");
+        } else {
+            assert_ne!(status, 403, "{origin}");
+        }
+    }
 }
