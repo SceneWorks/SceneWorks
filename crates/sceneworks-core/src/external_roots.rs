@@ -295,6 +295,40 @@ mod tests {
     }
 
     /// Build an OS-native path list the same way an operator's shell would.
+    #[cfg(unix)]
+    #[test]
+    fn confined_walk_internal_alias_cannot_spend_a_shallower_directory_depth_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        for (name, other) in [("left", "right"), ("right", "left")] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(dir.join("models")).unwrap();
+            std::fs::write(
+                dir.join("models/model.safetensors"),
+                b"metadata-only fixture",
+            )
+            .unwrap();
+            let mut deep = dir;
+            for _ in 0..6 {
+                deep = deep.join("deep");
+                std::fs::create_dir(&deep).unwrap();
+            }
+            std::os::unix::fs::symlink(root.join(other), deep.join("internal-alias")).unwrap();
+        }
+        let mut files = walk_confined(&root, 8, 10, |path| {
+            path.extension().is_some_and(|ext| ext == "safetensors")
+        });
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                root.join("left/models/model.safetensors"),
+                root.join("right/models/model.safetensors")
+            ]
+        );
+        assert_eq!(walk_confined(&root, 8, 1, |_| true).len(), 1);
+    }
+
     fn joined(paths: &[&str]) -> String {
         std::env::join_paths(paths.iter().map(Path::new))
             .expect("join_paths")
