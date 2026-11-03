@@ -1914,9 +1914,9 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     .await;
     assert_eq!(bad_status, StatusCode::BAD_REQUEST);
     assert_eq!(
-            bad_error["detail"],
-            "LoRA sourcePath must be inside app-managed data/loras, project/loras, or staged upload folders"
-        );
+        bad_error["detail"],
+        "sourcePath must be inside an approved folder"
+    );
 
     let app = create_app(settings.clone()).expect("app creates");
     let (bad_status, bad_error) = request(

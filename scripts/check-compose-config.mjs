@@ -7,6 +7,7 @@ async function composeConfig(envFile) {
   const env = { ...process.env };
   delete env.SCENEWORKS_UID;
   delete env.SCENEWORKS_GID;
+  delete env.SCENEWORKS_MCP_ALLOWED_HOSTS;
   const result = spawnSync(
     "docker",
     ["compose", "--env-file", envFile, "config", "--format", "json"],
@@ -69,6 +70,15 @@ function assertRuntimeDefaults(config, label, options = {}) {
   const apiPublishHost = options.apiPublishHost ?? "127.0.0.1";
   const apiPort = options.apiPort ?? "8010";
   const api = config.services?.api;
+  const allowedHosts = String(api?.environment?.SCENEWORKS_MCP_ALLOWED_HOSTS ?? "")
+    .split(",").map((host) => host.trim()).filter(Boolean);
+  if (!allowedHosts.includes("api")) {
+    throw new Error(`${label}: API Host policy must admit the internal worker service name`);
+  }
+  if (options.extraHost && !allowedHosts.includes(options.extraHost)) {
+    throw new Error(`${label}: API Host policy lost the configured LAN/proxy authority`);
+  }
+
   const worker = config.services?.worker;
   const rustWorker = config.services?.["rust-worker"];
   // Split the removed key so the story's cleanup grep does not report this assertion as a live reference.
@@ -137,7 +147,7 @@ try {
   await writeFile(emptyEnv, "", "utf8");
   await writeFile(
     lanEnv,
-    "SCENEWORKS_API_PUBLISH_HOST=0.0.0.0\nSCENEWORKS_API_PORT=18010\n",
+    "SCENEWORKS_API_PUBLISH_HOST=0.0.0.0\nSCENEWORKS_API_PORT=18010\nSCENEWORKS_MCP_ALLOWED_HOSTS=studio.local:18010\n",
     "utf8",
   );
   await writeFile(idsEnv, "SCENEWORKS_UID=1234\nSCENEWORKS_GID=2345\n", "utf8");
@@ -146,6 +156,7 @@ try {
   assertRuntimeDefaults(await composeConfig(lanEnv), "compose LAN override", {
     apiPublishHost: "0.0.0.0",
     apiPort: "18010",
+    extraHost: "studio.local:18010",
   });
   const ids = await composeConfig(idsEnv);
   for (const name of ["api", "worker", "rust-worker"]) {

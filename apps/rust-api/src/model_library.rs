@@ -21,6 +21,7 @@
 //! any token-holding LAN client — who could also re-point a shared server's library.
 
 use crate::error::ApiError;
+use crate::ApiJson;
 use crate::AppState;
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
@@ -94,15 +95,15 @@ pub(crate) struct RelocateModelLibraryResponse {
 /// created on adopt — so the Settings "change model library" control works before the first
 /// download exactly like the first-run storage step does.
 ///
-/// Local-only (see [`require_local_peer`]): it takes an absolute host path, and its typed refusals
+/// Local-only (see [`require_local_relocation`]): it takes an absolute host path, and its typed refusals
 /// would otherwise be a filesystem-existence oracle for any token-holding LAN client — which could
 /// also re-point a shared server's library out from under everyone else.
 pub(crate) async fn relocate_model_library(
     State(state): State<AppState>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
-    Json(request): Json<RelocateModelLibraryRequest>,
+    ApiJson(request): ApiJson<RelocateModelLibraryRequest>,
 ) -> Result<Json<RelocateModelLibraryResponse>, ApiError> {
-    require_local_peer(connect_info.map(|ConnectInfo(addr)| addr))?;
+    require_local_relocation(connect_info.map(|ConnectInfo(addr)| addr))?;
     let picked = request.path.trim().to_owned();
     if picked.is_empty() {
         return Err(ApiError::bad_request("A library folder is required."));
@@ -176,17 +177,16 @@ pub(crate) async fn relocate_model_library(
 
 /// Relocation names a host path and rewrites durable local state, so it is a local operation only.
 /// A missing peer fails closed: "we could not tell who is calling" is not permission.
-fn require_local_peer(peer: Option<SocketAddr>) -> Result<(), ApiError> {
-    if peer.is_some_and(|addr| addr.ip().is_loopback()) {
-        return Ok(());
-    }
-    Err(ApiError::typed(
-        StatusCode::FORBIDDEN,
-        "The model library can only be relocated from SceneWorks running on this machine. \
+fn require_local_relocation(peer: Option<SocketAddr>) -> Result<(), ApiError> {
+    crate::auth::require_local_peer(peer, || {
+        ApiError::typed(
+            StatusCode::FORBIDDEN,
+            "The model library can only be relocated from SceneWorks running on this machine. \
          Reconnect the library on the host, or change its location there.",
-        RELOCATION_NOT_PERMITTED_CODE,
-        json!({ "reason": "not_a_local_client" }),
-    ))
+            RELOCATION_NOT_PERMITTED_CODE,
+            json!({ "reason": "not_a_local_client" }),
+        )
+    })
 }
 
 fn relocation_error_to_api_error(error: LibraryRelocationError) -> ApiError {

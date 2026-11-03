@@ -560,6 +560,14 @@ async fn training_presets_route_returns_builtin_registry() {
 
 #[tokio::test]
 async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items() {
+    async fn request(
+        app: axum::Router,
+        method: &str,
+        uri: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        request_with_peer(app, method, uri, body, "127.0.0.1:50000").await
+    }
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
