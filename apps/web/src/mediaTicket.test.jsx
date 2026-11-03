@@ -190,6 +190,22 @@ describe("DocumentReader authenticates its document fetch (sc-8810)", () => {
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("retries a completed unauthorized document read when a fresh ticket arrives", async () => {
+    setMediaTicket("expired-ticket");
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 401 })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ segments: [{ type: "text", text: "recovered" }] }) });
+    const asset = { id: "doc", type: "document", projectId: "p1", file: { path: "assets/doc.json", mimeType: "application/json" } };
+    await act(async () => root.render(<AssetDetail asset={asset} availableTags={[]} />));
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch.mock.calls[0][0]).toContain("ticket=expired-ticket");
+    expect(container.textContent).toContain("401");
+    await act(async () => setMediaTicket("fresh-ticket"));
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch.mock.calls[1][0]).toContain("ticket=fresh-ticket");
+    expect(container.textContent).toContain("recovered");
+  });
+
   it("does not retry an in-flight read against a suspended replacement document", async () => {
     let release;
     const never = new Promise(() => {});
