@@ -79,10 +79,12 @@ pub enum Confinement {
     SymlinkSafe,
 }
 
-/// Join an untrusted relative path. SymlinkSafe resolves existing ancestors, so missing output
+/// Join an untrusted native relative path (including Windows native separators).
+/// Portable document strings must first use `portable_relative_path_parts` or
+/// `relative_normal_components`. SymlinkSafe resolves existing ancestors, so missing output
 /// files are supported without allowing a symlinked parent to redirect them outside the root.
 pub fn confine_under(root: &Path, relative: &str, policy: Confinement) -> io::Result<PathBuf> {
-    let parts = relative_normal_components(relative)
+    let parts = path_normal_components(Path::new(relative))
         .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
     let candidate = root.join(parts);
     match policy {
@@ -165,6 +167,11 @@ mod tests {
     fn existing_and_missing_files_stay_confined() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("inside"), b"valid").unwrap();
+        #[cfg(windows)]
+        assert_eq!(
+            confine_under(temp.path(), "new\\file", Confinement::Lexical).unwrap(),
+            temp.path().join("new/file")
+        );
         assert!(resolve_local_file(temp.path(), "inside").is_ok());
         assert!(resolve_local_file(temp.path(), "missing").is_err());
         assert!(confine_under(temp.path(), "new/file", Confinement::SymlinkSafe).is_ok());
