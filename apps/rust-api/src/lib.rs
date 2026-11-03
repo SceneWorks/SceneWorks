@@ -4184,10 +4184,32 @@ async fn create_generation_job_with_status(
     job_type: JobType,
     project_id: Option<String>,
     project_name: Option<String>,
-    mut payload: JsonObject,
+    payload: JsonObject,
     requested_gpu: String,
     initial_status: Option<JobStatus>,
 ) -> Result<JobSnapshot, ApiError> {
+    create_generation_job_with_binding(
+        state,
+        job_type,
+        project_id,
+        project_name,
+        payload,
+        requested_gpu,
+        (initial_status, None),
+    )
+    .await
+}
+
+async fn create_generation_job_with_binding(
+    state: AppState,
+    job_type: JobType,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    mut payload: JsonObject,
+    requested_gpu: String,
+    admission: (Option<JobStatus>, Option<Value>),
+) -> Result<JobSnapshot, ApiError> {
+    let (initial_status, mut download_binding) = admission;
     model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
     // sc-26687 / sc-26690: freeze the server-trusted provenance of the checkpoint this job
     // admitted, in the SAME transaction that enqueues it, so a later re-import or rescan cannot
@@ -4230,8 +4252,11 @@ async fn create_generation_job_with_status(
     if let Some(reference) = imported_reference_from_provenance(entry, model_provenance.as_ref()) {
         payload.insert("expectedImportedModelRef".to_owned(), reference);
     }
+    if let Some(binding) = download_binding.as_mut().and_then(Value::as_object_mut) {
+        binding.insert("payload".to_owned(), json!(payload));
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job_with_model_provenance(
+        store.create_job_with_download_binding(
             CreateJob {
                 job_type,
                 project_id,
@@ -4244,6 +4269,7 @@ async fn create_generation_job_with_status(
                 initial_status,
             },
             model_provenance.as_ref(),
+            download_binding.as_ref(),
         )
     })
     .await?;
