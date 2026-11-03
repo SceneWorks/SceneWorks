@@ -58,3 +58,25 @@ test('provisioning requires pinned fixtures, runtime extraction and independent 
   assert.match(workflow,/workflow_dispatch:/);
   assert.doesNotMatch(workflow,/^  (push|pull_request|schedule|workflow_run):/m);
 });
+
+test('registered dispatcher forwards exactly the CV contract and isolates every manual suite',async()=>{
+  const workflow=await readFile(new URL('../.github/workflows/nax-kernel-validation.yml',import.meta.url),'utf8');
+  const triggers=workflow.slice(workflow.indexOf('\non:'),workflow.indexOf('\npermissions:'));
+  assert.match(triggers,/default: nax/);
+  assert.match(triggers,/options: \[nax, aesthetic-cpu, cv\]/);
+  assert.doesNotMatch(triggers,/^  (push|pull_request|schedule|workflow_run|merge_group):/m);
+  assert.doesNotMatch(triggers.split('  workflow_call:')[1],/suite:|backend:|build_only:|inference_sha:/);
+  const jobs=workflow.slice(workflow.indexOf('\njobs:'));
+  const cv=jobs.slice(jobs.indexOf('\n  cv:'));
+  assert.match(cv,/github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks\/SceneWorks' && inputs.suite == 'cv'/);
+  assert.match(cv,/uses: \.\/\.github\/workflows\/cv-provider-validation.yml/);
+  assert.deepEqual([...cv.matchAll(/^      (\w+): \$\{\{ inputs\.(\w+) \}\}$/gm)].map(match=>[match[1],match[2]]),
+    ['source_sha','inference_sha','backend','build_only','mac_go'].map(name=>[name,name]));
+  assert.match(jobs,/inputs.suite == '' \|\| inputs.suite == 'nax'/);
+  assert.match(jobs,/inputs.suite == 'aesthetic-cpu'/);
+  assert.match(jobs,/test "\$MAC_GO" = true/);
+  const normal=await readFile(new URL('../.github/workflows/macos-mlx.yml',import.meta.url),'utf8');
+  const caller=normal.slice(normal.indexOf('\n  nax-kernel-validation:'),normal.indexOf('\n  manual-verification:'));
+  assert.match(caller,/github.event_name == 'workflow_dispatch'/);
+  assert.doesNotMatch(caller,/suite:|cv-provider-validation|cv-oracle-provision/);
+});

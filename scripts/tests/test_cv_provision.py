@@ -52,6 +52,40 @@ class ProvisionContracts(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "explicit Actions"):
                     cv.admit("a" * 40, "b" * 40, "mlx", env=env)
 
+    def test_actual_workflow_path_initializers_run_without_models(self):
+        # Execute only the embedded stdlib path initialization from each assembled workflow.
+        for name in ("cv-provider-validation.yml", "cv-oracle-provision.yml"):
+            workflow = (SCRIPTS.parent / ".github/workflows" / name).read_text()
+            code = workflow.split("python -B - <<'PYTHON'\n", 1)[1].split("          PYTHON", 1)[0]
+            code = "\n".join(line.removeprefix("          ") for line in code.splitlines())
+            output = self.root / (name + ".env")
+            env = dict(os.environ, RUNNER_TEMP=str(self.root / "runner space"),
+                       GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="2", GITHUB_ENV=str(output))
+            subprocess.run([sys.executable, "-I", "-B", "-c", code], env=env, check=True)
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            self.assertTrue(values)
+            for value in values.values():
+                self.assertTrue(value.startswith(str(self.root / "runner space")))
+                self.assertTrue(value.endswith("-123-2"))
+                self.assertFalse(Path(value).exists())
+
+    def test_nested_manual_dispatch_admits_exact_source_and_all_pin_sites(self):
+        source, pin = "a" * 40, "b" * 40
+        for name in ("Cargo.toml", "crates/sceneworks-core/Cargo.toml", "crates/sceneworks-worker/Cargo.toml", "crates/sceneworks-memory-adapter/Cargo.toml"):
+            file = self.root / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text('runtime = { git = "https://github.com/SceneWorks/inference", rev = "' + pin + '" }')
+        (self.root / "Cargo.lock").write_text('source = "git+https://github.com/SceneWorks/inference?rev=' + pin + '#' + pin + '"')
+        env = dict(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_SHA=source,
+                   GITHUB_WORKFLOW_REF="SceneWorks/SceneWorks/.github/workflows/nax-kernel-validation.yml@refs/heads/proof",
+                   CV_MAC_GO="true")
+        with patch.object(cv, "ROOT", self.root), patch.object(cv.subprocess, "check_output", side_effect=[source, ""]):
+            cv.admit(source, pin, "mlx", env=env)
+        (self.root / "Cargo.lock").write_text('source = "git+https://github.com/SceneWorks/inference?rev=' + pin + '#' + source + '"')
+        with patch.object(cv, "ROOT", self.root), patch.object(cv.subprocess, "check_output", side_effect=[source, ""]):
+            with self.assertRaisesRegex(ValueError, "resolved lock pins"):
+                cv.admit(source, pin, "mlx", env=env)
+
     def test_oracle_entry_rejects_before_any_model_import(self):
         # Executing a refused entry is safe: no torch/numpy imports are reachable first.
         code = "import sys; import cv_oracle_producer as p; " \

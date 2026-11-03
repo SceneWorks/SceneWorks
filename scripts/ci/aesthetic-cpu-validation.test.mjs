@@ -44,7 +44,7 @@ test('manual dispatcher adds one hosted CPU suite while preserving NAX default a
   const triggers = workflow.slice(workflow.indexOf('\non:'), workflow.indexOf('\npermissions:'));
   assert.doesNotMatch(triggers, /\n  (?:push|pull_request|pull_request_target|schedule|merge_group|workflow_run):/);
   assert.match(triggers, /default: nax/);
-  assert.match(triggers, /options: \[nax, aesthetic-cpu\]/);
+  assert.match(triggers, /options: \[nax, aesthetic-cpu, cv\]/);
   // workflow_call has no suite input: the existing guarded NAX caller retains its default.
   assert.doesNotMatch(triggers.split('  workflow_call:')[1], /suite:|inference_sha:/);
   const cpu = workflow.slice(workflow.indexOf('\n  aesthetic-cpu:'));

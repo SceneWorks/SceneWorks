@@ -115,7 +115,7 @@ export async function run(env=process.env) {
   const git=async (...args)=>(await execFile('git',args,{cwd:root})).stdout.trim();
   assert.equal(await git('rev-parse','HEAD'),env.CV_SOURCE_SHA);
   assert.equal(await git('status','--porcelain'),'','clean paired source required');
-  const manifests=await Promise.all(['Cargo.toml','crates/sceneworks-worker/Cargo.toml','crates/sceneworks-memory-adapter/Cargo.toml'].map(file=>readFile(path.join(root,file),'utf8')));
+  const manifests=await Promise.all(['Cargo.toml','crates/sceneworks-core/Cargo.toml','crates/sceneworks-worker/Cargo.toml','crates/sceneworks-memory-adapter/Cargo.toml'].map(file=>readFile(path.join(root,file),'utf8')));
   const lock=await readFile(path.join(root,'Cargo.lock'),'utf8'); assertPins(manifests,lock,env.CV_INFERENCE_SHA);
   const output=path.resolve(env.CV_OUTPUT), checkout=await realpath(root), parent=await realpath(path.dirname(output));
   assert(path.relative(checkout,parent).startsWith(`..${path.sep}`),'evidence must be outside checkout');

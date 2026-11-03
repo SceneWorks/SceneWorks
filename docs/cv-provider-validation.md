@@ -147,3 +147,16 @@ invokes either learned workflow.
 A passing compile, metadata/mock test, provisioning step or `build_only` run is
 not native provider proof. Keep the actual independent-oracle and both hardware
 validation artifacts with the acceptance report before closing SW-6775/SW-6680.
+
+## Registered dispatcher
+
+The existing registered `nax-kernel-validation.yml` dispatcher accepts `suite=cv`
+and forwards only `source_sha`, `inference_sha`, `backend`, `build_only`, and
+`mac_go` to the reusable CV workflow. Select the published consumer ref and pass
+its exact 40-character SHA, plus the inference SHA in that source's lockfile.
+For actual Mac MLX/CoreML proofs select `backend=mlx`, `build_only=false`,
+`mac_go=true`; for Windows CUDA select `backend=cuda`, `build_only=false`,
+`mac_go=false`. The NAX default and aesthetic CPU routes remain separate manual
+suites. Ordinary CI cannot select CV. An actual Mac run first creates independent
+CPU oracle artifacts in the separate reusable oracle job, then validates all six
+provider cases; Windows validates all four cases on physical GPU1/logical0.

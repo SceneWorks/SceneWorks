@@ -44,7 +44,7 @@ def admit(source, inference, backend, *, env=None):
     if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip():
         raise ValueError("clean source required")
     pins = []
-    for file in ("Cargo.toml", "crates/sceneworks-worker/Cargo.toml", "crates/sceneworks-memory-adapter/Cargo.toml"):
+    for file in ("Cargo.toml", "crates/sceneworks-core/Cargo.toml", "crates/sceneworks-worker/Cargo.toml", "crates/sceneworks-memory-adapter/Cargo.toml"):
         pins += re.findall(r'git\s*=\s*"https://github.com/SceneWorks/inference"\s*,\s*rev\s*=\s*"([a-f0-9]+)"', (ROOT / file).read_text())
     locked = re.findall(r'git\+https://github.com/SceneWorks/inference\?rev=([a-f0-9]+)#([a-f0-9]+)', (ROOT / "Cargo.lock").read_text())
     if not pins or set(pins) != {inference} or not locked or any(set(pair) != {inference} for pair in locked):
