@@ -446,7 +446,7 @@ pub fn ordered_image_reference_ids_for_model(
 ///
 /// The SHAPE half only. **Counting is not done here** — the cap lives in
 /// `limits.maxReferenceAssets` and is enforced once, by
-/// [`crate::video_request::image_reference_limit_error`], so there is exactly one place that knows
+/// [`crate::image_limits::image_reference_limit_error`], so there is exactly one place that knows
 /// what the ceiling is. What is left is everything else an ordered list can be wrong about:
 ///
 ///   1. **no references at all.** The conditioned modes ARE the conditioning call; with nothing to
@@ -481,7 +481,7 @@ pub fn ordered_image_reference_error(
     {
         return Some(format!("{model}: FLUX.3 layout and attachment-instance controls are unsupported; remove them or select FLUX.3."));
     }
-    let cap = crate::video_request::image_max_reference_assets(model_manifest_entry)?;
+    let cap = crate::image_limits::image_max_reference_assets(model_manifest_entry)?;
     let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
     // sc-24114: `image_to_image` is the declared single-reference face of the same call, so it is
     // a CONDITIONED mode exactly like the edit modes (it needs at least one reference).
@@ -1197,7 +1197,7 @@ pub fn validate_image_request_payload(
     if !reference_derived {
         let (width, height) =
             default_resolution(entry).unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
-        if let Some(error) = crate::video_request::image_dimension_error(
+        if let Some(error) = crate::image_limits::image_dimension_error(
             model,
             unsigned_or(payload.get("width"), width),
             unsigned_or(payload.get("height"), height),
