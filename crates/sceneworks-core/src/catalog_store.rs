@@ -4414,7 +4414,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let registry = CatalogRegistry::new(temp.path().join("state"));
         let mut catalog = registry
-            .create_catalog(&temp.path().join("catalog"), "local images")
+            .create_catalog(temp.path().join("catalog"), "local images")
             .unwrap();
         fs::create_dir_all(catalog.root().join("images")).unwrap();
         fs::write(catalog.root().join("images/cached.png"), b"cached").unwrap();
