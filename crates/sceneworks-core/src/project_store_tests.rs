@@ -2425,11 +2425,11 @@ fn list_assets_many_clean_rows_has_constant_filesystem_operations() {
         one_row_operations.total(),
         "clean-list filesystem work must be independent of returned row count"
     );
-    let list_source = include_str!("project_store.rs")
+    let list_source = include_str!("project_store/asset_queries.rs")
         .split_once("fn list_assets_filtered(")
         .unwrap()
         .1
-        .split_once("pub fn list_saved_voices(")
+        .split_once("pub fn get_asset(")
         .unwrap()
         .0;
     assert!(
@@ -5677,7 +5677,8 @@ fn the_scan_precedes_both_the_passthrough_and_the_transcode() {
     let source = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src")
-            .join("project_store.rs"),
+            .join("project_store")
+            .join("uploads.rs"),
     )
     .expect("reads this module");
     let body = source
@@ -7002,7 +7003,7 @@ fn front_kps() -> serde_json::Value {
 
 #[test]
 fn keypoint_reads_keep_the_asset_type_filter_at_the_sql_seam() {
-    let source = include_str!("project_store.rs");
+    let source = include_str!("project_store/asset_queries.rs");
     let list = source
         .split_once("fn list_assets_filtered(")
         .expect("filtered asset query")
@@ -7014,6 +7015,7 @@ fn keypoint_reads_keep_the_asset_type_filter_at_the_sql_seam() {
         list.contains("and (?3 is null or type = ?3)"),
         "the shared asset reader must push its optional type filter into SQLite"
     );
+    let source = include_str!("project_store/keypoints.rs");
     let keypoints = source
         .split_once("fn list_user_keypoint_presets(")
         .expect("keypoint reader")

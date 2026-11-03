@@ -590,13 +590,13 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     ("core", "hf_home.rs", "huggingface", CacheRole::HfCache),
     (
         "core",
-        "project_store.rs",
+        "project_store/keypoints.rs",
         "keypoint-uploads",
         CacheRole::Upload,
     ),
     (
         "core",
-        "project_store.rs",
+        "project_store/poses.rs",
         "pose_detect",
         CacheRole::Scratch,
     ),
@@ -1481,7 +1481,8 @@ fn strip_cfg_test_items(code: &str) -> String {
 /// Every file in `tree` reachable only as test code.
 ///
 /// Seeded from `#[cfg(test)] mod NAME;` declarations (detected by diffing the module declarations
-/// before and after [`strip_cfg_test_items`]) and propagated through both `mod NAME;` and
+/// before and after [`strip_cfg_test_items`]) and propagated through `mod NAME;` (including
+/// explicit `#[path]` locations) and
 /// `include!("…")` edges — `src/tests.rs` reaches its four submodules through `include!`, so a
 /// `mod`-only walk would leave them classified as production.
 ///
@@ -1491,18 +1492,25 @@ fn strip_cfg_test_items(code: &str) -> String {
 fn test_only_files(tree: &BTreeMap<String, String>, root_module: &str) -> BTreeSet<String> {
     let mut children: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     let mut includes: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut production_edges: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     let mut seeds: BTreeSet<String> = BTreeSet::new();
 
     for (rel, code) in tree {
         let declared = module_declarations(code);
-        let production = module_declarations(&strip_cfg_test_items(code));
+        let production_code = strip_cfg_test_items(code);
+        let production = module_declarations(&production_code);
         for name in &declared {
-            if let Some(target) = resolve_module(rel, name, tree, root_module) {
+            if let Some(target) = resolve_declared_module(rel, name, code, tree, root_module) {
                 children
                     .entry(rel.as_str())
                     .or_default()
                     .push(target.clone());
-                if !production.contains(name) {
+                if production.contains(name) {
+                    production_edges
+                        .entry(rel.as_str())
+                        .or_default()
+                        .push(target);
+                } else {
                     seeds.insert(target);
                 }
             }
@@ -1510,11 +1518,17 @@ fn test_only_files(tree: &BTreeMap<String, String>, root_module: &str) -> BTreeS
         for path in include_paths(code) {
             let base = rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
             let target = if base.is_empty() {
-                path
+                path.clone()
             } else {
                 format!("{base}/{path}")
             };
             if tree.contains_key(&target) {
+                if include_paths(&production_code).contains(&path) {
+                    production_edges
+                        .entry(rel.as_str())
+                        .or_default()
+                        .push(target.clone());
+                }
                 includes.entry(rel.as_str()).or_default().push(target);
             }
         }
@@ -1534,7 +1548,102 @@ fn test_only_files(tree: &BTreeMap<String, String>, root_module: &str) -> BTreeS
             }
         }
     }
+    // A path shared by a production declaration and a test alias still ships.
+    let mut production = BTreeSet::new();
+    let mut frontier = vec![root_module.to_owned()];
+    while let Some(current) = frontier.pop() {
+        if production.insert(current.clone()) {
+            frontier.extend(
+                production_edges
+                    .get(current.as_str())
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+        }
+    }
+    out.retain(|path| !production.contains(path));
     out
+}
+
+/// Resolve an explicit `#[path]` before falling back to Rust's default module layout.
+fn resolve_declared_module(
+    rel: &str,
+    name: &str,
+    code: &str,
+    tree: &BTreeMap<String, String>,
+    root_module: &str,
+) -> Option<String> {
+    // Keep byte offsets while blanking literals, so a quoted fake module is not an edge.
+    let bytes = code.as_bytes();
+    let mut syntax = bytes.to_vec();
+    let mut index = 0;
+    while index < bytes.len() {
+        let raw_end = if matches!(bytes[index], b'r' | b'b') {
+            crate::architecture_tests::raw_string_parts(bytes, index).map(|(_, end)| end)
+        } else {
+            None
+        };
+        if let Some(end) =
+            raw_end.or_else(|| (bytes[index] == b'"').then(|| skip_string(bytes, index)))
+        {
+            let end = end.min(bytes.len());
+            syntax[index..end].fill(b' ');
+            index = end;
+        } else if bytes[index] == b'\'' {
+            index = char_literal_end(bytes, index).unwrap_or(index + 1);
+        } else {
+            index += 1;
+        }
+    }
+    let syntax = String::from_utf8(syntax).expect("blanking literals preserves UTF-8");
+    let declaration = format!("mod {name}");
+    for (keyword, _) in syntax.match_indices(&declaration) {
+        let rest = &syntax[keyword + declaration.len()..];
+        if !rest.trim_start().starts_with(';') {
+            continue;
+        }
+        let mut before = syntax[..keyword].trim_end();
+        if let Some(prefix) = before
+            .strip_suffix("pub(crate)")
+            .or_else(|| before.strip_suffix("pub(super)"))
+            .or_else(|| before.strip_suffix("pub"))
+        {
+            before = prefix.trim_end();
+        }
+        while before.ends_with(']') {
+            let end = before.len();
+            let mut depth = 1usize;
+            let mut start = end - 1;
+            while start > 0 && depth > 0 {
+                start -= 1;
+                match before.as_bytes()[start] {
+                    b']' => depth += 1,
+                    b'[' => depth -= 1,
+                    _ => {}
+                }
+            }
+            if depth != 0 || start == 0 || before.as_bytes()[start - 1] != b'#' {
+                break;
+            }
+            let attribute = code[start + 1..end - 1].trim();
+            if let Some(value) = attribute
+                .strip_prefix("path")
+                .and_then(|value| value.trim_start().strip_prefix('='))
+            {
+                let path = string_literal_value(value)?;
+                let base = rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+                let target = if base.is_empty() {
+                    path
+                } else {
+                    format!("{base}/{path}")
+                };
+                return tree.contains_key(&target).then_some(target);
+            }
+            before = before[..start - 1].trim_end();
+        }
+    }
+    resolve_module(rel, name, tree, root_module)
 }
 
 /// `mod NAME;` declarations in `code` (not `mod NAME { … }`, which needs no file).
@@ -4082,5 +4191,44 @@ fn scanner_parsers_recognise_the_shapes_they_must_judge() {
     assert_eq!(
         include_paths("include!(\"tests/hf_and_family.rs\");"),
         vec!["tests/hf_and_family.rs".to_owned()]
+    );
+}
+
+#[test]
+fn scanner_follows_test_path_modules_without_hiding_production_aliases() {
+    let tree = [
+        (
+            "lib.rs",
+            r##"
+            #[cfg(test)]
+            #[path = "fixtures.rs"]
+            mod tests;
+            #[path = "shared.rs"]
+            pub mod shipping;
+            #[cfg(test)]
+            #[path = "shared.rs"]
+            mod test_alias;
+            const DECOY: &str = "#[path = \"shipping.rs\"] mod unrelated;";
+            mod live;
+        "##,
+        ),
+        (
+            "fixtures.rs",
+            "#[path = \"nested/stub.rs\"] pub(crate) mod stub;",
+        ),
+        ("nested/stub.rs", "fn mocked_http() {}"),
+        ("shared.rs", "fn production() {}"),
+        ("live.rs", "fn production() {}"),
+        ("shipping.rs", "fn unreferenced_but_scanned() {}"),
+    ]
+    .into_iter()
+    .map(|(path, code)| (path.to_owned(), code.to_owned()))
+    .collect();
+    assert_eq!(
+        test_only_files(&tree, "lib.rs"),
+        ["fixtures.rs", "nested/stub.rs"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     );
 }
