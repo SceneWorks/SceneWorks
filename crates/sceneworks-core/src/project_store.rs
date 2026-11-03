@@ -623,17 +623,8 @@ fn registry_content_sha256(file: &mut fs::File) -> ProjectStoreResult<[u8; 32]> 
     record_asset_list_filesystem_operation(AssetListFilesystemOperation::RegistryContentRead);
     let mut hasher = Sha256::new();
     let mut limited = file.take(MAX_REGISTRY_BYTES + 1);
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let read = limited.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        ensure_registry_size(total)?;
-        hasher.update(&buffer[..read]);
-    }
+    crate::hashing::update_sha256(&mut limited, &mut hasher)?;
+    ensure_registry_size(MAX_REGISTRY_BYTES + 1 - limited.limit())?;
     Ok(hasher.finalize().into())
 }
 

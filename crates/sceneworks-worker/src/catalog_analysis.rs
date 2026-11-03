@@ -7,8 +7,7 @@
 //! from each record so a crash cannot make incomplete rows look current.
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use sceneworks_core::catalog_store::{
@@ -1290,17 +1289,10 @@ fn resolve_catalog_image(catalog: &Catalog, record: &CatalogRecord) -> std::io::
 }
 
 fn image_fingerprint(path: &Path) -> std::io::Result<String> {
-    let mut input = BufReader::new(File::open(path)?);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = input.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!(
+        "sha256:{}",
+        sceneworks_core::hashing::sha256_file(path)?
+    ))
 }
 
 /// 64-bit difference hash over a normalized 9x8 luminance image. This is

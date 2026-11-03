@@ -23,7 +23,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -95,6 +94,7 @@ pub const MANAGED_INSTALLS_RELATIVE_DIR: &str = "models/imports";
 /// rename within one filesystem.
 pub const MANAGED_STAGING_RELATIVE_DIR: &str = "models/.import-staging";
 
+#[cfg(test)]
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// The longest user-chosen library label the store persists.
@@ -1207,9 +1207,6 @@ pub fn source_file_sha256_with_check(
         path,
         Some(file.metadata()?.len()),
     );
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
-    let mut hashed_bytes = 0u64;
     let checkpoint = |hashed_bytes| match check() {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -1220,23 +1217,28 @@ pub fn source_file_sha256_with_check(
             Err(error)
         }
     };
-    loop {
-        checkpoint(hashed_bytes)?;
-        let read = file.read(&mut buffer)?;
-        check()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        progress.add_bytes(read as u64);
-        hashed_bytes += read as u64;
-        if hashed_bytes == read as u64 || hashed_bytes % (256 * 1024 * 1024) < read as u64 {
-            tracing::info!(event = "source_file_hash_progress", path = %path.display(),
-                acquisition = "ColdContentRead", state = "Reading", hashed_bytes,
-                source_bytes = before.size_bytes, "Actual bounded source-content hash progress");
-        }
-        checkpoint(hashed_bytes)?;
-    }
+    let (digest, hashed_bytes) = crate::hashing::sha256_reader_with(
+        &mut file,
+        |hashed_bytes, event| {
+            match event {
+                crate::hashing::ReadEvent::Before => checkpoint(hashed_bytes)?,
+                crate::hashing::ReadEvent::After(bytes) => {
+                    check()?;
+                    if !bytes.is_empty() {
+                        let next = hashed_bytes + bytes.len() as u64;
+                        progress.add_bytes(bytes.len() as u64);
+                        if hashed_bytes == 0 || next % (256 * 1024 * 1024) < bytes.len() as u64 {
+                            tracing::info!(event = "source_file_hash_progress", path = %path.display(),
+                            acquisition = "ColdContentRead", state = "Reading", hashed_bytes = next,
+                            source_bytes = before.size_bytes, "Actual bounded source-content hash progress");
+                        }
+                        checkpoint(next)?;
+                    }
+                }
+            }
+            Ok(())
+        },
+    )?;
     checkpoint(hashed_bytes)?;
     let after = SourceStampV1::of(path, StoreClockV1::SYSTEM)?;
     if !before.identifies_same_entry(&after) || fs::canonicalize(path)? != target {
@@ -1250,7 +1252,7 @@ pub fn source_file_sha256_with_check(
     tracing::info!(event = "source_file_hash_progress", path = %path.display(),
         acquisition = "ColdContentRead", state = "Acquired", hashed_bytes,
         source_bytes = before.size_bytes, "Complete source digest acquired after source identity verification");
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(digest)
 }
 
 /// The store handle. Cheap to construct; every operation reads the current on-disk state.

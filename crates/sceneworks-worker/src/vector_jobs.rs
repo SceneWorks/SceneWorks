@@ -22,7 +22,6 @@ use quick_xml::{Reader, XmlVersion};
 use resvg::usvg;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -62,7 +61,7 @@ const CANCEL_MESSAGE: &str = "Vector generation canceled before publication.";
 const STARVECTOR_ADAPTER_ID: &str = "starvector";
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 fn terminal_result(

@@ -1,7 +1,8 @@
 //! Catalog-owned exact identity for managed single-file components. No network or ambient path.
 use serde_json::{Map, Value};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
-use std::{io::Read, path::Path, sync::OnceLock};
+use std::{path::Path, sync::OnceLock};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManagedFileIdentity {
@@ -75,16 +76,10 @@ impl ManagedFileIdentity {
         if file.metadata().map_err(|e| e.to_string())?.len() != self.bytes {
             return Err("managed component has the wrong byte count; repair/install it".into());
         }
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0u8; 1024 * 1024];
-        loop {
-            let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-        }
-        if format!("{:x}", hasher.finalize()) != self.sha256 {
+        let digest = crate::hashing::sha256_reader(&mut file)
+            .map_err(|e| e.to_string())?
+            .0;
+        if digest != self.sha256 {
             return Err("managed component SHA256 mismatch; repair/install it".into());
         }
         Ok(())

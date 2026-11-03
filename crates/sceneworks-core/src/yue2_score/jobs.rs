@@ -1231,18 +1231,20 @@ pub fn refresh_block_for_duplicate(payload: &mut serde_json::Map<String, serde_j
 }
 
 fn fresh_hex_id() -> String {
-    let mut bytes = [0u8; 16];
+    if let Ok(value) = crate::hashing::random_hex(16) {
+        return value;
+    }
+    let bytes = [0u8; 16];
     // A failed OS RNG must not hand two duplicates the same run: fall back to a time-and-address
     // mix, which is unique per call in one process.
-    if getrandom::fill(&mut bytes).is_err() {
+    {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default();
         let marker = &bytes as *const _ as usize as u128;
-        bytes = (nanos ^ marker.rotate_left(64)).to_le_bytes();
+        crate::hashing::hex(&(nanos ^ marker.rotate_left(64)).to_le_bytes())
     }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The engine's window-plan rule (`sliding_window_plan`) over the resolved values —

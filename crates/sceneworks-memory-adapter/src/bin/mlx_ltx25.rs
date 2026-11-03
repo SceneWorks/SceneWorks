@@ -949,22 +949,8 @@ fn canonical_av_identity(clip: &RenderedClip) -> Result<(String, u64), String> {
 fn file_identity(path: &Path) -> Result<(String, u64), String> {
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("open immutable A/V receipt {}: {error}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut total = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("read immutable A/V receipt {}: {error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        total = total
-            .checked_add(read as u64)
-            .ok_or_else(|| "immutable A/V receipt byte count overflow".to_owned())?;
-        hasher.update(&buffer[..read]);
-    }
-    Ok((format!("{:x}", hasher.finalize()), total))
+    sceneworks_core::hashing::sha256_reader(&mut file)
+        .map_err(|error| format!("read immutable A/V receipt {}: {error}", path.display()))
 }
 
 fn persist_canonical_av(

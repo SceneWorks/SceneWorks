@@ -51,7 +51,7 @@ use sceneworks_core::training_subject_masks::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 
 // epic 3720 (sc-3724): the backend-neutral training contract types come from `gen_core`, which is
 // tensor-free and links on every target. The import is gated to the backends that actually run a
@@ -790,42 +790,44 @@ fn copy_and_verify_prepared_bundle(
             ),
         ))
     })?;
-    let mut hash = Sha256::new();
-    let mut size = 0_u64;
-    let mut chunk = [0_u8; 64 * 1024];
-    loop {
-        let read = source.read(&mut chunk).map_err(|error| {
+    let (actual_sha256, size) = sceneworks_core::hashing::try_sha256_reader_with(
+        &mut source,
+        |size, event| {
+            if let sceneworks_core::hashing::ReadEvent::After(chunk) = event {
+                if chunk.is_empty() {
+                    return Ok(());
+                }
+                let next = size.checked_add(chunk.len() as u64).ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "Training item LTX prepared bundle byte count overflowed: {}.",
+                        key.source_path.display()
+                    ))
+                })?;
+                if next > key.expected_size {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "Training item LTX prepared bundle failed its stored size/SHA-256 integrity check: {}.",
+                        key.source_path.display()
+                    )));
+                }
+                snapshot.write_all(chunk).map_err(|error| {
+                    WorkerError::Io(std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "Could not write staged LTX prepared bundle {}: {error}",
+                            staged_path.display()
+                        ),
+                    ))
+                })?;
+            }
+            Ok(())
+        },
+        |error| {
             WorkerError::InvalidPayload(format!(
                 "Could not read LTX prepared bundle {}: {error}.",
                 key.source_path.display()
             ))
-        })?;
-        if read == 0 {
-            break;
-        }
-        size = size.checked_add(read as u64).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "Training item LTX prepared bundle byte count overflowed: {}.",
-                key.source_path.display()
-            ))
-        })?;
-        if size > key.expected_size {
-            return Err(WorkerError::InvalidPayload(format!(
-                "Training item LTX prepared bundle failed its stored size/SHA-256 integrity check: {}.",
-                key.source_path.display()
-            )));
-        }
-        snapshot.write_all(&chunk[..read]).map_err(|error| {
-            WorkerError::Io(std::io::Error::new(
-                error.kind(),
-                format!(
-                    "Could not write staged LTX prepared bundle {}: {error}",
-                    staged_path.display()
-                ),
-            ))
-        })?;
-        hash.update(&chunk[..read]);
-    }
+        },
+    )?;
     snapshot.sync_all().map_err(|error| {
         WorkerError::Io(std::io::Error::new(
             error.kind(),
@@ -835,7 +837,6 @@ fn copy_and_verify_prepared_bundle(
             ),
         ))
     })?;
-    let actual_sha256 = format!("{:x}", hash.finalize());
     if size != key.expected_size || actual_sha256 != key.expected_sha256 {
         return Err(WorkerError::InvalidPayload(format!(
             "Training item LTX prepared bundle failed its stored size/SHA-256 integrity check: {}.",

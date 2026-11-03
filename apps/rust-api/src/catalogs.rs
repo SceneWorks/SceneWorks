@@ -33,7 +33,6 @@ use sceneworks_worker::catalog_parquet_scanner::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -1556,10 +1555,7 @@ fn canonical_json(value: Value) -> Value {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 pub(crate) async fn review_catalog_record(

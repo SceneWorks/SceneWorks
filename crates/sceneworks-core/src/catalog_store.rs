@@ -4311,16 +4311,8 @@ fn atomic_write(path: &Path, payload: &[u8]) -> CatalogResult<()> {
 }
 
 fn random_hex(bytes: usize) -> CatalogResult<String> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut buffer = vec![0; bytes];
-    getrandom::fill(&mut buffer)
-        .map_err(|error| CatalogError::Io(std::io::Error::other(error.to_string())))?;
-    let mut output = String::with_capacity(bytes * 2);
-    for byte in buffer {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    Ok(output)
+    crate::hashing::random_hex(bytes)
+        .map_err(|error| CatalogError::Io(std::io::Error::other(error.to_string())))
 }
 
 fn map_sqlite_error(path: &Path, error: rusqlite::Error) -> CatalogError {

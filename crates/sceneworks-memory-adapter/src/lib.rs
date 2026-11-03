@@ -2114,13 +2114,11 @@ impl PulidIdentityBundle {
 }
 
 fn sha256_hex_of_file(path: &Path) -> Result<String, String> {
-    use sha2::Digest;
-    let mut file = std::fs::File::open(path)
+    let file = std::fs::File::open(path)
         .map_err(|error| format!("open {} for hashing: {error}", path.display()))?;
-    let mut hasher = sha2::Sha256::new();
-    io::copy(&mut file, &mut hasher)
-        .map_err(|error| format!("hash {}: {error}", path.display()))?;
-    Ok(format!("{:x}", hasher.finalize()))
+    sceneworks_core::hashing::sha256_reader_retry(file)
+        .map(|(digest, _)| digest)
+        .map_err(|error| format!("hash {}: {error}", path.display()))
 }
 
 /// The env-free half of [`pulid_identity_bundle`], so the file contract is unit-testable. Hashes
