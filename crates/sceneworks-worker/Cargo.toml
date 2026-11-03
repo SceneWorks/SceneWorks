@@ -124,7 +124,8 @@ runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "a43724
 # Direct weights-free LTX-2.5 training preflight. The runtime bundle owns execution, while this
 # public header/request validator lets dry-run fail before any base model is loaded.
 mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
-# Retained direct dependency: SceneWorks' native person detector uses MLX tensor primitives.
+# Retained direct dependency for worker memory controls, adapters and native proof tensors.
+# YOLO11 execution itself is owned by runtime-macos::cv.
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "11d0ff7c81e628beaa548e1872db974c10529efe" }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
