@@ -206,3 +206,9 @@ export function summarizeBatchRun(run, jobs, observedJobs) {
   summary.allDone = summary.total > 0 && summary.done === summary.total;
   return summary;
 }
+
+// Keep error details bounded even when a large batch repeatedly fails admission.
+export function recordBatchEnqueueFailure(run, count, message) {
+  return { ...run, submitted: run.submitted + count, failed: run.failed + count,
+    firstError: run.firstError ?? message, lastError: message };
+}

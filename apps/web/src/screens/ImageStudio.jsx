@@ -52,7 +52,7 @@ import { isFlux3LayoutModel, orderedLayoutAssetIds, reconcileLayoutReferences, m
 import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
-import { batchItemStatus, settlePromptBatchRun, summarizeBatchRun } from "../batchOps.js";
+import { batchItemStatus, recordBatchEnqueueFailure, settlePromptBatchRun, summarizeBatchRun } from "../batchOps.js";
 import {
   DEFAULT_SCENE_PROMPT,
   promptHintFor,
@@ -477,12 +477,41 @@ export function ImageStudio() {
     batchVariableValues, setBatchVariableValues, batchName, setBatchName,
     batchScope, setBatchScope, loadedBatchId, batchError, setBatchError,
     batchBusy, batchRun, setBatchRun, batchConfirmPending, setBatchConfirmPending,
-    batchAbortRef, batchPrompts, batchVariables, batchJobCount, handleSaveBatch,
+    batchPrompts, batchVariables, batchJobCount, handleSaveBatch,
     handleLoadBatch, handleDeleteBatch, handleImportBatch, handleNewBatch,
   } = useBatchPromptState({ saved, createPromptBatch, updatePromptBatch, deletePromptBatch });
   const batchObservedJobsRef = useRef(new Map());
   const batchRunRef = useRef(batchRun);
   const batchSlotWaitersRef = useRef([]);
+  const batchOwnerRef = useRef(null);
+  const batchProjectRef = useRef(activeProject?.id);
+  batchProjectRef.current = activeProject?.id;
+  const batchJobsRef = useRef(jobs);
+  batchJobsRef.current = jobs;
+  const batchJobActionRef = useRef(jobAction);
+  batchJobActionRef.current = jobAction;
+
+  useEffect(() => {
+    const waiters = batchSlotWaitersRef.current;
+    if (batchOwnerRef.current && batchOwnerRef.current.projectId !== activeProject?.id) {
+      batchOwnerRef.current = null;
+      batchRunRef.current = null;
+      setBatchRun(null);
+    }
+    return () => {
+      const owner = batchOwnerRef.current;
+      if (!owner) return;
+      owner.stopped = true;
+      owner.disposed = true;
+      for (const resolve of waiters.splice(0)) resolve();
+      // Project changes and unmount use the same policy as Stop: cancel jobs
+      // already enqueued, including a post that resolves after cleanup.
+      for (const [id, submittedJob] of owner.jobs) {
+        const job = batchJobsRef.current.find((entry) => entry.id === id) ?? submittedJob;
+        if (job && !terminalStatuses.has(job.status)) batchJobActionRef.current(job, "cancel");
+      }
+    };
+  }, [activeProject?.id, setBatchRun]);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
   const [textEncoderSelection, setTextEncoderSelection] = useState({
@@ -2636,49 +2665,31 @@ export function ImageStudio() {
     [assets, localJobs],
   );
 
+  // Both entry points use the same admission checks, then their own prompt/form rules.
+  // Layout references and model geometry are derived once above and passed unchanged
+  // to the shared request builder; exact replay tiers and MOSS components must be ready.
+  function preflightError(kind) {
+    if (!mossComponents.ready || mossEditError) return mossEditError || (mossEdit ? "Install or repair the exact MOSS edit adapter before editing." : "Install the selected MOSS 8-step components before generating.");
+    if (!selectedModelServesMode) return `Install or select a model that supports ${modeLabel} generation.`;
+    if (replayTierUnavailable) return "Recipe tier unavailable. Install it on a supported worker or choose another tier.";
+    if (characterReferenceError) return characterReferenceError;
+    if (decoderCapabilitiesPending) return "Waiting for engine capabilities before using the restored decoder.";
+    if (dimensionsInvalid || hiresFixTargetInvalid) return hiresFixTargetMessage || dimensionError || "Width and height must each be between 256 and 4096.";
+    if (cfgIntervalError) return cfgIntervalError;
+    if (macActiveModeBlock) return macActiveModeBlock.text;
+    const validity = kind === "batch" ? batchValidity : generateValidity;
+    if (!validity.ready) return validity.surfaced[0]?.message || "Complete the required fields before generating.";
+    if (kind === "single" && structuredActive && !captionValidation?.ok) return "Review the caption before generating.";
+    return null;
+  }
+
   async function submit(event) {
     event.preventDefault();
-    if (!mossComponents.ready || mossEditError) {
-      setSubmitError(mossEditError || (mossEdit ? "Install or repair the exact MOSS edit adapter before editing." : "Install the selected MOSS 8-step components before generating."));
-      return;
-    }
-    // Batch mode runs through its own "Run batch" action (sc-9956), never the single
-    // Generate submit — guard so a stray Enter in a batch field can't queue one image.
-    if (batchMode) {
-      return;
-    }
-    if (submitting) {
-      return;
-    }
-    // Defense in depth for Enter/programmatic submits and restored stale state.
-    // The disabled button is only an affordance; capability eligibility is the
-    // actual authorization to create a job.
-    if (!selectedModelServesMode) {
-      setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
-      return;
-    }
-    if (replayTierUnavailable) {
-      setSubmitError("Recipe tier unavailable. Install it on a supported worker or choose another tier.");
-      return;
-    }
-    if (characterReferenceError) {
-      setSubmitError(characterReferenceError);
-      return;
-    }
-    if (decoderCapabilitiesPending) {
-      setSubmitError("Waiting for engine capabilities before using the restored decoder.");
-      return;
-    }
-    if (dimensionsInvalid || hiresFixTargetInvalid) {
-      setSubmitError(
-        hiresFixTargetMessage ||
-          dimensionError ||
-          "Width and height must each be between 256 and 4096.",
-      );
-      return;
-    }
-    if (cfgIntervalError) {
-      setSubmitError(cfgIntervalError);
+    // Batch mode never routes a stray Enter through single generation.
+    if (batchMode || submitting) return;
+    const error = preflightError("single");
+    if (error) {
+      setSubmitError(error);
       return;
     }
     setSubmitting(true);
@@ -2959,8 +2970,8 @@ export function ImageStudio() {
     for (const resolve of waiters) resolve();
   }
 
-  async function waitForBatchSlot() {
-    while (!batchAbortRef.current) {
+  async function waitForBatchSlot(owner) {
+    while (!owner.stopped && batchProjectRef.current === owner.projectId) {
       const activeJobIds = batchRunRef.current?.activeJobIds ?? [];
       if (activeJobIds.length < BATCH_ACTIVE_JOB_LIMIT) return;
       await new Promise((resolve) => batchSlotWaitersRef.current.push(resolve));
@@ -2971,45 +2982,15 @@ export function ImageStudio() {
   // posts independently so the worker runs them serially with its between-image cache
   // release, and progress/cancel read the live jobs feed.
   async function runBatch(confirmed = false) {
-    if (!mossComponents.ready || mossEditError) { setBatchError(mossEditError || (mossEdit ? "Install or repair the exact MOSS edit adapter before editing." : "Install the selected MOSS 8-step components before generating.")); return; }
-    if (batchRun?.submitting || !activeProject) {
+    if (batchRunRef.current?.submitting || !activeProject) return;
+    const error = preflightError("batch");
+    if (error) {
+      setBatchError(error);
       return;
     }
-    if (!selectedModelServesMode) {
-      setBatchError(`Install or select a model that supports ${modeLabel} generation.`);
-      return;
-    }
-    if (replayTierUnavailable) {
-      setBatchError("Recipe tier unavailable. Install it on a supported worker or choose another tier.");
-      return;
-    }
-    if (characterReferenceError) {
-      setBatchError(characterReferenceError);
-      return;
-    }
-    if (decoderCapabilitiesPending) {
-      setBatchError("Waiting for engine capabilities before using the restored decoder.");
-      return;
-    }
-    // batchJobCount is cardinality(), so admission happens before any Cartesian expansion.
-    if (!batchJobCount) {
-      return;
-    }
-    // Soft cap: a large run must be confirmed once, showing the exact image count.
+    // Admission precedes expansion; confirmation preserves the exact image count.
     if (!confirmed && batchTotal > BATCH_RENDER_CAP) {
       setBatchConfirmPending(true);
-      return;
-    }
-    if (dimensionsInvalid || hiresFixTargetInvalid) {
-      setBatchError(
-        hiresFixTargetMessage ||
-          dimensionError ||
-          "Width and height must each be between 256 and 4096.",
-      );
-      return;
-    }
-    if (cfgIntervalError) {
-      setBatchError(cfgIntervalError);
       return;
     }
     const styledBatchPrompts = () => (function* composedBatchPrompts() {
@@ -3029,7 +3010,9 @@ export function ImageStudio() {
     }
     setBatchError("");
     setBatchConfirmPending(false);
-    batchAbortRef.current = false;
+    const owner = { stopped: false, projectId: activeProject.id, jobs: new Map() };
+    batchOwnerRef.current = owner;
+    const stopped = () => owner.stopped || batchProjectRef.current !== owner.projectId || batchOwnerRef.current !== owner;
     batchObservedJobsRef.current.clear();
     // Keep scalar totals plus a bounded in-flight id set. Once the set reaches the normal
     // batch cap, wait for a terminal job before posting the next resolved prompt.
@@ -3049,9 +3032,9 @@ export function ImageStudio() {
     if (stylePreviewActive && !structuredPromptModel && batchJobCount > BATCH_RENDER_CAP) {
       let inspected = 0;
       for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
-        if (batchAbortRef.current) {
+        if (stopped()) {
           const current = batchRunRef.current;
-          if (current) replaceBatchRun({ ...current, submitting: false });
+          if (current && !owner.disposed && batchOwnerRef.current === owner && batchProjectRef.current === owner.projectId) replaceBatchRun({ ...current, submitting: false });
           return;
         }
         const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
@@ -3091,8 +3074,8 @@ export function ImageStudio() {
       if (chunk.length) yield chunk;
     }
     for (const chunk of chunks()) {
-      await waitForBatchSlot();
-      if (batchAbortRef.current) {
+      await waitForBatchSlot(owner);
+      if (stopped()) {
         break;
       }
       const [{ prompt: cleanPrompt, resolution }] = chunk;
@@ -3104,7 +3087,7 @@ export function ImageStudio() {
           // resolved prompt into a JSON caption first (sc-9980) — N sequential refine calls.
           // A prompt that fails to expand fails only that item; the rest continue.
           const expanded = await onMagicExpand(cleanPrompt);
-          if (batchAbortRef.current) break;
+          if (stopped()) break;
           if (!validateCaption(expanded).ok) {
             throw new Error("Auto-generated caption was invalid.");
           }
@@ -3120,7 +3103,25 @@ export function ImageStudio() {
           // Each prompt composed exactly as its own job would be; `prompt` stays prompts[0].
           if (n > 1) request.prompts = chunk.map((item) => buildBatchJobRequest(item.prompt, { resolution }).prompt);
         }
+        if (stopped()) break;
         const job = await createImageJob(request);
+        if (stopped()) {
+          if (job?.id) jobAction(job, "cancel");
+          if (!owner.disposed && batchOwnerRef.current === owner && batchProjectRef.current === owner.projectId) {
+            const current = batchRunRef.current;
+            if (current) {
+              if (job?.id) {
+                owner.jobs.set(job.id, job);
+                replaceBatchRun({ ...current, submitted: current.submitted + n,
+                  activeJobIds: [...current.activeJobIds, job.id], sizes: { ...current.sizes, [job.id]: n } });
+              } else {
+                replaceBatchRun(recordBatchEnqueueFailure(current, n, "Job creation returned no job ID."));
+              }
+            }
+          }
+          break;
+        }
+        if (job?.id) owner.jobs.set(job.id, job);
         const current = batchRunRef.current;
         if (!current) break;
         replaceBatchRun(
@@ -3131,23 +3132,25 @@ export function ImageStudio() {
                 activeJobIds: [...current.activeJobIds, job.id],
                 sizes: { ...current.sizes, [job.id]: n },
               }
-            : { ...current, submitted: current.submitted + n, failed: current.failed + n },
+            : recordBatchEnqueueFailure(current, n, "Job creation returned no job ID."),
         );
-        if (batchAbortRef.current && job?.id) jobAction(job, "cancel");
-      } catch {
+      } catch (error) {
+        if (owner.disposed || batchOwnerRef.current !== owner || batchProjectRef.current !== owner.projectId) break;
         const current = batchRunRef.current;
         if (!current) break;
-        replaceBatchRun({ ...current, submitted: current.submitted + n, failed: current.failed + n });
+        replaceBatchRun(recordBatchEnqueueFailure(current, n, error?.message || (typeof error === "string" ? error : "Could not enqueue image job.")));
+        if (stopped()) break;
       }
     }
     const current = batchRunRef.current;
-    if (current) replaceBatchRun({ ...current, submitting: false });
+    if (current && !stopped()) replaceBatchRun({ ...current, submitting: false });
+    else if (current && !owner.disposed && batchOwnerRef.current === owner && batchProjectRef.current === owner.projectId) replaceBatchRun({ ...current, submitting: false });
   }
 
   // Stop the enqueue loop (if still running) and cancel every still-pending job in the run;
   // completed/failed items are left as-is.
   function cancelBatchRun() {
-    batchAbortRef.current = true;
+    if (batchOwnerRef.current) batchOwnerRef.current.stopped = true;
     releaseBatchSlotWaiters();
     const current = batchRunRef.current;
     if (!current) {
@@ -3158,7 +3161,7 @@ export function ImageStudio() {
       if (status !== "queued" && status !== "running") {
         continue;
       }
-      const job = jobs.find((entry) => entry.id === jobId);
+      const job = jobs.find((entry) => entry.id === jobId) ?? batchOwnerRef.current?.jobs.get(jobId);
       if (job) {
         jobAction(job, "cancel");
       }
@@ -3185,6 +3188,9 @@ export function ImageStudio() {
     }
     const settled = settlePromptBatchRun(current, jobs, batchObservedJobsRef.current);
     if (settled !== current) {
+      for (const id of current.activeJobIds) {
+        if (!settled.activeJobIds.includes(id)) batchOwnerRef.current?.jobs.delete(id);
+      }
       batchRunRef.current = settled;
       setBatchRun(settled);
       releaseBatchSlotWaiters();
@@ -3455,10 +3461,12 @@ export function ImageStudio() {
                   <div className="batch-run-progress" aria-live="polite">
                     <span>
                       {batchRun.submitting
-                        ? `Queued ${batchRunProgress.total - batchRunProgress.pending}/${batchRunProgress.total}`
+                        ? `Processed ${batchRunProgress.total - batchRunProgress.pending}/${batchRunProgress.total}`
                         : `${batchRunProgress.done}/${batchRunProgress.total} done`}
                       {batchRunProgress.failed ? ` · ${batchRunProgress.failed} failed` : ""}
+                      {!batchRun.submitting && batchRunProgress.pending ? ` · ${batchRunProgress.pending} not queued` : ""}
                     </span>
+                    {batchRun.firstError ? <span role="alert">First enqueue error: {batchRun.firstError}{batchRun.lastError !== batchRun.firstError ? ` · Last enqueue error: ${batchRun.lastError}` : ""}</span> : null}
                     {batchRun.submitting ? (
                       <button className="batch-btn ghost" onClick={cancelBatchRun} type="button">
                         Stop

@@ -323,13 +323,32 @@ describe("Image Studio batch cardinality admission", () => {
 
     // The first bounded preflight slice has yielded with the run rendered; the old
     // synchronous walk could not expose Stop until all ten million prompts were read.
-    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Queued 0/10000000"));
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Processed 0/10000000"));
     expect(container.querySelector(".batch-run-progress button")?.textContent).toBe("Stop");
     expect(createImageJob).not.toHaveBeenCalled();
 
     await click(container.querySelector(".batch-run-progress button"));
     await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/10000000 done"));
     expect(createImageJob).not.toHaveBeenCalled();
+  });
+
+  it("abandons streaming preflight on project switch", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, styleId: "ghibli-style", batchMode: true,
+      batchPromptsText: keys.map((key) => `{{${key}}}`).join(" "),
+      batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+    }));
+    const createImageJob = vi.fn();
+    const context = baseContext({ createImageJob });
+    await render(context);
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+    await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    expect(createImageJob).not.toHaveBeenCalled();
+    expect(container.querySelector(".batch-run-progress")).toBeNull();
   });
 
   // The in-flight window must not throttle an ordinary confirmed run: every resolved
@@ -361,6 +380,73 @@ describe("Image Studio batch cardinality admission", () => {
     expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/101 done");
   });
 
+  it("shows first and last enqueue errors and counts failed submissions", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo\nthree",
+    }));
+    const createImageJob = vi.fn().mockRejectedValueOnce(new Error("first failure"))
+      .mockResolvedValueOnce({ id: "ok", status: "queued" })
+      .mockRejectedValueOnce(new Error("last failure"));
+    await render(baseContext({ createImageJob }));
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(3));
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("2/3 done · 2 failed");
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("first failure");
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("last failure");
+  });
+
+  it("accounts for and cancels a job returned after Stop", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo",
+    }));
+    let resolvePost;
+    const createImageJob = vi.fn(() => new Promise((resolve) => { resolvePost = resolve; }));
+    const jobAction = vi.fn();
+    await render(baseContext({ createImageJob, jobAction }));
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-run-progress button"));
+    await act(async () => { resolvePost({ id: "late", status: "queued" }); });
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(jobAction).toHaveBeenCalledWith({ id: "late", status: "queued" }, "cancel");
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("1 not queued");
+  });
+
+  it.each(["unmount", "project switch"])("stops an outstanding post on %s and cancels the returned job", async (action) => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo",
+    }));
+    let resolvePost;
+    const createImageJob = vi.fn(() => new Promise((resolve) => { resolvePost = resolve; }));
+    const jobAction = vi.fn();
+    const context = baseContext({ createImageJob, jobAction });
+    await render(context);
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    if (action === "unmount") await act(async () => root.render(null));
+    else await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+    await act(async () => { resolvePost({ id: "late", status: "queued" }); });
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(jobAction).toHaveBeenCalledWith({ id: "late", status: "queued" }, "cancel");
+  });
+
+  it("releases a slot waiter on project switch without posting the tail", async () => {
+    const values = Array.from({ length: MAX_LISTED_JOBS + 1 }, (_, index) => String(index));
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "{{value}}", batchVariableValues: { value: values },
+    }));
+    let sequence = 0;
+    const createImageJob = vi.fn(async () => ({ id: `job-${sequence++}`, status: "queued" }));
+    const jobAction = vi.fn();
+    const context = baseContext({ createImageJob, jobAction });
+    await render(context);
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(MAX_LISTED_JOBS));
+    await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+    expect(createImageJob).toHaveBeenCalledTimes(MAX_LISTED_JOBS);
+    expect(jobAction).toHaveBeenCalledTimes(MAX_LISTED_JOBS);
+  });
+
   // The window is still a real bound for a run far past the queue depth — it feeds that
   // many jobs at a time rather than posting a huge product in one burst.
   it("windows a confirmed run larger than the in-flight limit", async () => {
@@ -385,7 +471,7 @@ describe("Image Studio batch cardinality admission", () => {
     await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(MAX_LISTED_JOBS));
 
     expect(container.querySelector(".batch-run-progress")?.textContent).toContain(
-      `Queued ${MAX_LISTED_JOBS}/${total}`,
+      `Processed ${MAX_LISTED_JOBS}/${total}`,
     );
     await click(
       [...container.querySelectorAll(".batch-run-progress button")].find((button) => button.textContent === "Stop"),
