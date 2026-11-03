@@ -219,9 +219,8 @@ async fn malformed_manifest_returns_stable_server_error() {
     let (status, error) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(error["detail"]
-        .as_str()
-        .is_some_and(|detail| detail.starts_with("Failed to parse manifest")));
+    assert_eq!(error["detail"], "An internal error occurred");
+    assert!(uuid::Uuid::parse_str(error["correlationId"].as_str().unwrap()).is_ok());
 }
 
 #[test]

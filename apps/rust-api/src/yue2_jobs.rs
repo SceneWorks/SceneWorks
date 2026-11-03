@@ -176,17 +176,10 @@ async fn catalog_entry(state: &AppState, model_id: &str) -> Result<Value, ApiErr
         })
 }
 
-fn requires_license_acknowledgment(entry: &Value) -> bool {
-    entry
-        .get("requiresLicenseAcknowledgment")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
 fn acknowledgment_view(entry: &Value, ack: Option<&LicenseAcknowledgment>) -> Value {
     json!({
         "modelId": entry.get("id").cloned().unwrap_or(Value::Null),
-        "required": requires_license_acknowledgment(entry),
+        "required": crate::models::model_requires_license_acknowledgment(entry),
         "termsSha256": acks::terms_sha256(entry),
         "acknowledged": ack.is_some(),
         "acknowledgment": ack,
@@ -309,7 +302,7 @@ pub(crate) async fn yue2_eligibility(
             ));
         }
     }
-    let ack = if requires_license_acknowledgment(&entry) {
+    let ack = if crate::models::model_requires_license_acknowledgment(&entry) {
         if assert_ack {
             record_license_acknowledgment(state, &entry, "yue2_job").await?;
         }

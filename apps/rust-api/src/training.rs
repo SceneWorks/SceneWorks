@@ -898,8 +898,10 @@ fn validate_parquet_import_request(
 pub(crate) async fn create_training_dataset_parquet_import_job(
     State(state): State<AppState>,
     Path((project_id, dataset_id)): Path<(String, String)>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     ApiJson(payload): ApiJson<DatasetParquetImportJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    auth::local_only(connect_info.map(|axum::extract::ConnectInfo(addr)| addr))?;
     let source_path = validate_parquet_import_request(&payload)?;
     let (dataset, dataset_root, project_name) = project_call(state.clone(), {
         let project_id = project_id.clone();

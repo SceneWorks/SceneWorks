@@ -27,6 +27,7 @@
 //!    what lets the UI say "restart to apply" honestly instead of claiming a change already landed.
 
 use crate::error::ApiError;
+use crate::ApiJson;
 use crate::AppState;
 use axum::extract::State;
 use axum::Json;
@@ -350,7 +351,7 @@ async fn open_mutable(state: &AppState) -> Result<ResolvedCacheStore, ApiError> 
 
 pub(crate) async fn preview_model_cache_removal(
     State(state): State<AppState>,
-    Json(request): Json<CacheKeyRequest>,
+    ApiJson(request): ApiJson<CacheKeyRequest>,
 ) -> Result<Json<RemovalPreviewDto>, ApiError> {
     let store = open_mutable(&state).await?;
     let preview =
@@ -372,7 +373,7 @@ pub(crate) async fn preview_model_cache_removal(
 
 pub(crate) async fn remove_model_cache_entry(
     State(state): State<AppState>,
-    Json(request): Json<CacheKeyRequest>,
+    ApiJson(request): ApiJson<CacheKeyRequest>,
 ) -> Result<Json<RemovalOutcomeDto>, ApiError> {
     let store = open_mutable(&state).await?;
     let now = sceneworks_core::time::now_unix_seconds().max(0) as u64;
@@ -394,7 +395,7 @@ pub(crate) async fn remove_model_cache_entry(
 /// clear from here.
 pub(crate) async fn set_model_cache_pin(
     State(state): State<AppState>,
-    Json(request): Json<CachePinRequest>,
+    ApiJson(request): ApiJson<CachePinRequest>,
 ) -> Result<Json<CacheEntryDto>, ApiError> {
     let store = open_mutable(&state).await?;
     let metadata = tokio::task::spawn_blocking(move || {

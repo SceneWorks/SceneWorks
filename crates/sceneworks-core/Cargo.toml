@@ -8,6 +8,9 @@ publish = false
 [features]
 # Explicit per-data-directory cache roots for CPU integration fixtures only.
 test-support = []
+# Learned CPU fixtures are compiled only for explicit manual model validation.
+# Every proof test is also ignored, including under --all-features.
+model-inference-proof = []
 
 [dependencies]
 sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }

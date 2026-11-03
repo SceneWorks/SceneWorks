@@ -1501,7 +1501,21 @@ fn create_app_with_state_mode(
             ),
         }
     }
+    // The configured self-call URL can name a stable LAN/proxy hostname even
+    // when the listener itself binds all interfaces.
+    let mut configured_hosts = settings.mcp_allowed_hosts_extra.clone();
+    if let Ok(url) = settings.mcp_api_url.parse::<axum::http::Uri>() {
+        if let Some(authority) = url.authority() {
+            configured_hosts.push(authority.as_str().to_owned());
+        }
+    }
+    let allowed_hosts = Arc::new(sceneworks_mcp::discovered_allowed_hosts(
+        &settings.host,
+        settings.port,
+        &configured_hosts,
+    ));
     let state = AppState {
+        allowed_hosts,
         settings,
         jobs_store,
         project_store,
@@ -1596,20 +1610,9 @@ fn create_app_with_state_mode(
     // port) carrying the access token, so there is no second engine/DB path.
     // Blocking-job wait policy comes from Settings (sc-10277: SCENEWORKS_MCP_JOB_*
     // env knobs), clamped to the invariants the poll loop needs.
-    // F-040 (sc-11236): restore the transport's Host-header (DNS-rebinding)
-    // defense. `/mcp` rides `access_control`, but that gate performs NO
-    // Host/Origin validation, so in the loopback/loopback-trust/no-token desktop
-    // posture a malicious page could DNS-rebind a browser onto `/mcp`. Derive the
-    // allowed Host set from the SAME bind config that decides where the API
-    // listens: loopback is always allowed; a concrete interface host adds itself;
-    // a wildcard LAN bind honors `SCENEWORKS_MCP_ALLOWED_HOSTS` (and otherwise
-    // disables the check, relying on the mandatory LAN access token).
-    let mcp_allowed_hosts = sceneworks_mcp::mcp_allowed_hosts(
-        &state.settings.host,
-        state.settings.port,
-        &state.settings.mcp_allowed_hosts_extra,
-    );
-    let mcp_service = sceneworks_mcp::streamable_http_service_with_hosts(
+    // Both API and MCP use the same concrete Host allow-list, including LAN interfaces.
+    let mcp_allowed_hosts = state.allowed_hosts.as_ref().clone();
+    let mcp_service = sceneworks_mcp::streamable_http_service_with_origins(
         sceneworks_mcp::ApiClientConfig {
             base_url: state.settings.mcp_api_url.clone(),
             access_token: Some(state.settings.access_token.clone()),
@@ -1619,6 +1622,7 @@ fn create_app_with_state_mode(
             state.settings.mcp_job_timeout,
         ),
         mcp_allowed_hosts,
+        state.settings.cors_origins.clone(),
     );
 
     let router = Router::new()
@@ -2382,8 +2386,9 @@ fn create_app_with_state_mode(
         // route (asset import, training uploads, pose/keypoint sources, and the
         // model/lora import routes above).
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
-        .layer(middleware::from_fn_with_state(state, access_control))
+        .layer(middleware::from_fn_with_state(state.clone(), access_control))
         .layer(cors)
+        .layer(middleware::from_fn_with_state(state, auth::browser_control))
         // Marking is inside CompressionLayer on the response path. This keeps
         // dynamic compression API-only even when `embed-web` serves a JSON
         // file through the same router.
@@ -4299,31 +4304,23 @@ async fn resolve_project_confined_asset_path(
     state: AppState,
     project_id: &str,
     asset_id: &str,
-    project_path: &FsPath,
+    _project_path: &FsPath,
 ) -> Result<PathBuf, ApiError> {
+    // Store resolves the owning root, never a caller-supplied path.
     let project_id = project_id.to_owned();
     let asset_id = asset_id.to_owned();
-    let asset = project_call(state, move |store| store.get_asset(&project_id, &asset_id)).await?;
-    let relative_path = asset
-        .get("file")
-        .and_then(|file| file.get("path"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::bad_request("Asset has no file path"))?;
-    let mut resolved = project_path.to_path_buf();
-    for component in FsPath::new(relative_path).components() {
-        match component {
-            std::path::Component::Normal(value) => resolved.push(value),
-            _ => {
-                return Err(ApiError::bad_request(
-                    "Asset path must stay inside the project directory",
-                ))
-            }
-        }
-    }
-    if !resolved.exists() {
-        return Err(ApiError::bad_request("Asset file not found on disk"));
-    }
-    Ok(resolved)
+    project_call(state, move |store| {
+        let asset = store.get_asset(&project_id, &asset_id)?;
+        let relative_path = asset
+            .get("file")
+            .and_then(|file| file.get("path"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| ProjectStoreError::BadRequest("Asset has no file path".into()))?;
+        store
+            .project_file(&project_id, relative_path)
+            .map(|file| file.path)
+    })
+    .await
 }
 
 fn model_lora_families(model: &Value) -> Vec<String> {
@@ -4674,33 +4671,28 @@ fn sanitized_upload_filename(filename: &str) -> String {
     }
 }
 
-fn validate_lora_import_source_path(
+fn validate_import_source_path(
     source_path: &str,
     allowed_roots: &[PathBuf],
 ) -> Result<(), ApiError> {
+    let rejected = || ApiError::bad_request("sourcePath must be inside an approved folder");
     let source = FsPath::new(source_path);
     if !source.is_absolute() {
-        return Err(ApiError::bad_request("LoRA sourcePath must be absolute"));
+        return Err(rejected());
     }
-    let source = std::fs::canonicalize(source)
-        .map_err(|_| ApiError::bad_request(format!("LoRA sourcePath not found: {source_path}")))?;
-    let metadata = std::fs::metadata(&source)
-        .map_err(|error| ApiError::bad_request(format!("Invalid LoRA sourcePath: {error}")))?;
+    let source = std::fs::canonicalize(source).map_err(|_| rejected())?;
+    let metadata = std::fs::metadata(&source).map_err(|_| rejected())?;
     if !metadata.is_file() && !metadata.is_dir() {
-        return Err(ApiError::bad_request(
-            "LoRA sourcePath must point to a file or directory",
-        ));
+        return Err(rejected());
     }
-    for root in allowed_roots {
-        if let Ok(root) = std::fs::canonicalize(root) {
-            if source.starts_with(root) {
-                return Ok(());
-            }
-        }
+    if allowed_roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| source.starts_with(root))
+    {
+        return Ok(());
     }
-    Err(ApiError::bad_request(
-        "LoRA sourcePath must be inside app-managed data/loras, project/loras, or staged upload folders",
-    ))
+    Err(rejected())
 }
 
 fn validate_source_url(source_url: &str) -> Result<(), ApiError> {
@@ -4758,25 +4750,7 @@ async fn known_lora_families_from_manifests(state: &AppState) -> Result<Vec<Stri
 }
 
 fn slugify_lora_id(value: &str) -> String {
-    let mut output = String::new();
-    let mut previous_separator = false;
-    for character in value.trim().chars() {
-        if character.is_ascii_alphanumeric() {
-            output.push(character.to_ascii_lowercase());
-            previous_separator = false;
-        } else if !previous_separator && !output.is_empty() {
-            output.push('_');
-            previous_separator = true;
-        }
-    }
-    while output.ends_with('_') {
-        output.pop();
-    }
-    if output.is_empty() {
-        "lora".to_owned()
-    } else {
-        output
-    }
+    sceneworks_core::slug::slugify(value, "lora", None).replace('-', "_")
 }
 
 fn now_rfc3339() -> String {

@@ -8606,10 +8606,10 @@ async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
     );
     // No text prompt is required for an image-caption job.
     assert!(job["payload"].get("prompt").is_none());
-    // The resolved imagePath is the asset's absolute on-disk location inside the project dir.
-    // Compare as paths: the handler joins component-wise (native separators), while `rel_path`
-    // keeps the asset record's literal `/`, so a string comparison breaks on Windows (sc-8967).
-    let expected = project_path.join(&rel_path);
+    // The canonical image path follows ProjectStore confinement, including macOS /var aliases.
+    // Compare paths rather than strings to preserve native Windows separators too.
+    let expected =
+        std::fs::canonicalize(project_path.join(&rel_path)).expect("uploaded image canonicalizes");
     assert_eq!(
         std::path::Path::new(job["payload"]["imagePath"].as_str().unwrap()),
         expected
@@ -9162,8 +9162,9 @@ async fn image_describe_refine_job_resolves_asset_and_forwards_caption_style() {
     assert_eq!(job["payload"]["task"], "image_describe");
     assert_eq!(job["payload"]["captionStyle"], "tags");
     assert!(job["payload"].get("prompt").is_none());
-    // Path (not string) comparison: separator-agnostic on Windows (sc-8967, same as the caption test).
-    let expected = project_path.join(&rel_path);
+    // Match canonical confinement and native path separators (macOS aliases / Windows).
+    let expected =
+        std::fs::canonicalize(project_path.join(&rel_path)).expect("uploaded image canonicalizes");
     assert_eq!(
         std::path::Path::new(job["payload"]["imagePath"].as_str().unwrap()),
         expected
@@ -9256,8 +9257,9 @@ async fn mood_board_refine_job_resolves_multiple_assets_to_image_paths() {
         .expect("imagePaths array");
     assert_eq!(paths.len(), 2, "both references resolved");
     for (path, rel) in paths.iter().zip(rel_paths.iter()) {
-        // Path (not string) comparison: separator-agnostic on Windows (sc-8967).
-        let expected = project_path.join(rel);
+        // Compare the canonical file path, including platform aliases and separators.
+        let expected =
+            std::fs::canonicalize(project_path.join(rel)).expect("uploaded image canonicalizes");
         assert_eq!(std::path::Path::new(path.as_str().unwrap()), expected);
     }
 }

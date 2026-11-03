@@ -307,11 +307,14 @@ impl From<ApiError> for Response {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let correlation_id = (self.status == StatusCode::INTERNAL_SERVER_ERROR)
+            .then(|| uuid::Uuid::new_v4().to_string());
         // Make every 5xx leave a server-side trace (it previously returned `{detail}`
         // to the client and logged nothing). Expected/normal typed 4xx domain errors
         // stay at debug to avoid drowning the error level in routine validation noise.
         if self.status.is_server_error() {
             tracing::error!(
+                correlation_id = correlation_id.as_deref(),
                 event = "api_error",
                 status = self.status.as_u16(),
                 detail = %self.detail,
@@ -324,12 +327,33 @@ impl IntoResponse for ApiError {
                 detail = %self.detail,
             );
         }
-        let mut body = match self.code {
-            Some(code) => json!({ "detail": self.detail, "code": code }),
-            None => json!({ "detail": self.detail }),
+        let detail = if correlation_id.is_some() {
+            // Preserve intentional typed recovery messages using fixed public
+            // summaries, never a caller's diagnostic detail or context.
+            match self.code {
+                Some(crate::workflows::ASSET_WORKFLOW_CODE_UNREADABLE) => {
+                    crate::workflows::ASSET_WORKFLOW_UNREADABLE_DETAIL
+                }
+                Some(crate::workflows::INSPECT_CODE_READ_FAILED) => {
+                    crate::workflows::INSPECT_READ_FAILED_DETAIL
+                }
+                _ => "An internal error occurred",
+            }
+            .to_owned()
+        } else {
+            self.detail
         };
-        if let (Some(object), Some(context)) = (body.as_object_mut(), self.context) {
-            object.insert("context".to_owned(), context);
+        let mut body = match self.code {
+            Some(code) => json!({ "detail": detail, "code": code }),
+            None => json!({ "detail": detail }),
+        };
+        if correlation_id.is_none() {
+            if let (Some(object), Some(context)) = (body.as_object_mut(), self.context) {
+                object.insert("context".to_owned(), context);
+            }
+        }
+        if let Some(id) = correlation_id {
+            body["correlationId"] = json!(id);
         }
         (self.status, Json(body)).into_response()
     }

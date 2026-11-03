@@ -64,6 +64,8 @@ embed-web = ["dep:rust-embed", "dep:mime_guess"]
 # See crates/sceneworks-worker/Cargo.toml's `backend-candle` for the providers it
 # pulls. (sc-5559)
 backend-candle = ["sceneworks-worker/backend-candle"]
+# CPU aesthetic fixture only; no backend activation, and the test is also ignored.
+aesthetic-inference-proof = []
 # Manual bounded product acceptance only; never enabled by ordinary builds.
 model-inference-proof = ["backend-candle", "sceneworks-worker/model-inference-proof"]
 

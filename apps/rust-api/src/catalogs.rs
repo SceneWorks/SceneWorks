@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Component, Path as FsPath, PathBuf};
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, Response, StatusCode};
 use axum::Json;
 use sceneworks_core::catalog_store::{
@@ -34,6 +34,7 @@ use sceneworks_worker::catalog_parquet_scanner::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -535,8 +536,10 @@ pub(crate) async fn list_catalogs(
 
 pub(crate) async fn create_catalog(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     ApiJson(request): ApiJson<CreateCatalogRequest>,
 ) -> Result<(StatusCode, Json<CatalogResponse>), ApiError> {
+    crate::auth::local_only(connect_info.map(|ConnectInfo(addr)| addr))?;
     require_absolute_catalog_path(&request.path)?;
     validated_scan_plan(&state, request.source_config.as_ref()).await?;
     let config_dir = state.settings.config_dir.clone();
@@ -574,8 +577,10 @@ pub(crate) async fn create_catalog(
 
 pub(crate) async fn attach_catalog(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     ApiJson(request): ApiJson<AttachCatalogRequest>,
 ) -> Result<Json<CatalogResponse>, ApiError> {
+    crate::auth::local_only(connect_info.map(|ConnectInfo(addr)| addr))?;
     require_absolute_catalog_path(&request.path)?;
     let config_dir = state.settings.config_dir.clone();
     let response = catalog_call(move || {
