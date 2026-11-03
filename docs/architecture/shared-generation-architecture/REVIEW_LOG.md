@@ -162,4 +162,14 @@ Reviewed Claude's design revision `2576499e03`. Full report: [round5-codex.md](e
 
 Design-only. No requirements/plan changes, implementation, builds, model execution, CI dispatches or tracker items in round 5.
 
-The subsequent draft-0.5 corrections above address round 5; its original report remains historical evidence. Re-review follows publication of the revision. No implementation, builds/model execution or program tracker items were created by the correction work.
+The subsequent draft-0.5 corrections above address round 5; its original report remains historical evidence. Round 6 below follows publication of the revision. No implementation, builds/model execution or program tracker items were created by the correction work.
+
+## Round 6: self-review of draft 0.5 (2026-11-03)
+
+Reviewed published revision `62e247b1fb`, then the final requirements/plan clarification at `b2b8d01720`. Full report: [round6-codex.md](evidence/reviews/round6-codex.md). This is the revision author's **self-review**, not an independent review.
+
+**All four round-5 findings are addressed at the design-document level. No unresolved BLOCKER or MAJOR finding in the re-reviewed scope.** Confidence: high in the contract coherence; medium in unmeasured quality/performance and native migration feasibility. No §10 approval or runtime acceptance is implied.
+
+Closure checks cover transition workspace and evidence inclusion basis, completed-K estimator provenance/state/draw semantics, production terminal-chunk adoption with SW-F148 before/after/NO-GO ownership, and `PricingPlan` terminology/counts. Editorial clarification labels endpoint estimation as the default and requires payload transfer without an extra full-clip copy or surviving legacy finalization path.
+
+Verified links/fences/whitespace, four Accepted R5 dispositions, pricing and draw-coordinate arithmetic, and the acyclic 24-node roadmap with 16 pre-pilot engine features. These are document checks and walkthroughs; the owning features still implement their conformance/runtime proofs. No new unresolved findings, code implementation, learned execution, builds/CI dispatches or program tracker items.
