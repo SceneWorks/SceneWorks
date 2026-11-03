@@ -1054,6 +1054,16 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         ),
         ("crates/sceneworks-core/src/slug.rs", "slugify"),
         ("crates/sceneworks-core/src/slug.rs", "slugify_with"),
+        ("crates/sceneworks-core/src/safetensors.rs", "read_header"),
+        (
+            "crates/sceneworks-core/src/safetensors.rs",
+            "read_file_header",
+        ),
+        ("crates/sceneworks-core/src/safetensors.rs", "dtype_bits"),
+        (
+            "crates/sceneworks-core/src/builtin_manifests.rs",
+            "builtin_manifest",
+        ),
         ("crates/sceneworks-core/src/fsutil.rs", "write_atomic"),
         ("crates/sceneworks-core/src/fsutil.rs", "write_atomic_with"),
         (

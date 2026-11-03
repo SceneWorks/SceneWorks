@@ -10,14 +10,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
-
-/// Maximum allowed safetensors header size, in bytes. Matches the
-/// pre-existing 16 MiB cap enforced by the rust-api.
-const MAX_HEADER_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Errors returned when reading a safetensors header from disk.
 #[derive(Debug)]
@@ -55,39 +50,23 @@ impl std::error::Error for SafetensorsHeaderError {}
 /// layout is: 8-byte little-endian header length, then the JSON header,
 /// then tensor data — only the header is read.
 pub fn read_safetensors_header(path: &Path) -> Result<Value, SafetensorsHeaderError> {
-    let metadata = fs::metadata(path).map_err(SafetensorsHeaderError::Io)?;
-    if metadata.len() < 8 {
-        return Err(SafetensorsHeaderError::InvalidHeader);
-    }
-    let mut file = fs::File::open(path).map_err(SafetensorsHeaderError::Io)?;
-    let mut length_bytes = [0_u8; 8];
-    file.read_exact(&mut length_bytes)
-        .map_err(|_| SafetensorsHeaderError::InvalidHeader)?;
-    let header_len = u64::from_le_bytes(length_bytes);
-    if header_len == 0 || header_len > MAX_HEADER_BYTES || header_len + 8 > metadata.len() {
-        return Err(SafetensorsHeaderError::InvalidHeader);
-    }
-    let header_len_usize =
-        usize::try_from(header_len).map_err(|_| SafetensorsHeaderError::InvalidHeader)?;
-    let mut header = vec![0_u8; header_len_usize];
-    file.read_exact(&mut header)
-        .map_err(|_| SafetensorsHeaderError::InvalidHeader)?;
-    let header = serde_json::from_slice::<Value>(&header)
-        .map_err(|_| SafetensorsHeaderError::InvalidHeader)?;
-    // A valid header can still front a truncated/incomplete file (an interrupted
-    // download): the data section must be large enough to hold every tensor the
-    // header declares. The tensor `data_offsets` are relative to the byte buffer
-    // that begins right after the 8-byte length and the header JSON, so the file
-    // must be at least `8 + header_len + max(data_offsets end)` bytes. Without this
-    // the bad file is accepted at import and only fails cryptically at load time
-    // ("invalid data offsets exceeding the size of the file"). See sc-6072.
-    let declared = 8_u64
-        .saturating_add(header_len)
-        .saturating_add(max_tensor_data_end(&header));
-    if metadata.len() < declared {
+    use crate::safetensors::{
+        read_file_header, HeaderError, HeaderJsonPolicy, MAX_ADAPTER_HEADER_BYTES,
+    };
+    let descriptor = read_file_header(path, MAX_ADAPTER_HEADER_BYTES, HeaderJsonPolicy::Standard)
+        .map_err(|error| match error {
+        HeaderError::Io(error) => SafetensorsHeaderError::Io(error),
+        _ => SafetensorsHeaderError::InvalidHeader,
+    })?;
+    let header = descriptor.value;
+    let declared = descriptor
+        .data_start
+        .checked_add(max_tensor_data_end(&header))
+        .ok_or(SafetensorsHeaderError::InvalidHeader)?;
+    if descriptor.file_len < declared {
         return Err(SafetensorsHeaderError::IncompleteData {
             declared,
-            actual: metadata.len(),
+            actual: descriptor.file_len,
         });
     }
     Ok(header)
@@ -7053,6 +7032,30 @@ mod tests {
         let path = temp.path().join("padded.safetensors");
         write_safetensors_with_data(&path, 32, 64);
         read_safetensors_header(&path).expect("over-long file is accepted");
+    }
+
+    #[test]
+    fn read_safetensors_header_preserves_adapter_cap_and_rejects_non_objects() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bounded.safetensors");
+        let length = crate::safetensors::MAX_ADAPTER_HEADER_BYTES + 1;
+        // Valid JSON apart from the intentional size violation: widening the import cap would
+        // accept this file, rather than merely failing later on malformed sparse-file padding.
+        let mut oversized = length.to_le_bytes().to_vec();
+        oversized.extend_from_slice(b"{}");
+        oversized.resize((length + 8) as usize, b' ');
+        std::fs::write(&path, oversized).unwrap();
+        assert!(matches!(
+            read_safetensors_header(&path),
+            Err(SafetensorsHeaderError::InvalidHeader)
+        ));
+        let mut raw = 2_u64.to_le_bytes().to_vec();
+        raw.extend_from_slice(b"[]");
+        std::fs::write(&path, raw).unwrap();
+        assert!(matches!(
+            read_safetensors_header(&path),
+            Err(SafetensorsHeaderError::InvalidHeader)
+        ));
     }
 
     #[test]

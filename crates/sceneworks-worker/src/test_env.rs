@@ -209,22 +209,7 @@ pub(crate) fn isolate_hf_cache() -> crate::test_env::EnvVars {
 
 /// The embedded shipped catalog; no filesystem, network or model execution.
 pub(crate) fn shipped_catalog_entry(model_id: &str) -> sceneworks_core::contracts::JsonObject {
-    static MODELS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-    let manifest = MODELS.get_or_init(|| {
-        let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .expect("embedded model catalog")
-            .1;
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text))
-            .expect("valid shipped catalog")
-    });
-    manifest["models"]
-        .as_array()
-        .expect("models array")
-        .iter()
-        .find(|model| model["id"] == model_id)
-        .and_then(serde_json::Value::as_object)
+    sceneworks_core::builtin_manifests::builtin_model_entry(model_id)
         .unwrap_or_else(|| panic!("{model_id} is in the shipped catalog"))
         .clone()
 }

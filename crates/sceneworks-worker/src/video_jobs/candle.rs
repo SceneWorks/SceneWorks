@@ -1578,21 +1578,17 @@ pub(super) fn comfyui_wan_vram_preflight(
 
 /// Peek a safetensors header (8-byte length + JSON) and return the `patch_embedding.weight`
 /// in-channels (`shape[1]`) — the T2V(16)/I2V(36) discriminator. `None` on any read/parse miss.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 fn wan_expert_in_channels(path: &Path) -> Option<u64> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut len = [0u8; 8];
-    file.read_exact(&mut len).ok()?;
-    let header_len = u64::from_le_bytes(len) as usize;
-    // Guard against a corrupt/huge length before allocating (headers are KB-scale).
-    if header_len == 0 || header_len > 64 * 1024 * 1024 {
-        return None;
-    }
-    let mut buf = vec![0u8; header_len];
-    file.read_exact(&mut buf).ok()?;
-    let header: Value = serde_json::from_slice(&buf).ok()?;
+    // Preserve this discriminator's existing 64 MiB bound; it inspects only the descriptor.
+    let header = sceneworks_core::safetensors::read_file_header(
+        path,
+        64 * 1024 * 1024,
+        sceneworks_core::safetensors::HeaderJsonPolicy::Standard,
+    )
+    .ok()?;
     header
+        .value
         .get("patch_embedding.weight")?
         .get("shape")?
         .as_array()?
@@ -3208,5 +3204,34 @@ mod adapter_fit_tests {
 
         let missing = vec![adapter(root.path().join("missing.safetensors"), None)];
         assert!(wan_user_adapter_resident_bytes(&missing, true, "q4").is_err());
+    }
+}
+
+#[cfg(test)]
+mod safetensors_header_tests {
+    use super::*;
+
+    #[test]
+    fn wan_expert_descriptor_preserves_channel_detection_and_header_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("expert.safetensors");
+        for channels in [16, 36] {
+            let raw = serde_json::json!({"patch_embedding.weight":{"shape":[1,channels,1,1]}})
+                .to_string();
+            let mut bytes = (raw.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(raw.as_bytes());
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(wan_expert_in_channels(&path), Some(channels));
+        }
+        let length = 64 * 1024 * 1024 + 1_u64;
+        // A valid channel descriptor padded with JSON whitespace makes this discriminate the
+        // caller's 64 MiB limit from the general reader's larger model limit.
+        let mut oversized = length.to_le_bytes().to_vec();
+        oversized.extend_from_slice(br#"{"patch_embedding.weight":{"shape":[1,16,1,1]}}"#);
+        oversized.resize((length + 8) as usize, b' ');
+        std::fs::write(&path, oversized).unwrap();
+        assert_eq!(wan_expert_in_channels(&path), None);
+        std::fs::write(&path, 0_u64.to_le_bytes()).unwrap();
+        assert_eq!(wan_expert_in_channels(&path), None);
     }
 }
