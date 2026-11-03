@@ -32,6 +32,7 @@ vi.mock("../api.js", async (importOriginal) => {
   };
 });
 
+import { setMediaTicket } from "../api.js";
 import { AppContext } from "../context/AppContext.js";
 import { KeyPointLibraryScreen } from "./KeyPointLibraryScreen.jsx";
 
@@ -121,6 +122,7 @@ describe("KeyPointLibraryScreen", () => {
 
   afterEach(async () => {
     await unmountRoot(root, container);
+    setMediaTicket("");
     vi.clearAllMocks();
   });
 
@@ -150,6 +152,8 @@ describe("KeyPointLibraryScreen", () => {
       (el.getAttribute("href") ?? "").includes("assets/keypoints/asset_k1.png"),
     );
     expect(image).toBeTruthy();
+    await act(async () => setMediaTicket("new-ticket"));
+    expect(image.getAttribute("href")).toContain("ticket=new-ticket");
   });
 
   it("protects built-ins and danger-confirms a user preset delete", async () => {
@@ -231,6 +235,12 @@ describe("KeyPointLibraryScreen", () => {
     // The completed job yields a preview + a name seeded from the filename.
     const nameInput = document.body.querySelector('#keypoint-panel-capture input[type="text"], #keypoint-panel-capture input:not([type])');
     expect(nameInput.value).toBe("face");
+    const image = container.querySelector('.keypoint-capture-review image');
+    expect(image.getAttribute("href")).toBe("blob:test");
+    const revoke = vi.spyOn(window.URL, "revokeObjectURL");
+    await act(async () => setMediaTicket("rotated-ticket"));
+    expect(image.getAttribute("href")).toBe("blob:test");
+    expect(revoke).not.toHaveBeenCalled();
     await setInputValue(nameInput, "Captured front");
     await click(byText("Save preset"));
 
@@ -247,6 +257,7 @@ describe("KeyPointLibraryScreen", () => {
   });
 
   it("captures from an existing asset via the shared dialog, recording provenance", async () => {
+    setMediaTicket("old-ticket");
     presets = [builtinPreset()];
     global.fetch = vi.fn(async () => ({
       ok: true,
@@ -277,7 +288,13 @@ describe("KeyPointLibraryScreen", () => {
     await act(async () => {}); // flush fetch -> stage -> job post -> job-watch
 
     // The asset's bytes were re-staged like an upload, then a kps_extract job fired.
-    expect(global.fetch).toHaveBeenCalled();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const image = container.querySelector('.keypoint-capture-review image');
+    expect(image.getAttribute("href")).toContain("ticket=old-ticket");
+    await act(async () => setMediaTicket("new-ticket"));
+    expect(image.getAttribute("href")).toContain("ticket=new-ticket");
+    expect(image.getAttribute("href")).not.toContain("old-ticket");
+    expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(apiCalls.some((c) => c.method === "POST" && c.path === "/api/v1/keypoints/sources")).toBe(true);
     expect(apiCalls.some((c) => c.method === "POST" && c.path === "/api/v1/jobs")).toBe(true);
 

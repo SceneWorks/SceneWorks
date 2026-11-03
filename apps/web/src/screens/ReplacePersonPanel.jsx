@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { projectFileUrl } from "../api/media.js";
 import { VideoSourcePickerField } from "../components/AssetPicker.jsx";
@@ -128,6 +129,7 @@ function maskUrl(projectId, relPath) {
  * replacement pipeline regenerates masks from corrected boxes.
  */
 function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
+  useMediaTicket();
   const frames = useMemo(() => track?.frames ?? [], [track]);
   const [frameIndex, setFrameIndex] = useState(0);
   const [drafts, setDrafts] = useState({});

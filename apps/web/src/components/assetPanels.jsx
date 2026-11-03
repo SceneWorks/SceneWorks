@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { mediaResponse } from "../api/media.js";
 import { AssetVedaOutcome } from "./VedaOutcome.jsx";
 import React from "react";
@@ -120,34 +121,56 @@ export async function emptyTrash(trashedAssets, purgeAsset) {
 // Reopens a saved interleaved document: the asset's file points to the segments
 // JSON in assets/documents/, fetched here (served like any project file).
 function DocumentReader({ asset }) {
+  const ticket = useMediaTicket();
+  const [unauthorizedTicket, setUnauthorizedTicket] = React.useState(null);
+  const [retryGeneration, setRetryGeneration] = React.useState(0);
+  React.useEffect(() => {
+    if (unauthorizedTicket !== null && unauthorizedTicket !== ticket) {
+      setUnauthorizedTicket(null);
+      setRetryGeneration((value) => value + 1);
+    }
+  }, [ticket, unauthorizedTicket]);
   const url = assetUrl(asset);
+  const urlRef = React.useRef(url);
+  React.useLayoutEffect(() => { urlRef.current = url; }, [url]);
+  const resourceKey = React.useMemo(() => {
+    if (!url) return "";
+    const parsed = new URL(url, "http://sceneworks.invalid");
+    parsed.searchParams.delete("ticket");
+    return parsed.href;
+  }, [url]);
   const [segments, setSegments] = React.useState(null);
   const [error, setError] = React.useState("");
 
   React.useEffect(() => {
-    if (!url) {
+    if (!resourceKey) {
       setError("Document file is unavailable.");
       return undefined;
     }
     const controller = new AbortController();
+    const initialUrl = urlRef.current;
+    let requestTicket = getMediaTicket();
+    setUnauthorizedTicket(null);
     setSegments(null);
     setError("");
-    mediaResponse(url, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`Request failed (${response.status})`);
-        }
-        return response.json();
-      })
-      .then((document) => {
-        setSegments(Array.isArray(document?.segments) ? document.segments : []);
-      })
-      .catch((err) => {
-        if (isAbortError(err)) return;
-        setError(String(err?.message ?? err));
-      });
+    const load = async () => {
+      let response = await mediaResponse(initialUrl, { signal: controller.signal });
+      // Do not restart a live or already completed read solely for rotation.
+      // If the old credential expired during this read, retry once with the new one.
+      if (response.status === 401 && urlRef.current !== initialUrl && !controller.signal.aborted) {
+        requestTicket = getMediaTicket();
+        response = await mediaResponse(urlRef.current, { signal: controller.signal });
+      }
+      if (response.status === 401 && !controller.signal.aborted) setUnauthorizedTicket(requestTicket);
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      const document = await response.json();
+      if (!controller.signal.aborted) setSegments(Array.isArray(document?.segments) ? document.segments : []);
+    };
+    load().catch((err) => {
+      if (!controller.signal.aborted && !isAbortError(err)) setError(String(err?.message ?? err));
+    });
     return () => controller.abort();
-  }, [url]);
+  }, [resourceKey, retryGeneration]);
 
   if (error) {
     return <p className="empty-panel error-text">Couldn't load document: {error}</p>;
@@ -619,6 +642,7 @@ export function AssetDetail({
   // sc-25682: open the depth action for this image (absent when depth cannot run here).
   onEstimateDepth = null,
 }) {
+  useMediaTicket();
   if (!asset) {
     return <aside className="asset-detail empty-panel">No asset selected</aside>;
   }
