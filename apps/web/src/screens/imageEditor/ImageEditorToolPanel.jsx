@@ -22,22 +22,16 @@ export function useStableImageEditorToolPanelScope(scope) {
   const latestScope = React.useRef(scope);
   latestScope.current = scope;
   const stableFunctions = React.useRef(null);
-  if (stableFunctions.current === null) {
-    stableFunctions.current = Object.fromEntries(
-      Object.entries(scope)
-        .filter(([, value]) => typeof value === "function")
-        .map(([key, value]) => [
-          key,
-          /^[A-Z]/.test(key)
-            ? value
-            : (...args) => latestScope.current[key](...args),
-        ]),
-    );
+  if (stableFunctions.current === null) stableFunctions.current = {};
+  for (const [key, value] of Object.entries(scope)) {
+    if (typeof value === "function" && !/^[A-Z]/.test(key) && !stableFunctions.current[key]) {
+      stableFunctions.current[key] = (...args) => latestScope.current[key](...args);
+    }
   }
   return Object.fromEntries(
     Object.entries(scope).map(([key, value]) => [
       key,
-      typeof value === "function" ? stableFunctions.current[key] : value,
+      typeof value === "function" && !/^[A-Z]/.test(key) ? stableFunctions.current[key] : value,
     ]),
   );
 }

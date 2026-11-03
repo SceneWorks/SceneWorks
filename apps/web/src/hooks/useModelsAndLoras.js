@@ -410,6 +410,13 @@ export function useModelsAndLoras({
     [token, setJobs, setLoraError, refreshLoras],
   );
 
+  const downloadConditionalComponents = useCallback(
+    (model, purpose) => apiFetch(`/api/v1/models/${encodeURIComponent(model)}/conditional-components/${encodeURIComponent(purpose)}/download`, token, {
+      method: "POST", body: JSON.stringify({ licenseAcknowledged: true }),
+    }),
+    [token],
+  );
+
   return {
     models,
     setModels,
@@ -424,6 +431,7 @@ export function useModelsAndLoras({
     createModelImportJob,
     createLoraImportJob,
     createModelDownloadJob,
+    downloadConditionalComponents,
     createLoraDownloadJob,
     createModelConvertJob,
   };

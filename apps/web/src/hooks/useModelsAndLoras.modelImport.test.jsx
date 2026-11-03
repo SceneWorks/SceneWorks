@@ -53,6 +53,14 @@ afterEach(async () => {
   container.remove();
 });
 
+it("downloads conditional components through the model domain API", async () => {
+  apiFetchMock.mockResolvedValueOnce({ jobs: [{ id: "component-job" }] });
+  await expect(hookApi.downloadConditionalComponents("model/id", "purpose name")).resolves.toEqual({ jobs: [{ id: "component-job" }] });
+  expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/models/model%2Fid/conditional-components/purpose%20name/download", "tok", {
+    method: "POST", body: JSON.stringify({ licenseAcknowledged: true }),
+  });
+});
+
 describe("createModelImportJob type-field contract (sc-14020)", () => {
   it.each(["json", "multipart"])("submits %s managed repair to the original selection, not ordinary create", async (kind) => {
     const metadata = { repairModelId: "original-selection", modelId: "original-selection", name: "Renamed replacement", type: "image" };
