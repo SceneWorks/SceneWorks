@@ -109,6 +109,8 @@ fn operation_llm_timeout(operation: &FilmPlanningOperation) -> Duration {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FilmPlannerAvailability {
     providers: Vec<FilmPlannerProviderAvailability>,
+    sound_synthesis_models: &'static [&'static str],
+    default_sound_synthesis_model: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,6 +176,8 @@ pub(crate) async fn film_planner_availability(
         }
     };
     Ok(Json(FilmPlannerAvailability {
+        sound_synthesis_models: sceneworks_core::film_plan::SOUND_SYNTHESIS_MODELS,
+        default_sound_synthesis_model: sceneworks_core::film_plan::DEFAULT_SOUND_SYNTHESIS_MODEL,
         providers: vec![
             provider(
                 "prompt_refiner",

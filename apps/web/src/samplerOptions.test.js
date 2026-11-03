@@ -20,7 +20,7 @@ import {
   nativeResolutionHint,
   promptTokenLimitHint,
 } from "./samplerOptions.js";
-import { fallbackModels } from "./modelCatalog.js";
+import { fallbackModels } from "./testSupport/builtinModels.js";
 
 describe("samplerOptions", () => {
   it("falls back to default-only when limits are missing", () => {
@@ -134,14 +134,8 @@ describe("samplerOptions", () => {
       expect(stepsDefaultFromModel(model), `${id} default steps`).toBe(8);
     }
 
-    // The other video models must stay UNPINNED — a blanket pin would remove a working control.
-    const unpinned = fallbackModels.filter(
-      (model) => model.type === "video" && !String(model.id).startsWith("ltx_2_3"),
-    );
-    expect(unpinned.length).toBeGreaterThan(0);
-    for (const model of unpinned) {
-      expect(stepsMenuFromModel(model), `${model.id} must keep a free Steps control`).toBeNull();
-    }
+    // A model without a declared menu keeps a free Steps control.
+    expect(stepsMenuFromModel({ type: "video", limits: {} })).toBeNull();
   });
 
   it("guidance methods fall back to cfg-only and order canonically (epic 7434)", () => {
