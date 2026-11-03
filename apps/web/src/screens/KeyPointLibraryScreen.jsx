@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch } from "../api.js";
+import { jobsApi } from "../api/jobsResources.js";
+import { mediaResponse } from "../api/media.js";
 import { useAppContext, useAppStatic } from "../context/AppContext.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { KpsOverlay } from "../components/KpsOverlay.jsx";
@@ -229,7 +230,7 @@ function KeypointCapturePanel({ hidden, onSaved }) {
       setError("");
       const url = assetUrl(asset);
       try {
-        const response = await fetch(url);
+        const response = await mediaResponse(url);
         if (!response.ok) {
           throw new Error(`Could not load the selected image (${response.status}).`);
         }
@@ -642,7 +643,7 @@ function stripExtension(filename) {
 }
 
 async function postExtractJob(token, requestedGpu, sourcePath) {
-  return apiFetch("/api/v1/jobs", token, {
+  return jobsApi.list(token, {
     method: "POST",
     body: JSON.stringify({
       type: "kps_extract",

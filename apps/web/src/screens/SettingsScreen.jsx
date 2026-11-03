@@ -1,10 +1,10 @@
+import { systemApi } from "../api/systemResources.js";
 import { AppearanceTab } from "./settings/AppearanceTab.jsx";
 import { SettingsTab } from "./settings/SettingsTab.jsx";
 import { DeviceTab } from "./settings/DeviceTab.jsx";
 import { ServerTab } from "./settings/ServerTab.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { SCHEME_LABELS, loadCredentials, removeCredentialRequest, saveCredential } from "../credentials.js";
-import { apiFetch } from "../api.js";
+import { loadCredentials, removeCredentialRequest, saveCredential } from "../credentials.js";
 import { putUiPreferences } from "../uiPreferences.js";
 import { isDesktop, tauriInvoke as invoke } from "../runtime.js";
 import { generationQualityLabel, readDefaultGenerationQuality, writeDefaultGenerationQuality } from "../generationQuality.js";
@@ -479,7 +479,7 @@ export function SettingsScreen({
       if (isDesktop) {
         await invoke("restart_worker");
       } else {
-        await apiFetch("/api/v1/worker/restart", token, { method: "POST" });
+        await systemApi.workerRestart(token, { method: "POST" });
       }
       setStatus("Restarting the inference worker…");
     } catch (error) {

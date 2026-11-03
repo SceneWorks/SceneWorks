@@ -1,3 +1,4 @@
+import { modelImportPath } from "./api/modelImport.js";
 import { bytesToGib } from "./modelCache.js";
 import { licenseAckRefusalMessage, licenseAcknowledgmentBlocked, requiresLicenseAcknowledgment } from "./licenseAcknowledgment.js";
 
@@ -46,6 +47,6 @@ export function buildModelImportRequest(payload, { models }) {
   } else {
     body = JSON.stringify(metadata);
   }
-  const endpoint = repairModelId ? `/api/v1/models/${encodeURIComponent(repairModelId)}/repair` : "/api/v1/models/import";
+  const endpoint = modelImportPath(repairModelId);
   return { endpoint, body };
 }

@@ -1,7 +1,7 @@
+import { useProjectScopedList } from "./useProjectScopedList.js";
+import { voicesApi } from "../api/voicesResources.js";
 import { useCallback, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
-import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 
 // Owns the project's Voice Clone "saved voices" roster + its create/delete mutations (sc-13517).
 // A saved voice is a named pointer to a library audio reference clip (plus its Chatterbox-VE speaker
@@ -19,37 +19,13 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
     [activeProjectRef],
   );
 
-  const refreshSavedVoices = useCallback(
-    async (projectId = activeProject?.id, { signal } = {}) => {
-      if (!projectId) {
-        return refreshFailure("missing-project");
-      }
-      if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
-        return refreshFailure("stale");
-      }
-      try {
-        const items = await apiFetch(
-          `/api/v1/projects/${projectId}/voices`,
-          token,
-          { signal },
-        );
-        // Drop a stale response for a project the user already switched away from
-        // (mirrors refreshCharacters' guard).
-        if (!isCurrentVoiceRequest(projectId)) {
-          return refreshFailure("stale");
-        }
-        setSavedVoices(Array.isArray(items) ? items : []);
-        setError("");
-        return refreshSuccess(items);
-      } catch (err) {
-        if (!isCurrentVoiceRequest(projectId)) return refreshFailure("stale", err);
-        if (isAbortError(err)) return refreshFailure("aborted", err);
-        setError(err.message);
-        return refreshFailure("error", err);
-      }
-    },
-    [token, activeProject, isCurrentVoiceRequest, setError],
-  );
+  const refreshSavedVoices = useProjectScopedList({
+    token, activeProject, activeProjectRef,
+    load: voicesApi.list,
+    setItems: setSavedVoices,
+    setError: setError,
+    normalize: (items) => Array.isArray(items) ? items : [],
+  });
 
   // Register a saved voice: the backend resolves the reference clip, computes its embedding, runs
   // near-duplicate detection, and persists. Returns the created voice (with a `nearDuplicate` field)
@@ -62,14 +38,10 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
       }
       const projectId = activeProject.id;
       try {
-        const created = await apiFetch(
-          `/api/v1/projects/${projectId}/voices`,
-          token,
-          {
+        const created = await voicesApi.list(projectId, token, {
             method: "POST",
             body: JSON.stringify({ name, referenceAudioAssetId }),
-          },
-        );
+          });
         if (!isCurrentVoiceRequest(projectId)) {
           return null;
         }
@@ -96,11 +68,7 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
       }
       const projectId = activeProject.id;
       try {
-        await apiFetch(
-          `/api/v1/projects/${projectId}/voices/${encodeURIComponent(voiceId)}`,
-          token,
-          { method: "DELETE" },
-        );
+        await voicesApi.item(projectId, voiceId, token, { method: "DELETE" });
         if (!isCurrentVoiceRequest(projectId)) {
           return null;
         }

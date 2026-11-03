@@ -1,3 +1,4 @@
+import { mediaResponse } from "../api/media.js";
 import { AssetVedaOutcome } from "./VedaOutcome.jsx";
 import React from "react";
 import { getMediaTicket, isAbortError, subscribeMediaTicket } from "../api.js";
@@ -131,7 +132,7 @@ function DocumentReader({ asset }) {
     const controller = new AbortController();
     setSegments(null);
     setError("");
-    fetch(url, { signal: controller.signal })
+    mediaResponse(url, { signal: controller.signal })
       .then((response) => {
         if (!response.ok) {
           throw new Error(`Request failed (${response.status})`);

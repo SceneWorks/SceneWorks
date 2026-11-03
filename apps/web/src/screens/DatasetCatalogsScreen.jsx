@@ -1,5 +1,9 @@
+import { catalogsApi } from "../api/catalogsResources.js";
+import { projectsApi } from "../api/projectsResources.js";
+import { systemApi } from "../api/systemResources.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { API_BASE_URL, apiFetch, isAbortError, withMediaTicket } from "../api.js";
+import { isAbortError } from "../api.js";
+import { catalogThumbnailUrl } from "../api/media.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { RequiredModelsNotice } from "../components/RequiredModelsNotice.jsx";
@@ -328,15 +332,12 @@ function CatalogCuration({ catalogId, token }) {
     const body = curationBody(nextQuery, nextCursor);
     try {
       const [page, facetPage] = await Promise.all([
-        apiFetch(`/api/v1/catalogs/${encodeURIComponent(catalogId)}/curation/query`, token, {
+        catalogsApi.catalogsItemCurationQuery(catalogId, token, {
           method: "POST",
           body: JSON.stringify(body),
           signal: controller.signal,
         }),
-        nextCursor ? Promise.resolve(null) : apiFetch(
-          `/api/v1/catalogs/${encodeURIComponent(catalogId)}/curation/facets`,
-          token,
-          {
+        nextCursor ? Promise.resolve(null) : catalogsApi.catalogsItemCurationFacets(catalogId, token, {
             method: "POST",
             body: JSON.stringify({
               query: { ...body, includeTotal: false },
@@ -352,8 +353,7 @@ function CatalogCuration({ catalogId, token }) {
               limitPerFacet: 12,
             }),
             signal: controller.signal,
-          },
-        ),
+          }),
       ]);
       if (controller.signal.aborted) return;
       setItems((current) => append ? [...current, ...(page.items ?? [])] : (page.items ?? []));
@@ -378,12 +378,8 @@ function CatalogCuration({ catalogId, token }) {
     openAbortRef.current = controller;
     try {
       const [views, projectList] = await Promise.all([
-        apiFetch(
-          `/api/v1/catalogs/${encodeURIComponent(catalogId)}/saved-views`,
-          token,
-          { signal: controller.signal },
-        ),
-        apiFetch("/api/v1/projects", token, { signal: controller.signal }),
+        catalogsApi.catalogsItemSavedViews(catalogId, token, { signal: controller.signal }),
+        projectsApi.projects(token, { signal: controller.signal }),
       ]);
       if (controller.signal.aborted) return;
       setSavedViews(views ?? []);
@@ -405,10 +401,7 @@ function CatalogCuration({ catalogId, token }) {
     event.preventDefault();
     if (!savedName.trim()) return;
     try {
-      const saved = await apiFetch(
-        `/api/v1/catalogs/${encodeURIComponent(catalogId)}/saved-views`,
-        token,
-        {
+      const saved = await catalogsApi.catalogsItemSavedViews(catalogId, token, {
           method: "POST",
           body: JSON.stringify({ name: savedName.trim(), query: curationBody(query) }),
           signal,
@@ -425,10 +418,7 @@ function CatalogCuration({ catalogId, token }) {
   async function setReview(recordId, decision) {
     const signal = mutationAbortRef.current.signal;
     try {
-      const review = await apiFetch(
-        `/api/v1/catalogs/${encodeURIComponent(catalogId)}/records/${encodeURIComponent(recordId)}/review`,
-        token,
-        {
+      const review = await catalogsApi.catalogsItemRecordsItemReview(catalogId, recordId, token, {
           method: "PUT",
           body: JSON.stringify({
             decision,
@@ -466,10 +456,7 @@ function CatalogCuration({ catalogId, token }) {
     setMaterialization(null);
     setError("");
     try {
-      const result = await apiFetch(
-        `/api/v1/catalogs/${encodeURIComponent(catalogId)}/materialize`,
-        token,
-        {
+      const result = await catalogsApi.catalogsItemMaterialize(catalogId, token, {
           method: "POST",
           body: JSON.stringify({
             ...materializeDraft,
@@ -479,8 +466,7 @@ function CatalogCuration({ catalogId, token }) {
             idempotencyKey: materializeDraft.idempotencyKey,
           }),
           signal: controller.signal,
-        },
-      );
+        });
       if (controller.signal.aborted || materializeGenerationRef.current !== generation) return;
       setMaterialization(result);
       setMaterializeDraft((current) => ({
@@ -716,7 +702,7 @@ function CatalogCuration({ catalogId, token }) {
               <img
                 alt={record.metadata?.caption ?? record.id}
                 loading="lazy"
-                src={withMediaTicket(`${API_BASE_URL}/api/v1/catalogs/${encodeURIComponent(catalogId)}/records/${encodeURIComponent(record.id)}/thumbnail`)}
+                src={catalogThumbnailUrl(catalogId, record.id)}
               />
               <span>{record.metadata?.caption ?? record.id}</span>
               <small>{record.metadata?.analysis?.medium ?? record.metadata?.medium ?? "Unclassified"}{review ? ` · ${review.decision}` : ""}</small>
@@ -802,7 +788,7 @@ export function DatasetCatalogsScreen() {
   const refresh = useCallback(async ({ quiet = false, signal, generation = generationRef.current } = {}) => {
     if (!quiet) setLoading(true);
     try {
-      const next = await apiFetch("/api/v1/catalogs", token, { signal });
+      const next = await catalogsApi.catalogs(token, { signal });
       if (signal?.aborted || generation !== generationRef.current) return next;
       setCatalogs(Array.isArray(next) ? next : []);
       setSelectedId((current) => {
@@ -825,7 +811,7 @@ export function DatasetCatalogsScreen() {
     const generation = ++generationRef.current;
     const controller = new AbortController();
     Promise.all([
-      apiFetch("/api/v1/ui-preferences", token, { signal: controller.signal }).catch(() => ({})),
+      systemApi.uiPreferences(token, { signal: controller.signal }).catch(() => ({})),
       refresh({ signal: controller.signal, generation }),
     ]).then(([preferences, next]) => {
       if (controller.signal.aborted || generation !== generationRef.current) return;
@@ -851,11 +837,7 @@ export function DatasetCatalogsScreen() {
       pollAbortRef.current?.abort();
       pollAbortRef.current = controller;
       try {
-        const updated = await apiFetch(
-          `/api/v1/catalogs/${encodeURIComponent(selectedId)}/status`,
-          token,
-          { signal: controller.signal },
-        );
+        const updated = await catalogsApi.catalogsItemStatus(selectedId, token, { signal: controller.signal });
         if (stopped || controller.signal.aborted || generation !== generationRef.current) return;
         setCatalogs((current) => current.map((catalog) => (
           catalog.id === updated.id
@@ -941,7 +923,7 @@ export function DatasetCatalogsScreen() {
     }
     await mutate(
       "create the catalog",
-      (signal) => apiFetch("/api/v1/catalogs", token, {
+      (signal) => catalogsApi.catalogs(token, {
         method: "POST",
         body: JSON.stringify(body),
         signal,
@@ -957,7 +939,7 @@ export function DatasetCatalogsScreen() {
     event.preventDefault();
     await mutate(
       "attach the catalog",
-      (signal) => apiFetch("/api/v1/catalogs/attach", token, {
+      (signal) => catalogsApi.catalogsAttach(token, {
         method: "POST",
         body: JSON.stringify({ path: attachPath.trim() }),
         signal,
@@ -973,7 +955,7 @@ export function DatasetCatalogsScreen() {
     if (!selected) return;
     await mutate(
       `${action} processing`,
-      (signal) => apiFetch(`/api/v1/catalogs/${encodeURIComponent(selected.id)}/${action}`, token, {
+      (signal) => catalogsApi.catalogsItemItem (selected.id, action, token, {
         method: "POST",
         body: JSON.stringify({
           expectedRevision: selected.processingControl?.revision ?? 0,
@@ -989,18 +971,14 @@ export function DatasetCatalogsScreen() {
     if (!selected) return;
     await mutate(
       "save analyzer settings",
-      (signal) => apiFetch(
-        `/api/v1/catalogs/${encodeURIComponent(selected.id)}/analyzer-config`,
-        token,
-        {
+      (signal) => catalogsApi.catalogsItemAnalyzerConfig(selected.id, token, {
           method: "PUT",
           body: JSON.stringify({
             expectedRevision: selected.analyzerConfig?.revision ?? 0,
             settings: analyzerDraft,
           }),
           signal,
-        },
-      ),
+        }),
       (updated) => setCatalogs((current) =>
         current.map((item) => item.id === updated.id ? updated : item)),
     );
@@ -1010,10 +988,7 @@ export function DatasetCatalogsScreen() {
     if (!selected) return;
     await mutate(
       "start catalog analysis",
-      (signal) => apiFetch(
-        `/api/v1/catalogs/${encodeURIComponent(selected.id)}/analyze`,
-        token,
-        {
+      (signal) => catalogsApi.catalogsItemAnalyze(selected.id, token, {
           method: "POST",
           body: JSON.stringify({
             expectedAnalyzerConfigRevision: selected.analyzerConfig?.revision ?? 0,
@@ -1021,8 +996,7 @@ export function DatasetCatalogsScreen() {
             batchSize: 16,
           }),
           signal,
-        },
-      ),
+        }),
     );
   }
 
@@ -1034,7 +1008,7 @@ export function DatasetCatalogsScreen() {
     }))) return;
     await mutate(
       "detach the catalog",
-      (signal) => apiFetch(`/api/v1/catalogs/${encodeURIComponent(selected.id)}`, token, {
+      (signal) => catalogsApi.catalogsItem (selected.id, token, {
         method: "DELETE",
         signal,
       }),
@@ -1051,7 +1025,7 @@ export function DatasetCatalogsScreen() {
     }))) return;
     await mutate(
       "delete the catalog files",
-      (signal) => apiFetch(`/api/v1/catalogs/${encodeURIComponent(selected.id)}/on-disk`, token, {
+      (signal) => catalogsApi.catalogsItemOnDisk(selected.id, token, {
         method: "DELETE",
         signal,
       }),

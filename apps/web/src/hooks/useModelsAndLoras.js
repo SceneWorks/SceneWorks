@@ -1,7 +1,7 @@
+import { useProjectScopedList } from "./useProjectScopedList.js";
+import { modelsApi } from "../api/modelsResources.js";
+import { lorasApi } from "../api/lorasResources.js";
 import { useCallback, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
-import { isCurrentProjectRequest } from "../appStateHelpers.js";
-import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { appConfirm } from "../appConfirm.jsx";
 import {
   borrowedLicenseAcknowledgmentBlocked,
@@ -55,60 +55,24 @@ export function useModelsAndLoras({
 
   // sc-4194: actions wrapped in useCallback so their identity is stable across App's
   // SSE-driven re-renders, letting appContextValue memoize.
-  const refreshLoras = useCallback(
-    async (projectId = activeProject?.id, { signal } = {}) => {
-      if (
-        projectId &&
-        !isCurrentProjectRequest(activeProject?.id ?? null, projectId)
-      ) {
-        return refreshFailure("stale");
-      }
-      try {
-        const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-        const items = await apiFetch(`/api/v1/loras${query}`, token, { signal });
-        // sc-8858: an SSE-triggered refresh for a specific project can resolve after
-        // the user switches away; committing then would clobber the new project's
-        // LoRA overlay with the old one's. Drop the stale response — mirrors
-        // refreshTimelines' guard (useTimelines.js). Only project-scoped refreshes
-        // are guarded; a global refresh (projectId undefined) still commits.
-        if (
-          projectId &&
-          !isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)
-        ) {
-          return refreshFailure("stale");
-        }
-        setLoras(items);
-        setLoraError("");
-        return refreshSuccess(items);
-      } catch (err) {
-        if (
-          projectId &&
-          !isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)
-        ) {
-          return refreshFailure("stale", err);
-        }
-        if (isAbortError(err)) return refreshFailure("aborted", err);
-        setLoraError(err.message);
-        return refreshFailure("error", err);
-      }
-    },
-    [token, activeProject, activeProjectRef, setLoraError],
-  );
+  const refreshLoras = useProjectScopedList({
+    token, activeProject, activeProjectRef,
+    load: (projectId, token, options) => lorasApi.list(projectId ? `?projectId=${encodeURIComponent(projectId)}` : "", token, options),
+    setItems: setLoras,
+    setError: setLoraError,
+    optionalProject: true,
+  });
 
   const deleteModel = useCallback(
     async (model) => {
-      let result = await apiFetch(`/api/v1/models/${encodeURIComponent(model.id)}`, token, {
+      let result = await modelsApi.item(model.id, token, {
         method: "DELETE",
       });
       if (result?.trashUnavailable) {
         if (!(await confirmPermanentDelete())) {
           return { cancelled: true };
         }
-        result = await apiFetch(
-          `/api/v1/models/${encodeURIComponent(model.id)}?permanent=true`,
-          token,
-          { method: "DELETE" },
-        );
+        result = await modelsApi.removePermanently(model.id, token, { method: "DELETE" });
       }
       if (result.removedManifestEntry) {
         setModels((items) => items.filter((item) => item.id !== model.id));
@@ -129,11 +93,7 @@ export function useModelsAndLoras({
   // loop (sc-12088). One DELETE; the confirm dialog makes the permanence explicit.
   const deleteModelVariant = useCallback(
     async (model, variant) => {
-      const result = await apiFetch(
-        `/api/v1/models/${encodeURIComponent(model.id)}/variants/${encodeURIComponent(variant)}`,
-        token,
-        { method: "DELETE" },
-      );
+      const result = await modelsApi.variant(model.id, variant, token, { method: "DELETE" });
       setError("");
       await refreshData();
       return result;
@@ -151,7 +111,7 @@ export function useModelsAndLoras({
       params.set("projectId", activeProject.id);
     }
     const query = params.toString() ? `?${params.toString()}` : "";
-    let result = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
+    let result = await lorasApi.itemWithQuery(lora.id, query, token, {
       method: "DELETE",
     });
     if (result?.trashUnavailable) {
@@ -159,11 +119,7 @@ export function useModelsAndLoras({
         return { cancelled: true };
       }
       params.set("permanent", "true");
-      result = await apiFetch(
-        `/api/v1/loras/${encodeURIComponent(lora.id)}?${params.toString()}`,
-        token,
-        { method: "DELETE" },
-      );
+      result = await lorasApi.item(lora.id, params.toString(), token, { method: "DELETE" });
     }
     if (result.removedManifestEntry) {
       setLoras((items) => items.filter((item) => item.id !== lora.id || item.scope !== lora.scope));
@@ -187,7 +143,7 @@ export function useModelsAndLoras({
         params.set("projectId", activeProject.id);
       }
       const query = params.toString() ? `?${params.toString()}` : "";
-      const updated = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
+      const updated = await lorasApi.itemWithQuery(lora.id, query, token, {
         method: "PATCH",
         body: JSON.stringify(updates),
       });
@@ -210,10 +166,7 @@ export function useModelsAndLoras({
         params.set("projectId", activeProject.id);
       }
       const query = params.toString() ? `?${params.toString()}` : "";
-      const result = await apiFetch(
-        `/api/v1/loras/${encodeURIComponent(lora.id)}/embedded-tags${query}`,
-        token,
-      );
+      const result = await lorasApi.embeddedTags(lora.id, query, token);
       return Array.isArray(result?.tags) ? result.tags : [];
     },
     [token, activeProject],
@@ -224,7 +177,7 @@ export function useModelsAndLoras({
     // Request building is loaded on first use so it stays out of the first-paint bundle.
     const { buildModelImportRequest } = await import("../modelImportRequest.js");
     const { endpoint, body } = buildModelImportRequest(payload, { models });
-    const job = await apiFetch(endpoint, token, {
+    const job = await modelsApi.importRequest(endpoint, token, {
       method: "POST",
       body,
     });
@@ -275,7 +228,7 @@ export function useModelsAndLoras({
         projectName: metadata.scope === "project" ? activeProject.name : null,
       });
     }
-    const job = await apiFetch("/api/v1/loras/import", token, {
+    const job = await lorasApi.import(token, {
       method: "POST",
       body,
     });
@@ -324,7 +277,7 @@ export function useModelsAndLoras({
         }
         // The server reads its current terms-bound record. No new acceptance assertion
         // may be inferred from browser state, even after the preflight succeeded.
-        const job = await apiFetch(`/api/v1/models/${model.id}/download`, token, {
+        const job = await modelsApi.download(model.id, token, {
           method: "POST",
           body: JSON.stringify(body),
         });
@@ -342,7 +295,7 @@ export function useModelsAndLoras({
   const createModelConvertJob = useCallback(
     async (model) => {
       try {
-        const job = await apiFetch(`/api/v1/models/${model.id}/convert`, token, {
+        const job = await modelsApi.convert(model.id, token, {
           method: "POST",
           body: JSON.stringify({ requestedGpu: "auto" }),
         });
@@ -376,7 +329,7 @@ export function useModelsAndLoras({
           return null;
         }
         const body = { requestedGpu: "auto" };
-        const job = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}/download`, token, {
+        const job = await lorasApi.download(lora.id, token, {
           method: "POST",
           body: JSON.stringify(body),
         });
@@ -403,7 +356,7 @@ export function useModelsAndLoras({
   );
 
   const downloadConditionalComponents = useCallback(
-    (model, purpose) => apiFetch(`/api/v1/models/${encodeURIComponent(model)}/conditional-components/${encodeURIComponent(purpose)}/download`, token, {
+    (model, purpose) => modelsApi.conditionalDownload(model, purpose, token, {
       method: "POST", body: JSON.stringify({ licenseAcknowledged: true }),
     }),
     [token],

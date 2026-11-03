@@ -1,6 +1,10 @@
 import { isImageUpload } from "../uploadFiles.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { API_BASE_URL, apiFetch, isAbortError, withMediaTicket } from "../api.js";
+import { isAbortError } from "../api.js";
+import { assetsApi } from "../api/assetsResources.js";
+import { jobsApi } from "../api/jobsResources.js";
+import { posesApi } from "../api/poses.js";
+import { posePreviewUrl } from "../api/media.js";
 import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetThumbnail } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
@@ -164,7 +168,7 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
       try {
         const body = new FormData();
         for (const file of images) body.append("file", file);
-        const result = await apiFetch("/api/v1/poses/sources", token, { method: "POST", body });
+        const result = await posesApi.sources(token, { method: "POST", body });
         const staged = Array.isArray(result?.sources) ? result.sources : [];
         mergeSources(
           staged.map((src, index) => ({
@@ -230,7 +234,7 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
     setError("");
     setCandidates([]);
     try {
-      const job = await apiFetch("/api/v1/jobs", token, {
+      const job = await jobsApi.list(token, {
         method: "POST",
         body: JSON.stringify({
           type: "pose_detect",
@@ -332,7 +336,7 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
         height: candidate.height,
         pose: candidate.pose,
       }));
-      await apiFetch("/api/v1/poses", token, { method: "POST", body: JSON.stringify({ poses }) });
+      await posesApi.collection(token, { method: "POST", body: JSON.stringify({ poses }) });
       resetSession();
       onSaved?.();
     } catch (err) {
@@ -464,11 +468,7 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
                   >
                     <img
                       alt={`Pose skeleton from ${candidate.sourceDisplayName}`}
-                      src={withMediaTicket(
-                        `${API_BASE_URL}/api/v1/poses/preview/${encodeURIComponent(
-                          candidate.jobId,
-                        )}/${encodeURIComponent(candidate.skeletonFile)}`,
-                      )}
+                      src={posePreviewUrl(candidate.jobId, candidate.skeletonFile)}
                     />
                     <span>
                       {candidate.sourceDisplayName} · {candidate.facing}
@@ -537,8 +537,8 @@ export function PoseLibraryScreen() {
     async (signal) => {
       try {
         setLoading(true);
-        const items = await apiFetch(
-          `/api/v1/projects/${GLOBAL_POSES_PROJECT_ID}/assets?includeRejected=true&includeTrashed=true`,
+        const items = await assetsApi.listIncludingHidden(
+          GLOBAL_POSES_PROJECT_ID,
           token,
           signal ? { signal } : {},
         );
@@ -564,7 +564,7 @@ export function PoseLibraryScreen() {
   // app-level asset mutators refresh the *active* project, not this one.
   const updateAssetStatus = useCallback(
     async (asset, changes) => {
-      await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/status`, token, {
+      await assetsApi.status(asset.projectId, asset.id, token, {
         method: "PATCH",
         body: JSON.stringify(changes),
       });
@@ -574,7 +574,7 @@ export function PoseLibraryScreen() {
   );
   const updateAssetTags = useCallback(
     async (asset, tags) => {
-      await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/tags`, token, {
+      await assetsApi.tags(asset.projectId, asset.id, token, {
         method: "PATCH",
         body: JSON.stringify({ tags }),
       });
@@ -584,14 +584,14 @@ export function PoseLibraryScreen() {
   );
   const deleteAsset = useCallback(
     async (asset) => {
-      await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}`, token, { method: "DELETE" });
+      await assetsApi.item(asset.projectId, asset.id, token, { method: "DELETE" });
       await refresh();
     },
     [token, refresh],
   );
   const purgeAsset = useCallback(
     async (asset) => {
-      await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge`, token, { method: "DELETE" });
+      await assetsApi.purge(asset.projectId, asset.id, token, { method: "DELETE" });
       await refresh();
     },
     [token, refresh],

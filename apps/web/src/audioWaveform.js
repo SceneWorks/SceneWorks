@@ -1,3 +1,4 @@
+import { mediaResponse } from "./api/media.js";
 import { getAudioContextCtor } from "./audioContext.js";
 import { useEffect, useState } from "react";
 import { assetCanRenderAsAudio, assetUrl } from "./components/assetMedia.jsx";
@@ -135,7 +136,7 @@ async function decodeAssetPeaks(asset) {
   if (!Ctx || !url || typeof fetch !== "function") {
     return null;
   }
-  const response = await fetch(url);
+  const response = await mediaResponse(url);
   if (!response.ok) {
     return null;
   }

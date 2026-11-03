@@ -1,3 +1,4 @@
+import { projectFileUrl } from "../api/media.js";
 import React from "react";
 import { API_BASE_URL, getMediaTicket, subscribeMediaTicket, withMediaTicket } from "../api.js";
 import { isDepthAsset } from "../depthJobs.js";
@@ -22,7 +23,7 @@ function bareAssetUrl(asset) {
       .filter(Boolean)
       .map((segment) => encodeURIComponent(segment))
       .join("/");
-    return `${API_BASE_URL}/api/v1/projects/${asset.projectId}/files/${normalizedPath}`;
+    return projectFileUrl(asset.projectId, normalizedPath, { ticket: false, encodedPath: true });
   }
   return "";
 }
@@ -87,7 +88,7 @@ function isPreviewBackedAsset(asset) {
 function storedPreviewUrl(asset) {
   if (!asset?.projectId || !asset?.preview?.path) return "";
   const path = asset.preview.path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
-  return withMediaTicket(`${API_BASE_URL}/api/v1/projects/${asset.projectId}/files/${path}`);
+  return projectFileUrl(asset.projectId, path, { encodedPath: true });
 }
 
 export function assetCanRenderAsVideo(asset) {

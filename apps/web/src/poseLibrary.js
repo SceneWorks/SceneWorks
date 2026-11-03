@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiFetch } from "./api.js";
+import { fetchResource } from "./api.js";
+import { assetsApi } from "./api/assetsResources.js";
 import { assetDisplayUrl } from "./components/assetMedia.jsx";
 import { useAppStatic } from "./context/AppContext.js";
 
@@ -66,7 +67,7 @@ export function loadBuiltinPoses() {
         if (typeof fetch !== "function") {
           throw new Error("fetch unavailable");
         }
-        return fetch("/poses/index.json");
+        return fetchResource("/poses/index.json");
       })
       .then((response) => {
         if (!response.ok) {
@@ -139,7 +140,7 @@ export async function loadPoseLibrary({ loadUserPoses, extraPoses = [] } = {}) {
 export function useUserPoseLoader() {
   const { token } = useAppStatic();
   return useCallback(async () => {
-    const items = await apiFetch(`/api/v1/projects/${GLOBAL_POSES_PROJECT_ID}/assets`, token);
+    const items = await assetsApi.list(GLOBAL_POSES_PROJECT_ID, token);
     return (Array.isArray(items) ? items : [])
       .filter((asset) => asset?.type === "pose")
       .map(poseAssetToRecord);

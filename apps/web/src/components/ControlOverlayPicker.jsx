@@ -1,5 +1,6 @@
+import { controlsApi } from "../api/controlsResources.js";
 import React, { useEffect, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
+import { isAbortError } from "../api.js";
 import { useAppContext } from "../context/AppContext.js";
 
 // Trained ControlNet overlay picker (sc-10165 B4). Self-contained: fetches the registered overlays for
@@ -23,7 +24,7 @@ export function ControlOverlayPicker({ baseModel, selectedOverlayId, onOverlayCh
     if (activeProject?.id) {
       params.set("projectId", activeProject.id);
     }
-    apiFetch(`/api/v1/control-overlays?${params.toString()}`, token, {
+    controlsApi.controlOverlays(params.toString(), token, {
       signal: controller.signal,
     })
       .then((items) => {

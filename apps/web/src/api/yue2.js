@@ -1,3 +1,4 @@
+import { modelsApi } from "./modelsResources.js";
 import { API_BASE_URL, apiFetch } from "../api.js";
 
 // YuE2 (epic 22988) client seam: the song-job route, the server-side licence acknowledgment and
@@ -94,7 +95,7 @@ export function createYue2Comparison(projectId, body, token) {
 // revision, status: "queued" | "installed", jobId? }] }. Refusals: 403 `license_acknowledgment_required`,
 // 403 `component_blocked` (context.blocked[]), 404 `conditional_components_not_declared`.
 export function downloadYue2ConditionalComponents(modelId, purpose, body, token) {
-  return apiFetch(`/api/v1/models/${enc(modelId)}/conditional-components/${enc(purpose)}/download`, token, {
+  return modelsApi.conditionalDownload(modelId, purpose, token, {
     method: "POST",
     body: JSON.stringify(body),
   });
