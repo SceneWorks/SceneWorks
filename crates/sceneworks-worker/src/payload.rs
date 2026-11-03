@@ -31,6 +31,21 @@ pub(crate) fn json_f64(value: &Value) -> Option<f64> {
         .or_else(|| value.as_str()?.trim().parse().ok())
 }
 
+/// Required normalized text with a caller-owned diagnostic (payload and dataset-item contracts differ).
+#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+pub(crate) fn required_trimmed_str<'a>(
+    object: &'a JsonObject,
+    field: &str,
+    message: &str,
+) -> WorkerResult<&'a str> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| WorkerError::InvalidPayload(message.to_owned()))
+}
+
 pub(crate) fn required_payload_string<'a>(
     payload: &'a JsonObject,
     field: &str,
@@ -106,6 +121,20 @@ pub(crate) fn value_f64(value: &Value, default: f64) -> f64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn required_trimmed_text_rejects_missing_empty_and_non_string_values() {
+        for value in [json!(null), json!(false), json!("  ")] {
+            let object = JsonObject::from_iter([("key".to_owned(), value)]);
+            assert!(required_trimmed_str(&object, "key", "missing key").is_err());
+        }
+        let object = JsonObject::from_iter([("key".to_owned(), json!(" value "))]);
+        assert_eq!(
+            required_trimmed_str(&object, "key", "missing key").expect("text"),
+            "value"
+        );
+        assert!(required_trimmed_str(&object, "absent", "missing key").is_err());
+    }
 
     #[cfg(any(
         target_os = "macos",

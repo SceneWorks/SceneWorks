@@ -2346,21 +2346,7 @@ pub(crate) fn training_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        // Stamped by update_job before posting (sc-4172).
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 // --------------------------------------------------------------------------- #
@@ -4026,20 +4012,8 @@ async fn verified_moss_resume_step(
 /// and on the final `Done` event report completion with the result the UI shows.
 /// Mirrors `image_jobs::consume_gen_events`.
 ///
-/// sc-9541 (F-034 follow-up): this deliberately does NOT fold into the shared
-/// [`analysis_jobs_common::run_batched_analysis_job`] scaffold (which the CLIP + face analysis jobs
-/// share). That scaffold abstracts "N homogeneous items, each a bare `usize` index → one record `R`,
-/// all ending in ONE sidecar POST"; training shares none of those axes — its channel carries a rich
-/// `TrainEvent`/`TrainingProgress` variant tree (not a `usize`), its progress spans five kernel bands
-/// via [`map_training_progress`] (not the analysis single-ramp `item_progress`), its `Sample` events
-/// have file-persistence side effects (`SamplePersister`), its cancel posts an interim non-terminal
-/// "Cancelling…" update (`begin_training_cancel`, the analysis loop trips a bare flag), and it emits an
-/// in-place `Done` result with NO sidecar POST (the engine writes the adapter; the API registers it
-/// separately). Forcing training through the analysis scaffold would require making it generic over an
-/// event type + an event→progress mapper + a stateful side-effect hook + a no-op sidecar branch —
-/// distorting the clean analysis-only seam for more complexity than the duplication it removes. The
-/// only genuinely shared machinery (the `CancelJoinGuard` + bounded-join teardown + deferred-terminal
-/// cancel, sc-8804/8917) is already reconciled across both by convention, not code sharing.
+/// Lane-specific training event handling on the shared stream supervisor. Preview persistence,
+/// checkpoint verification, non-terminal cancellation and durable Iris exports stay here.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -4059,13 +4033,12 @@ pub(crate) async fn consume_training_events(
     blocking: tokio::task::JoinHandle<WorkerResult<()>>,
     run_notes: JsonObject,
 ) -> WorkerResult<()> {
-    // Bind the blocking training task to its cancel flag (sc-8804, F-003): every `update_job`/
-    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
-    // reclaim); on that early return this guard trips the engine `CancelFlag` and aborts the
-    // still-running training thread instead of leaving it burning GPU memory alongside the next
-    // claimed job. `cancel` is kept alongside (it's `Clone`) for the in-loop `begin_training_cancel`
-    // pollers; the guard drives only the drop-time teardown.
-    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
+    let mut supervisor = StreamSupervisor::new(
+        cancel.clone(),
+        blocking,
+        progress_report_interval(settings),
+        None,
+    );
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
@@ -4082,33 +4055,15 @@ pub(crate) async fn consume_training_events(
     // `samples.all_samples` / `samples.cfg` for the final result fold.
     let mut samples = SamplePersister::new(settings, job, plan, sample_config);
 
-    let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
-    heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
-    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
-    let loop_result: WorkerResult<()> = async {
+    let handling: WorkerResult<()> = async {
         loop {
-            let event = tokio::select! {
-                maybe_event = rx.recv() => match maybe_event {
-                    Some(event) => event,
-                    None => break,
-                },
-                _ = heartbeat_interval.tick() => {
-                    // Keep the worker's heartbeat alive during long silent gaps between engine events
-                    // — e.g. a slow checkpoint disk-write + preview-sampling pass for a large model
-                    // (Krea2). Heartbeats otherwise ride only on incoming progress events (below), so a
-                    // quiet stretch past the API's 90s worker-timeout lets the stale-sweep mark this
-                    // still-running job `interrupted`, and the next progress post is then 409'd
-                    // (sc-8390; same class as the inline-upscale sc-8200). Also poll cancel here so a
-                    // cancel requested during such a gap is honored without awaiting the next event.
-                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
-                    // poll (a local flag read) so a quit stops training at the next step / event gap.
-                    if !canceled && (shutdown_requested() || cancel_requested_peek(api, &job.id).await)
-                    {
-                        begin_training_cancel(api, &job.id, &cancel, backend).await;
-                        canceled = true;
-                    }
+            let event = match supervisor.next(api, settings, &job.id, Some(&mut rx)).await? {
+                StreamSignal::Event(event) => event,
+                StreamSignal::Finished => break,
+                StreamSignal::ProgressTick => continue,
+                StreamSignal::CancelRequested => {
+                    begin_training_cancel(api, &job.id, &cancel, backend).await;
+                    canceled = true;
                     continue;
                 }
             };
@@ -4130,12 +4085,14 @@ pub(crate) async fn consume_training_events(
                     // shutdown (sc-9618) short-circuits the throttle + API poll so a quit stops on the
                     // very next training step, not just at the heartbeat-tick gap above.
                     if matches!(progress, TrainingProgress::Training { .. })
-                        && (shutdown_requested()
+                        && (crate::progress::shutdown_requested()
+                            || shutdown_requested()
                             || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
                                 last_cancel_check = Instant::now();
                                 cancel_requested_peek(api, &job.id).await
                             }))
                     {
+                        supervisor.request_cancel();
                         begin_training_cancel(api, &job.id, &cancel, backend).await;
                         canceled = true;
                         continue;
@@ -4205,11 +4162,9 @@ pub(crate) async fn consume_training_events(
                         training_progress(status, stage, fraction, &message, result, backend),
                     )
                     .await?;
-                    // No per-event heartbeat here: the `heartbeat_interval.tick()` arm above already
-                    // pings `Busy` on the shared 5–15 s interval, keeping `last_seen` fresh independent of
-                    // event cadence (posting progress does not refresh it). A heartbeat per progress event
-                    // just doubled the API round-trips, throttling GPU stepping to API latency (sc-8917,
-                    // F-115) with no keepalive benefit.
+                    // The shared supervisor heartbeats on its independent 5–15 s interval. Posting
+                    // progress does not refresh last_seen; a heartbeat per event would double API
+                    // round-trips and throttle stepping to API latency (sc-8917, F-115).
                 }
                 TrainEvent::Done(output) => {
                     let mut result = training_result(
@@ -4257,17 +4212,8 @@ pub(crate) async fn consume_training_events(
         Ok(())
     }
     .await;
-    if let Err(error) = loop_result {
-        guard.cancel_and_join().await;
-        return Err(error);
-    }
-
-    // The event loop exited cleanly (channel closed after `Done`/cancel-drain), so the blocking
-    // task is finished or finishing — reclaim its handle (disarming the drop-guard) and join it.
-    let task_result = guard
-        .into_handle()
-        .await
-        .map_err(|error| task_join_error("training task join", error))?;
+    let (_, task_result) = supervisor.finish_stream(handling, &mut rx).await?;
+    let task_result = task_result.map_err(|error| task_join_error("training task join", error))?;
     if canceled {
         // Training has actually stopped now, so post the TERMINAL Canceled here (not at the
         // earlier cancel poll, which only tripped the flag + showed "Cancelling…"). This terminal

@@ -116,6 +116,8 @@ pub(crate) async fn run_dataset_parquet_import_job(
     let scan_caption_includes = caption_includes.clone();
     let scan_caption_excludes = caption_excludes.clone();
     let scan_caption_fields = caption_field_columns.clone();
+    let cancel = gen_core::CancelFlag::new();
+    let scan_cancel = cancel.clone();
     let scan_task = crate::load_progress::spawn_blocking(move || {
         read_candidates(
             &scan_source,
@@ -126,11 +128,18 @@ pub(crate) async fn run_dataset_parquet_import_job(
             &scan_caption_includes,
             &scan_caption_excludes,
             &scan_caption_fields,
+            &scan_cancel,
         )
     });
-    let candidates =
-        heartbeat_while_blocking(api, settings, &job.id, "Parquet metadata scan", scan_task)
+    let (canceled, result) =
+        StreamSupervisor::new(cancel, scan_task, progress_report_interval(settings), None)
+            .wait(api, settings, &job.id)
             .await?;
+    if canceled {
+        mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    let candidates = result.map_err(|error| task_join_error("Parquet metadata scan", error))??;
     if candidates.is_empty() {
         return Err(WorkerError::InvalidPayload(format!(
             "No usable URL/caption rows were found in columns {url_column:?} and {caption_column:?}."
@@ -359,12 +368,19 @@ fn read_candidates(
     caption_includes: &[String],
     caption_excludes: &[String],
     caption_field_columns: &[String],
+    cancel: &gen_core::CancelFlag,
 ) -> WorkerResult<Vec<Candidate>> {
+    scan_checkpoint(cancel)?;
     let files = parquet_files(source)?;
     let mut candidates = Vec::with_capacity(limit.min(16_384));
     let mut seen_urls = HashSet::new();
     let mut observed_columns = Vec::new();
+    let mut scanned = 0;
     for path in files {
+        scan_checkpoint(cancel)?;
+        if scanned >= limit {
+            break;
+        }
         let reader = SerializedFileReader::new(File::open(&path)?).map_err(|error| {
             WorkerError::InvalidPayload(format!(
                 "Could not read Parquet shard {}: {error}",
@@ -377,7 +393,11 @@ fn read_candidates(
                 path.display()
             ))
         })?;
-        for row in rows {
+        // Bound rows examined, not only accepted candidates: rejected/missing/duplicate rows
+        // consume the same finite budget, across every shard. `take` avoids decoding row cap + 1.
+        for row in rows.take(limit.saturating_sub(scanned)) {
+            scan_checkpoint(cancel)?;
+            scanned += 1;
             let row = row.map_err(|error| {
                 WorkerError::InvalidPayload(format!(
                     "Could not decode a row in {}: {error}",
@@ -459,6 +479,13 @@ fn read_candidates(
         )));
     }
     Ok(candidates)
+}
+
+fn scan_checkpoint(cancel: &gen_core::CancelFlag) -> WorkerResult<()> {
+    if cancel.is_cancelled() {
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    Ok(())
 }
 
 fn row_u32(row: &parquet::record::Row, requested: &str) -> Option<u32> {
@@ -651,8 +678,44 @@ mod tests {
             &["portrait".to_owned()],
             &["logo".to_owned()],
             &["short_caption".to_owned(), "missing_column".to_owned()],
+            &gen_core::CancelFlag::new(),
         )
         .expect("rows read");
+
+        // Every first-row filter rejection still consumes the scan budget. A matching row exists
+        // at index 1; it must not be read when the scanned-row cap is one.
+        let rejected = read_candidates(
+            &path,
+            "url",
+            "text",
+            1,
+            0,
+            &["logo".to_owned()],
+            &[],
+            &[],
+            &gen_core::CancelFlag::new(),
+        );
+        assert!(rejected
+            .expect_err("cap stops before the matching second row")
+            .to_string()
+            .contains("no usable rows"));
+        // Cancellation precedes even source discovery/metadata reads.
+        let cancel = gen_core::CancelFlag::new();
+        cancel.cancel();
+        assert!(matches!(
+            read_candidates(
+                &temp.path().join("absent"),
+                "url",
+                "text",
+                10,
+                0,
+                &[],
+                &[],
+                &[],
+                &cancel
+            ),
+            Err(WorkerError::Canceled(_))
+        ));
 
         assert_eq!(candidates.len(), 1);
         // sc-25685: named caption columns become per-item captions; an absent column adds nothing.
@@ -678,8 +741,18 @@ mod tests {
         file.extend_from_slice(b"PAR1");
         std::fs::write(&path, file).expect("fixture writes");
 
-        let import_error = read_candidates(&path, "url", "text", 1, 0, &[], &[], &[])
-            .expect_err("truncated metadata cannot be imported");
+        let import_error = read_candidates(
+            &path,
+            "url",
+            "text",
+            1,
+            0,
+            &[],
+            &[],
+            &[],
+            &gen_core::CancelFlag::new(),
+        )
+        .expect_err("truncated metadata cannot be imported");
         assert!(
             import_error
                 .to_string()

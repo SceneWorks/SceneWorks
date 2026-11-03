@@ -1368,7 +1368,7 @@ pub(crate) async fn run_prompt_refine_job(
     // ~16 GB snapshot every time, and is idle-evicted so memory stays bounded (mirrors the image/video
     // `generator_cache`). `with_cached_refiner` runs the closure ON that thread, so the `!Send`
     // provider never crosses a thread boundary; only the `String` result comes back. Wrapping it in a
-    // `tokio::spawn` keeps the existing `CancelJoinGuard` teardown seam (sc-8804, F-003) unchanged.
+    // The spawned task is joined by the shared stream supervisor, including on cancel/API failure.
     let refine_spec = gen_core::core_llm::LoadSpec {
         source: weights_dir.to_string_lossy().into_owned(),
         // See `catalog_semantic_jobs`: an explicit projector artifact is only for a separable
@@ -1566,74 +1566,17 @@ pub(crate) async fn run_prompt_refine_job(
         },
     ));
 
-    // Bind the blocking LLM task to its cancel flag (sc-8804, F-003): every `update_job`/
-    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
-    // reclaim); on that early return this guard trips `cancel` and aborts the generation thread
-    // instead of leaving it running on a job nobody is consuming. `cancel` is kept alongside (it's
-    // `Clone`) for the in-loop cancel poll; the guard drives only the drop-time teardown.
-    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
-    // Heartbeat + poll-cancel cadence (the shared 5–15 s worker interval).
-    let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
-    heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // Progress-post cadence (sc-8840, F-038): a fixed short tick that COALESCES the per-token watch
-    // channel down to at most ~4 posts/sec regardless of decode speed — thousands of per-token POSTs
-    // collapse to a few, and generation is never back-pressured by API latency. Decoupled from the
-    // (coarser) heartbeat interval so progress stays smooth without the token stream driving the API.
-    let mut progress_interval = tokio::time::interval(PROGRESS_POST_INTERVAL);
-    progress_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // Skip a redundant post when the token count has not advanced since the last one (the watch holds
-    // the same value between decode ticks), so a stalled decode does not re-POST identical progress.
-    let mut last_posted: Option<(u32, u32)> = None;
-    // Defer the terminal `Canceled` until the blocking decode has actually stopped (sc-11189, F-017):
-    // a cancel poll here only TRIPS the engine flag (`cancel_requested_peek`, no terminal write) and
-    // latches `canceled`; the terminal `Canceled` — which frees the worker row — is posted from the
-    // generation-finished arm below only AFTER the task's handle has resolved, so the scheduler never
-    // sees a free worker while the refiner is still on the GPU (mirrors `run_batched_analysis_job`
-    // sc-8917/F-115 + the training path). The old path called `check_cancel` on the tick, which posted
-    // the terminal `Canceled` at acknowledgement time.
-    let mut canceled = false;
-    // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
-    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003). The loop
-    // yields the raw model output on clean completion.
-    let loop_result: WorkerResult<(gen_core::core_llm::TextLlmOutput, Value)> = async {
+    let mut supervisor = StreamSupervisor::new(
+        cancel,
+        blocking,
+        progress_report_interval(settings),
+        Some(PROGRESS_POST_INTERVAL),
+    );
+    let mut last_posted = None;
+    let handling: WorkerResult<()> = async {
         loop {
-            tokio::select! {
-                // Generation finished (the shared cache thread replied). Disarm the guard before any
-                // `?` so a task/join error never drops an armed guard, then post the FINAL coalesced
-                // progress snapshot (the watch's resident terminal value — never dropped) before
-                // handing the raw output to the post-loop cleanup.
-                result = &mut *guard.handle_mut() => {
-                    guard.disarm();
-                    // The decode task has ACTUALLY stopped now (its handle resolved). If a cancel was
-                    // acknowledged during the run, post the DEFERRED terminal `Canceled` HERE — not at
-                    // the poll that only tripped the flag — so the worker row frees only once the GPU
-                    // is genuinely free (sc-11189, F-017; mirrors `run_batched_analysis_job` + the
-                    // training path). The task's own `Canceled`/output result is discarded in favor of
-                    // the honored user cancel.
-                    if canceled {
-                        mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
-                        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-                    }
-                    let raw = result
-                        .map_err(|error| task_join_error("prompt refine task join", error))??;
-                    // Deliver the FINAL coalesced snapshot (the watch's resident terminal value — the
-                    // last token count, never dropped) so the terminal progress is always correct even
-                    // if it landed between ticks. Copy the `(u32, u32)` out of the borrow into a plain
-                    // value FIRST so the non-`Send` `watch::Ref` guard is dropped before the `.await`
-                    // (holding it across the await would make `run_worker_loop`'s future `!Send` and
-                    // break the `tokio::spawn` in rust-api — build-windows caught this).
-                    let latest = *progress_rx.borrow();
-                    if let Some((current, total)) = next_progress_post(latest, last_posted) {
-                        post_refine_progress(api, &job.id, current, total, work_message, backend)
-                            .await?;
-                    }
-                    return Ok(raw);
-                }
-                _ = progress_interval.tick() => {
-                    // Coalesced progress: post ONLY the latest token count, and only if it moved since
-                    // the last post (a stalled decode holds the same value → no redundant re-POST).
-                    // Copy out of the borrow first so the non-`Send` `watch::Ref` is not held across
-                    // the `.await` (keeps `run_worker_loop`'s future `Send` for `tokio::spawn`).
+            match supervisor.next::<()>(api, settings, &job.id, None).await? {
+                StreamSignal::ProgressTick => {
                     let latest = *progress_rx.borrow();
                     if let Some((current, total)) = next_progress_post(latest, last_posted) {
                         post_refine_progress(api, &job.id, current, total, work_message, backend)
@@ -1641,33 +1584,25 @@ pub(crate) async fn run_prompt_refine_job(
                         last_posted = Some((current, total));
                     }
                 }
-                _ = heartbeat_interval.tick() => {
-                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
-                    // poll (a local flag read) so a quit trips the decode flag at its next per-token
-                    // check instead of waiting out the grace window, exactly like a user cancel does.
-                    // Here we only TRIP the engine flag and latch `canceled`; the terminal `Canceled`
-                    // is posted from the generation-finished arm once the decode has actually stopped
-                    // (sc-11189, F-017 — no terminal write at acknowledgement time).
-                    if !canceled && (shutdown_requested() || cancel_requested_peek(api, &job.id).await)
-                    {
-                        cancel.cancel();
-                        canceled = true;
-                    }
-                }
+                StreamSignal::Finished => break,
+                StreamSignal::CancelRequested | StreamSignal::Event(()) => {}
             }
         }
+        Ok(())
     }
     .await;
-    // sc-20682: what the KV cache asked for and ran on — the block the generation's `llm_kv_cache`
-    // event carried (under the engine lane), recorded on the result too.
-    let (output, kv_cache) = match loop_result {
-        Ok(generated) => generated,
-        Err(error) => {
-            guard.cancel_and_join().await;
-            return Err(error);
-        }
-    };
+    let (canceled, result) = supervisor.finish(handling).await?;
+    if canceled {
+        mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    let (output, kv_cache) =
+        result.map_err(|error| task_join_error("prompt refine task join", error))??;
+    // Preserve the terminal coalesced snapshot even when generation finishes between ticks.
+    let latest = *progress_rx.borrow();
+    if let Some((current, total)) = next_progress_post(latest, last_posted) {
+        post_refine_progress(api, &job.id, current, total, work_message, backend).await?;
+    }
     // A JSON task isolates the object (the web parses + validates a caption; image_caption validates
     // here too, and the film plan is parsed strictly by the harness); the free-text rewrite cleans to
     // prose.
@@ -1875,21 +1810,7 @@ fn refine_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        // Stamped by update_job before posting (sc-4172).
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 /// The prompt-refine generation request: the task's turn, sampler, budget and decode constraint,
