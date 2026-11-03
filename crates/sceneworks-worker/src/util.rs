@@ -31,24 +31,8 @@ pub(crate) fn now_rfc3339() -> String {
     format_unix_seconds(now_unix_seconds())
 }
 
-pub(crate) fn bounded_tail(value: &str, max_lines: usize, max_chars: usize) -> String {
-    let mut lines = value.lines().rev().take(max_lines).collect::<Vec<_>>();
-    lines.reverse();
-    let mut output = lines.join("\n");
-    let char_count = output.chars().count();
-    if char_count > max_chars {
-        if max_chars == 0 {
-            output.clear();
-        } else {
-            let start = output
-                .char_indices()
-                .nth(char_count - max_chars)
-                .map_or(output.len(), |(index, _)| index);
-            output = output[start..].to_owned();
-        }
-    }
-    output
-}
+#[cfg(test)]
+pub(crate) use sceneworks_core::media_process::bounded_tail;
 
 pub(crate) fn fresh_asset_id() -> String {
     format!("asset_{}", Uuid::new_v4().simple())
@@ -103,10 +87,7 @@ pub(crate) async fn with_hf_auth(
 /// all of which compile only on macOS OR the off-Mac candle lane. On the Linux `parity`
 /// lane (non-macOS, default features) none of those callers compile, so leaving this
 /// helper ungated makes it dead code under `-D warnings` (sc-11175, Linux parity fix).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn resolve_env_file_pin(
     key: &str,
     value: Option<std::ffi::OsString>,
@@ -125,10 +106,7 @@ pub(crate) fn resolve_env_file_pin(
     )))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn resolved_cache_paths_match<const N: usize>(
     cached: [&Path; N],
     requested: [&Path; N],
@@ -136,13 +114,7 @@ pub(crate) fn resolved_cache_paths_match<const N: usize>(
     cached == requested
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod cache_path_tests {
     use super::*;
 
@@ -161,5 +133,44 @@ mod cache_path_tests {
             [det_a, pose_a],
             [det_a, pose_b]
         ));
+    }
+}
+
+pub(crate) fn gradient_rgb8(width: u32, height: u32, seed: i64) -> Vec<u8> {
+    let seed = seed as u64;
+    let base = [
+        (seed & 0xFF) as u8,
+        ((seed >> 8) & 0xFF) as u8,
+        ((seed >> 16) & 0xFF) as u8,
+    ];
+    let span = height.saturating_sub(1).max(1) as f32;
+    let mut buffer = Vec::with_capacity((width as usize) * (height as usize) * 3);
+    for y in 0..height {
+        let t = y as f32 / span;
+        let row = [lerp(base[0], t), lerp(base[1], t), lerp(base[2], t)];
+        for _ in 0..width {
+            buffer.extend_from_slice(&row);
+        }
+    }
+    buffer
+}
+
+pub(crate) fn lerp(a: u8, t: f32) -> u8 {
+    let a = a as f32;
+    (a + (255.0 - a) * t).round().clamp(0.0, 255.0) as u8
+}
+
+#[cfg(test)]
+mod gradient_tests {
+    use super::*;
+    #[test]
+    fn gradient_preserves_seed_bytes_white_endpoint_and_degenerate_dimensions() {
+        assert_eq!(gradient_rgb8(1, 1, 0x030201), vec![1, 2, 3]);
+        assert_eq!(
+            gradient_rgb8(2, 2, 0x030201),
+            vec![1, 2, 3, 1, 2, 3, 255, 255, 255, 255, 255, 255]
+        );
+        assert!(gradient_rgb8(0, 8, 7).is_empty());
+        assert!(gradient_rgb8(8, 0, 7).is_empty());
     }
 }

@@ -961,11 +961,7 @@ pub fn parse_reference_pack(text: &str) -> Result<ReferencePack, String> {
 /// `[A-Za-z0-9_-]{1,64}` — the charset every id and role in these documents must satisfy, so an
 /// id can be embedded in file names, tags and job payloads without escaping.
 pub fn is_safe_plan_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    crate::ids::is_safe_id_with_max(value, 64)
 }
 
 /// Parse `"WxH"` into `(width, height)`.
@@ -3196,7 +3192,12 @@ static BUILTIN_PLAN_LORAS: std::sync::OnceLock<Vec<PlanLoraEntry>> = std::sync::
 
 /// Every LoRA in the embedded builtin catalog, in catalog order.
 pub fn builtin_plan_loras() -> &'static [PlanLoraEntry] {
-    BUILTIN_PLAN_LORAS.get_or_init(|| parse_plan_loras(embedded_manifest("builtin.loras.jsonc")))
+    BUILTIN_PLAN_LORAS.get_or_init(|| {
+        plan_loras_from_manifest(
+            crate::builtin_manifests::builtin_manifest("builtin.loras.jsonc")
+                .expect("invalid embedded LoRA catalog"),
+        )
+    })
 }
 
 /// The embedded builtin catalog entry for `id`, or `None` when the id names nothing shipped.
@@ -3204,24 +3205,11 @@ pub fn builtin_plan_lora(id: &str) -> Option<&'static PlanLoraEntry> {
     builtin_plan_loras().iter().find(|lora| lora.id == id)
 }
 
-fn embedded_manifest(name: &str) -> &'static str {
-    crate::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(manifest, _)| *manifest == name)
-        .map(|(_, contents)| *contents)
-        .unwrap_or("")
-}
-
-/// Parse a `builtin.loras.jsonc` body. Split out so tests can drive synthetic catalogs; a malformed
-/// manifest yields an EMPTY list rather than a panic, exactly as [`crate::minimax_h3_turbo`] does.
-fn parse_plan_loras(contents: &str) -> Vec<PlanLoraEntry> {
-    let stripped = strip_jsonc_comments(contents);
-    let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
-        return Vec::new();
-    };
-    let Some(loras) = manifest.get("loras").and_then(Value::as_array) else {
-        return Vec::new();
-    };
+fn plan_loras_from_manifest(manifest: &Value) -> Vec<PlanLoraEntry> {
+    let loras = manifest
+        .get("loras")
+        .and_then(Value::as_array)
+        .expect("embedded LoRA catalog requires a loras array");
     loras
         .iter()
         .filter_map(|lora| {
@@ -3265,47 +3253,21 @@ fn parse_plan_loras(contents: &str) -> Vec<PlanLoraEntry> {
 /// which makes [`lora_family_matches_model`] permissive there rather than refusing a pairing this
 /// side cannot judge. The video route's own compatibility gate still judges it at enqueue.
 ///
-/// Parsed ONCE ([`builtin_plan_loras`] does the same for the LoRA catalog): the embedded model
-/// manifest is a compile-time constant, and re-parsing it per call put a whole-catalog JSON parse
-/// inside [`plan_loras_for_partition`], which every shot's compile and every envelope offer runs.
+/// Reads the shared parsed builtin catalog; no per-shot JSON parse or independent model cache.
 pub fn model_lora_families(model_id: &str) -> Vec<String> {
-    static MODEL_LORA_FAMILIES: std::sync::OnceLock<BTreeMap<String, Vec<String>>> =
-        std::sync::OnceLock::new();
-    MODEL_LORA_FAMILIES
-        .get_or_init(|| {
-            let stripped = strip_jsonc_comments(embedded_manifest("builtin.models.jsonc"));
-            let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
-                return BTreeMap::new();
-            };
-            manifest
-                .get("models")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|model| {
-                    let id = model.get("id").and_then(Value::as_str)?.to_owned();
-                    let families = model
-                        .get("loraCompatibility")?
-                        .get("families")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect();
-                    Some((id, families))
-                })
-                .collect()
-        })
-        .get(model_id)
-        .cloned()
+    crate::builtin_manifests::builtin_model_entry(model_id)
+        .map(crate::lora_family::declared_model_lora_families)
         .unwrap_or_default()
 }
 
-/// Whether `lora`'s family is one catalog model `model_id` declares it can load. Permissive for a
-/// model the embedded catalog does not hold; see [`model_lora_families`].
+/// Apply the enqueue accepted-family gate over canonical families. The embedded catalog cannot
+/// judge custom/user-installed IDs, so those retain the established permissive planning behavior.
 pub fn lora_family_matches_model(lora: &PlanLoraEntry, model_id: &str) -> bool {
-    let families = model_lora_families(model_id);
-    families.is_empty() || families.contains(&lora.family)
+    let Some(model) = crate::builtin_manifests::builtin_model_entry(model_id) else {
+        return true;
+    };
+    let accepted = crate::lora_family::accepted_model_lora_families(model);
+    accepted.contains(&crate::lora_family::canonical_lora_family(&lora.family))
 }
 
 /// The partitions a plan declaring `plan_model_id` may ever dispatch as: the declared model, plus
@@ -3393,7 +3355,7 @@ fn validate_plan_loras(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
             ));
             continue;
         };
-        if !families.is_empty() && !families.contains(&lora.family) {
+        if !lora_family_matches_model(lora, &plan.model.id) {
             findings.push(PlanDiagnostic::plan(
                 "model.loras",
                 format!(
@@ -3401,7 +3363,11 @@ fn validate_plan_loras(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
                     lora.id,
                     lora.family,
                     plan.model.id,
-                    families.join(", ")
+                    if families.is_empty() {
+                        "no LoRA families".to_owned()
+                    } else {
+                        families.join(", ")
+                    }
                 ),
             ));
         }

@@ -54,11 +54,11 @@ async fn item_image(
         .iter()
         .find(|item| item.id == item_id)
         .ok_or_else(|| ApiError::bad_request("Training dataset item not found"))?;
-    let mut path = root;
-    for component in FsPath::new(&item.path).components() {
-        path.push(component);
-    }
-    Ok(path)
+    sceneworks_core::safe_path::resolve_local_file(&root, &item.path).map_err(|error| {
+        ApiError::bad_request(format!(
+            "Training dataset image is not a confined file: {error}"
+        ))
+    })
 }
 
 pub(crate) async fn upload_iris_item_sidecar(

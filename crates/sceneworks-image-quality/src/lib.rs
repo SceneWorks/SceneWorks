@@ -2,8 +2,8 @@
 //!
 //! The decode-bearing half of Tier-0: turn an image into the per-image scalars that the *pure*
 //! decision logic in [`sceneworks_core::dataset_quality`] consumes. It lives in its own crate —
-//! not the decode-free core, not the GPU-laden worker — so it builds and tests anywhere on just
-//! the pure-Rust `image` (png/jpeg/webp) + `imageproc` + `image_hasher` stack, with no Metal/CUDA.
+//! separate from the worker — so pixel metrics build and test with `image`, `imageproc`,
+//! and `image_hasher`. Core owns the shared codec backstop; metric extraction executes no model.
 //! Both the worker and the API's synchronous readiness path can depend on it.
 //!
 //! Blur + exposure are measured on the **center-crop→bucket-resize the trainer actually feeds**
@@ -73,45 +73,7 @@ pub fn aesthetic_predictor() -> &'static AestheticPredictor {
     })
 }
 
-/// Decode an image, transcoding a valid-but-unsupported format to a temp PNG first (sc-6143).
-/// Always AVIF/HEIC/HEIF (`image` has no decoder for them at any feature level), plus TIFF/BMP/GIF in
-/// a build whose `image` feature union lacks them — note that union is workspace-wide, so a crate's
-/// own `features = [...]` does not decide what it can decode. `decode` runs directly on `path` on the
-/// fast path; only when that fails
-/// *and* the bytes sniff as a recognized format the pure-Rust `image` build can't decode do we shell
-/// out to the shared [`sceneworks_core::media_convert`] transcoder and re-run `decode` on the PNG.
-///
-/// Import normalizes new uploads to PNG, but assets that predate that change — or reach this crate by
-/// a path that skips normalization — would otherwise fail here (`The image format Avif is not
-/// supported`). This mirrors the worker's `decode_image_any` backstop so the API's synchronous
-/// Dataset Doctor paths degrade to "transcode + run" instead of erroring.
-pub(crate) fn decode_transcoding<F>(path: &Path, decode: F) -> image::ImageResult<DynamicImage>
-where
-    F: Fn(&Path) -> image::ImageResult<DynamicImage>,
-{
-    use sceneworks_core::media_convert::{sniff_image_kind_at, transcode_to_png};
-
-    match decode(path) {
-        Ok(image) => Ok(image),
-        Err(decode_error) => {
-            // Only transcode a format we recognize as valid-but-unsupported; a natively-supported
-            // format (or unrecognized bytes) means a genuine decode failure — surface it unchanged.
-            match sniff_image_kind_at(path) {
-                Some(kind) if !kind.is_natively_supported() => {
-                    let dir = tempfile::tempdir().map_err(image::ImageError::IoError)?;
-                    let png = dir.path().join("decoded.png");
-                    if let Err(error) = transcode_to_png(path, &png) {
-                        return Err(image::ImageError::IoError(std::io::Error::other(
-                            error.to_string(),
-                        )));
-                    }
-                    decode(&png)
-                }
-                _ => Err(decode_error),
-            }
-        }
-    }
-}
+pub(crate) use sceneworks_core::image_decode::decode_image_with as decode_transcoding;
 
 /// Decode the image at `path` and extract its Tier-0 scalars. `bucket_edge` is the trainer's
 /// target square resolution (the size blur + exposure are measured at).

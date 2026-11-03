@@ -296,10 +296,7 @@ mod download_lock {
 // (Linux) lane the function is dead in the test build too. Gating the allow on `not(test)` compiles
 // on this Mac and fails `rust:check:candle` with `-D dead-code` — which is exactly what it did.
 #[allow(dead_code)]
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_cached_file(
     context: &DownloadContext<'_>,
     url: &str,
@@ -314,10 +311,7 @@ pub(crate) async fn ensure_cached_file(
 /// `expected_sha256` (a content digest — e.g. an HF `lfs.oid`) before returning
 /// (sc-8879). A malformed/absent digest is skipped by `verify_file_sha256`, so callers
 /// can pass whatever the source advertises; a mismatch removes the file and errors.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_cached_file_verified(
     context: &DownloadContext<'_>,
     url: &str,
@@ -381,10 +375,7 @@ pub(crate) async fn ensure_cached_file_verified(
     Ok(target.to_path_buf())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn remote_content_length(
     context: &DownloadContext<'_>,
     url: &str,
@@ -449,10 +440,7 @@ async fn remote_content_length(
 // `backend-candle`. Compiled on every platform anyway so the bare lib build type-checks it too
 // (a gated-out helper is how parity goes blind to dead code); dead_code silenced only where
 // nothing calls it, the same idiom as `safe_weight_filename`.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn resolve_hf_component_file(
     settings: &Settings,
     repo: &str,
@@ -474,10 +462,7 @@ pub(crate) fn resolve_hf_component_file(
 /// Resolve a single Hugging Face file and stream it into an app cache target with
 /// size-aware resume/progress. This is for first-use runtime weights that are not
 /// installed through the full model-download flow.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_hf_cached_file(
     context: &DownloadContext<'_>,
     repo: &str,
@@ -500,7 +485,7 @@ pub(crate) async fn ensure_hf_cached_file(
     .await
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 async fn resolve_single_hf_file(
     context: &DownloadContext<'_>,
     repo: &str,
@@ -534,10 +519,7 @@ async fn resolve_single_hf_file(
 /// their resumable state. Imported SDXL components are loader inputs shared by
 /// concurrent jobs, so a destination-path cache hit must be verified rather than
 /// inferred from `is_file()` (sc-21689).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_hf_cached_file_atomically(
     context: &DownloadContext<'_>,
     repo: &str,
@@ -562,10 +544,7 @@ pub(crate) async fn ensure_hf_cached_file_atomically(
 /// [`partial_download_path`] sibling. A final cache hit is reused only after it is
 /// checked against the same size and (when available) SHA-256 identity used for a
 /// freshly downloaded file.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_cached_file_verified_atomically(
     context: &DownloadContext<'_>,
     url: &str,
@@ -631,10 +610,7 @@ fn partial_download_path(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn cached_file_matches_expected(
     context: &DownloadContext<'_>,
     path: &Path,
@@ -775,7 +751,7 @@ impl HuggingFaceSnapshot {
 /// Obtain only the content digest of one pinned HF file for installed-receipt verification.
 /// LFS weights use their published SHA-256; small non-LFS metadata is streamed into a digest.
 /// No remote bytes or filesystem destination cross this boundary, and no model is installed.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) async fn huggingface_file_content_sha256(
     client: &reqwest::Client,
     settings: &Settings,
@@ -816,7 +792,7 @@ pub(crate) async fn huggingface_file_content_sha256(
     if received != size {
         return Err(invalid("upstream file is incomplete"));
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(sceneworks_core::hashing::hex(&digest.finalize()))
 }
 
 /// Extract the `rel="next"` target from an RFC 5988 `Link` header, if present. The HF tree API
@@ -1095,12 +1071,11 @@ pub(crate) async fn sha256_file(
     job_id: &str,
     path: &Path,
 ) -> WorkerResult<String> {
-    Ok(format!(
-        "{:x}",
-        download_hash_state_raw(api, settings, job_id, path)
-            .await?
-            .finalize()
-    ))
+    let path = path.to_path_buf();
+    let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
+        sceneworks_core::hashing::sha256_file(&path).map_err(WorkerError::Io)
+    });
+    heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
 }
 
 async fn download_hash_state(context: &DownloadContext<'_>, path: &Path) -> WorkerResult<Sha256> {
@@ -1115,17 +1090,9 @@ async fn download_hash_state_raw(
 ) -> WorkerResult<Sha256> {
     let path = path.to_path_buf();
     let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<Sha256> {
-        use std::io::Read;
-        let mut file = std::fs::File::open(&path).map_err(WorkerError::Io)?;
+        let file = std::fs::File::open(&path).map_err(WorkerError::Io)?;
         let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; 1024 * 1024];
-        loop {
-            let read = file.read(&mut buffer).map_err(WorkerError::Io)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
+        sceneworks_core::hashing::update_sha256(file, &mut hasher).map_err(WorkerError::Io)?;
         Ok(hasher)
     });
     heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
@@ -1374,7 +1341,7 @@ async fn download_file_inner(
             if let Some(expected) = expected_size {
                 let written = tokio::fs::metadata(dest).await?.len();
                 if written == expected {
-                    return Ok(Some(format!("{:x}", hasher.finalize())));
+                    return Ok(Some(sceneworks_core::hashing::hex(&hasher.finalize())));
                 }
                 if written < expected && resume.take_network_resume() {
                     continue;
@@ -1393,7 +1360,7 @@ async fn download_file_inner(
         if let Some(expected) = expected_size {
             let written = tokio::fs::metadata(dest).await?.len();
             if written == expected {
-                return Ok(Some(format!("{:x}", hasher.finalize())));
+                return Ok(Some(sceneworks_core::hashing::hex(&hasher.finalize())));
             }
             if written < expected && resume.take_network_resume() {
                 continue;
@@ -1405,7 +1372,7 @@ async fn download_file_inner(
                 label, written, expected,
             )));
         }
-        return Ok(Some(format!("{:x}", hasher.finalize())));
+        return Ok(Some(sceneworks_core::hashing::hex(&hasher.finalize())));
     }
 }
 
@@ -1648,7 +1615,10 @@ fn normalize_etag(raw: &str) -> Option<String> {
 }
 
 fn blob_fallback_name(path: &str) -> String {
-    format!("path-{:x}", Sha256::digest(path.as_bytes()))
+    format!(
+        "path-{}",
+        sceneworks_core::hashing::sha256_bytes(path.as_bytes())
+    )
 }
 
 /// Materialize a snapshot entry pointing at its blob, returning whether it
@@ -2902,17 +2872,6 @@ mod resolve_hf_component_file_tests {
     const REPO: &str = "SceneWorks/sam3-mlx";
     const FILE: &str = "model.safetensors";
 
-    /// Neutralize the ambient HF cache env so `huggingface_repo_cache_path` resolves under the
-    /// test's own `data_dir` — else a developer's real `HF_HOME` wins and the test reads the
-    /// machine's actual 2.1 TB cache (the sc-13679 trap).
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
-
     fn settings_at(data_dir: PathBuf) -> Settings {
         Settings {
             api_url: "http://127.0.0.1:0".to_owned(),
@@ -2963,7 +2922,7 @@ mod resolve_hf_component_file_tests {
     /// The happy path: a pinned revision reads that exact `snapshots/<sha>/`.
     #[test]
     fn resolves_a_pinned_snapshot_file() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let staged = stage_snapshot_file(data_dir.path(), PIN, FILE);
 
@@ -2975,7 +2934,7 @@ mod resolve_hf_component_file_tests {
     /// An UNPINNED revision (`main`) takes the `refs/main`-preferring resolver.
     #[test]
     fn resolves_an_unpinned_revision_through_refs_main() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let staged = stage_snapshot_file(data_dir.path(), PIN, FILE);
         stage_refs_main(data_dir.path(), PIN);
@@ -2996,7 +2955,7 @@ mod resolve_hf_component_file_tests {
     /// every other test in this module and fails only this one.
     #[test]
     fn refuses_to_fall_back_from_an_uncached_pin_to_refs_main() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         stage_snapshot_file(data_dir.path(), OTHER_PIN, FILE);
         stage_refs_main(data_dir.path(), OTHER_PIN);
@@ -3013,7 +2972,7 @@ mod resolve_hf_component_file_tests {
     /// "install X from the Model Manager" error instead of a mid-render fetch.
     #[test]
     fn returns_none_when_the_component_is_not_installed() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let resolved =
             resolve_hf_component_file(&settings_at(data_dir.path().to_path_buf()), REPO, PIN, FILE);
@@ -3033,7 +2992,7 @@ mod resolve_hf_component_file_tests {
     /// produce, and it really is a file. Only then does the `None` mean confinement.
     #[test]
     fn confines_a_traversing_component_file() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let snapshot = stage_snapshot_file(data_dir.path(), PIN, FILE)
             .parent()
@@ -3063,7 +3022,7 @@ mod resolve_hf_component_file_tests {
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 mod atomic_cache_publication_tests {
     use super::*;
     use axum::{

@@ -4,35 +4,24 @@
 //! bounded acquisition, objective analysis, and survivor-only semantic work.
 //! Vectors and their searchable manifest stay outside SQLite; record metadata
 //! contains only small results, pointers, digests, and exact provenance.
-#![cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#![cfg_attr(not(native_lane), allow(dead_code))]
 
+use crate::text_clean::clean_fenced_json_output as clean_json_output;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use std::sync::Arc;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::catalog_store::CatalogProcessingLease;
 use sceneworks_core::catalog_store::{
     Catalog, CatalogAnalyzerConfig, CatalogRecord, CatalogRegistry, NewCatalogRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sha2::{Digest, Sha256};
 
 use crate::{WorkerError, WorkerResult};
@@ -48,7 +37,7 @@ const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
 const CLIP_PROVIDER: &str = CLIP_EMBEDDER_ID;
 const CLIP_SPACE: &str = "clip-vit-l14";
-pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "a43724b82fbae35c9227cef4bcdabba6dd1da12c";
+use sceneworks_core::inference_provenance::INFERENCE_REVISION as INFERENCE_RUNTIME_REVISION;
 const DEFAULT_BATCH_SIZE: usize = 16;
 const MAX_BATCH_SIZE: usize = 64;
 const PAGE_SIZE: u32 = 250;
@@ -225,26 +214,6 @@ pub fn parse_normalized_vision_result(text: &str) -> Result<NormalizedVisionResu
             .map(|(value, confidence)| ConfidentTag { value, confidence })
             .collect(),
     })
-}
-
-fn clean_json_output(text: &str) -> String {
-    let trimmed = text.trim();
-    let unfenced = if trimmed.starts_with("```") && trimmed.ends_with("```") {
-        let after_header = trimmed
-            .find('\n')
-            .map(|index| &trimmed[index + 1..])
-            .unwrap_or(trimmed);
-        after_header
-            .strip_suffix("```")
-            .unwrap_or(after_header)
-            .trim()
-    } else {
-        trimmed
-    };
-    match (unfenced.find('{'), unfenced.rfind('}')) {
-        (Some(start), Some(end)) if end >= start => unfenced[start..=end].to_owned(),
-        _ => unfenced.to_owned(),
-    }
 }
 
 fn normalize_token(value: &str) -> String {
@@ -541,41 +510,7 @@ fn reconcile_semantic_records(
 }
 
 fn resolve_catalog_image(catalog: &Catalog, record: &CatalogRecord) -> WorkerResult<PathBuf> {
-    let relative = record
-        .metadata
-        .pointer("/acquisition/cachePath")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            (!record.image_path.contains("://") && !record.image_path.trim().is_empty())
-                .then_some(record.image_path.as_str())
-        })
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "catalog record {} has no available local image",
-                record.id
-            ))
-        })?;
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "catalog record {} has an unsafe image path",
-            record.id
-        )));
-    }
-    let candidate = catalog.root().join(path);
-    let resolved = candidate.canonicalize().map_err(WorkerError::Io)?;
-    let root = catalog.root().canonicalize().map_err(WorkerError::Io)?;
-    if !resolved.starts_with(&root) || !resolved.is_file() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "catalog record {} image escapes its catalog",
-            record.id
-        )));
-    }
-    Ok(resolved)
+    catalog.resolve_local_image(record).map_err(WorkerError::Io)
 }
 
 fn l2_normalize(mut vector: Vec<f32>) -> Result<Vec<f32>, String> {
@@ -656,10 +591,7 @@ fn persist_semantic_checkpoint(
 /// Decode the vision-policy JSON on the resident `model` and record the generation's
 /// `llm_kv_cache` event whichever way it ends: completed, or refused, canceled or failed by the
 /// engine (sc-20682, sc-20688).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn run_vision_generation(
     model: &dyn gen_core::core_llm::TextLlm,
     request: &gen_core::core_llm::TextLlmRequest,
@@ -689,10 +621,7 @@ fn run_vision_generation(
         .map_err(|error| WorkerError::Engine(format!("catalog vision inference failed: {error}")))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn generate_vision_json(
     api: &crate::ApiClient,
     settings: &crate::Settings,
@@ -755,21 +684,17 @@ async fn generate_vision_json(
             run_vision_generation(model, &request, &job_id)
         },
     );
-    tokio::pin!(generation);
-    loop {
-        tokio::select! {
-            result = &mut generation => return result,
-            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                if crate::shutdown_requested()
-                    || crate::cancel_requested_peek(api, &job.id).await
-                {
-                    cancel.cancel();
-                    return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-                }
-                crate::heartbeat(api, settings, sceneworks_core::contracts::WorkerStatus::Busy, Some(&job.id)).await?;
-            }
-        }
+    // The cache-thread reply resolves only after native generation has stopped. Never drop that
+    // reply future on cancel: the caller still owns the catalog-processing lease until this join.
+    let (canceled, result) =
+        crate::StreamSupervisor::new(cancel, generation, std::time::Duration::from_secs(2), None)
+            .wait(api, settings, &job.id)
+            .await?;
+    if canceled {
+        crate::mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
+    result
 }
 
 fn apply_vision_outcome(
@@ -836,10 +761,7 @@ fn apply_vision_outcome(
     Ok(())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn run_vision_pass(
     api: &crate::ApiClient,
     settings: &crate::Settings,
@@ -907,10 +829,7 @@ async fn run_vision_pass(
     Ok((examined, updated))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn fetch_catalog_images_with_heartbeat(
     api: &crate::ApiClient,
     settings: &crate::Settings,
@@ -920,32 +839,28 @@ async fn fetch_catalog_images_with_heartbeat(
     options: &crate::catalog_image_fetch::CatalogImageFetchOptions,
     processing: &CatalogProcessingLease,
 ) -> WorkerResult<crate::catalog_image_fetch::CatalogImageFetchReport> {
-    use sceneworks_core::contracts::WorkerStatus;
-
+    let cancel = gen_core::CancelFlag::new();
     let fetch = crate::catalog_image_fetch::fetch_attached_catalog_images_under_processing_lease(
-        registry, catalog_id, options, processing,
+        registry, catalog_id, options, processing, &cancel,
     );
-    tokio::pin!(fetch);
-    let mut interval = tokio::time::interval(crate::progress_report_interval(settings));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            result = &mut fetch => {
-                return result
-                    .map_err(|error| WorkerError::Engine(format!("catalog image fetch failed: {error}")));
-            }
-            _ = interval.tick() => {
-                crate::heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await?;
-                crate::check_cancel(api, job_id, CANCEL_MESSAGE).await?;
-            }
-        }
+    // Cancel stops admission at the next bounded fetch batch, drains its active downloads and
+    // finishes the fetch future before its compatibility lock or the outer processing lease drops.
+    let (canceled, result) = crate::StreamSupervisor::new(
+        cancel.clone(),
+        fetch,
+        crate::progress_report_interval(settings),
+        None,
+    )
+    .wait(api, settings, job_id)
+    .await?;
+    if canceled {
+        crate::mark_job_canceled(api, job_id, CANCEL_MESSAGE).await?;
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
+    result.map_err(|error| WorkerError::Engine(format!("catalog image fetch failed: {error}")))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn run_embedding_pass_blocking(
     registry: CatalogRegistry,
     catalog_id: String,
@@ -1162,10 +1077,7 @@ fn run_embedding_pass_blocking(
     Ok((examined, updated))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn run_embedding_pass_with_index_reconciliation(
     registry: CatalogRegistry,
     catalog_id: String,
@@ -1313,10 +1225,7 @@ fn rebuild_embedding_index_streaming(
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_catalog_analysis_job(
     api: &crate::ApiClient,
     settings: &crate::Settings,
@@ -1324,12 +1233,7 @@ pub(crate) async fn run_catalog_analysis_job(
 ) -> WorkerResult<()> {
     use sceneworks_core::contracts::{JobStatus, ProgressStage, WorkerStatus};
 
-    let catalog_id = job
-        .payload
-        .get("catalogId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let catalog_id = crate::payload::trimmed_string(job.payload.get("catalogId"))
         .ok_or_else(|| {
             WorkerError::InvalidPayload("catalog analysis requires catalogId".to_owned())
         })?
@@ -1710,7 +1614,7 @@ fn validate_pipeline_settings(config: &CatalogAnalyzerConfig) -> WorkerResult<()
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_catalog_analysis_job(
     _api: &crate::ApiClient,
     _settings: &crate::Settings,
@@ -1728,10 +1632,7 @@ mod tests {
 
     /// sc-20688: a vision decode the engine refuses still records its `llm_kv_cache` event, with
     /// the requested policy, the outcome and the refusal.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn a_refused_vision_generation_records_its_kv_cache_event() {
         use crate::llm_kv_cache::test_support::{events_for, RefusingLlm};
@@ -2270,8 +2171,9 @@ mod tests {
             .nth(1)
             .and_then(|body| body.split("fn run_embedding_pass_blocking").next())
             .expect("fetch helper source");
-        assert!(fetch.contains("crate::heartbeat("));
-        assert!(fetch.contains("crate::check_cancel("));
+        assert!(fetch.contains("crate::StreamSupervisor::new("));
+        assert!(fetch.contains(".wait(api, settings, job_id)"));
+        assert!(fetch.contains("crate::mark_job_canceled(api, job_id, CANCEL_MESSAGE)"));
         let handler = source
             .split("pub(crate) async fn run_catalog_analysis_job")
             .nth(1)

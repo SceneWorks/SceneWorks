@@ -194,10 +194,7 @@ where
     // them — and on CUDA the free-VRAM probe would count the departing model and refuse a run that
     // fits once it is gone.
     evict_resident_engines().await?;
-    #[cfg(target_os = "macos")]
-    let available_gb = mlx_available_gb();
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let available_gb = candle_free_gb(settings).await;
+    let available_gb = crate::fit_gate::lane_available_gb(&settings.gpu_id).await;
     let declaration = DepthAdmission::from_payload(&job.payload, ADMISSION_LANE)?;
     admission_decision(&declaration, &plan, available_gb)?;
 
@@ -525,9 +522,7 @@ impl DepthAdmission {
         // the release `iris_3b_depth` entry.
         let model = payload
             .get(sceneworks_core::image_restoration::IRIS_MODEL_KEY)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(DEPTH_MODEL_ID);
         let entry = payload
             .get("modelManifestEntries")
@@ -588,29 +583,6 @@ impl DepthAdmission {
 const ADMISSION_LANE: &str = "mlx";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const ADMISSION_LANE: &str = "candle";
-
-/// The MLX budget: the (capped) unified-memory total minus the host reserve. `None` when it cannot be
-/// probed — which refuses rather than admitting unbounded.
-#[cfg(target_os = "macos")]
-fn mlx_available_gb() -> Option<f64> {
-    let total_gb = crate::mlx_fit_gate::resolve_budget(
-        crate::mlx_fit_gate::probe_total_unified_memory_bytes()
-            .map(|bytes| bytes as f64 / (1u64 << 30) as f64),
-        crate::mlx_fit_gate::mlx_memory_cap_gb(),
-    )?
-    .total_gb;
-    Some(total_gb - crate::fit_gate::legacy_unified_reserve(total_gb).gb)
-}
-
-/// The Candle budget: free VRAM on the selected card (capped), minus the allocator headroom.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-async fn candle_free_gb(settings: &Settings) -> Option<f64> {
-    crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    )
-    .map(|budget| budget.free_gb - crate::vram_gate::HEADROOM_GB)
-}
 
 /// Admit or refuse BEFORE loading. Never shrinks the requested resolution: a refusal names the
 /// numbers and the explicit alternative (a smaller cap).

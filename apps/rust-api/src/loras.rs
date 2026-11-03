@@ -1778,7 +1778,8 @@ pub(crate) fn validate_lora_specs_for_model(
             )));
         }
         if families.iter().any(|family| family == "ltx-video")
-            && model_id == "ltx_2_5"
+            && sceneworks_core::model_facts::lora_generation(model_id, model.as_object())
+                == Some("2.5")
             && declared_model_ids.is_empty()
             && lora_base_model(lora).is_none()
         {
@@ -1809,10 +1810,15 @@ pub(crate) fn validate_lora_specs_for_model(
                 // extra-compatible arm that keeps the 5B-vs-14B split while letting a Wan-14B
                 // LoRA onto a 14B-class model that accepts `wan-video` through the registry —
                 // its recorded base can never equal that model's id.
-                if !sceneworks_core::lora_family::base_model_satisfies_gate(
+                if !sceneworks_core::lora_family::base_model_satisfies_gate_with_manifest(
                     &model_own_family,
                     model_id,
                     &base_model,
+                    model.as_object(),
+                    models
+                        .iter()
+                        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(&base_model))
+                        .and_then(Value::as_object),
                 ) {
                     let detail = if families.iter().any(|family| family == "ltx-video") {
                         "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable"

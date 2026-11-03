@@ -4346,10 +4346,8 @@ fn publish_rename_error(
 }
 
 fn random_id() -> Result<String, ResolvedCacheError> {
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| ResolvedCacheError::new(format!("generate cache id: {error}")))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    crate::hashing::random_hex(16)
+        .map_err(|error| ResolvedCacheError::new(format!("generate cache id: {error}")))
 }
 
 fn now_seconds() -> Result<u64, ResolvedCacheError> {

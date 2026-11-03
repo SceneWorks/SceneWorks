@@ -711,18 +711,7 @@ pub(super) async fn download_media(
 
 /// A project-relative media path that is safe to interpolate into the file route: no absolute
 /// path, no `..`, no escaping or encoding needed.
-pub(super) fn is_safe_media_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.starts_with('/')
-        && !path.split('/').any(|segment| {
-            segment.is_empty()
-                || segment == ".."
-                || segment == "."
-                || !segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        })
-}
+pub(super) use sceneworks_core::safe_path::is_safe_media_path;
 
 // ---------------------------------------------------------------------------------------------
 // HTTP transport (the binary's)

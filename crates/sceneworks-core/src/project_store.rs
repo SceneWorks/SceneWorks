@@ -43,7 +43,7 @@ use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
 use crate::store_util::{
     ensure_column, is_safe_id, is_safe_relative_path, lock_project_files, optional_f64,
-    optional_str, optional_u64, random_hex, read_json, relative_string, write_json,
+    optional_str, optional_u64, random_hex, read_json, relative_string, required_str, write_json,
 };
 use crate::time::utc_now;
 use crate::training::TrainingDataset;
@@ -183,6 +183,15 @@ impl std::fmt::Display for ProjectStoreError {
 }
 
 impl std::error::Error for ProjectStoreError {}
+
+impl From<crate::media_convert::IngestImageError> for ProjectStoreError {
+    fn from(error: crate::media_convert::IngestImageError) -> Self {
+        match error {
+            crate::media_convert::IngestImageError::Io(error) => Self::Io(error),
+            error => Self::BadRequest(error.to_string()),
+        }
+    }
+}
 
 impl From<std::io::Error> for ProjectStoreError {
     fn from(error: std::io::Error) -> Self {
@@ -626,17 +635,8 @@ fn registry_content_sha256(file: &mut fs::File) -> ProjectStoreResult<[u8; 32]> 
     record_asset_list_filesystem_operation(AssetListFilesystemOperation::RegistryContentRead);
     let mut hasher = Sha256::new();
     let mut limited = file.take(MAX_REGISTRY_BYTES + 1);
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let read = limited.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        ensure_registry_size(total)?;
-        hasher.update(&buffer[..read]);
-    }
+    crate::hashing::update_sha256(&mut limited, &mut hasher)?;
+    ensure_registry_size(MAX_REGISTRY_BYTES + 1 - limited.limit())?;
     Ok(hasher.finalize().into())
 }
 
@@ -2778,7 +2778,11 @@ impl ProjectStore {
                 "Asset media path must be project-relative".to_owned(),
             ));
         }
-        Ok(project_path.join(media_rel))
+        crate::safe_path::resolve_local_file(&project_path, media_rel).map_err(|error| {
+            ProjectStoreError::BadRequest(format!(
+                "Asset media path is not a confined project file: {error}"
+            ))
+        })
     }
 
     pub fn list_characters(
@@ -3004,7 +3008,7 @@ impl ProjectStore {
     }
 
     pub fn get_person_track(&self, project_id: &str, track_id: &str) -> ProjectStoreResult<Value> {
-        if !is_safe_track_id(track_id) {
+        if !is_safe_id(track_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid person track ID".to_owned(),
             ));
@@ -3041,7 +3045,7 @@ impl ProjectStore {
         track_id: &str,
         corrections: Vec<Value>,
     ) -> ProjectStoreResult<Value> {
-        if !is_safe_track_id(track_id) {
+        if !is_safe_id(track_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid person track ID".to_owned(),
             ));
@@ -3686,40 +3690,14 @@ impl ProjectStore {
         // decodable and never mislabeled (sc-6143) — without this an AVIF capture would be copied
         // verbatim under a `.png` name. A sniffable supported format keeps its bytes; when the magic
         // bytes aren't recognized at all (e.g. SVG) we fall back to the extension, then PNG.
-        let source_kind = crate::media_convert::sniff_image_kind_at(&canonical_source);
-        let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
-        let (ext, mime) = if needs_transcode {
-            ("png", "image/png")
-        } else {
-            sniff_image_format(&canonical_source)
-                .or_else(|| {
-                    canonical_source
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        .and_then(|value| match value.to_ascii_lowercase().as_str() {
-                            "jpg" | "jpeg" => Some(("jpg", "image/jpeg")),
-                            "webp" => Some(("webp", "image/webp")),
-                            "png" => Some(("png", "image/png")),
-                            _ => None,
-                        })
-                })
-                .unwrap_or(("png", "image/png"))
-        };
-        let media_path = dir.join(format!("{asset_id}.{ext}"));
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
-        if needs_transcode {
-            let kind = source_kind.expect("needs_transcode implies a sniffed kind");
-            crate::media_convert::transcode_to_png(&canonical_source, &media_path).map_err(
-                |error| {
-                    ProjectStoreError::BadRequest(format!(
-                        "Could not convert {} image to a supported format: {error}",
-                        kind.label()
-                    ))
-                },
-            )?;
-        } else {
-            fs::copy(&canonical_source, &media_path)?;
-        }
+        let ingested = crate::media_convert::ingest_image_with_naming(
+            &canonical_source,
+            &dir.join(&asset_id),
+            crate::media_convert::ImageCopyNaming::Canonical,
+        )?;
+        let media_path = ingested.path;
+        let mime = ingested.mime;
         let media_rel = relative_string(&project_path, &media_path)?;
 
         let source_asset_id = spec
@@ -4787,19 +4765,17 @@ impl ProjectStore {
         }
         let project_path = self.find_project_path(project_id)?;
         let root = fs::canonicalize(&project_path)?;
-        let target = project_path.join(relative_path);
-        let target = fs::canonicalize(&target).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ProjectStoreError::NotFound("File not found".to_owned())
-            } else {
-                ProjectStoreError::Io(error)
-            }
-        })?;
-        if !target.starts_with(&root) {
-            return Err(ProjectStoreError::BadRequest(
-                "Invalid project file path".to_owned(),
-            ));
-        }
+        let target = crate::safe_path::resolve_local_file(&project_path, relative_path).map_err(
+            |error| match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    ProjectStoreError::NotFound("File not found".to_owned())
+                }
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput => {
+                    ProjectStoreError::BadRequest("Invalid project file path".to_owned())
+                }
+                _ => ProjectStoreError::Io(error),
+            },
+        )?;
         // Recheck the canonical relative path too: a public-looking symlink must
         // never turn this read-only media boundary into access to internal state.
         if !target.is_file() || !target.strip_prefix(&root).is_ok_and(is_public_project_file) {
@@ -6968,19 +6944,6 @@ fn build_document_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Va
     (file, recipe, lineage)
 }
 
-/// Parse + validate the 5-point normalized kps from a spec into a JSON `[[x,y]×5]` array.
-/// Sniff a still-image format from its magic bytes → `(extension, mime)`, or `None` when the
-/// header isn't a format the library retains. Used to label a captured keypoint source correctly
-/// regardless of the staged temp file's (extension-less) name.
-/// Recognize a natively-decodable image (png/jpeg/webp) from its magic bytes, returning the
-/// `(extension, mime)` to store it under. Returns `None` for any other format — the keypoint path's
-/// callers then fall back to the extension/PNG. Delegates to the shared [`crate::media_convert`]
-/// sniffer so there is one source of truth for image magic bytes (sc-6143).
-fn sniff_image_format(path: &Path) -> Option<(&'static str, &'static str)> {
-    let kind = crate::media_convert::sniff_image_kind_at(path)?;
-    kind.is_natively_supported().then(|| kind.canonical())
-}
-
 /// The outcome of import-time image normalization (sc-6143): the path whose bytes should be moved
 /// into the asset store, plus the mime type and file extension to record. When `transcoded_temp` is
 /// set, the move consumes that temp PNG (not the original upload), so the caller must remove the
@@ -7919,18 +7882,6 @@ fn read_dir_paths(path: &Path) -> ProjectStoreResult<Vec<PathBuf>> {
         .collect()
 }
 
-fn is_safe_track_id(track_id: &str) -> bool {
-    !track_id.trim().is_empty()
-        && track_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-}
-
-fn required_str<'a>(payload: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
-    optional_str(payload, key)
-        .ok_or_else(|| ProjectStoreError::BadRequest(format!("Missing required field: {key}")))
-}
-
 fn normalize_asset_tags(tags: &[String]) -> ProjectStoreResult<Vec<String>> {
     let mut seen = BTreeSet::new();
     let mut normalized = Vec::new();
@@ -8116,14 +8067,14 @@ mod tests {
         fail_next_asset_sidecar_remove, fail_next_upscale_lineage_db_read, find_timeline_file,
         guess_mime_from_filename, index_timeline, install_ensure_ready_before_lock_hook,
         is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags,
-        normalize_image_upload, read_json, read_registry_payload, sniff_image_format,
-        upload_extension, upscale_lineage_group, write_json, AssetIndexMutation, AssetScope,
-        AssetStatusPatch, CharacterCreateInput, CharacterLookInput, CharacterReferenceInput,
-        FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset, WorkflowScan,
-        ASSET_INDEX_DIRTY_MARKER, ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID,
-        GLOBAL_POSES_PROJECT_ID, IMPORTED_WORKFLOW_KEY, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR,
-        PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION,
-        SAFE_UPLOAD_EXTENSIONS, UPSCALE_LINEAGE_QUERY,
+        normalize_image_upload, read_json, read_registry_payload, upload_extension,
+        upscale_lineage_group, write_json, AssetIndexMutation, AssetScope, AssetStatusPatch,
+        CharacterCreateInput, CharacterLookInput, CharacterReferenceInput, FilmReferenceInput,
+        ProjectStore, ProjectStoreError, UploadAsset, WorkflowScan, ASSET_INDEX_DIRTY_MARKER,
+        ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
+        IMPORTED_WORKFLOW_KEY, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS,
+        PROJECT_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        UPSCALE_LINEAGE_QUERY,
     };
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
@@ -14013,7 +13964,7 @@ mod tests {
             .resolve_asset_media_path(&project.id, &asset_id)
             .expect("resolve safe id");
         assert!(resolved.is_file());
-        assert!(resolved.starts_with(temp_dir.path()));
+        assert!(resolved.starts_with(temp_dir.path().canonicalize().unwrap()));
 
         // A `../` escape id is rejected outright (never joined into a path).
         for escape in ["../../etc/passwd", "..", "a/../../b"] {
@@ -14023,6 +13974,44 @@ mod tests {
                 "traversal id {escape:?} must be rejected, got {result:?}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_asset_media_path_rejects_replaced_media_symlink() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temporary.path().join("data"), "test");
+        let project = store.create_project("Symlink boundary").unwrap();
+        let source = temporary.path().join("source.png");
+        fs::write(&source, b"fixture").unwrap();
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "source.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .unwrap();
+        let id = asset["id"].as_str().unwrap();
+        let media = store.resolve_asset_media_path(&project.id, id).unwrap();
+        let outside = temporary.path().join("outside.png");
+        fs::write(&outside, b"outside").unwrap();
+        fs::remove_file(&media).unwrap();
+        std::os::unix::fs::symlink(&outside, &media).unwrap();
+        assert!(matches!(
+            store.resolve_asset_media_path(&project.id, id),
+            Err(ProjectStoreError::BadRequest(_))
+        ));
+        assert!(store
+            .project_file(
+                &project.id,
+                asset.pointer("/file/path").and_then(Value::as_str).unwrap()
+            )
+            .is_err());
     }
 
     /// sc-13517: `saved_voices` rows are DB-authoritative and MUST survive a reindex. The reindex
@@ -15354,20 +15343,37 @@ mod tests {
     }
 
     #[test]
-    fn sniff_image_format_reads_magic_bytes() {
+    fn ingest_image_names_extensionless_magic_bytes() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let png = temp_dir.path().join("a.bin");
-        std::fs::write(&png, b"\x89PNG\r\n\x1a\n....").unwrap();
-        assert_eq!(sniff_image_format(&png), Some(("png", "image/png")));
-        let jpg = temp_dir.path().join("b.bin");
-        std::fs::write(&jpg, [0xFF, 0xD8, 0xFF, 0xE0]).unwrap();
-        assert_eq!(sniff_image_format(&jpg), Some(("jpg", "image/jpeg")));
-        let webp = temp_dir.path().join("c.bin");
-        std::fs::write(&webp, b"RIFF\x00\x00\x00\x00WEBPVP8 ").unwrap();
-        assert_eq!(sniff_image_format(&webp), Some(("webp", "image/webp")));
-        let other = temp_dir.path().join("d.bin");
-        std::fs::write(&other, b"not an image").unwrap();
-        assert_eq!(sniff_image_format(&other), None);
+        for (name, bytes, expected) in [
+            (
+                "png",
+                b"\x89PNG\r\n\x1a\n....".as_slice(),
+                ("png", "image/png"),
+            ),
+            (
+                "jpg",
+                [0xff, 0xd8, 0xff, 0xe0].as_slice(),
+                ("jpg", "image/jpeg"),
+            ),
+            (
+                "webp",
+                b"RIFF\0\0\0\0WEBPVP8 ".as_slice(),
+                ("webp", "image/webp"),
+            ),
+            ("other", b"not an image".as_slice(), ("png", "image/png")),
+        ] {
+            let source = temp_dir.path().join(format!("{name}.bin"));
+            std::fs::write(&source, bytes).unwrap();
+            let result = crate::media_convert::ingest_image_with_naming(
+                &source,
+                &temp_dir.path().join(format!("stored-{name}")),
+                crate::media_convert::ImageCopyNaming::Canonical,
+            )
+            .unwrap();
+            assert_eq!((result.extension.as_str(), result.mime), expected);
+            assert_eq!(std::fs::read(result.path).unwrap(), bytes);
+        }
     }
 
     #[test]

@@ -21,17 +21,11 @@ fn ort_upscaler_cache_key_includes_factor_and_resolved_path() {
 }
 // `Rgb`/`RgbImage` back the Real-ESRGAN tiling/crop tests + the off-Mac ort smoke (the `ort` path,
 // macOS + the candle lane) AND the SeedVR2 real-weight smoke (Mac MLX + the candle lane).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use image::{Rgb, RgbImage};
 use serde_json::json;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn tile_slices_single_when_image_fits() {
     // tile >= max(w,h) → one tile covering the whole image (upscalers.py).
@@ -49,10 +43,7 @@ fn tile_slices_single_when_image_fits() {
     assert_eq!(tile_slices(512, 512, 512).len(), 1);
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn tile_slices_grid_row_major_clamped() {
     // 768x768 @ tile 512 → 2x2 grid, edge tiles clamped to bounds.
@@ -99,19 +90,13 @@ fn tile_slices_grid_row_major_clamped() {
     assert_eq!(covered, 768 * 768);
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn tile_slices_zero_tile_is_single() {
     assert_eq!(tile_slices(100, 50, 0).len(), 1);
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn crop_to_chw_layout_and_normalization() {
     let mut img = RgbImage::new(3, 2);
@@ -136,10 +121,7 @@ fn crop_to_chw_layout_and_normalization() {
     assert!((data[g_plane - 1] - 1.0).abs() < 1e-6); // R(2,1)=255 last in R plane
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn crop_to_chw_subregion() {
     let mut img = RgbImage::new(4, 4);
@@ -157,10 +139,7 @@ fn crop_to_chw_subregion() {
     assert!((data[g + 3] - 20.0 / 255.0).abs() < 1e-6);
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn pad_chw_even_replicates_to_even_dims_for_pixel_unshuffle() {
     // odd width (the 323px-wide regression): 3x2 CHW → padded to 4x2, the new column replicates
@@ -196,10 +175,7 @@ fn pad_chw_even_replicates_to_even_dims_for_pixel_unshuffle() {
 }
 
 /// Tiny deterministic CHW buffer (each channel a distinct gradient) for the padding test.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn crop_chw_const_gradient(cw: usize, ch: usize) -> (Vec<f32>, usize, usize) {
     let mut data = vec![0.0f32; 3 * cw * ch];
     for c in 0..3 {
@@ -212,10 +188,7 @@ fn crop_chw_const_gradient(cw: usize, ch: usize) -> (Vec<f32>, usize, usize) {
     (data, cw, ch)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn onnx_filename_per_factor() {
     assert_eq!(onnx_file(2), "real_esrgan_x2.onnx");
@@ -241,10 +214,7 @@ fn image_upscale_factor_accepts_2_and_4_rejects_others() {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn manifest_onnx_resource_extracts_repo_file() {
     let entry = json!({
@@ -302,10 +272,7 @@ fn upscale_target_dimensions_are_bounded_before_allocation() {
 
 /// Resolve the locally-cached `numz/SeedVR2_comfyUI` checkpoint dir (env override or the HF cache),
 /// so the smoke below can run on real weights without a download. `None` ⇒ skip.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn cached_seedvr2_checkpoint() -> Option<std::path::PathBuf> {
     if let Ok(pinned) = std::env::var("SCENEWORKS_SEEDVR2_CHECKPOINT") {
         let dir = std::path::PathBuf::from(pinned);
@@ -328,10 +295,7 @@ fn cached_seedvr2_checkpoint() -> Option<std::path::PathBuf> {
 /// end). Gated on the checkpoint being present (skips in CI, which has no weights), mirroring the
 /// family worker E2E smokes. Set `SCENEWORKS_SEEDVR2_CHECKPOINT` to the ckpt dir and run with
 /// `cargo test -p sceneworks-worker --features backend-candle -- --ignored seedvr2_upscale_real_weight_smoke`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test]
 #[ignore = "real-weight: needs the cached numz/SeedVR2_comfyUI checkpoint (~7 GB) + the seedvr2 backend (MLX on Mac / candle on Windows)"]
 async fn seedvr2_upscale_real_weight_smoke() {
@@ -825,10 +789,7 @@ fn validate_upscale_output_rejects_mismatched_shapes() {
 /// sc-17633 (epic 17625) — the Real-ESRGAN ONNX resolves from the HF cache and can no longer
 /// download. Before this, `ensure_onnx` fetched ~67 MB per factor mid-upscale into
 /// `<data_dir>/cache/upscale/`, a destination the Models screen can neither size nor delete.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod resolve_onnx_tests {
     use super::*;
 
@@ -962,10 +923,7 @@ mod resolve_onnx_tests {
 /// Neither legacy destination exists on the machine this was written on, so the AC10 fallbacks are
 /// exercised against STAGED fixtures (`stage_legacy`) rather than real bytes; what they pin is the
 /// resolution ORDER and the whole-pair-per-root rule, which is what an upgrade depends on.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod resolve_seedvr2_tests {
     use super::*;
 

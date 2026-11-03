@@ -58,7 +58,7 @@ fn read_weights(path: &Path) -> WorkerResult<Vec<u8>> {
     read_ranges(path, std::slice::from_ref(&(0..length)))
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) fn ort_session(
     mut builder: ort::session::builder::SessionBuilder,
     path: &Path,
@@ -753,7 +753,7 @@ mod tests {
 
     // Session creation can execute ORT graph optimizations. It is deliberately excluded from
     // ordinary CI; the explicit sc-27984 validation profile records this dedicated runtime smoke.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     #[ignore = "dedicated model validation only: ORT session creation may execute graph kernels"]
     fn external_initializer_session_creation_acceptance() {

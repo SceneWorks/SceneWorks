@@ -32,7 +32,9 @@ use std::sync::{mpsc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use gen_core::{LoadSpec, Precision, Quant, Transform, WeightsSource};
+#[cfg(test)]
+use gen_core::WeightsSource;
+use gen_core::{LoadSpec, Precision, Quant, Transform};
 
 use crate::cache_thread::{self, CacheJob, Fingerprint, SeamMessages};
 use crate::{WorkerError, WorkerResult};
@@ -41,8 +43,10 @@ type TransformJob = CacheJob<TransformIdentity, Box<dyn Transform>>;
 
 /// Same knob and default as the generator and refine caches, so one setting bounds resident model
 /// memory across all three lanes.
-const TRANSFORM_CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
-const DEFAULT_TRANSFORM_CACHE_IDLE_SECONDS: u64 = 300;
+#[cfg(test)]
+const TRANSFORM_CACHE_IDLE_SECONDS_ENV: &str = cache_thread::CACHE_IDLE_SECONDS_ENV;
+#[cfg(test)]
+const DEFAULT_TRANSFORM_CACHE_IDLE_SECONDS: u64 = cache_thread::DEFAULT_CACHE_IDLE_SECONDS;
 
 /// Free the prior resident transform's backend allocation before a cold load (the refine cache's
 /// policy): a transform has no fit-gate/residency ladder that sizes the load inside the loader, so
@@ -68,9 +72,7 @@ pub(crate) struct TransformIdentity {
 
 impl TransformIdentity {
     pub(crate) fn new(engine_id: &str, spec: &LoadSpec) -> Self {
-        let weights = match &spec.weights {
-            WeightsSource::Dir(path) | WeightsSource::File(path) => path.clone(),
-        };
+        let weights = crate::weights_source::WeightsSourceExt::path(&spec.weights).to_path_buf();
         Self {
             engine_id: engine_id.to_owned(),
             weights_fingerprint: Fingerprint::of(&weights),
@@ -105,11 +107,7 @@ fn directory_entry_fingerprints(dir: &Path) -> Vec<(String, Fingerprint)> {
 fn transform_worker() -> &'static mpsc::Sender<TransformJob> {
     TRANSFORM_WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<TransformJob>();
-        let idle_timeout = transform_cache_idle_timeout(
-            std::env::var(TRANSFORM_CACHE_IDLE_SECONDS_ENV)
-                .ok()
-                .as_deref(),
-        );
+        let idle_timeout = cache_thread::idle_timeout_from_env();
         thread::Builder::new()
             .name("sceneworks-transform-cache".to_owned())
             .spawn(move || run_transform_cache_worker(rx, idle_timeout))
@@ -134,6 +132,7 @@ fn run_transform_cache_worker(rx: mpsc::Receiver<TransformJob>, idle_timeout: Op
     );
 }
 
+#[cfg(test)]
 fn transform_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
     cache_thread::idle_timeout_from_secs(raw, DEFAULT_TRANSFORM_CACHE_IDLE_SECONDS)
 }
@@ -152,10 +151,7 @@ const TRANSFORM_SEAM_MESSAGES: SeamMessages = SeamMessages {
 /// the transform thread (its own eviction of a resident transform runs from async code), so this
 /// cannot deadlock.
 fn evict_resident_generator_before_transform_load() -> WorkerResult<()> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         let evicted = crate::generator_cache::evict_cached_generator_blocking()?;
         if evicted {

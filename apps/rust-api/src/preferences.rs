@@ -233,12 +233,7 @@ fn normalize_accent(input: Option<&str>) -> Option<String> {
 
 fn normalize_preference_id(input: Option<&str>, max_len: usize) -> Option<String> {
     let value = input.map(str::trim)?;
-    (!value.is_empty()
-        && value.len() <= max_len
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_-".contains(character)))
-    .then(|| value.to_owned())
+    sceneworks_core::ids::is_safe_id_with_max(value, max_len).then(|| value.to_owned())
 }
 
 /// The valid stored generation quality for `input`, falling back to the q8 default when

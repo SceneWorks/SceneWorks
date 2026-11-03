@@ -102,8 +102,7 @@ pub fn read_run_record(run_dir: &Path) -> Result<RunRecord, HarnessError> {
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 /// The key one attempt of one shot dispatches under. Stable across restarts because every part of

@@ -11,20 +11,6 @@ use super::*;
 use crate::fit_gate::BYTES_PER_GIB;
 use crate::vram_gate::LoadPlan;
 
-fn source_path(source: &WeightsSource) -> &Path {
-    match source {
-        WeightsSource::Dir(path) | WeightsSource::File(path) => path,
-    }
-}
-
-fn path_weight_bytes(path: &Path) -> u64 {
-    match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() => metadata.len(),
-        Ok(metadata) if metadata.is_dir() => crate::mlx_fit_gate::sum_safetensors_bytes(path),
-        _ => 0,
-    }
-}
-
 /// Sum the exact files/directories a bespoke load consumes without double-counting a
 /// file already covered by a recursively scanned directory.
 fn distinct_weight_bytes(paths: &[&Path]) -> u64 {
@@ -38,7 +24,7 @@ fn distinct_weight_bytes(paths: &[&Path]) -> u64 {
         kept.push(path);
     }
     kept.into_iter().fold(0_u64, |total, path| {
-        total.saturating_add(path_weight_bytes(path))
+        total.saturating_add(crate::weights_source::path_weight_bytes(path))
     })
 }
 
@@ -211,10 +197,7 @@ pub(super) async fn admit_candle_base(
         );
     }
 
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let (plan, budget) = gate_with_evict_reclaim(
         &settings.gpu_id,
         raw_budget,
@@ -282,10 +265,7 @@ pub(super) async fn admit_candle_base_floor_with_resident_overlay(
         );
         return Ok(());
     };
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let (plan, budget) = gate_with_evict_reclaim(
         &settings.gpu_id,
         raw_budget,
@@ -369,11 +349,9 @@ impl CachedCandleBaseFloorAdmission {
             );
             return Ok(());
         };
-        let raw_budget = crate::vram_gate::apply_vram_cap(
-            self.runtime
-                .block_on(crate::gpu::nvidia_vram_budget_gb(&self.gpu_id)),
-            crate::vram_gate::cuda_vram_cap_gb(),
-        );
+        let raw_budget = self
+            .runtime
+            .block_on(crate::vram_gate::live_capped_budget(&self.gpu_id));
         let reclaimable_gb = resident_reclaimable_weight_bytes as f64 / BYTES_PER_GIB;
         let budget = cached_floor_budget(raw_budget, resident_reclaimable_weight_bytes);
         let needed = Some(floor_gb);
@@ -479,12 +457,18 @@ pub(super) async fn admit_candle_load_spec_floor(
     settings: &Settings,
     spec: &LoadSpec,
 ) -> WorkerResult<()> {
-    let mut paths = vec![source_path(&spec.weights)];
+    let mut paths = vec![crate::weights_source::WeightsSourceExt::path(&spec.weights)];
     paths.extend(spec.adapters.iter().map(|adapter| adapter.path.as_path()));
-    paths.extend(spec.components.values().map(source_path));
+    paths.extend(
+        spec.components
+            .values()
+            .map(crate::weights_source::WeightsSourceExt::path),
+    );
     if let Some(pid) = &spec.pid {
-        paths.push(source_path(&pid.checkpoint));
-        paths.push(source_path(&pid.gemma));
+        paths.push(crate::weights_source::WeightsSourceExt::path(
+            &pid.checkpoint,
+        ));
+        paths.push(crate::weights_source::WeightsSourceExt::path(&pid.gemma));
     }
     admit_candle_base_floor(model, lane, settings, &paths).await
 }

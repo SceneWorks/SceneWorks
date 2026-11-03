@@ -30,10 +30,7 @@ use sceneworks_core::video_request::{
 // gated to the macOS / backend-candle lanes (the shared `generate_video` funnel) —
 // so gate the import to match, or the Linux-no-candle "neither" build sees it as
 // unused (`-D warnings`, the sc-10404 dead-code trap).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::contracts::GenerationMetrics;
 
 use super::*;
@@ -43,35 +40,22 @@ use crate::media_jobs::{run_ffmpeg, run_ffmpeg_with_stdin_chunks, FfmpegContext}
 /// list explicit prevents a family from silently inheriting newly imported parent
 /// names or flattening another engine family's namespace.
 mod prelude {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::load_reference_image;
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle"),
-        test
-    ))]
+    #[cfg(any(native_lane, test))]
     #[allow(unused_imports)]
     pub(super) use super::ltx_frame_count;
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::scail2::scail2_segment_blocking;
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::{
         advanced, assemble_scail2_animate_conditioning, lora_scale, non_empty_negative_prompt,
-        resolve_dense_adapters, resolve_lora_file, video_frame_count, wan_frame_count, AdapterSpec,
-        CancelFlag, CharacterStore, Conditioning, GenerationMetrics, GenerationOutput,
-        GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision,
+        resolve_dense_adapters, video_frame_count, wan_frame_count, AdapterSpec, CancelFlag,
+        CharacterStore, Conditioning, GenerationMetrics, GenerationOutput, GenerationRequest,
+        Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision, PreparedVideoAdapters,
         Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
     };
     #[allow(unused_imports)]
@@ -85,10 +69,7 @@ mod prelude {
         RgbFrame, Settings, Uuid, Value, VideoRequest, WorkerError, WorkerResult, WorkerStatus,
         CANCEL_MESSAGE,
     };
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::{classify_adapter, lora_path};
     #[cfg(target_os = "macos")]
@@ -98,15 +79,9 @@ mod prelude {
 
 // Real MLX Wan2.2 generation (macOS, sc-3034). `runtime-macos` explicitly includes all three Wan
 // registrations in its validated media catalog.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::image_jobs::load_reference_image;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::image_jobs::{classify_adapter, lora_path};
 // epic 3720 (sc-3724): the backend-neutral generation contract types come from `gen_core` while the
 // compile-time runtime bundle decides which backend catalog this module loads from.
@@ -115,10 +90,7 @@ use crate::image_jobs::{classify_adapter, lora_path};
 // (`run_loaded_video_generation`), and `VideoGenInput`/`video_load_spec` are all backend-neutral, so
 // these types compile on both lanes. `cfg(target_os)` decides which provider crate registered the
 // video engine, not which contract types this module names.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{
     AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator,
     LoadPhase, LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
@@ -128,15 +100,9 @@ use gen_core::{
 use gen_core::{AdapterKind, MoeExpert};
 // VACE conditioning + replacement types are shared by the MLX Wan-VACE path and the candle Wan-VACE
 // lane (sc-5494), so they are available on both the macos and windows+backend-candle builds.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{Image, ReplacementMode};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::character_store::CharacterStore;
 // Frame-count stride coercion (Wan needs frames ≡ 1 mod 4; LTX snaps to 8k+1; Mochi snaps to 6k+1)
 // — used by the MLX path and the candle entry (sc-5097).
@@ -146,27 +112,17 @@ use sceneworks_core::character_store::CharacterStore;
 // — so the shipped 5 s @ 30 fps default (150 raw) fails outright on the Wan stride. `mochi_frame_count`
 // (B3/sc-11993) snaps to the NEAREST 6k+1 (151), the count the manifest documents for that default.
 // See `frames_are_the_mochi_lattice_not_wans` for the exact failure mode.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::video_request::{video_frame_count, wan_frame_count};
 // `ltx_frame_count` is used by both native LTX conditioning lanes and by cross-platform tests.
 // `mochi_frame_count` is named only by tests that are themselves macOS/candle-gated.
 // Each is gated to exactly the configs that use it: an import left dead on a single cfg fails the
 // parity lane's `-D warnings` while a macOS check stays green (sc-10404's trap).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 use sceneworks_core::video_request::ltx_frame_count;
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 use sceneworks_core::video_request::mochi_frame_count;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use std::time::{Duration, Instant};
 
 /// Stub adapter id recorded on generated assets — matches the Python
@@ -1209,10 +1165,7 @@ pub(crate) async fn run_video_generate_job(
             ),
         }
     };
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     let (decoded, adapter, raw_settings, replacement_status) = (
         generate_stub_video(&request, seed),
         STUB_ADAPTER,
@@ -1294,11 +1247,12 @@ fn validate_video_lora_compatibility(request: &VideoRequest) -> WorkerResult<()>
     if !is_ltx_model(&request.model) {
         return Ok(());
     }
-    sceneworks_core::lora_family::validate_lora_compatibility(
+    sceneworks_core::lora_family::validate_lora_compatibility_with_manifest(
         &request.loras,
         Some("ltx-video"),
         "ltx_video",
         Some(&request.model),
+        (!request.model_manifest_entry.is_empty()).then_some(&request.model_manifest_entry),
     )
     .map_err(WorkerError::InvalidPayload)
 }
@@ -1510,40 +1464,23 @@ fn generate_stub_video(request: &VideoRequest, seed: i64) -> DecodedVideo {
 /// white, with a bright vertical band that sweeps left→right across the clip so frames
 /// differ (visible motion). Exactly `width * height * 3` RGB8 bytes.
 fn stub_video_rgb8(width: u32, height: u32, seed: i64, index: u32, frame_count: u32) -> Vec<u8> {
-    let seed = seed as u64;
-    let base = [
-        (seed & 0xFF) as u8,
-        ((seed >> 8) & 0xFF) as u8,
-        ((seed >> 16) & 0xFF) as u8,
-    ];
-    let v_span = height.saturating_sub(1).max(1) as f32;
-    // The sweeping band's centre column for this frame.
+    let mut buffer = crate::util::gradient_rgb8(width, height, seed);
     let progress = index as f32 / frame_count.max(1) as f32;
     let band_centre = progress * width.saturating_sub(1).max(1) as f32;
     let band_half = (width as f32 * 0.06).max(1.0);
-    let mut buffer = Vec::with_capacity((width as usize) * (height as usize) * 3);
     for y in 0..height {
-        let t = y as f32 / v_span;
-        let row = [lerp(base[0], t), lerp(base[1], t), lerp(base[2], t)];
         for x in 0..width {
             let dist = (x as f32 - band_centre).abs();
             if dist <= band_half {
-                // Brighten toward white inside the band (1.0 at centre → 0 at edge).
                 let highlight = 1.0 - dist / band_half;
-                buffer.push(lerp(row[0], highlight));
-                buffer.push(lerp(row[1], highlight));
-                buffer.push(lerp(row[2], highlight));
-            } else {
-                buffer.extend_from_slice(&row);
+                let offset = ((y as usize) * (width as usize) + (x as usize)) * 3;
+                for channel in &mut buffer[offset..offset + 3] {
+                    *channel = crate::util::lerp(*channel, highlight);
+                }
             }
         }
     }
     buffer
-}
-
-fn lerp(a: u8, t: f32) -> u8 {
-    let a = a as f32;
-    (a + (255.0 - a) * t).round().clamp(0.0, 255.0) as u8
 }
 
 /// A quiet 220 Hz mono tone matching the clip length (`frame_count / fps` seconds) at
@@ -1806,21 +1743,7 @@ fn video_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        // Stamped by update_job before posting (sc-4172).
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 // The shared standalone-audio-reference resolver (sc-17160 / sc-18650). Not an engine family: it is
@@ -1842,22 +1765,13 @@ pub(crate) mod seedvr2;
 pub(crate) mod wan;
 // MiniMax-H3's packed-sequence stall budget (sc-26691): the watchdog arithmetic `wan`'s shared
 // `generate_video` funnel applies to an H3 request.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod minimax_h3_sequence;
 #[cfg(target_os = "macos")]
 use wan::{generate_wan, wan_available, wan_engine_id, wan_raw_settings, WAN_ADAPTER};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) mod bernini;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // `pub(crate)` since sc-18814: the shared video memory gate reads this lane's VRAM budget from
 // `candle_video_vram_budget` — the same figure `wan_video_fit_error` / `svd_fit_error` are handed
 // — rather than probing the card a second way.
@@ -1903,16 +1817,13 @@ pub(crate) mod minimax_h3;
 use minimax_h3::{generate_candle_minimax_h3, CANDLE_MINIMAX_H3_ADAPTER};
 #[cfg(target_os = "macos")]
 use minimax_h3::{generate_minimax_h3, minimax_h3_available, MINIMAX_H3_ADAPTER};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use minimax_h3::{imported_minimax_h3_checkpoint_id, minimax_h3_engine_id, MINIMAX_H3_ENGINE_ID};
 mod svd;
 #[cfg(target_os = "macos")]
 use svd::{generate_svd, svd_available, svd_engine_id, svd_raw_settings, SVD_ADAPTER};
 mod vace;
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 use vace::validate_vace_fun_capability;
 #[cfg(target_os = "macos")]
 use vace::{
@@ -2024,81 +1935,37 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
 
 /// At most 5 user LoRAs per job (mirrors the image path's `MAX_JOB_LORAS`). Shared by every
 /// dense (single-transformer) video family on both backends.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const MAX_JOB_LORAS: usize = 5;
 
 /// The trimmed `negative_prompt`, or `None` when empty/whitespace — the single source for the
 /// idiom the video dispatchers all repeated (sc-8830). Empty negatives must be `None`, not
 /// `Some("")`, so the engines treat them as "no negative" rather than conditioning on the empty
 /// string.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn non_empty_negative_prompt(request: &VideoRequest) -> Option<String> {
     let trimmed = request.negative_prompt.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
-/// A LoRA spec's strength (`weight`, default 0.8 — matches the image path). Shared by both
+/// A LoRA spec's strength (`weight`, default 1.0 — matches the image path). Shared by both
 /// backends (sc-8830; formerly the byte-identical `lora_scale` / `candle_scail2_lora_scale`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn lora_scale(lora: &Value) -> f32 {
-    lora.get("weight")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        // Last resort only — see `image_jobs::lora_weight`; matches the API/web default.
-        .unwrap_or(1.0) as f32
+    crate::adapter_resolution::lora_weight(lora) as f32
 }
 
-/// Resolve a LoRA spec's file (a directory → its first `.safetensors`, recursively via core's
-/// [`first_safetensors_path`]), verifying it exists. The `path` originates from
-/// attacker-controllable job payload, so it is first confined to an app-managed root
-/// (sc-5723 / WKA-002) via [`normalize_app_managed_lora_path`] before any on-disk use.
-///
-/// Shared by both backends (sc-8830). The old candle twin `candle_resolve_lora_file`
-/// re-implemented the directory scan with a shallow (non-recursive) case-sensitive `read_dir`,
-/// which missed nested `subdir/model.safetensors` snapshots and uppercase `.SAFETENSORS`
-/// extensions that the macOS path (core `first_safetensors_path`) resolved. Converging on the
-/// core helper fixes that latent candle-lane bug; path confinement is preserved identically.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+/// Compatibility test access to the shared directory resolver. Production video resolution pins
+/// each selected entry before inspecting its header and carries that token through cache/load.
+#[cfg(native_lane)]
+#[cfg(test)]
 fn resolve_lora_file(
     settings: &Settings,
     path: PathBuf,
     declared: Option<&str>,
 ) -> WorkerResult<PathBuf> {
-    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
-    let file = if path.is_dir() {
-        // Prefer the manifest-declared adapter over an arbitrary directory scan so a
-        // trained LoRA loads its final adapter, not a step checkpoint (sc-10221).
-        crate::resolve_adapter_in_dir(&path, declared).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                path.display()
-            ))
-        })?
-    } else {
-        path
-    };
-    if !file.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "LoRA file is missing: {}",
-            file.display()
-        )));
-    }
-    Ok(file)
+    let lora = json!({"path": path, "files": declared.map(|name| vec![name])});
+    crate::adapter_resolution::resolve_adapter_file(&lora, settings, "")
 }
 
 /// Build the adapter specs for a **dense** (single-transformer) video family — Wan-VACE and
@@ -2107,32 +1974,21 @@ fn resolve_lora_file(
 /// engine sniffs the format and merges it. `classify_adapter` tags SceneWorks peft LoKr as
 /// `Lokr` and everything else (incl. third-party LyCORIS) as `Lora`. Parameterized by the
 /// per-family max-LoRA cap so the confinement + count guard lives in one place (sc-8830).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_dense_adapters(
     settings: &Settings,
     request: &VideoRequest,
     max_loras: usize,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     if request.loras.len() > max_loras {
         return Err(WorkerError::InvalidPayload(format!(
             "Generation supports at most {max_loras} LoRAs per job."
         )));
     }
-    let mut specs: Vec<AdapterSpec> = Vec::new();
+    let mut specs = PreparedVideoAdapters::default();
     for lora in &request.loras {
-        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = resolve_lora_file(
-            settings,
-            path,
-            crate::image_jobs::declared_adapter_file(lora),
-        )?;
-        let kind = crate::image_jobs::classify_adapter(&file)?;
-        specs.push(AdapterSpec {
+        let (file, kind) = specs.user(settings, lora, &request.model)?;
+        specs.specs.push(AdapterSpec {
             path: file,
             scale: lora_scale(lora),
             kind,
@@ -2169,15 +2025,10 @@ fn resolve_dense_adapters(
 /// / `resolve_scail2_quant`).
 #[cfg(target_os = "macos")]
 fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
-    match request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
-        Some(bits) if bits <= 0 => None,
-        Some(bits) if bits <= 4 => Some(Quant::Q4),
-        Some(_) => Some(Quant::Q8),
-        None => Some(Quant::Q4),
+    match crate::payload::tier_for_bits(request.quant_bits(), "q4") {
+        "bf16" => None,
+        "q4" => Some(Quant::Q4),
+        _ => Some(Quant::Q8),
     }
 }
 
@@ -2185,10 +2036,7 @@ fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
 /// driving frames. Each reference is independently segmented into its paired color mask; the
 /// backend-specific SAM3 module and background convention stay at the call site while this
 /// orchestration remains shared between MLX and Candle.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn assemble_scail2_animate_conditioning<FR, FD>(
     api: &ApiClient,
     settings: &Settings,
@@ -2225,3 +2073,55 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(native_lane)]
+#[derive(Clone, Debug, Default)]
+struct PreparedVideoAdapters {
+    specs: Vec<AdapterSpec>,
+    pins: BTreeMap<PathBuf, gen_core::PinnedWeightsFile>,
+}
+#[cfg(native_lane)]
+impl std::ops::Deref for PreparedVideoAdapters {
+    type Target = Vec<AdapterSpec>;
+    fn deref(&self) -> &Self::Target {
+        &self.specs
+    }
+}
+#[cfg(native_lane)]
+impl PreparedVideoAdapters {
+    fn push(&mut self, settings: &Settings, mut spec: AdapterSpec) -> WorkerResult<()> {
+        let pin = crate::paths::pin_app_managed_model_file(settings, &spec.path, "video adapter")?;
+        spec.path = pin.loader_path().to_path_buf();
+        crate::adapter_resolution::retain_adapter_pin(&mut self.pins, pin)?;
+        self.specs.push(spec);
+        Ok(())
+    }
+    fn append(&mut self, other: Self) -> WorkerResult<()> {
+        for pin in other.pins.into_values() {
+            crate::adapter_resolution::retain_adapter_pin(&mut self.pins, pin)?;
+        }
+        self.specs.extend(other.specs);
+        Ok(())
+    }
+    fn user(
+        &mut self,
+        settings: &Settings,
+        lora: &Value,
+        model: &str,
+    ) -> WorkerResult<(PathBuf, gen_core::AdapterKind)> {
+        let pin = crate::adapter_resolution::resolve_prepared_adapter_file(lora, settings, model)?;
+        let pin = crate::adapter_resolution::retain_adapter_pin(&mut self.pins, pin)?;
+        let kind = crate::image_jobs::classify_prepared_adapter(pin)?;
+        let file = pin.loader_path().to_path_buf();
+        Ok((file, kind))
+    }
+    fn install(&self, spec: &mut gen_core::LoadSpec) -> gen_core::Result<()> {
+        if self.specs.is_empty() {
+            return Ok(());
+        }
+        for pin in self.pins.values() {
+            spec.set_prepared_file_pin(pin.loader_path(), pin.clone())?;
+        }
+        spec.prepare_file_sources()
+    }
+}

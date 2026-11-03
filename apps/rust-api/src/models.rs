@@ -93,23 +93,8 @@ impl ModelCatalogCache {
     }
 }
 
-fn validate_huggingface_repo(repo: &str) -> Result<(), ApiError> {
-    let parts: Vec<_> = repo.trim().split('/').collect();
-    if parts.len() != 2
-        || parts.iter().any(|part| {
-            part.is_empty()
-                || part.starts_with('.')
-                || part.ends_with('.')
-                || !part.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-                })
-        })
-    {
-        return Err(ApiError::bad_request(
-            "Hugging Face repo must be in owner/name form",
-        ));
-    }
-    Ok(())
+fn validate_huggingface_repo(repo: &str) -> Result<&str, ApiError> {
+    sceneworks_core::hf_repo_id::namespaced(repo).map_err(ApiError::bad_request)
 }
 
 #[derive(Debug, Default)]
@@ -925,17 +910,7 @@ pub(crate) async fn create_model_download_job(
     Path(model_id): Path<String>,
     ApiJson(payload): ApiJson<ModelDownloadRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let catalog = model_catalog(&state).await?;
-    let model = catalog
-        .iter()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
-        .cloned()
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Model not found".to_owned(),
-            context: None,
-            code: None,
-        })?;
+    let model = require_model_by_id(&state, &model_id).await?;
     // License-acknowledgment gate (sc-17227), enforced HERE and not only in the web client.
     //
     // The web client refuses an unacknowledged download at `createModelDownloadJob`, but that code
@@ -973,20 +948,16 @@ pub(crate) async fn create_model_download_job(
                 "Imported component repair takes no co-requisite choices",
             ));
         }
-        let base = model
+        let base_id = model
             .get("baseModel")
             .and_then(Value::as_str)
-            .and_then(|id| {
-                catalog
-                    .iter()
-                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
-            })
-            .ok_or_else(|| {
-                ApiError::bad_request("Imported component repair requires its compatible base")
-            })?;
+            .unwrap_or_default();
+        let base = find_model_by_id(&state, base_id).await?.ok_or_else(|| {
+            ApiError::bad_request("Imported component repair requires its compatible base")
+        })?;
         let download = bound_import_component_download(
             &model,
-            base,
+            &base,
             component_id,
             payload.variant.as_deref(),
             &state.settings.data_dir,
@@ -1298,16 +1269,7 @@ pub(crate) async fn create_conditional_components_download_jobs(
     use sceneworks_core::model_usage_policy::{
         conditional_component_downloads, ConditionalComponentsError,
     };
-    let model = model_catalog(&state)
-        .await?
-        .into_iter()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Model not found".to_owned(),
-            context: None,
-            code: None,
-        })?;
+    let model = require_model_by_id(&state, &model_id).await?;
     let rows = conditional_component_downloads(&model, &purpose).map_err(|error| match error {
         ConditionalComponentsError::NotDeclared { .. } => ApiError::typed(
             StatusCode::NOT_FOUND,
@@ -2009,16 +1971,7 @@ pub(crate) async fn create_model_convert_job(
     )
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
-    let model = model_catalog(&state)
-        .await?
-        .into_iter()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Model not found".to_owned(),
-            context: None,
-            code: None,
-        })?;
+    let model = require_model_by_id(&state, &model_id).await?;
     ensure_model_not_cleanup_only(&model)?;
     let mlx = model
         .get("mlx")
@@ -2288,12 +2241,7 @@ pub(crate) async fn delete_model(
         .iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
         .cloned()
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Model not found".to_owned(),
-            context: None,
-            code: None,
-        })?;
+        .ok_or_else(|| model_not_found("Model not found"))?;
     let manifest_path = state
         .settings
         .config_dir
@@ -2822,16 +2770,7 @@ pub(crate) async fn delete_model_variant(
     Path((model_id, variant)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let variant = variant.trim().to_ascii_lowercase();
-    let catalog = model_catalog(&state).await?;
-    let model = catalog
-        .into_iter()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Model not found".to_owned(),
-            context: None,
-            code: None,
-        })?;
+    let model = require_model_by_id(&state, &model_id).await?;
     let data_dir = &state.settings.data_dir;
     let allowed_roots = vec![
         data_dir.join("models"),
@@ -3602,6 +3541,16 @@ fn reconcile_expected_sha256(
     }
 }
 
+fn normalize_import_repo_ids(payload: &mut ModelImportRequest) -> Result<(), ApiError> {
+    if let Some(repo) = payload.repo.as_mut() {
+        *repo = validate_huggingface_repo(repo)?.to_owned();
+    }
+    if let Some(ModelImportSourceV1::HuggingFace { repo, .. }) = payload.source.as_mut() {
+        *repo = validate_huggingface_repo(repo)?.to_owned();
+    }
+    Ok(())
+}
+
 /// Collapse the discriminated `source` (when present) onto the flat `repo`/`sourceUrl`/`sourcePath`
 /// fields the rest of the import path already speaks, and describe what was chosen as provenance.
 ///
@@ -3616,6 +3565,7 @@ fn reconcile_expected_sha256(
 pub(crate) fn normalize_model_import_source(
     payload: &mut ModelImportRequest,
 ) -> Result<(ModelImportProvenance, Option<String>), ApiError> {
+    normalize_import_repo_ids(payload)?;
     let Some(source) = payload.source.take() else {
         // Legacy flat request. `uploadedSourcePath` is set only by the multipart handler, so it is
         // what distinguishes an upload from a copy of a file the user already had.
@@ -3929,6 +3879,7 @@ pub(crate) async fn queue_model_import_job(
     mut payload: ModelImportRequest,
     repair_model_id: Option<String>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    normalize_import_repo_ids(&mut payload)?;
     let repair = if let Some(model_id) = repair_model_id {
         if payload.model_id.as_deref().is_some_and(|id| id != model_id) {
             return Err(ApiError::bad_request(
@@ -3940,16 +3891,9 @@ pub(crate) async fn queue_model_import_job(
                 "Linked originals use relink/rescan, not managed repair",
             ));
         }
-        let model = model_catalog(&state)
+        let model = find_model_by_id(&state, &model_id)
             .await?
-            .into_iter()
-            .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
-            .ok_or_else(|| ApiError {
-                status: StatusCode::NOT_FOUND,
-                detail: "The imported model to repair no longer exists".into(),
-                code: None,
-                context: None,
-            })?;
+            .ok_or_else(|| model_not_found("The imported model to repair no longer exists"))?;
         let binding = sceneworks_core::model_artifacts::provenance::managed_repair_binding(
             &state.settings.data_dir,
             model
@@ -4031,7 +3975,7 @@ pub(crate) async fn queue_model_import_job(
         validate_source_url(source_url)?;
     }
     if let Some(repo) = payload.repo.as_deref() {
-        validate_huggingface_repo(repo)?;
+        payload.repo = Some(validate_huggingface_repo(repo)?.to_owned());
     }
     // Licence acknowledgment, keyed on the repo the import will FETCH (sc-17227). This route had no
     // licence logic at all — `model_import_enabled()` hard-returns `true` and nothing below reads
@@ -4060,7 +4004,7 @@ pub(crate) async fn queue_model_import_job(
     };
     payload.model_type = Some(model_type.clone());
     if let Some(family) = payload.family.take() {
-        let models = model_catalog(&state).await?;
+        let models = model_catalog_snapshot(&state).await?;
         let normalized = normalize_lora_family(&family);
         payload.family = Some(
             if models.iter().any(|model| {
@@ -4116,9 +4060,9 @@ pub(crate) async fn queue_model_import_job(
         .model_id
         .clone()
         .unwrap_or_else(|| slugify_lora_id(&name));
-    let existing_ids = model_catalog(&state)
+    let existing_ids = model_catalog_snapshot(&state)
         .await?
-        .into_iter()
+        .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
     if existing_ids.contains(&model_id) && repair.is_none() {
@@ -4202,10 +4146,8 @@ pub(crate) async fn queue_model_import_job(
     // are provisioned, identically for managed transfers and approved linked sources.
     let import_components = if payload.family.as_deref() == Some("minimax-h3") {
         let base_id = payload.base_model.as_deref().expect("validated H3 base");
-        let base = model_catalog(&state)
+        let base = find_model_by_id(&state, base_id)
             .await?
-            .into_iter()
-            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(base_id))
             .ok_or_else(|| ApiError::bad_request("The selected compatible base is unavailable"))?;
         let default = sceneworks_core::model_artifacts::artifact_selection::model_download(&base)
             .ok_or_else(|| {
@@ -4639,6 +4581,50 @@ pub(crate) fn max_model_upload_bytes() -> usize {
     MAX_MODEL_UPLOAD_BYTES
 }
 
+/// Select from the current shared catalog before cloning. Linked-source availability is probed
+/// for the selected row on every call, just as it is for the full catalog response.
+pub(crate) async fn find_model_catalog_entry(
+    state: &AppState,
+    predicate: impl Fn(&Value) -> bool,
+) -> Result<Option<Value>, ApiError> {
+    let snapshot = model_catalog_snapshot(state).await?;
+    let Some(model) = snapshot.iter().find(|entry| predicate(entry)) else {
+        return Ok(None);
+    };
+    let mut selected = vec![model.clone()];
+    crate::model_sources::refresh_live_external_availability(
+        &state.settings.data_dir,
+        &mut selected,
+    )
+    .await?;
+    Ok(selected.pop())
+}
+
+pub(crate) async fn find_model_by_id(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<Value>, ApiError> {
+    find_model_catalog_entry(state, |entry| {
+        entry.get("id").and_then(Value::as_str) == Some(id)
+    })
+    .await
+}
+
+pub(crate) fn model_not_found(detail: impl Into<String>) -> ApiError {
+    ApiError {
+        status: StatusCode::NOT_FOUND,
+        detail: detail.into(),
+        context: None,
+        code: None,
+    }
+}
+
+pub(crate) async fn require_model_by_id(state: &AppState, id: &str) -> Result<Value, ApiError> {
+    find_model_by_id(state, id)
+        .await?
+        .ok_or_else(|| model_not_found("Model not found"))
+}
+
 /// Catalog without live Hugging Face size estimation: download sizes fall back to
 /// manifest metadata only. This is the right call for job validation, LoRA/preset
 /// CRUD, download/convert job creation, and delete — none of which read the
@@ -4850,7 +4836,56 @@ mod runtime_text_encoder_option_tests {
         assert!(model.get("textEncoderOptions").is_none());
     }
 
-    #[cfg(target_os = "macos")]
+    #[test]
+    fn embedded_builtin_lookup_preserves_entries_and_isolates_returned_clones() {
+        let predicate = |entry: &Value| entry["id"] == "moss_image_base";
+        let expected = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .unwrap()["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| predicate(entry))
+            .unwrap()
+            .clone();
+        let mut first = embedded_builtin_catalog_entry(predicate).unwrap().unwrap();
+        assert_eq!(
+            first, expected,
+            "the complete cross-platform entry is retained"
+        );
+        first["downloads"] = json!([]);
+        assert_eq!(
+            embedded_builtin_catalog_entry(predicate).unwrap(),
+            Some(expected)
+        );
+        assert!(embedded_builtin_catalog_entry(|_| false).unwrap().is_none());
+    }
+
+    #[test]
+    fn install_health_uses_full_core_safetensors_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = temp.path().join("transformer");
+        std::fs::create_dir(&component).unwrap();
+        let path = component.join("model.safetensors");
+        write_tiny_safetensors(&path);
+        assert!(diffusers_component_safetensors_are_valid(
+            temp.path(),
+            "transformer"
+        ));
+        for raw in [
+            br#"{}"#.as_slice(),
+            br#"{"weight":{"dtype":"F32","shape":[2],"data_offsets":[0,1]}}"#,
+        ] {
+            let mut bytes = (raw.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(raw);
+            bytes.push(0);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(!diffusers_component_safetensors_are_valid(
+                temp.path(),
+                "transformer"
+            ));
+        }
+    }
+
     fn write_tiny_safetensors(path: &FsPath) {
         let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
         let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
@@ -5819,14 +5854,8 @@ mod download_receipt_tests {
     }
 
     fn builtin_models_entry(model_id: &str) -> Value {
-        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .map(|(_, contents)| *contents)
-            .expect("builtin.models.jsonc present");
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-                .expect("builtin.models.jsonc parses");
+        let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         manifest["models"]
             .as_array()
             .expect("models array")
@@ -11904,9 +11933,8 @@ mod model_size_concurrency_tests {
 
     #[test]
     fn builtin_download_contexts_fit_in_size_cache() {
-        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
-        let manifest: Value = serde_json::from_str(&crate::strip_jsonc_comments(raw))
-            .expect("builtin manifest parses");
+        let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         // The cache is keyed by `(repo, files)`, so shared model rows deliberately collapse to one
         // entry. Assert the invariant the production scan needs instead of sealing today's catalog
         // population: every platform's distinct contexts fit together and remain addressable.
@@ -12296,8 +12324,7 @@ pub(crate) async fn resolve_model_manifest_entry(
 pub(crate) fn embedded_builtin_catalog_entry(
     predicate: impl Fn(&Value) -> bool,
 ) -> Result<Option<Value>, ApiError> {
-    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+    let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
         .map_err(|error| ApiError::internal(format!("embedded model manifest invalid: {error}")))?;
     let entry = manifest
         .get("models")
@@ -13008,31 +13035,11 @@ fn diffusers_component_safetensors_are_valid(snapshot: &FsPath, component: &str)
         .filter(|path| path.to_ascii_lowercase().ends_with(".safetensors"))
         .collect::<Vec<_>>();
     !files.is_empty()
-        && files
-            .iter()
-            .all(|path| safetensors_header_is_valid(&snapshot.join(component).join(path)))
-}
-
-fn safetensors_header_is_valid(path: &FsPath) -> bool {
-    use std::io::Read as _;
-
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut length = [0_u8; 8];
-    if file.read_exact(&mut length).is_err() {
-        return false;
-    }
-    let header_len = u64::from_le_bytes(length);
-    let Ok(file_len) = file.metadata().map(|metadata| metadata.len()) else {
-        return false;
-    };
-    if header_len == 0 || header_len > file_len.saturating_sub(8) || header_len > 64 * 1024 * 1024 {
-        return false;
-    }
-    let mut header = vec![0_u8; header_len as usize];
-    file.read_exact(&mut header).is_ok()
-        && serde_json::from_slice::<Value>(&header).is_ok_and(|value| value.is_object())
+        && files.iter().all(|path| {
+            sceneworks_core::safetensors::file_is_structurally_valid(
+                &snapshot.join(component).join(path),
+            )
+        })
 }
 
 /// Whether an already-walked snapshot file list holds anything that is not documentation/artwork.
@@ -14377,13 +14384,8 @@ mod variant_install_tests {
         let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .map(|(_, contents)| *contents)
-            .expect("builtin.models.jsonc present");
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         let shipped = manifest["models"]
             .as_array()
             .unwrap()
@@ -15828,14 +15830,8 @@ mod variant_delete_tests {
     /// *Mutation that reds this:* `is_sole_repo_tier` answering `false` — the scope is refused.
     #[tokio::test]
     async fn deleting_the_qwen_image_2_1_bf16_tier_reclaims_only_the_upstream_snapshot() {
-        let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .expect("builtin.models.jsonc embedded")
-                .1,
-        ))
-        .expect("builtin.models.jsonc parses");
+        let shipped = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         let model = shipped["models"]
             .as_array()
             .expect("models array")
@@ -18849,5 +18845,100 @@ mod io_offload_tests {
         prune_empty_repo_cache(&directory).await;
         assert_eq!(std::fs::read(directory.join("keep.txt")).unwrap(), b"keep");
         assert!(directory.join("snapshots/empty").is_dir());
+    }
+}
+
+#[cfg(test)]
+mod model_contract_metadata_tests {
+    use super::*;
+    use sceneworks_core::model_artifacts::external_library::{
+        ExternalArtifactRequirement, ExternalLibraryBindingStore, ModelResolution,
+    };
+
+    #[test]
+    fn import_sources_store_normalized_repo_and_provenance_for_both_wire_shapes() {
+        for (body, expected_reference) in [
+            (json!({"repo":" Owner/_Model.git "}), "Owner/_Model.git"),
+            (
+                json!({"source":{"kind":"huggingFace", "repo":" Owner/_Model.git ", "revision":"main"}}),
+                "Owner/_Model.git@main",
+            ),
+        ] {
+            let mut payload: ModelImportRequest = serde_json::from_value(body).unwrap();
+            let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+            assert_eq!(payload.repo.as_deref(), Some("Owner/_Model.git"));
+            assert_eq!(provenance.reference.as_deref(), Some(expected_reference));
+        }
+        for repo in [
+            "a/b/c",
+            "../name",
+            "owner/model--bad",
+            "owner/bad..name",
+            "owner/model \n name",
+        ] {
+            assert!(validate_huggingface_repo(repo).is_err(), "{repo:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_lookup_refreshes_only_the_selected_current_row_and_keeps_snapshot_immutable()
+    {
+        let _env = crate::tests::support::isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let (_, state) =
+            crate::create_app_with_state(crate::tests::support::test_settings(&temp)).unwrap();
+        let library = temp.path().join("external-library");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let source = library
+            .join("models--owner--model")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("model.safetensors"), b"metadata fixture").unwrap();
+        let requirement = ExternalArtifactRequirement {
+            repository: "owner/model".to_owned(),
+            revision: Some(revision.to_owned()),
+            variant: "default".to_owned(),
+            files: vec![PathBuf::from("model.safetensors")],
+            is_primary: true,
+        };
+        let store = ExternalLibraryBindingStore::new(&state.settings.data_dir).unwrap();
+        let (binding, _) = store
+            .bind_or_probe_validated(&library, std::slice::from_ref(&requirement))
+            .unwrap();
+        let resolution =
+            ModelResolution::external_ready(library.clone(), binding, vec![requirement]).unwrap();
+        let selected = json!({"id":"selected", "modelResolution":resolution});
+        // A corrupt unselected carrier must neither be refreshed nor fail the selected lookup.
+        let snapshot = Arc::new(vec![
+            json!({"id":"other", "modelResolution":{"invalid":true}}),
+            selected.clone(),
+        ]);
+        {
+            let mut cache = state.model_catalog_cache.state.lock();
+            cache.snapshot = Some((
+                cache.generation,
+                crate::generation::enqueue_backend(&state),
+                snapshot.clone(),
+            ));
+        }
+        let detached = temp.path().join("detached");
+        std::fs::rename(&library, &detached).unwrap();
+        let offline = require_model_by_id(&state, "selected").await.unwrap();
+        assert_eq!(
+            offline["modelAvailability"],
+            "installed_external_unavailable"
+        );
+        std::fs::rename(detached, library).unwrap();
+        let mut online = find_model_by_id(&state, "selected").await.unwrap().unwrap();
+        assert_eq!(online["modelAvailability"], "external_ready");
+        online["callerMutation"] = json!(true);
+        assert_eq!(snapshot[1], selected);
+        let current = model_catalog_snapshot(&state).await.unwrap();
+        assert!(Arc::ptr_eq(&snapshot, &current));
+        assert!(find_model_by_id(&state, "missing").await.unwrap().is_none());
+        let missing = require_model_by_id(&state, "missing").await.unwrap_err();
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        assert_eq!(missing.detail, "Model not found");
     }
 }

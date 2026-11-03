@@ -994,7 +994,7 @@ pub(crate) fn prefix_kv_cache_surcharge_bytes(
             ),
         )
     }
-    #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+    #[cfg(not(native_lane))]
     {
         None
     }
@@ -2031,10 +2031,7 @@ mod corpus_replay_tests {
     /// This is the test that proves the worker never triggers `Capabilities::validate_request`'s
     /// execution-domain refusal in production — the refusal path exists, is exercised upstream, and
     /// must remain unreachable from here.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn no_registered_provider_refuses_what_the_planner_selects_for_it() {
         let mut declaring = 0usize;

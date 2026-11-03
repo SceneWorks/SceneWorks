@@ -16,11 +16,15 @@
 //! UNCERTIFIED artifact gets no floors at all (the manifest rows describe the certified bytes,
 //! not an imported checkpoint) and keeps its resident-estimate-only behavior.
 
+pub(crate) use crate::memory_route_registry::{
+    KOLORS_REQUEST_EVIDENCE_REVISION, PULID_FLUX_REQUEST_EVIDENCE_REVISION,
+    SDXL_REQUEST_EVIDENCE_REVISION,
+};
 use gen_core::{
     GenerationMemory, LoadSpec, MemoryBackend, MemoryCacheState, MemoryConformanceState,
-    MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
-    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract, MemoryParityResult,
-    MemoryRunContext, MemorySelection, MemoryStrategy, Precision, Quant,
+    MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryGeometry, MemoryMode,
+    MemoryNumericTier, MemoryParityContract, MemoryParityResult, MemoryRunContext, MemorySelection,
+    MemoryStrategy, Precision, Quant,
 };
 use sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::SdxlCudaMemoryEndpoints;
 use sceneworks_core::memory_calibration::{
@@ -34,20 +38,7 @@ use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 use crate::vram_gate::VramBudget;
 use crate::{WorkerError, WorkerResult};
 
-const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request-scope-v1";
-const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-request-scope-v1";
-const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
-const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-request-scope-v1";
-const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str = "sc-15831-candle-flux2-klein-request-scope-v1";
-const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str = "sc-15813-candle-mage-flow-request-scope-v1";
-const CHROMA_REQUEST_EVIDENCE_REVISION: &str = "sc-20788-candle-chroma-staged-residency-v2";
-const IDEOGRAM_REQUEST_EVIDENCE_REVISION: &str =
-    "sc-20789-candle-ideogram-request-scoped-staged-residency-v1";
-pub(crate) const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str =
-    "sc-15839-candle-pulid-flux-request-scope-v1";
-const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
-pub(crate) const SDXL_REQUEST_EVIDENCE_REVISION: &str = "sdxl-candle-request-contract-v3";
-const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 const CHROMA_ADAPTER_OVERLAY_PREFIX: &str = "chroma.adapters.ordered-additive.sha256:";
 const IDEOGRAM_ADAPTER_OVERLAY_PREFIX: &str = "ideogram.adapters.ordered-additive.sha256:";
 const IDEOGRAM_TURBO_ADAPTER_PREFIX: &str = "ideogram.turbo-time.sha256:";
@@ -56,9 +47,7 @@ const IDEOGRAM_PHYSICAL_RECEIPT_PREFIX: &str = "ideogram.physical.sha256:";
 const SANA_PHYSICAL_RECEIPT_PREFIX: &str = "sana.candle.dense.physical.sha256:";
 const SD35_PHYSICAL_RECEIPT_PREFIX: &str = "sd3.5.candle.physical.sha256:";
 const SD35_ADAPTER_RECEIPT_PREFIX: &str = "sd3.5.adapters.ordered-additive.sha256:";
-pub(crate) const KOLORS_REQUEST_EVIDENCE_REVISION: &str = "kolors-candle-request-contract-v1";
-const SANA_REQUEST_EVIDENCE_REVISION: &str = "sana-candle-dense-request-contract-v1";
-const SD35_REQUEST_EVIDENCE_REVISION: &str = "sd3.5-candle-request-contract-v1";
+
 const KOLORS_PHYSICAL_RECEIPT_PREFIX: &str = "kolors.physical.sha256:";
 const KOLORS_ADAPTER_RECEIPT_PREFIX: &str = "kolors.adapters.ordered.sha256:";
 const KOLORS_IP_RECEIPT_PREFIX: &str = "kolors.ip.sha256:";
@@ -68,34 +57,34 @@ const SDXL_OVERLAY_RECEIPT_DOMAIN: &str = "sdxl-candle-overlay-assembly-v1";
 const SDXL_OVERLAY_RECEIPT_PREFIX: &str = "sdxl.overlay.ordered.sha256:";
 
 fn is_chroma(engine_id: &str) -> bool {
-    matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Chroma)
 }
 
 fn is_ideogram(engine_id: &str) -> bool {
-    matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Ideogram)
 }
 
 fn is_sana(engine_id: &str) -> bool {
-    matches!(engine_id, "sana_1600m" | "sana_sprint_1600m")
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Sana)
 }
 
 /// The FLUX 3 Image Klein provider ids, whose packages include the publisher FP8R/NVFP4 tiers.
 fn is_flux3(engine_id: &str) -> bool {
-    matches!(engine_id, "flux3_klein" | "flux3_klein_base")
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Flux3)
 }
 
 pub(crate) fn is_sd35(engine_id: &str) -> bool {
-    matches!(
-        engine_id,
-        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium"
-    )
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Sd35)
 }
 
 fn is_sealed_kolors_bespoke(engine_id: &str) -> bool {
-    matches!(
-        engine_id,
-        "candle_kolors_ipadapter" | "candle_kolors_control"
-    )
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::KolorsBespoke)
 }
 
 /// Every family whose admitted peak is priced from an exact provider receipt rather than a
@@ -829,17 +818,14 @@ pub(crate) fn bind_ideogram_cache_execution(
     Ok(())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn declared_component_floors(engine_id: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
     crate::inference_runtime::media_descriptor(engine_id)
         .map(|descriptor| descriptor.capabilities.component_precision_floors)
         .unwrap_or(&[])
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 fn declared_component_floors(_: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
     &[]
 }
@@ -848,15 +834,10 @@ fn active_component_floors(
     engine_id: &str,
     selected: Option<Quant>,
 ) -> &'static [gen_core::ComponentPrecisionFloor] {
-    let declared = declared_component_floors(engine_id);
-    match selected {
-        Some(selected)
-            if !declared.is_empty() && declared.iter().all(|floor| floor.applies_to(selected)) =>
-        {
-            declared
-        }
-        _ => &[],
-    }
+    sceneworks_core::memory_contracts::active_component_floors(
+        declared_component_floors(engine_id),
+        selected,
+    )
 }
 
 fn numeric_tier(engine_id: &str, tier: &str) -> Option<MemoryNumericTier> {
@@ -1280,45 +1261,11 @@ fn estimate_floor_parameters(
     contract: &gen_core::MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> Option<gen_core::MemoryStrategyParameters> {
-    let smallest = |strategy: MemoryStrategy,
-                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
-     -> Option<Option<u32>> {
-        if !engaged.contains(&strategy) {
-            return Some(None);
-        }
-        pick(&contract.capability(strategy)?.parameters)
-            .iter()
-            .copied()
-            .min()
-            .map(Some)
-    };
-    let transformer_window_component =
-        if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) {
-            contract
-                .capability(MemoryStrategy::BoundedTransformerResidency)?
-                .parameters
-                .transformer_window_components
-                .first()
-                .copied()
-        } else {
-            None
-        };
-    Some(gen_core::MemoryStrategyParameters {
-        stage_residency: None,
-        decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_tile_edges
-        })?,
-        decode_overlap: smallest(MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_overlaps
-        })?,
-        attention_chunk_size: smallest(MemoryStrategy::BoundedAttention, |ranges| {
-            &ranges.attention_chunk_sizes
-        })?,
-        transformer_window_size: smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
-            &ranges.transformer_window_sizes
-        })?,
-        transformer_window_component,
-    })
+    sceneworks_core::memory_contracts::smallest_parameters(
+        contract,
+        engaged,
+        sceneworks_core::memory_contracts::TransformerScopeParameters::ProviderOrder,
+    )
 }
 
 /// Synthesize an estimate-floor candidate for every implemented optimized rung (sc-18097, epic
@@ -1616,8 +1563,8 @@ fn synthesize_estimate_floors(
             selection,
             phase_peaks,
             basis,
-            evidence: MemoryEvidence {
-                key: MemoryEvidenceKey {
+            evidence: sceneworks_core::memory_contracts::unverified_estimate(
+                MemoryEvidenceKey {
                     model_family: engine_id.to_owned(),
                     resolved_route: engine_id.to_owned(),
                     backend: MemoryBackend::Candle,
@@ -1636,28 +1583,11 @@ fn synthesize_estimate_floors(
                     engaged_composition: engaged,
                     parameters,
                 },
-                conformance: MemoryConformanceState::ImplementedUnverified,
-                dimensions: MemoryEvidenceDimensions {
-                    static_implementation: MemoryEvidenceVerdict::Satisfied,
-                    declared_calibration: MemoryEvidenceVerdict::Missing,
-                    historical_verification: MemoryEvidenceVerdict::Missing,
-                    current_environment_verification: MemoryEvidenceVerdict::Missing,
-                    canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-                    exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-                },
-                calibration_abi: calibration
-                    .map_or(gen_core::MEMORY_CALIBRATION_ABI, |item| item.abi),
-                calibration_fingerprint: calibration
-                    .map_or_else(String::new, |item| item.fingerprint.clone()),
-                sceneworks_revision: request_evidence_revision.to_owned(),
-                inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
-                    .to_owned(),
-                harness_version: String::new(),
+                calibration.map_or(gen_core::MEMORY_CALIBRATION_ABI, |item| item.abi),
+                calibration.map_or_else(String::new, |item| item.fingerprint.clone()),
+                request_evidence_revision.to_owned(),
                 predicted_peak_bytes,
-                observed_peak_bytes: None,
-                parity: MemoryParityContract::Exact,
-                parity_result: MemoryParityResult::NotRun,
-            },
+            ),
         });
     }
     synthesized
@@ -1812,29 +1742,28 @@ pub(crate) fn request_regime(
     engaged: &[MemoryStrategy],
     parameters: &gen_core::MemoryStrategyParameters,
 ) -> Option<sceneworks_core::memory_anchor::RequestRegime> {
-    use sceneworks_core::memory_anchor::{DecodeTile, RequestRegime};
-    let engages = |strategy: MemoryStrategy| engaged.contains(&strategy);
-    Some(RequestRegime {
-        staged: engages(MemoryStrategy::StagedResidency),
-        decode_tile: if engages(MemoryStrategy::BoundedDecode) {
-            Some(DecodeTile {
-                edge: parameters.decode_tile_edge?,
-                overlap: parameters.decode_overlap?,
-            })
-        } else {
-            None
-        },
-        attention_chunk_scores: if engages(MemoryStrategy::BoundedAttention) {
-            Some(u64::from(parameters.attention_chunk_size?))
-        } else {
-            None
-        },
-        transformer_window: if engages(MemoryStrategy::BoundedTransformerResidency) {
-            Some(parameters.transformer_window_size?)
-        } else {
-            None
-        },
-    })
+    // Candle has historically refused incomplete engaged parameters; retain that boundary.
+    for (rung, complete) in [
+        (
+            MemoryStrategy::BoundedDecode,
+            parameters.decode_tile_edge.is_some() && parameters.decode_overlap.is_some(),
+        ),
+        (
+            MemoryStrategy::BoundedAttention,
+            parameters.attention_chunk_size.is_some(),
+        ),
+        (
+            MemoryStrategy::BoundedTransformerResidency,
+            parameters.transformer_window_size.is_some(),
+        ),
+    ] {
+        if engaged.contains(&rung) && !complete {
+            return None;
+        }
+    }
+    Some(sceneworks_core::memory_contracts::request_regime(
+        engaged, parameters,
+    ))
 }
 
 /// The manifest staged row as a pseudo-anchor (sc-22664, the contract-only path): one STAGED
@@ -2010,19 +1939,11 @@ fn memory_for_selection(
     contract: &gen_core::MemoryProviderContract,
     selection: MemorySelection,
 ) -> Option<GenerationMemory> {
-    (selection.strategy != MemoryStrategy::Resident).then(|| GenerationMemory {
-        stage_residency: contract.engages_selection(&selection, MemoryStrategy::StagedResidency),
-        tile_vae_decode: contract.engages_selection(&selection, MemoryStrategy::BoundedDecode),
-        decode_tile_edge: selection.parameters.decode_tile_edge,
-        decode_overlap: selection.parameters.decode_overlap,
-        chunk_attention: contract.engages_selection(&selection, MemoryStrategy::BoundedAttention),
-        attention_chunk_size: selection.parameters.attention_chunk_size,
-        stream_transformer_blocks: contract
-            .engages_selection(&selection, MemoryStrategy::BoundedTransformerResidency),
-        transformer_window_size: selection.parameters.transformer_window_size,
-        transformer_window_component: selection.parameters.transformer_window_component,
-        ..Default::default()
-    })
+    if selection.strategy == MemoryStrategy::Resident {
+        None
+    } else {
+        contract.generation_memory(&selection)
+    }
 }
 
 /// [`evaluate_shared_image`] with the provider's prefix-KV-cache surcharge priced in (epic 25899):
@@ -2387,9 +2308,11 @@ pub(crate) fn evaluate_shared_bespoke_image(
     request_evidence_revision: &'static str,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let expected_revision = match engine_id {
-        "pulid_flux" => PULID_FLUX_REQUEST_EVIDENCE_REVISION,
-        "candle_kolors_ipadapter" | "candle_kolors_control" => KOLORS_REQUEST_EVIDENCE_REVISION,
-        "sdxl" => SDXL_REQUEST_EVIDENCE_REVISION,
+        "pulid_flux" => crate::memory_route_registry::PULID_FLUX_REQUEST_EVIDENCE_REVISION,
+        "candle_kolors_ipadapter" | "candle_kolors_control" => {
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION
+        }
+        "sdxl" => crate::memory_route_registry::SDXL_REQUEST_EVIDENCE_REVISION,
         _ => {
             return Err(WorkerError::InvalidPayload(format!(
                 "{engine_id} has no registered bespoke memory evidence authority"
@@ -2598,28 +2521,15 @@ fn evaluate_shared_image_inner_priced_with_resources(
     reference_workspace_bytes: u64,
     sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
-    let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
-        "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control" => {
-            Z_IMAGE_REQUEST_EVIDENCE_REVISION
-        }
-        "qwen_image" | "qwen_image_edit" => QWEN_IMAGE_REQUEST_EVIDENCE_REVISION,
-        "flux1_schnell" | "flux1_dev" => FLUX1_REQUEST_EVIDENCE_REVISION,
-        "flux2_dev" => FLUX2_DEV_REQUEST_EVIDENCE_REVISION,
-        "flux2_klein_9b" => FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION,
-        "mage_flow_base"
-        | "mage_flow"
-        | "mage_flow_turbo"
-        | "mage_flow_edit_base"
-        | "mage_flow_edit"
-        | "mage_flow_edit_turbo" => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
-        "chroma1_hd" | "chroma1_base" | "chroma1_flash" => CHROMA_REQUEST_EVIDENCE_REVISION,
-        "ideogram_4" | "ideogram_4_turbo" => IDEOGRAM_REQUEST_EVIDENCE_REVISION,
-        "kolors" => KOLORS_REQUEST_EVIDENCE_REVISION,
-        "sana_1600m" | "sana_sprint_1600m" => SANA_REQUEST_EVIDENCE_REVISION,
-        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => SD35_REQUEST_EVIDENCE_REVISION,
-        "sdxl" => SDXL_REQUEST_EVIDENCE_REVISION,
-        _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
-    });
+    let Some(registered_revision) =
+        crate::memory_route_registry::candle_gate_evidence_revision(engine_id)
+    else {
+        // Unregistered families retain resident/legacy admission and cannot acquire an optimized
+        // request contract through the former declaration-revision catch-all.
+        return Ok(None);
+    };
+    let request_evidence_revision =
+        request_evidence_revision_override.unwrap_or(registered_revision);
     // Hires-fix is two independently shaped denoise passes. Only families whose generation harness
     // mints and carries one exact context per pass may use request-scoped optimized admission.
     if worker_multipass && !is_ideogram(engine_id) && !is_sana(engine_id) && engine_id != "sdxl" {
@@ -2719,8 +2629,8 @@ fn evaluate_shared_image_inner_priced_with_resources(
         parameters: Default::default(),
         tier,
     };
-    let mut resident = MemoryEvidence {
-        key: MemoryEvidenceKey {
+    let mut resident = sceneworks_core::memory_contracts::unverified_estimate(
+        MemoryEvidenceKey {
             model_family: engine_id.to_owned(),
             resolved_route: engine_id.to_owned(),
             backend: MemoryBackend::Candle,
@@ -2739,22 +2649,10 @@ fn evaluate_shared_image_inner_priced_with_resources(
             engaged_composition: contract.engaged_composition(MemoryStrategy::Resident),
             parameters: resident_selection.parameters,
         },
-        conformance: MemoryConformanceState::ImplementedUnverified,
-        dimensions: MemoryEvidenceDimensions {
-            static_implementation: MemoryEvidenceVerdict::Satisfied,
-            declared_calibration: MemoryEvidenceVerdict::Missing,
-            historical_verification: MemoryEvidenceVerdict::Missing,
-            current_environment_verification: MemoryEvidenceVerdict::Missing,
-            canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-            exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-        },
-        calibration_abi: calibration.map_or(gen_core::MEMORY_CALIBRATION_ABI, |item| item.abi),
-        calibration_fingerprint: calibration
-            .map_or_else(String::new, |item| item.fingerprint.clone()),
-        sceneworks_revision: request_evidence_revision.to_owned(),
-        inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.to_owned(),
-        harness_version: String::new(),
-        predicted_peak_bytes: {
+        calibration.map_or(gen_core::MEMORY_CALIBRATION_ABI, |item| item.abi),
+        calibration.map_or_else(String::new, |item| item.fingerprint.clone()),
+        request_evidence_revision.to_owned(),
+        {
             let declared = scale_ideogram_hires_envelope(
                 engine_id,
                 &mode.mode,
@@ -2778,10 +2676,7 @@ fn evaluate_shared_image_inner_priced_with_resources(
                 declared
             }
         },
-        observed_peak_bytes: None,
-        parity: MemoryParityContract::Exact,
-        parity_result: MemoryParityResult::NotRun,
-    };
+    );
     let exact_overlay = overlay.unwrap_or("none");
     // Matrix/evidence overlays remain cells of the advertised base provider (`z_image` or
     // `z_image_turbo`), while the runtime registers the strict-control implementation under a
@@ -3314,9 +3209,106 @@ fn evaluate_shared_image_inner_priced_with_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gen_core::WeightsSource;
+    use gen_core::{MemoryEvidenceVerdict, WeightsSource};
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn selection_memory_matches_contract_with_explicit_candle_resident_boundary() {
+        let mut contract = chroma_probe_contract(None, 0, 0);
+        contract.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        contract.strategies = MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| gen_core::MemoryStrategyCapability {
+                strategy,
+                support: gen_core::MemoryStrategySupport::Implemented,
+                parameters: match strategy {
+                    MemoryStrategy::BoundedDecode => gen_core::MemoryParameterRanges {
+                        decode_tile_edges: vec![128],
+                        decode_overlaps: vec![16],
+                        ..Default::default()
+                    },
+                    MemoryStrategy::BoundedAttention => gen_core::MemoryParameterRanges {
+                        attention_chunk_sizes: vec![512],
+                        ..Default::default()
+                    },
+                    MemoryStrategy::BoundedTransformerResidency => {
+                        gen_core::MemoryParameterRanges {
+                            transformer_window_sizes: vec![2],
+                            transformer_window_components: vec![
+                                gen_core::TransformerComponent::TextEncoder,
+                            ],
+                            ..Default::default()
+                        }
+                    }
+                    _ => Default::default(),
+                },
+            })
+            .collect();
+        contract.lifecycle.decode_tiling = true;
+        contract.lifecycle.attention_chunking = true;
+        contract.lifecycle.transformer_window_materialization = true;
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "{:?}",
+            contract.conformance_errors()
+        );
+        let tier = MemoryNumericTier {
+            precision: Precision::Bf16,
+            quant: None,
+            component_precision_floors: &[],
+        };
+        for resident in [
+            gen_core::ResidentRequestMemory::PreserveLoadDefaults,
+            gen_core::ResidentRequestMemory::ExplicitResident,
+        ] {
+            contract.resident_request_memory = resident;
+            for strategy in MemoryStrategy::ALL {
+                let parameters =
+                    estimate_floor_parameters(&contract, &contract.engaged_composition(strategy))
+                        .unwrap();
+                let selection = MemorySelection {
+                    strategy,
+                    parameters,
+                    tier,
+                };
+                contract.validate_selection(&selection).unwrap();
+                let expected = if strategy == MemoryStrategy::Resident {
+                    None
+                } else {
+                    contract.generation_memory(&selection)
+                };
+                assert_eq!(memory_for_selection(&contract, selection), expected);
+            }
+        }
+        // Contract mapping omits knobs for excluded mechanisms even if stale callers carry values.
+        contract
+            .default_engagement_exclusions
+            .push(gen_core::MemoryStrategyEngagementExclusion {
+                selection: MemoryStrategy::BoundedTransformerResidency,
+                excluded_rung: MemoryStrategy::BoundedAttention,
+                evidence: "weights-free composition fixture".into(),
+            });
+        let mut parameters = estimate_floor_parameters(
+            &contract,
+            &contract.engaged_composition(MemoryStrategy::BoundedTransformerResidency),
+        )
+        .unwrap();
+        parameters.attention_chunk_size = Some(512);
+        let selection = MemorySelection {
+            strategy: MemoryStrategy::BoundedTransformerResidency,
+            parameters,
+            tier,
+        };
+        let actual = memory_for_selection(&contract, selection).unwrap();
+        assert_eq!(Some(actual), contract.generation_memory(&selection));
+        assert!(!actual.chunk_attention);
+        assert_eq!(actual.attention_chunk_size, None);
+        assert_eq!(
+            actual.transformer_window_component,
+            Some(gen_core::TransformerComponent::TextEncoder)
+        );
+    }
 
     /// sc-26241: every FLUX 3 package is a numeric tier the selector can bind by identity — the
     /// publisher FP8R/NVFP4 as their own quant, never bf16 — while other families keep NVFP4 (and
@@ -3396,8 +3388,9 @@ mod tests {
             },
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             calibration_fingerprint: contract.calibration.as_ref().unwrap().fingerprint.clone(),
-            sceneworks_revision: SDXL_REQUEST_EVIDENCE_REVISION.into(),
-            inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.into(),
+            sceneworks_revision: crate::memory_route_registry::SDXL_REQUEST_EVIDENCE_REVISION
+                .into(),
+            inference_revision: sceneworks_core::inference_provenance::INFERENCE_REVISION.into(),
             harness_version: String::new(),
             predicted_peak_bytes: 0,
             observed_peak_bytes: None,
@@ -3674,7 +3667,7 @@ mod tests {
                 },
                 (resident * BYTES_PER_GIB).ceil() as u64,
                 overlay_bytes,
-                SDXL_REQUEST_EVIDENCE_REVISION,
+                crate::memory_route_registry::SDXL_REQUEST_EVIDENCE_REVISION,
                 no_anchors(),
             )
         };
@@ -3732,7 +3725,7 @@ mod tests {
             full_min.evidence.key.geometry,
             (resident * BYTES_PER_GIB).ceil() as u64,
             0,
-            SDXL_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::SDXL_REQUEST_EVIDENCE_REVISION,
             no_anchors(),
         );
         assert!(refused.iter().all(|candidate| candidate
@@ -3845,7 +3838,8 @@ mod tests {
                 34
             }),
             cache_state: MemoryCacheState::Cold,
-            evidence_revision: IDEOGRAM_REQUEST_EVIDENCE_REVISION.to_owned(),
+            evidence_revision: crate::memory_route_registry::IDEOGRAM_REQUEST_EVIDENCE_REVISION
+                .to_owned(),
         }
     }
 
@@ -4329,7 +4323,7 @@ mod tests {
         .expect("registered Kolors staged selection");
         assert_eq!(
             evaluation.context.evidence_revision,
-            KOLORS_REQUEST_EVIDENCE_REVISION
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION
         );
         let assembly = evaluation.context.overlay.unwrap();
         assert!(assembly.contains(KOLORS_PHYSICAL_RECEIPT_PREFIX));
@@ -4464,7 +4458,7 @@ mod tests {
             0,
             MemoryCacheState::Cold,
             kolors_bespoke_probe_contract("candle_kolors_ipadapter", "q4", false),
-            KOLORS_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION,
         )
         .unwrap()
         .expect("exact staged candidate");
@@ -4474,7 +4468,7 @@ mod tests {
         );
         assert_eq!(
             evaluation.context.evidence_revision,
-            KOLORS_REQUEST_EVIDENCE_REVISION
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION
         );
         assert!(evaluation
             .context
@@ -4512,7 +4506,7 @@ mod tests {
             0,
             MemoryCacheState::Cold,
             kolors_bespoke_probe_contract("candle_kolors_ipadapter", "q4", false),
-            KOLORS_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION,
         );
         assert!(
             crossed.is_err(),
@@ -4660,7 +4654,7 @@ mod tests {
                         0,
                         cache_state,
                         ip_contract.clone(),
-                        KOLORS_REQUEST_EVIDENCE_REVISION,
+                        crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION,
                     )
                     .unwrap()
                     .expect("IP staged candidate");
@@ -4709,7 +4703,7 @@ mod tests {
                             0,
                             cache_state,
                             control_contract.clone(),
-                            KOLORS_REQUEST_EVIDENCE_REVISION,
+                            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION,
                         )
                         .unwrap()
                         .expect("Control staged candidate");
@@ -4756,7 +4750,7 @@ mod tests {
             0,
             MemoryCacheState::Cold,
             kolors_bespoke_probe_contract("candle_kolors_ipadapter", "q4", false),
-            KOLORS_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION,
         )
         .unwrap()
         .expect("a roomy card still admits");
@@ -4996,7 +4990,7 @@ mod tests {
                 MemoryCacheState::Cold,
                 None,
                 Some(contract.clone()),
-                Some(CHROMA_REQUEST_EVIDENCE_REVISION),
+                Some(crate::memory_route_registry::CHROMA_REQUEST_EVIDENCE_REVISION),
                 None,
                 surcharge,
                 None,
@@ -5128,7 +5122,7 @@ mod tests {
                 MemoryCacheState::Cold,
                 None,
                 Some(contract),
-                Some(CHROMA_REQUEST_EVIDENCE_REVISION),
+                Some(crate::memory_route_registry::CHROMA_REQUEST_EVIDENCE_REVISION),
                 None,
             )
         };
@@ -5257,7 +5251,7 @@ mod tests {
                     MemoryCacheState::Cold,
                     None,
                     Some(contract),
-                    Some(SANA_REQUEST_EVIDENCE_REVISION),
+                    Some(crate::memory_route_registry::SANA_REQUEST_EVIDENCE_REVISION),
                     None,
                 )
             };
@@ -5285,7 +5279,7 @@ mod tests {
                 assert_eq!(evaluation.context.has_phases, request_has_phases);
                 assert_eq!(
                     evaluation.context.evidence_revision,
-                    SANA_REQUEST_EVIDENCE_REVISION
+                    crate::memory_route_registry::SANA_REQUEST_EVIDENCE_REVISION
                 );
             }
 
@@ -5713,7 +5707,7 @@ mod tests {
                 MemoryCacheState::Warm,
                 Some("text_to_image"),
                 Some(contract),
-                Some(IDEOGRAM_REQUEST_EVIDENCE_REVISION),
+                Some(crate::memory_route_registry::IDEOGRAM_REQUEST_EVIDENCE_REVISION),
                 None,
             )
         };
@@ -5766,7 +5760,7 @@ mod tests {
             MemoryCacheState::Cold,
             Some("image_to_image"),
             Some(contract.clone()),
-            Some(IDEOGRAM_REQUEST_EVIDENCE_REVISION),
+            Some(crate::memory_route_registry::IDEOGRAM_REQUEST_EVIDENCE_REVISION),
             None,
         )
         .expect("Hires structural estimate")
@@ -6265,10 +6259,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn mage_numeric_tiers_bind_only_the_active_q4_precision_floors() {
         for engine_id in [
@@ -6810,7 +6801,7 @@ mod tests {
         // Estimate admissions are legacy-scoped in telemetry, exactly like the resident estimate.
         assert_eq!(
             evaluation.context.evidence_revision,
-            Z_IMAGE_REQUEST_EVIDENCE_REVISION
+            crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION
         );
 
         // Margin mutation arm: at 4.52 GiB free the padded staged floor (2.5 + 2 = 4.5) fits but
@@ -7178,7 +7169,7 @@ mod tests {
             Z_IMAGE_FIXTURE_GEOMETRY,
             (18.4 * BYTES_PER_GIB) as u64,
             0,
-            Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
             anchors,
         )
     }
@@ -8259,7 +8250,7 @@ mod tests {
             geometry,
             (18.4 * BYTES_PER_GIB) as u64,
             0,
-            Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
             anchors,
         )
     }
@@ -8586,7 +8577,7 @@ mod tests {
                 geometry,
                 resident_peak_bytes,
                 0,
-                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 no_anchors(),
             )
         };
@@ -8776,7 +8767,7 @@ mod tests {
                 geometry,
                 resident_peak_bytes,
                 0,
-                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 CandleLadderAnchors {
                     store: anchors,
                     facts: ArchitectureFacts::default(),
@@ -8916,7 +8907,7 @@ mod tests {
                 geometry,
                 resident_peak_bytes,
                 0,
-                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 CandleLadderAnchors {
                     store: Some(&store),
                     facts: ArchitectureFacts::default(),
@@ -8992,7 +8983,7 @@ mod tests {
                 geometry,
                 resident_peak_bytes,
                 0,
-                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 CandleLadderAnchors {
                     store: Some(&foreign_store),
                     facts: ArchitectureFacts::default(),

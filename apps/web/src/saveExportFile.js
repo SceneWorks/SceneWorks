@@ -18,10 +18,28 @@ export async function saveExportFile(
   } = {},
 ) {
   if (desktop) {
-    return invoke("save_image_export", {
-      imageBytes: Array.from(new Uint8Array(await file.arrayBuffer())),
+    const maxBytes = 256 * 1024 * 1024;
+    const chunkBytes = 1024 * 1024;
+    if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > maxBytes) {
+      throw new Error("The exported file must contain 1 byte to 256 MB.");
+    }
+    const exportId = await invoke("begin_image_export", {
       suggestedFilename: file.name,
+      totalBytes: file.size,
     });
+    if (!exportId) return null;
+    try {
+      for (let offset = 0; offset < file.size; offset += chunkBytes) {
+        const chunk = await file.slice(offset, offset + chunkBytes).arrayBuffer();
+        await invoke("save_image_export", chunk, {
+          headers: { "x-sceneworks-export-id": exportId },
+        });
+      }
+      return await invoke("finish_image_export", { exportId });
+    } catch (error) {
+      await invoke("cancel_image_export", { exportId }).catch(() => {});
+      throw error;
+    }
   }
   downloadBlob(file, file.name, { documentRef, urlApi });
   return null;

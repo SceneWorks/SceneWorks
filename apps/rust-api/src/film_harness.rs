@@ -63,7 +63,6 @@ use sceneworks_core::film_planner::{capabilities_for, PlannerCapabilities};
 use sceneworks_core::jobs_store::TERMINAL_STATUSES;
 use sceneworks_core::time::{parse_utc_seconds, utc_now};
 use serde_json::{json, Map as JsonObject, Value};
-use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 mod transport;

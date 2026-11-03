@@ -337,14 +337,8 @@ mod tests {
     #[test]
     fn declarations_match_the_shipped_rows_and_the_recorded_download_evidence() {
         use serde_json::Value;
-        let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(
-            crate::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .expect("builtin.models.jsonc embedded")
-                .1,
-        ))
-        .expect("builtin.models.jsonc parses");
+        let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         let evidence: Value = serde_json::from_str(include_str!(
             "../../../config/download-pattern-evidence.json"
         ))

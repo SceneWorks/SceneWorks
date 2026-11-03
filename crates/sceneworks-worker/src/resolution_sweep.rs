@@ -260,7 +260,7 @@ fn spec_safetensors_bytes(spec: &LoadSpec) -> u64 {
     total
 }
 
-const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 /// One generation at `(width, height)` with the peak counter re-based first. Returns
 /// `(peak_bytes, resident_after_bytes, render_std)`; the caller derives

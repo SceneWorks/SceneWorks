@@ -73,7 +73,7 @@ use crate::vram_gate::VramBudget;
 /// [`crate::vram_gate`]'s and [`crate::krea_control_fit`]'s own `HEADROOM_GB` — allocator slack + CUDA
 /// context overhead, NOT an activation estimate (this gate makes no claim about activations; see the
 /// module note on why the floor stays a floor).
-const HEADROOM_GB: f64 = 2.0;
+const HEADROOM_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
 
 /// WHERE one candle conditioning lane is admitted — not whether.
 ///
@@ -162,7 +162,7 @@ impl ConditioningFootprint {
             base_bytes: crate::mlx_fit_gate::sum_safetensors_bytes(base_dir),
             overlay_bytes: dedupe_contained(base_dir, overlays)
                 .into_iter()
-                .map(path_weight_bytes)
+                .map(crate::weights_source::path_weight_bytes)
                 .sum(),
         }
     }
@@ -201,15 +201,6 @@ fn dedupe_contained<'a>(base_dir: &Path, overlays: &[&'a Path]) -> Vec<&'a Path>
     kept
 }
 
-/// The path inside a [`gen_core::WeightsSource`], for the overlay list. Both variants carry one path;
-/// [`path_weight_bytes`] already distinguishes file from directory on disk, so the variant itself does
-/// not need to be threaded through.
-pub(crate) fn weights_source_path(source: &gen_core::WeightsSource) -> &Path {
-    match source {
-        gen_core::WeightsSource::Dir(path) | gen_core::WeightsSource::File(path) => path.as_path(),
-    }
-}
-
 /// The extra CO-RESIDENT paths an opted-in PiD decoder adds to a render (epic 7840): the PiD student
 /// checkpoint plus the `gemma-2-2b-it` caption-encoder snapshot. Empty when PiD is off.
 ///
@@ -220,21 +211,11 @@ pub(crate) fn weights_source_path(source: &gen_core::WeightsSource) -> &Path {
 pub(crate) fn pid_paths(pid: Option<&gen_core::PidWeights>) -> Vec<&Path> {
     pid.map(|pid| {
         vec![
-            weights_source_path(&pid.checkpoint),
-            weights_source_path(&pid.gemma),
+            crate::weights_source::WeightsSourceExt::path(&pid.checkpoint),
+            crate::weights_source::WeightsSourceExt::path(&pid.gemma),
         ]
     })
     .unwrap_or_default()
-}
-
-/// On-disk weight bytes at `path`: the file's own length when it is a file, else a recursive
-/// `.safetensors` sum when it is a directory. `0` when neither (missing / unreadable) ⇒ no signal.
-fn path_weight_bytes(path: &Path) -> u64 {
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() => meta.len(),
-        Ok(meta) if meta.is_dir() => crate::mlx_fit_gate::sum_safetensors_bytes(path),
-        _ => 0,
-    }
 }
 
 /// The predicted resident FLOOR (GB) for a conditioning render: the co-resident base + overlay weights

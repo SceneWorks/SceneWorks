@@ -132,30 +132,9 @@ fn stage_export(data_dir: &Path, files: &[&str], config: &str) {
     }
 }
 
-fn isolate_hf_cache() -> crate::test_env::EnvVars {
-    crate::test_env::EnvVars::set(&[
-        ("HF_HUB_CACHE", ""),
-        ("HUGGINGFACE_HUB_CACHE", ""),
-        ("HF_HOME", ""),
-    ])
-}
-
 /// The shipped `iris_3b_depth` catalog entry, so admission reads the real declaration.
 fn shipped_depth_entry() -> Value {
-    let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("builtin.models.jsonc embedded")
-        .1;
-    let manifest: Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text)).unwrap();
-    manifest["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|model| model["id"] == DEPTH_MODEL_ID)
-        .cloned()
-        .expect("iris_3b_depth is in the builtin catalog")
+    Value::Object(crate::test_env::shipped_catalog_entry(DEPTH_MODEL_ID))
 }
 
 // ---- EXIF orientation ---------------------------------------------------------------------------
@@ -321,7 +300,7 @@ fn a_rotated_jpeg_is_estimated_upright() {
 
 #[test]
 fn the_export_resolves_only_from_its_own_complete_depth_closure() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let data = tempfile::tempdir().unwrap();
     let settings = settings_at(data.path());
 

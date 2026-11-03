@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use reqwest::header;
@@ -30,16 +29,8 @@ use sceneworks_core::lora_family::{
 // `read_safetensors_header` joined this block in sc-14057: the LoRA-import path used to read the
 // header itself, and now delegates to `lora_family::inspect_adapter_in_dir`, leaving
 // `classify_adapter` as the only caller — which is gated.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::lora_family::read_safetensors_header;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-use sceneworks_core::lora_family::resolve_adapter_in_dir;
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
     validate_lora_url_host, validate_public_ip,
@@ -50,7 +41,7 @@ use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use tracing::Level;
@@ -222,33 +213,20 @@ pub fn flux3_converted_bundle_check(root: &Path, package: &Path) -> Result<(), S
 /// Backend-neutral: the envelope is a property of the engine's attention layout, which both lanes
 /// share, so a per-lane copy would be two declarations of one fact.
 pub(crate) use sceneworks_core::admission_geometry;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod advanced;
 mod api_client;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod asset_media;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod image_sampling;
 // Shared one-child PNG persistence for upscale (Mac + candle) and smart-select (Mac).
 // Keep the include site on the callers' superset so the neither-backend lane does not
 // compile an otherwise dead helper — plus `test`, because this seam is where the standalone
 // upscale's embedded workflow is written (sc-15948) and that contract should be asserted on every
 // lane rather than only where an upscaler backend compiles. The non-test build is unchanged.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 mod single_child_asset;
 // Lazy, on-demand download-credential pull from the macOS desktop credential socket
 // (sc-5891). Compiles on all targets; the socket I/O is `cfg(unix)` and inert unless
@@ -281,17 +259,11 @@ mod resolved_cache_promotion;
 mod generator_cache;
 // Resident-model cache for image→image `gen_core::Transform`s (the Iris-3B restorer, sc-25683): the
 // third thin wrapper over `cache_thread`, sharing one resident engine with the generator cache.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod transform_cache;
 // Iris-3B restoration (sc-25683): the engine's pure planner for the pre-submission preview (public:
 // the rust-api plan endpoint calls it), the cache-only install resolver, admission and the run.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub mod iris_restore;
 // sc-21027: MiniMax-H3's FL2VA provider labels its two conditioning-force boundaries. A Metal
 // watchdog timeout there poisons this process's command queue, so record the first timeout, refuse
@@ -312,33 +284,15 @@ mod execution_planner;
 // so off both natives it is dead (allow it, mirroring the `generator_cache` precedent). Caches the
 // ~16 GB refine model keyed by weights dir + selection reqs with the SAME idle-eviction window as
 // `generator_cache` so a single setting bounds resident model memory across both lanes.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod refine_model_cache;
 // Bounds MLX's free-buffer cache across a long LLM decode (sc-24029). Dead off both natives for the
 // same reason `refine_model_cache` is: nothing there decodes on a resident text model.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod mlx_decode_cache;
 // Compressed-KV opt-in and the KV-cache report SceneWorks records for a local LLM generation
 // (sc-20682). Dead off both natives for the same reason as the two modules above.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod llm_kv_cache;
 use api_client::*;
 // Backend-neutral engine dispatch table + registry-derived capability advertisement
@@ -387,13 +341,7 @@ pub mod memory_strategy;
 mod mlx_fit_gate;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_phase_estimate;
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod video_admission;
 // The full base fine-tune memory-envelope gate (sc-14056) lives beside the generation MLX fit gate
 // (it reuses that module's byte-summing + unified-memory budget probe). Re-exported for the rust-api
@@ -401,13 +349,7 @@ mod video_admission;
 pub use mlx_fit_gate::full_finetune_memory_error;
 // Iris-3B generation training seams (sc-25685/sc-25686): the trainer's data-walk report the API
 // surfaces before launch, and the declared memory-floor gate (the macOS submit-time twin is public).
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod iris_training;
 pub use iris_training::{
     iris_checkpoint_root, iris_data_walk_report, iris_plan_memory_error, iris_run_checkpoint_dirs,
@@ -416,13 +358,7 @@ pub use iris_training::{
 // Iris-3B depth (sc-25687) / restoration (sc-25688) training seams: task items + load inputs for the
 // executor, and the pre-launch checks the API serves (install availability, sidecar format/alignment,
 // the per-item dataset report, the degradation parser).
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod iris_task_training;
 pub use iris_task_training::{
     check_degraded_sidecar, check_depth_sidecar, check_restore_degradation,
@@ -431,31 +367,16 @@ pub use iris_task_training::{
 };
 // Iris-3B curricula, REPA, holdout and fp16 (sc-25689): the engine's stage presets, its plan
 // resolution (typed refusals + receipts) and the REPA teacher TRAINING resource.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code, unused_imports)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code, unused_imports))]
 mod iris_curricula;
 pub use iris_curricula::{
     installed_repa_teacher, iris_stage_presets, IrisPlanRefusal, ResolvedIrisPlan,
 };
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub use iris_curricula::{resolve_iris_config, resolve_iris_plan};
 // Multi-rank Iris training on one host (sc-25689): the worker launches `world_size` rank processes
 // (this same executable, re-entered through [`iris_rank_entry`]) and coordinates them.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code, unused_imports)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code, unused_imports))]
 mod iris_dist;
 pub use iris_dist::iris_rank_entry;
 // The auxiliary-training-model install check (sc-25213), shared with the rust-api submit gate.
@@ -497,6 +418,7 @@ use media_jobs::*;
 // `sceneworks_core::media_convert` routine (sips on macOS, ffmpeg elsewhere).
 mod image_decode;
 mod image_jobs;
+mod parquet_row;
 use image_jobs::*;
 
 /// Model-scoped enhancement TOKEN ceiling shared by API enqueue and worker/native parsing.
@@ -546,7 +468,7 @@ mod yue2_admission;
 // sc-23001's YuE2 memory-profile capture entrypoint: one #[ignore]d test the terminal campaign
 // (`scripts/yue2-memory-profile.mjs`, sc-23002) runs once per case in a fresh process. Test-only,
 // and only where the candle audio lane is linked (Metal on macOS, CUDA under `backend-candle`).
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 mod yue2_memory_profile;
 // YuE2 song jobs (sc-22999): `audio_generate` jobs carrying a `yue2` block, run through the `yue2`
 // provider's `generate_with_report`. Compiled everywhere; the engine is reached through the audio
@@ -566,13 +488,7 @@ pub mod voice_register;
 // so off macOS the items are otherwise unused (the parity tests still build + run).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod person_replace;
-#[cfg(all(
-    feature = "test-support",
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(feature = "test-support", native_lane))]
 pub mod test_support;
 mod training_jobs;
 use training_jobs::*;
@@ -586,19 +502,10 @@ use dataset_parquet_jobs::*;
 pub mod catalog_analysis;
 pub mod catalog_image_fetch;
 pub mod catalog_parquet_scanner;
-// The shared scaffold both dataset-analysis jobs route through (sc-8836, F-034) — the `CancelJoinGuard`
-// select loop, per-item progress ramp, and sidecar POST extracted out of the two near-duplicate modules.
-// Gated to the same lanes as its only callers (the real `run_*_analysis_job` in the two modules below);
-// on the parity lane those fall back to no-op stubs, so the scaffold has no consumer and must not compile.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+// Dataset item parsing is shared by the native analysis, caption and upscale jobs.
+#[cfg(native_lane)]
 mod analysis_jobs_common;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use analysis_jobs_common::*;
 mod dataset_analysis_jobs;
 use dataset_analysis_jobs::*;
@@ -637,13 +544,7 @@ mod downloads;
 mod qwen_alpha;
 // Every consumer is the TextLlm lane in `prompt_refine_jobs`, which only a backend build compiles;
 // a no-backend build keeps the module for its pure-function tests.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod qwen_prompt_rewrite;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
@@ -658,26 +559,14 @@ mod lora_train_driver;
 // `is_all_zero`/`save_png`) that were copy-pasted across every `*_mlx_smoke.rs` (macOS) and
 // `*_gpu_smoke.rs` (off-Mac candle) file + `footprint_measure.rs`. Gated on the SUPERSET of both
 // smoke lanes so it compiles exactly where a smoke that imports it does.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod smoke_support;
 // sc-12409: parity guard tying the shipped video manifest's `limits.maxPixels` to the area cap of
 // the ENGINE PINNED by Cargo.toml (mlx via `runtime-macos` on macOS, candle via `runtime-cuda`
 // off-mac under backend-candle). Not a smoke — no weights, no GPU; just the shipped manifest bytes
 // vs the pinned `MAX_AREA_*` const. Gated on the same "engine bundle present" superset as
 // `smoke_support` because it needs a backend crate in scope to read the const.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod pinned_engine_geometry;
 // sc-17607: the COMPOSITION half of the SC-15833 FLUX.2 audit — is `flux2_dev` still registered by
 // `candle-gen-flux2` in the bundle the worker links? A codegen digest cannot answer that, because
@@ -722,24 +611,12 @@ mod imported_comfy_quant_gpu_smoke;
 // Real-weight end-to-end worker smoke for Iris-3B on Candle/CUDA (sc-25680): one production
 // `image_generate` job through the shipped catalog entry and the generic text_encoder seam. The
 // native prompt-batch smoke (sc-25681) also runs on the macOS/MLX lane.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod iris_gpu_smoke;
 // Real-weight Iris-3B generation TRAINING smoke (sc-25685 MLX / sc-25686 Candle): one bounded LoRA
 // `lora_train` job through the production executor, then the adapter applied by an `image_generate`
 // job. Backend-neutral, so the same test runs on Apple Silicon and on the CUDA real-weights card.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod iris_training_gpu_smoke;
 // Real-weight GPU smoke for the candle Anima 2B lane (epic 10512, sc-10625 — the hardware-gated
 // acceptance extracted from sc-10525). Test-only + candle-only; drives `crate::inference_runtime::load("anima_base" |
@@ -987,10 +864,7 @@ mod bernini_tier_build;
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +
 // unit-tests (cross-platform raster) but its items are otherwise unused — so allow
 // dead_code only there.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod openpose_skeleton;
 // Native canny edge-map preprocessor for the Fun-Controlnet-Union canny head
 // (epic 8236, sc-8240). Pure CPU raster (cross-platform + testable everywhere),
@@ -999,10 +873,7 @@ mod openpose_skeleton;
 // off-Mac candle strict-control trio (sc-8304); on a candle-disabled box off Mac
 // it still builds + unit-tests but its items are otherwise unused — so allow
 // dead_code only there.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod canny;
 // Depth-map preprocessor for the Fun-Controlnet-Union depth head (epic 8236): arbitrary image →
 // `ControlKind::Depth` control image via a Depth Anything V2 port. Sibling of `canny` /
@@ -1012,19 +883,13 @@ mod canny;
 // driver (sc-8243 mac) AND the off-Mac candle strict-control trio (sc-8304, which wires the candle
 // estimator into `preprocess_control_entry`); on a candle-disabled box off Mac the estimator stays
 // unused — so allow dead_code only there.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod depth;
 // DWPose pose detection via onnxruntime (epic 3482, sc-3487). On Mac the CoreML EP +
 // on the off-Mac candle GPU-worker lane the CUDA EP (sc-5496, epic 5482) run the same
 // RTMW detector in-process; on a candle-disabled box the capability is not advertised and the job
 // remains queued.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod pose_jobs;
 // Control-type preprocessor registry (ControlNet Training Studio A1, sc-10160, epic 10159): the
 // single `ControlKind`-keyed mapping from a target image to its condition image, wrapping the
@@ -1040,10 +905,7 @@ mod pose_jobs;
 // (through A2). That caller exists only on the neural-inference builds (macOS / off-Mac candle), so
 // the module is fully wired there; on a candle-disabled off-Mac ("neither") build there is still no
 // consumer of the neural path, so keep the dead_code allowance only for that build.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod control_preprocess;
 // Folder-ingest control-dataset prep (Training Studio A2, sc-10161, epic 10159): the "create your
 // own" GENERATE core — raw target images → render each condition via the A1 `control_preprocess`
@@ -1054,10 +916,7 @@ mod control_preprocess;
 // first real caller — it renders conditions from an existing dataset then trains. That caller exists
 // only on the neural-inference builds; on a candle-disabled off-Mac ("neither") build nothing drives
 // the pipeline, so keep the dead_code allowance only for that build.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod control_dataset_prep;
 // Bring-your-own-dataset ingest adapter (Training Studio A3, sc-10171, epic 10159): the second
 // dataset-input path — map a PROVIDED dataset into the same on-disk layout A2 emits, skipping what
@@ -1089,35 +948,23 @@ mod ort_cuda;
 // InstantID face-stack detector reused in-process for the Key Point Library "extract kps from this
 // image" capability. So the module compiles on Mac AND the candle lane; on a candle-disabled box the
 // capability is not advertised and the job remains queued.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod kps_jobs;
 // Image upscaling: Real-ESRGAN (epic 3482, sc-3489) RRDBNet x2/x4 via `ort`/CoreML on Mac, plus the
 // SeedVR2 one-step diffusion upscaler — native MLX on Mac (sc-4815) and the candle CUDA backend on
 // Windows (sc-5928). So the module compiles on Mac AND the Windows/CUDA candle lane; the ort/CoreML
 // Real-ESRGAN path inside stays Mac-gated while the candle worker supplies the off-Mac Real-ESRGAN
 // lane, and SeedVR2 is backend-neutral (`crate::inference_runtime::load("seedvr2")`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod upscale_jobs;
 // YOLO11 person detection + selected-person ByteTrack tracking (epic 3482, sc-3488/sc-3633;
 // off-Mac candle lane sc-5498, epic 5482). Native-MLX YOLO11m on Mac, `ort`/CUDA on the off-Mac
 // candle GPU-worker lane (the pure-Rust ByteTrack in `person_track` is backend-neutral). So both
 // modules compile on Mac AND the candle lane; a candle-disabled off-Mac build refuses the jobs.
 // Person segmentation uses MLX SAM2/SAM3 on Mac and native candle SAM3 off-Mac.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod person_jobs;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod person_track;
 // Native-MLX SAM2 person segmentation (epic 3704, sc-3709): the `mlx-gen-sam2`
 // box-prompt segmenter generates per-frame masks in `run_person_track`. On Mac this is SAM2; off-Mac
@@ -1131,24 +978,15 @@ mod person_segment;
 mod person_segment_sam3;
 // Smart-select image segmentation: native SAM3 box-PVS on both registered runtimes. Candle's
 // pinned SAM3 surface has no point-prompt API, so segment_jobs rejects points before any I/O.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod segment_jobs;
 // Iris-3B monocular depth (sc-25682): the `image_depth` job — a raw float32 `.npy` depth asset plus a
 // derived preview, served by the native MLX worker on macOS and the Candle worker off-Mac.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod depth_jobs;
 // Reading a saved depth asset as a consumer (sc-25682): the depth-control adapter. Compiled on every
 // build; its only caller (strict depth control) is gated behind a native lane.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod depth_asset;
 // Off-Mac candle SAM3 text-concept person segmenter (sc-6247, epic 5482 under sc-5062) — the
 // Windows/CUDA sibling of `person_segment_sam3`, driving `candle-gen-sam3`'s `Sam3VideoModel` to
@@ -1160,36 +998,21 @@ mod person_segment_sam3_candle;
 // modules (`person_segment_sam3` MLX / `person_segment_sam3_candle` candle). Extracted here ONCE so a
 // fix lands on both platforms and they cannot silently diverge; the per-backend files keep only their
 // tensor/model/device seam. Same superset gate as `scail2_masks` (both SAM3 modules or neither).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod person_segment_sam3_common;
 // SCAIL-2 color-coded segmentation-mask painting (epic 5439, sc-5448): turns native SAM3
 // per-person masks into the palette-painted RGB masks the SCAIL-2 engine consumes. Backend-neutral
 // (pure pixel painting over `AllPersonMasks`); available on both the macOS MLX lane (sc-5448) and the
 // off-Mac candle lane (sc-6837, the candle SCAIL-2 sibling), each over its own SAM3 module's
 // structurally-identical `AllPersonMasks`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod scail2_masks;
 use downloads::*;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use kps_jobs::*;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use pose_jobs::*;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use upscale_jobs::*;
 
 mod checkpoint_catalog_migration;
@@ -1202,6 +1025,7 @@ pub(crate) use manifest::*;
 mod paths;
 pub use paths::*;
 mod payload;
+mod text_clean;
 pub(crate) use payload::*;
 mod settings;
 pub use settings::*;
@@ -1209,8 +1033,12 @@ pub use settings::*;
 mod imports;
 pub use imports::*;
 mod load_progress;
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 mod model_io;
+mod stream_supervision;
+#[cfg(any(test, native_lane))]
+use stream_supervision::StreamSignal;
+use stream_supervision::StreamSupervisor;
 mod progress;
 pub(crate) use progress::*;
 mod util;
@@ -1231,25 +1059,13 @@ const DEFAULT_TRANSITION_DURATION_SECONDS: f64 = 0.5;
 // aliases fall back to the literal values — kept in lockstep by
 // `person_track_sample_constants_are_a_single_source_of_truth`, which asserts the equality on the
 // lanes where both exist.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = person_track::SAMPLE_RATE_FPS;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const PERSON_TRACK_MAX_SAMPLES: usize = person_track::MAX_SAMPLES;
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = 2.0;
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 const PERSON_TRACK_MAX_SAMPLES: usize = 24;
 const PERSON_TRACK_X_DRIFT: f64 = 0.018;
 
@@ -2695,10 +2511,7 @@ async fn run_utility_job_inner(
             // macOS MLX worker, CUDA EP on the off-Mac candle GPU worker. Available on Mac
             // AND the candle lane; on a candle-disabled box `PoseDetect` is never advertised, so the
             // job remains queued and this falls to the `_` arm only if called defensively.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
+            #[cfg(native_lane)]
             JobType::PoseDetect => run_pose_detect_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Pose detection failed.", error)),
@@ -2707,10 +2520,7 @@ async fn run_utility_job_inner(
             // for the Key Point Library. Available on Mac AND the candle lane; on a candle-disabled box
             // `KpsExtract` is never advertised, so the job remains queued and this falls to the `_` arm
             // only if called defensively.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
+            #[cfg(native_lane)]
             JobType::KpsExtract => run_kps_extract_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Keypoint extraction failed.", error)),
@@ -2719,19 +2529,13 @@ async fn run_utility_job_inner(
             // (native MLX on Mac sc-4815 / candle CUDA on Windows sc-5928). Available on Mac AND the
             // Windows/CUDA candle lane; on a build without either lane `ImageUpscale` is never advertised,
             // so the job remains queued. The routing oracle admits only the engines each native lane serves.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
+            #[cfg(native_lane)]
             JobType::ImageUpscale => run_image_upscale_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image upscale failed.", error)),
             // Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-res items, then
             // re-point each via the API. Same engine + worker lanes as image_upscale.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
+            #[cfg(native_lane)]
             JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Dataset upscale failed.", error)),
@@ -2739,20 +2543,14 @@ async fn run_utility_job_inner(
             // served in-process by `segment_jobs::run_image_segment_job` — a box prompt → a binary
             // inpaint mask asset for the Image Editor. Advertised by both native workers; Candle
             // point prompts fail closed because the pinned provider exposes box PVS only.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
+            #[cfg(native_lane)]
             JobType::ImageSegment => segment_jobs::run_image_segment_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Smart-select segmentation failed.", error)),
             // Iris-3B monocular depth (sc-25682): the `iris_3b_depth` task export on the native MLX
             // worker (macOS) or the Candle worker (off-Mac); a build without either lane never
             // advertises `image_depth`, so the job remains queued.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
+            #[cfg(native_lane)]
             JobType::ImageDepth => depth_jobs::run_image_depth_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Depth estimation failed.", error)),
@@ -2761,10 +2559,7 @@ async fn run_utility_job_inner(
             // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.
             // Available on Mac + the Windows/CUDA candle lane; elsewhere `VideoUpscale` is never advertised
             // (no torch path), so it falls to the `_` arm and the routing oracle reports it unsupported.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
+            #[cfg(native_lane)]
             JobType::VideoUpscale => {
                 video_jobs::seedvr2::run_video_upscale_job(api, settings, &job)
                     .await
@@ -3105,3 +2900,8 @@ mod cpu_preparation_startup_tests {
         }
     }
 }
+
+mod weights_source;
+
+#[cfg(any(test, native_lane))]
+mod adapter_resolution;

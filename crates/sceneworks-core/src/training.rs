@@ -27,7 +27,6 @@ use serde_json::{json, Value};
 
 use crate::contracts::{string_enum, ContractNumber, ExtraFields, JsonObject};
 use crate::dataset_quality::{CachedTier0Scalars, QualityAck};
-use crate::store_util::is_safe_relative_path;
 
 pub mod flux3;
 pub mod iris;
@@ -100,7 +99,7 @@ pub(crate) fn inverted_window_message(
 }
 
 /// Every epic 2123 technique key of `advanced` that [`technique_value`] governs.
-pub const TECHNIQUE_KEYS: [&str; 45] = [
+const BASIC_TECHNIQUE_KEYS: &[&str] = &[
     WEIGHT_NOISE_SIGMA_KEY,
     GRADIENT_NOISE_ETA_KEY,
     GRADIENT_NOISE_GAMMA_KEY,
@@ -108,45 +107,43 @@ pub const TECHNIQUE_KEYS: [&str; 45] = [
     SUBJECT_MASK_LOSS_KEY,
     SUBJECT_MASK_BACKGROUND_WEIGHT_KEY,
     SUBJECT_MASK_SUBJECT_WEIGHT_KEY,
-    depth_anchoring::DEPTH_ANCHORING_WEIGHT_KEY,
-    depth_anchoring::DEPTH_ANCHORING_MODEL_KEY,
-    depth_anchoring::DEPTH_ANCHORING_MIN_T_KEY,
-    depth_anchoring::DEPTH_ANCHORING_MAX_T_KEY,
-    depth_anchoring::DEPTH_ANCHORING_EVERY_KEY,
-    "bodyProportionWeight",
-    "bodyProportionMinT",
-    "bodyProportionMaxT",
-    "bodyProportionEvery",
-    body_losses::BODY_PROPORTION_INCLUDE_HEAD_KEY,
-    "bodyShapeWeight",
-    "bodyShapeMinT",
-    "bodyShapeMaxT",
-    "bodyShapeEvery",
-    body_losses::BODY_SHAPE_MIN_COS_KEY,
-    "normalWeight",
-    "normalMinT",
-    "normalMaxT",
-    "normalEvery",
-    body_losses::NORMAL_RESTRICT_TO_SUBJECT_KEY,
-    face_losses::IDENTITY_LOSS_WEIGHT_KEY,
-    face_losses::IDENTITY_LOSS_MIN_T_KEY,
-    face_losses::IDENTITY_LOSS_MAX_T_KEY,
-    face_losses::IDENTITY_LOSS_EVERY_KEY,
-    face_losses::IDENTITY_LOSS_MIN_COS_KEY,
-    face_losses::IDENTITY_LOSS_REFERENCE_KEY,
-    face_losses::FACE_LANDMARK_LOSS_WEIGHT_KEY,
-    face_losses::FACE_LANDMARK_LOSS_MIN_T_KEY,
-    face_losses::FACE_LANDMARK_LOSS_MAX_T_KEY,
-    face_losses::FACE_LANDMARK_LOSS_EVERY_KEY,
-    latent_perceptual::VAE_ANCHOR.weight_key,
-    latent_perceptual::VAE_ANCHOR.min_t_key,
-    latent_perceptual::VAE_ANCHOR.max_t_key,
-    latent_perceptual::VAE_ANCHOR.every_key,
-    latent_perceptual::LATENT_LPIPS.weight_key,
-    latent_perceptual::LATENT_LPIPS.min_t_key,
-    latent_perceptual::LATENT_LPIPS.max_t_key,
-    latent_perceptual::LATENT_LPIPS.every_key,
 ];
+const TECHNIQUE_KEY_GROUPS: &[&[&str]] = &[
+    BASIC_TECHNIQUE_KEYS,
+    depth_anchoring::TECHNIQUE_KEYS,
+    body_losses::TECHNIQUE_KEYS,
+    face_losses::TECHNIQUE_KEYS,
+    latent_perceptual::TECHNIQUE_KEYS,
+];
+
+const fn technique_key_count() -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < TECHNIQUE_KEY_GROUPS.len() {
+        count += TECHNIQUE_KEY_GROUPS[i].len();
+        i += 1;
+    }
+    count
+}
+
+const fn technique_keys() -> [&'static str; technique_key_count()] {
+    let mut keys = [""; technique_key_count()];
+    let mut index = 0;
+    let mut group = 0;
+    while group < TECHNIQUE_KEY_GROUPS.len() {
+        let mut key = 0;
+        while key < TECHNIQUE_KEY_GROUPS[group].len() {
+            keys[index] = TECHNIQUE_KEY_GROUPS[group][key];
+            index += 1;
+            key += 1;
+        }
+        group += 1;
+    }
+    keys
+}
+
+/// Every technique key, derived from the owning modules in stable parser order.
+pub const TECHNIQUE_KEYS: [&str; technique_key_count()] = technique_keys();
 
 fn target_limit_flag(target: &TrainingTarget, flag: &str) -> bool {
     target.limits.get(flag).and_then(Value::as_bool) == Some(true)
@@ -1035,24 +1032,12 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
         ],
         extra: ExtraFields::new(),
     };
-    // Epic 2123 latent-space perceptual losses (sc-24833): static per-target support flags
-    // (`latent_perceptual::{VAE_ANCHOR_TARGETS, LATENT_LPIPS_TARGETS}`), identical on both platforms.
+    // Stamp static technique support once, after every target has its final identity. Backend
+    // routing and technique descriptors are validated by the metadata-only contract tests.
     for target in &mut registry.targets {
-        latent_perceptual::insert_limits(target);
-    }
-    // Epic 2123 resolution buckets (sc-2127): every builtin target's trainer declares them except
-    // the ones listed in `RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS`.
-    for target in &mut registry.targets {
-        // Epic 2123 face losses (sc-24831): the ArcFace identity and FaceMesh landmark losses ride
-        // the same shared perceptual builder arms and x0 decoder as depth anchoring, and every
-        // trainer that declares depth anchoring declares both — so each target advertising depth
-        // anchoring advertises them too (the worker drift test pins all three to the descriptors).
-        if depth_anchoring::target_supports_depth_anchoring(target) {
-            for key in [
-                face_losses::IDENTITY_LOSS_SUPPORT_LIMIT,
-                face_losses::FACE_LANDMARK_LOSS_SUPPORT_LIMIT,
-            ] {
-                target.limits.insert(key.to_owned(), Value::Bool(true));
+        for &(flag, targets) in TRAINING_SUPPORT_FLAGS {
+            if targets.contains(&target.id.as_str()) {
+                target.limits.insert(flag.to_owned(), Value::Bool(true));
             }
         }
         if !RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS.contains(&target.id.as_str()) {
@@ -1061,22 +1046,106 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
                 Value::Bool(true),
             );
         }
-        // Epic 2123: the x0 decoder the decoded-x0 losses use, from the one trainer-keyed mapping
-        // the worker loads it by. Every builtin target has a trainer identity contract (pinned by
-        // the routing matrix tests), and the MLX and Candle trainers of a target share a latent
-        // family, so the MLX identity names the decoder on both platforms (a contract test pins
-        // that too).
-        let trainer = crate::jobs_store::expected_backend_local_trainer_id(target, "mlx")
-            .unwrap_or_else(|error| panic!("builtin training target: {error}"));
-        if let Some(decoder) = depth_anchoring::x0_decoder_for_trainer(trainer) {
-            target.limits.insert(
-                depth_anchoring::X0_DECODER_LIMIT.to_owned(),
-                depth_anchoring::x0_decoder_limit(decoder),
-            );
+        // A malformed static declaration must not panic a production catalog request. Contract
+        // tests require every builtin trainer identity; an unresolved identity has no decoder.
+        if let Ok(trainer) = crate::jobs_store::expected_backend_local_trainer_id(target, "mlx") {
+            if let Some(decoder) = depth_anchoring::x0_decoder_for_trainer(trainer) {
+                target.limits.insert(
+                    depth_anchoring::X0_DECODER_LIMIT.to_owned(),
+                    depth_anchoring::x0_decoder_limit(decoder),
+                );
+            }
         }
     }
     registry
 }
+
+// Decoded-x0 techniques share the existing VAE-anchor support set on both backends. MOSS
+// supports adapter noise and subject masks only. LTX-2.5's prepared bundles cannot carry masks;
+// both LTX generations still decode video x0 through TAELTX2.3 for the decoded-x0 loss group.
+const NOISE_TARGETS: &[&str] = &[
+    "z_image_turbo_lora",
+    "sdxl_lora",
+    "illustrious_xl_v1_lora",
+    "illustrious_xl_v2_lora",
+    "kolors_lora",
+    "sd3_5_large_lora",
+    "sd3_5_medium_lora",
+    "lens_turbo_lora",
+    "krea_2_raw_lora",
+    "anima_base_lora",
+    "wan_lora",
+    "wan_t2v_14b_lora",
+    "wan_i2v_14b_lora",
+    "ltx_video_lora",
+    "ltx_2_5_video_lora",
+    "mage_flow_base_lora",
+    "qwen_image_2_1_lora",
+    "qwen_image_2_1_edit_lora",
+    "moss_image_base_lora",
+    "moss_image_sft_lora",
+];
+const SUBJECT_MASK_TARGETS: &[&str] = &[
+    "z_image_turbo_lora",
+    "sdxl_lora",
+    "illustrious_xl_v1_lora",
+    "illustrious_xl_v2_lora",
+    "kolors_lora",
+    "sd3_5_large_lora",
+    "sd3_5_medium_lora",
+    "lens_turbo_lora",
+    "krea_2_raw_lora",
+    "anima_base_lora",
+    "wan_lora",
+    "wan_t2v_14b_lora",
+    "wan_i2v_14b_lora",
+    "ltx_video_lora",
+    "mage_flow_base_lora",
+    "qwen_image_2_1_lora",
+    "qwen_image_2_1_edit_lora",
+    "moss_image_base_lora",
+    "moss_image_sft_lora",
+];
+const TRAINING_SUPPORT_FLAGS: &[(&str, &[&str])] = &[
+    (WEIGHT_NOISE_SUPPORT_LIMIT, NOISE_TARGETS),
+    (GRADIENT_NOISE_SUPPORT_LIMIT, NOISE_TARGETS),
+    (SUBJECT_MASK_LOSS_SUPPORT_LIMIT, SUBJECT_MASK_TARGETS),
+    (
+        depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        body_losses::BODY_PROPORTION_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        body_losses::BODY_SHAPE_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        body_losses::NORMAL_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        face_losses::IDENTITY_LOSS_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        face_losses::FACE_LANDMARK_LOSS_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        latent_perceptual::VAE_ANCHOR.support_limit,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        latent_perceptual::LATENT_LPIPS.support_limit,
+        &latent_perceptual::LATENT_LPIPS_TARGETS,
+    ),
+    // sc-25213: the ostris de-distill adapter selected by Z-Image presets is honored by both
+    // native trainers. No sibling target advertises this training-adapter contract.
+    ("supportsTrainingAdapter", &["z_image_turbo_lora"]),
+];
 
 /// The built-in training presets Rust owns out of the box.
 pub fn builtin_training_presets() -> TrainingPresetRegistry {
@@ -2147,21 +2216,6 @@ fn mage_flow_lora_target(
             "networkTypes": ["lora", "lokr", "full"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": name,
@@ -2239,22 +2293,6 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24826/sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-2125, sc-24830): declared on MLX and Candle alike.
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared on MLX and Candle alike.
-            "supportsSubjectMaskLoss": true,
-            // sc-25213: the ostris de-distill training adapter the presets select is honored by
-            // the Z-Image-Turbo trainer on MLX and Candle (pinned by a worker drift test).
-            "supportsTrainingAdapter": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -2367,21 +2405,6 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Lens LoRA",
@@ -2484,23 +2507,6 @@ fn krea_raw_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
-            // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
-            // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614).
         })),
         ui: object(json!({
             "label": "Krea 2 LoRA",
@@ -2687,21 +2693,6 @@ fn sd3_large_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "SD3.5 Large LoRA",
@@ -2786,21 +2777,6 @@ fn sd3_medium_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "SD3.5 Medium LoRA",
@@ -2898,34 +2874,15 @@ fn ltx_lora_target(
         );
     }
     let mut limits = object(json!({
-        "rank": [4, 128],
-        "alpha": [1, 128],
-        "steps": [200, 4000],
-        "resolutions": [512, 768, 1024],
-        "batchSize": [1, 2],
-        "networkTypes": ["lora"],
-        "lrSchedulers": ["constant", "linear", "cosine"],
-        "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true
-    }));
-    // Epic 2123 subject-masked loss (sc-24828): the LTX-2.3 trainer declares it on both backends;
-    // LTX-2.5 trains from prepared latent bundles, which no image mask can be aligned with, so its
-    // trainers refuse it and it is not advertised.
-    if !is_ltx_2_5 {
-        limits.insert(SUBJECT_MASK_LOSS_SUPPORT_LIMIT.to_owned(), json!(true));
-    }
-    // Epic 2123 depth anchoring (sc-24830): both LTX-2.3 and LTX-2.5 decode the video latent per
-    // frame through TAELTX2.3 (2.5's prepared bundles carry the clean video latent).
-    limits.insert(
-        depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT.to_owned(),
-        json!(true),
-    );
-    // Epic 2123 body losses (sc-24832): the same decoder arms, on both LTX-2.3 and LTX-2.5.
-    for loss in body_losses::BodyLoss::ALL {
-        limits.insert(loss.support_limit().to_owned(), json!(true));
-    }
+    "rank": [4, 128],
+    "alpha": [1, 128],
+    "steps": [200, 4000],
+    "resolutions": [512, 768, 1024],
+    "batchSize": [1, 2],
+    "networkTypes": ["lora"],
+    "lrSchedulers": ["constant", "linear", "cosine"],
+    "outputScopes": ["project", "global"],
+        }));
     if is_ltx_2_5 {
         limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
         limits.insert(
@@ -3100,21 +3057,6 @@ fn wan_lora_target() -> TrainingTarget {
             "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Wan2.2 Video LoRA",
@@ -3201,21 +3143,6 @@ fn wan_moe_lora_target(
             },
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": name,
@@ -3329,21 +3256,6 @@ fn sdxl_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Stable Diffusion XL LoRA",
@@ -3425,21 +3337,6 @@ fn illustrious_xl_v1_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v1.0 LoRA",
@@ -3511,21 +3408,6 @@ fn illustrious_xl_v2_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v2.0 LoRA",
@@ -3607,21 +3489,6 @@ fn kolors_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Kolors LoRA",
@@ -3994,16 +3861,23 @@ fn resolve_item_path(
     dataset_root: &Path,
     relative_path: &str,
 ) -> Result<String, TrainingPlanError> {
-    if !is_safe_relative_path(relative_path) {
+    // Dataset items are portable strings; native export filenames use a separate policy.
+    if crate::safe_path::relative_normal_components(relative_path).is_err() {
         return Err(TrainingPlanError::InvalidConfig(
             "Dataset item path must be relative to the dataset root.".to_owned(),
         ));
     }
-    let mut path = dataset_root.to_path_buf();
-    for component in Path::new(relative_path).components() {
-        path.push(component);
-    }
-    Ok(path.display().to_string())
+    crate::safe_path::confine_under(
+        dataset_root,
+        relative_path,
+        crate::safe_path::Confinement::Lexical,
+    )
+    .map(|path| path.display().to_string())
+    .map_err(|_| {
+        TrainingPlanError::InvalidConfig(
+            "Dataset item path must be relative to the dataset root.".to_owned(),
+        )
+    })
 }
 
 /// The target limit naming how many ORDERED reference images one instruction-edit item may carry
@@ -5031,21 +4905,6 @@ fn anima_base_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Anima LoRA",
@@ -5158,19 +5017,6 @@ fn qwen_image_2_1_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123: the Qwen Image 2.1 trainer declares adapter noise, depth anchoring, the
-            // three body losses and subject-masked loss on MLX and Candle alike (pinned per platform
-            // by the worker drift tests); its decoded-x0 losses decode through TAEQI2.1. The face
-            // losses follow depth anchoring, and resolution buckets / the VAE anchor are stamped in
-            // `builtin_training_targets`. No E-LatentLPIPS (no published weights for this latent
-            // family) and no training adapter.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            "supportsDepthAnchoring": true,
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Qwen Image 2.1 LoRA",
@@ -5307,6 +5153,10 @@ mod tests {
             resolve_item_path(root, "/absolute.png"),
             Err(TrainingPlanError::InvalidConfig(_))
         ));
+        assert!(
+            resolve_item_path(root, "images\\photo.png").is_err(),
+            "persisted dataset items use portable separators"
+        );
         // A safe relative path resolves under the dataset root using the host separator (the plan is
         // built + consumed on the same machine). Build the expectation the same way so the assertion
         // holds on Windows too — a hardcoded `/dataset/images/photo.png` only matches on `/`-sep hosts.
@@ -5458,8 +5308,7 @@ fn moss_image_lora_target(sft: bool) -> TrainingTarget {
             "optimizers":["adamw","adam","prodigyopt","rose"],"networkTypes":["lora","lokr"],
             "mixedPrecisions":["bf16","f32"],"timestepTypes":["moss_stage3_v1","sigmoid","linear","uniform","weighted"],
             "timestepBiases":["balanced","high_noise","low_noise"],"lossTypes":["mse","mae"],
-            "lrSchedulers":["constant","linear","cosine"],"outputScopes":["project","global"],
-            "supportsWeightNoise":true,"supportsGradientNoise":true,"supportsSubjectMaskLoss":true})),
+            "lrSchedulers":["constant","linear","cosine"],"outputScopes":["project","global"]})),
         ui: object(
             json!({"label":format!("{name} LoRA / LoKr"),"datasetModality":"image",
             "description":"Native MLX and CUDA transformer adapters for this exact MOSS checkpoint. Text encoder, VAE and base weights stay frozen. Published final-pretraining Stage3 sampler adapted for adapter training; deterministic posterior-mean VAE caching is a SceneWorks policy.",
@@ -5599,5 +5448,57 @@ mod moss_training_s1_tests {
                 "{refused} must not map into the native f32 contract"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod model_contract_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn static_support_tables_and_trainer_identities_are_valid() {
+        let registry = builtin_training_targets();
+        let ids = registry
+            .targets
+            .iter()
+            .map(|target| target.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            ids.len(),
+            registry.targets.len(),
+            "duplicate target identity"
+        );
+        let mut flags = std::collections::BTreeSet::new();
+        for &(flag, targets) in TRAINING_SUPPORT_FLAGS {
+            assert!(flags.insert(flag), "duplicate support flag {flag}");
+            let mut seen = std::collections::BTreeSet::new();
+            for target in targets {
+                assert!(
+                    ids.contains(target),
+                    "{flag} references absent target {target}"
+                );
+                assert!(seen.insert(target), "duplicate target {target} in {flag}");
+            }
+        }
+        for target in &registry.targets {
+            for backend in ["mlx", "candle"] {
+                crate::jobs_store::expected_backend_local_trainer_id(target, backend)
+                    .unwrap_or_else(|error| panic!("{}/{}: {error}", target.id, backend));
+            }
+        }
+        let keys = TECHNIQUE_KEYS
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys.len(),
+            TECHNIQUE_KEYS.len(),
+            "duplicate technique parser key"
+        );
+        assert_eq!(
+            TECHNIQUE_KEYS.len(),
+            45,
+            "existing technique surface changed"
+        );
     }
 }

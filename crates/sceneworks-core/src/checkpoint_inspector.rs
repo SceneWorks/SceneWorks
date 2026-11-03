@@ -38,13 +38,12 @@ thread_local! {
 
 const MAX_DISCOVERY_ENTRIES: usize = 4096;
 const MAX_DISCOVERY_DEPTH: usize = 8;
-const MAX_SAFETENSORS_HEADER_BYTES: u64 = 100_000_000;
+const MAX_SAFETENSORS_HEADER_BYTES: u64 = crate::safetensors::MAX_HEADER_BYTES;
 pub(crate) const MAX_JSON_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GGUF_DESCRIPTOR_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_GGUF_ITEMS: u64 = 1_000_000;
 const MAX_GGUF_STRING_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GGUF_ARRAY_DEPTH: usize = 16;
-const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_AGGREGATE_TENSOR_NAMES: usize = 65_536;
 const MAX_AGGREGATE_TENSOR_NAME_BYTES: usize = 32 * 1024 * 1024;
 const MAX_AGGREGATE_EVIDENCE_STRING_BYTES: usize = 64 * 1024 * 1024;
@@ -1915,40 +1914,29 @@ fn discover_safetensors_header(
         code: CheckpointDiagnosticCodeV1::Io,
         message: format!("safetensors candidate could not be opened: {error}"),
     })?;
-    let mut length_bytes = [0_u8; 8];
-    file.read_exact(&mut length_bytes)
-        .map_err(|_| SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::TruncatedHeader,
-            message: "safetensors candidate is truncated before its header length".to_owned(),
-        })?;
-    let header_len = u64::from_le_bytes(length_bytes);
-    if header_len == 0 || header_len > MAX_SAFETENSORS_HEADER_BYTES {
-        return Err(SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::HeaderTooLarge,
-            message: format!(
-                "safetensors header length {header_len} is outside the discovery bound"
-            ),
-        });
+    crate::safetensors::read_header(
+        &mut file,
+        file_len,
+        MAX_SAFETENSORS_HEADER_BYTES,
+        crate::safetensors::HeaderJsonPolicy::Standard,
+    )
+    .map(|header| header.value)
+    .map_err(safetensors_header_error)
+}
+
+fn safetensors_header_error(error: crate::safetensors::HeaderError) -> SafetensorsDiscoveryError {
+    use crate::safetensors::HeaderError;
+    let code = match &error {
+        HeaderError::Io(_) => CheckpointDiagnosticCodeV1::Io,
+        HeaderError::Truncated => CheckpointDiagnosticCodeV1::TruncatedHeader,
+        HeaderError::InvalidLength(_) => CheckpointDiagnosticCodeV1::HeaderTooLarge,
+        HeaderError::DuplicateKey(_) => CheckpointDiagnosticCodeV1::DuplicateKey,
+        HeaderError::Malformed(_) => CheckpointDiagnosticCodeV1::MalformedMetadata,
+    };
+    SafetensorsDiscoveryError {
+        code,
+        message: error.to_string(),
     }
-    if 8_u64
-        .checked_add(header_len)
-        .is_none_or(|end| end > file_len)
-    {
-        return Err(SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::TruncatedHeader,
-            message: "safetensors descriptor bytes are truncated".to_owned(),
-        });
-    }
-    let mut header = vec![0_u8; header_len as usize];
-    file.read_exact(&mut header)
-        .map_err(|_| SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::TruncatedHeader,
-            message: "safetensors descriptor bytes are truncated".to_owned(),
-        })?;
-    serde_json::from_slice(&header).map_err(|error| SafetensorsDiscoveryError {
-        code: CheckpointDiagnosticCodeV1::MalformedMetadata,
-        message: format!("safetensors descriptor is malformed JSON: {error}"),
-    })
 }
 
 #[derive(Default)]
@@ -1965,60 +1953,23 @@ fn validate_safetensors(
     file_len: u64,
     relative_path: Option<String>,
 ) -> Result<ValidatedArtifact, Vec<CheckpointDiagnosticV1>> {
-    let Some(header_len_bytes) = prefix.get(..8) else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::TruncatedHeader,
-            relative_path,
-            "safetensors file is truncated before its 8-byte header length",
-        )]);
-    };
-    let header_len = u64::from_le_bytes(header_len_bytes.try_into().unwrap());
-    if header_len == 0 || header_len > MAX_SAFETENSORS_HEADER_BYTES {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::HeaderTooLarge,
-            relative_path,
-            format!(
-                "safetensors header length {header_len} is outside the 1..={MAX_SAFETENSORS_HEADER_BYTES} bound"
-            ),
-        )]);
-    }
-    let Some(data_start) = 8_u64.checked_add(header_len) else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::InvalidTensorRange,
-            relative_path,
-            "safetensors header length overflows the file address space",
-        )]);
-    };
-    if data_start > file_len {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::TruncatedHeader,
-            relative_path,
-            format!(
-                "safetensors header ends at byte {data_start}, beyond the {file_len}-byte file"
-            ),
-        )]);
-    }
-    let Some(header) = prefix.get(8..data_start as usize) else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::TruncatedHeader,
-            relative_path,
-            "safetensors descriptor bytes are truncated",
-        )]);
-    };
-    let value = strict_json(header).map_err(|error| {
+    let header = crate::safetensors::read_header(
+        &mut std::io::Cursor::new(prefix),
+        file_len,
+        MAX_SAFETENSORS_HEADER_BYTES,
+        crate::safetensors::HeaderJsonPolicy::RejectDuplicateKeys,
+    )
+    .map_err(|error| {
+        let error = safetensors_header_error(error);
         vec![CheckpointDiagnosticV1::error(
             error.code,
             relative_path.clone(),
-            format!("invalid safetensors descriptor: {}", error.message),
+            error.message,
         )]
     })?;
-    let Some(entries) = value.as_object() else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::MalformedMetadata,
-            relative_path,
-            "safetensors descriptor must be a JSON object",
-        )]);
-    };
+    let data_start = header.data_start;
+    let value = header.value;
+    let entries = value.as_object().expect("shared reader requires an object");
 
     let mut diagnostics = Vec::new();
     if let Some(metadata) = entries.get("__metadata__") {
@@ -2056,7 +2007,7 @@ fn validate_safetensors(
         let Some(bits_per_element) = tensor
             .get("dtype")
             .and_then(Value::as_str)
-            .and_then(safetensors_dtype_bits)
+            .and_then(crate::safetensors::dtype_bits)
         else {
             diagnostics.push(CheckpointDiagnosticV1::error(
                 CheckpointDiagnosticCodeV1::UnsupportedTensorType,
@@ -2194,19 +2145,6 @@ fn validate_safetensors(
         declared_tensor_bytes: Some(data_len),
         tensor_names,
     })
-}
-
-fn safetensors_dtype_bits(dtype: &str) -> Option<u64> {
-    match dtype {
-        "F4" => Some(4),
-        "F6_E2M3" | "F6_E3M2" => Some(6),
-        "BOOL" | "U8" | "I8" | "F8_E4M3" | "F8_E5M2" | "F8_E8M0" | "F8_E4M3FNUZ"
-        | "F8_E5M2FNUZ" => Some(8),
-        "U16" | "I16" | "F16" | "BF16" => Some(16),
-        "U32" | "I32" | "F32" => Some(32),
-        "U64" | "I64" | "F64" | "C64" => Some(64),
-        _ => None,
-    }
 }
 
 #[derive(Default)]
@@ -2412,10 +2350,20 @@ fn validate_json_descriptor(
     }
     dialects.sort();
     dialects.dedup();
-    let families = dialects
+    let explicit_families = dialects
         .iter()
-        .filter_map(|value| normalize_family(value))
+        .filter_map(|value| crate::model_family::exact_identity(value).map(str::to_owned))
         .collect::<BTreeSet<_>>();
+    let families = if explicit_families.is_empty() {
+        dialects
+            .iter()
+            .filter_map(|value| normalize_family(value))
+            .collect::<BTreeSet<_>>()
+    } else {
+        // A generic pipeline-class substring is weaker evidence than an explicit generation or
+        // family identity. Preserve conflicting exact declarations as a diagnostic below.
+        explicit_families
+    };
     if families.len() > 1 {
         return Err(CheckpointDiagnosticV1::error(
             CheckpointDiagnosticCodeV1::FamilyDialectConflict,
@@ -2450,39 +2398,7 @@ fn collect_strings(value: &Value, output: &mut Vec<String>) {
 }
 
 fn normalize_family(value: &str) -> Option<String> {
-    let lower = value.to_ascii_lowercase();
-    for (needle, family) in [
-        // MiniMax-H3's diffusers `_class_name` (`MiniMaxH3Transformer3DModel`, sc-26680). First so
-        // no broader needle below can claim it.
-        ("minimaxh3", "minimax-h3"),
-        ("minimax_h3", "minimax-h3"),
-        ("minimax-h3", "minimax-h3"),
-        ("stable diffusion xl", "sdxl"),
-        ("stablediffusionxl", "sdxl"),
-        ("sdxl", "sdxl"),
-        ("qwenimage", "qwen-image"),
-        ("qwen_image", "qwen-image"),
-        ("qwen-image", "qwen-image"),
-        ("flux2", "flux2"),
-        ("flux.2", "flux2"),
-        ("flux", "flux"),
-        ("wan", "wan-video"),
-        ("z_image", "z-image"),
-        ("z-image", "z-image"),
-        ("mageflow", "mage-flow"),
-        ("mage_flow", "mage-flow"),
-        ("mage-flow", "mage-flow"),
-        ("krea", "krea_2"),
-        ("ltx", "ltx-video"),
-        ("ideogram", "ideogram"),
-        ("anima", "anima"),
-        ("cosmos", "anima"),
-    ] {
-        if lower.contains(needle) {
-            return Some(family.to_owned());
-        }
-    }
-    None
+    crate::model_family::checkpoint_descriptor_family(value)
 }
 
 fn is_auxiliary_family(family: &str) -> bool {
@@ -2707,29 +2623,18 @@ fn snapshot_file(path: &Path, prefix_limit: u64) -> std::io::Result<ArtifactSnap
     });
     let mut file = File::open(path)?;
     let before = FileStamp::from_metadata(&file.metadata()?);
-    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
-    let mut hasher = Sha256::new();
     let mut prefix = Vec::new();
-    let mut size_bytes = 0_u64;
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    let (sha256, size_bytes) = crate::hashing::sha256_reader_with(&mut file, |_, event| {
+        if let crate::hashing::ReadEvent::After(bytes) = event {
+            let remaining = prefix_limit.saturating_sub(prefix.len() as u64) as usize;
+            prefix.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
         }
-        hasher.update(&buffer[..read]);
-        size_bytes = size_bytes.checked_add(read as u64).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "artifact size overflows u64",
-            )
-        })?;
-        let remaining = prefix_limit.saturating_sub(prefix.len() as u64) as usize;
-        prefix.extend_from_slice(&buffer[..read.min(remaining)]);
-    }
+        Ok(())
+    })?;
     let after = FileStamp::from_metadata(&file.metadata()?);
     let stable = before == after && size_bytes == after.len;
     Ok(ArtifactSnapshot {
-        sha256: format!("{:x}", hasher.finalize()),
+        sha256,
         size_bytes,
         prefix,
         before,
@@ -3483,5 +3388,53 @@ impl<'a> ByteReader<'a> {
             _ => return Err(format!("unsupported GGUF metadata value type {value_type}")),
         }
         .ok_or_else(|| "truncated metadata value".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod canonical_descriptor_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn exact_generation_outweighs_generic_class_and_exact_conflicts_remain_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("model")).unwrap();
+        let request =
+            CheckpointInspectionRequestV1::linked("fixture", temp.path(), "model", "root").unwrap();
+        let resolved = resolve_input(&request).unwrap();
+        for (class, family) in [
+            ("QwenImagePipeline", "qwen-image-2-1"),
+            ("KreaPipeline", "krea-realtime"),
+        ] {
+            let raw =
+                serde_json::to_vec(&json!({"_class_name":class,"architecture":family})).unwrap();
+            let evidence = validate_json_descriptor(
+                &resolved,
+                &temp.path().join("model/config.json"),
+                "model/config.json",
+                &raw,
+                raw.len() as u64,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(evidence.family.as_deref(), Some(family));
+        }
+        let raw =
+            serde_json::to_vec(&json!({"architectures":["qwen-image", "qwen-image-2-1"]})).unwrap();
+        let error = validate_json_descriptor(
+            &resolved,
+            &temp.path().join("model/config.json"),
+            "model/config.json",
+            &raw,
+            raw.len() as u64,
+            &mut Vec::new(),
+        )
+        .err()
+        .expect("conflicting explicit families must be refused");
+        assert_eq!(
+            error.code,
+            CheckpointDiagnosticCodeV1::FamilyDialectConflict
+        );
     }
 }

@@ -1,5 +1,5 @@
 use super::{huggingface_snapshot_dir, resolve_app_managed_model_dir, standard_tier_subdir};
-use super::{non_empty, ImageRequest, PathBuf, Settings, Value, WorkerResult};
+use super::{non_empty, ImageRequest, PathBuf, Settings, WorkerResult};
 
 // Candle (Windows/CUDA) Z-Image img2img / edit route (sc-6595, epic 5480) — pixel-conditioned editing
 // on Z-Image-Turbo off-Mac through the registered generator's `Conditioning::Reference` path. Both
@@ -29,19 +29,12 @@ pub(super) fn resolve_zimage_edit_candle_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Z-Image edit modelPath").map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model)
                 .unwrap_or(ZIMAGE_EDIT_CANDLE_DEFAULT_REPO)

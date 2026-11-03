@@ -20,6 +20,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -48,6 +49,8 @@ pub struct CredIpc {
     pub endpoint: CredIpcEndpoint,
     pub token: String,
     cache: CredCache,
+    #[cfg(unix)]
+    private_directory: Option<tempfile::TempDir>,
 }
 
 impl CredIpc {
@@ -81,6 +84,9 @@ impl CredIpc {
         match &self.endpoint {
             CredIpcEndpoint::Unix(socket) => {
                 let _ = std::fs::remove_file(socket);
+                if let Some(directory) = &self.private_directory {
+                    let _ = std::fs::remove_dir(directory.path());
+                }
             }
             #[cfg(test)]
             CredIpcEndpoint::Tcp(_) => {}
@@ -115,44 +121,47 @@ fn random_token() -> String {
 
 /// Start the production transport for this platform: a user-only Unix socket on
 /// macOS/Linux, or an authenticated ephemeral loopback listener on Windows.
-pub fn start(socket: PathBuf) -> Option<CredIpc> {
+pub fn start() -> Option<CredIpc> {
     let resolver: SecretResolver = Arc::new(settings::resolve_credential_secret);
     #[cfg(unix)]
     {
-        start_unix(socket, resolver)
+        start_unix(resolver)
     }
     #[cfg(windows)]
     {
-        let _ = socket;
         start_tcp(resolver)
     }
 }
 
 #[cfg(unix)]
-fn start_unix(socket: PathBuf, resolver: SecretResolver) -> Option<CredIpc> {
-    let _ = std::fs::remove_file(&socket);
-    if let Some(parent) = socket.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+fn start_unix(resolver: SecretResolver) -> Option<CredIpc> {
+    // Configure directory creation as 0700 before bind. A short ephemeral path
+    // keeps Unix sockaddr limits independent of the configured data/config root.
+    // Both supported Unix desktop platforms provide /tmp; the private directory
+    // owns cleanup on graceful drop, and OS temporary-file cleanup handles crashes.
+    let private_directory = tempfile::Builder::new()
+        .prefix("scw-cred-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in("/tmp")
+        .ok()?;
+    let socket = private_directory.path().join("c");
     let listener = UnixListener::bind(&socket).ok()?;
-    let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
-    let token = random_token();
-    let cache: CredCache = Arc::new(Mutex::new(HashMap::new()));
-    let server_token = token.clone();
-    let server_cache = Arc::clone(&cache);
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).ok()?;
+    let (token, cache) = serve_connections(
+        move || {
+            let (stream, _) = listener.accept()?;
             let timeout = Some(std::time::Duration::from_secs(2));
-            let _ = stream.set_read_timeout(timeout);
-            let _ = stream.set_write_timeout(timeout);
-            handle_connection(stream, &server_token, &server_cache, &resolver);
-        }
-    });
+            stream.set_read_timeout(timeout)?;
+            stream.set_write_timeout(timeout)?;
+            Ok(stream)
+        },
+        resolver,
+    );
     Some(CredIpc {
         endpoint: CredIpcEndpoint::Unix(socket),
         token,
         cache,
+        private_directory: Some(private_directory),
     })
 }
 
@@ -161,24 +170,61 @@ fn start_tcp(resolver: SecretResolver) -> Option<CredIpc> {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).ok()?;
     let address = listener.local_addr().ok()?;
     debug_assert!(address.ip().is_loopback());
-    let token = random_token();
-    let cache: CredCache = Arc::new(Mutex::new(HashMap::new()));
-    let server_token = token.clone();
-    let server_cache = Arc::clone(&cache);
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
+    let (token, cache) = serve_connections(
+        move || {
+            let (stream, _) = listener.accept()?;
             let timeout = Some(std::time::Duration::from_secs(2));
-            let _ = stream.set_read_timeout(timeout);
-            let _ = stream.set_write_timeout(timeout);
-            handle_connection(stream, &server_token, &server_cache, &resolver);
-        }
-    });
+            stream.set_read_timeout(timeout)?;
+            stream.set_write_timeout(timeout)?;
+            Ok(stream)
+        },
+        resolver,
+    );
     Some(CredIpc {
         endpoint: CredIpcEndpoint::Tcp(address),
         token,
         cache,
+        #[cfg(unix)]
+        private_directory: None,
     })
+}
+
+/// Bounded worker pool shared by Unix and TCP. A partial request cannot serialize
+/// the accept loop, and an unauthenticated flood cannot spawn unbounded threads.
+fn serve_connections<S: Read + Write + Send + 'static>(
+    mut accept: impl FnMut() -> std::io::Result<S> + Send + 'static,
+    resolver: SecretResolver,
+) -> (String, CredCache) {
+    let token = random_token();
+    let cache: CredCache = Arc::new(Mutex::new(HashMap::new()));
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<S>(16);
+    let receiver = Arc::new(Mutex::new(receiver));
+    for _ in 0..8 {
+        let receiver = receiver.clone();
+        let token = token.clone();
+        let cache = cache.clone();
+        let resolver = resolver.clone();
+        std::thread::spawn(move || loop {
+            let stream = match receiver.lock().expect("credential queue").recv() {
+                Ok(stream) => stream,
+                Err(_) => return,
+            };
+            handle_connection(stream, &token, &cache, &resolver);
+        });
+    }
+    std::thread::spawn(move || loop {
+        if let Ok(stream) = accept() {
+            let _ = sender.try_send(stream);
+        }
+    });
+    (token, cache)
+}
+
+fn capability_matches(presented: &str, expected: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    // Production tokens have one fixed public length (64 ASCII bytes). Rejecting
+    // a different length reveals no secret; equal-length values use constant time.
+    presented.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 fn handle_connection<S: Read + Write>(
@@ -199,7 +245,7 @@ fn handle_connection<S: Read + Write>(
     let mut parts = line.trim().splitn(2, ' ');
     let presented = parts.next().unwrap_or_default();
     let host = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
-    let response = if presented != token || host.is_empty() {
+    let response = if !capability_matches(presented, token) || host.is_empty() {
         "ERR".to_owned()
     } else {
         resolve(&host, cache, resolver).unwrap_or_else(|| "ERR".to_owned())
@@ -241,7 +287,14 @@ mod tests {
     use std::sync::Barrier;
 
     fn request(address: SocketAddr, auth: &str, host: &str) -> String {
-        let mut stream = TcpStream::connect(address).expect("connect to credential bridge");
+        let mut stream = TcpStream::connect_timeout(&address, std::time::Duration::from_secs(3))
+            .expect("connect to credential bridge");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
         stream
             .write_all(format!("{auth} {host}\n").as_bytes())
             .expect("write request");
@@ -338,5 +391,68 @@ mod tests {
         let refreshed = resolve("planner.example", &cache, &resolver).unwrap();
         assert!(refreshed.contains("new-token"));
         assert!(!refreshed.contains("old-token"));
+    }
+    #[test]
+    fn partial_and_oversized_peers_do_not_block_other_credential_clients() {
+        let resolver: SecretResolver =
+            Arc::new(|_| Some(("secret".to_owned(), CredentialScheme::Bearer)));
+        let ipc = start_tcp(resolver).unwrap();
+        let address = match ipc.endpoint {
+            CredIpcEndpoint::Tcp(address) => address,
+            #[cfg(unix)]
+            CredIpcEndpoint::Unix(_) => panic!("tcp"),
+        };
+        let mut slow = TcpStream::connect(address).unwrap();
+        slow.write_all(b"partial").unwrap();
+        let start = std::time::Instant::now();
+        assert!(request(address, &ipc.token, "valid.example").contains("secret"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        let mut oversized = TcpStream::connect(address).unwrap();
+        oversized
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        oversized
+            .write_all(&vec![b'x'; MAX_REQUEST_BYTES as usize + 2])
+            .unwrap();
+        let mut reply = String::new();
+        let closed = oversized.read_to_string(&mut reply);
+        assert!(
+            closed.is_ok()
+                || closed.is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
+        );
+        assert!(reply.is_empty());
+        assert_eq!(request(address, "bad", "valid.example"), "ERR");
+        assert!(capability_matches(&ipc.token, &ipc.token));
+        let mut wrong = ipc.token.clone().into_bytes();
+        wrong[63] ^= 1;
+        assert!(!capability_matches(
+            std::str::from_utf8(&wrong).unwrap(),
+            &ipc.token
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_is_born_inside_private_directory() {
+        let resolver: SecretResolver = Arc::new(|_| None);
+        let ipc = start_unix(resolver).unwrap();
+        let CredIpcEndpoint::Unix(ref path) = ipc.endpoint else {
+            panic!("unix")
+        };
+        assert_eq!(
+            std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let parent = path.parent().unwrap().to_owned();
+        ipc.cleanup();
+        assert!(!parent.exists());
     }
 }

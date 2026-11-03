@@ -177,18 +177,7 @@ async fn spawn_worker_api_stub() -> (String, ProgressPosts) {
 
 /// The shipped `iris_3b` catalog entry (the real `coRequisite` declaration, not a test copy).
 fn shipped_iris_entry() -> Value {
-    let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("builtin.models.jsonc embedded")
-        .1;
-    let manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(text)).expect("parse builtin.models.jsonc");
-    manifest["models"]
-        .as_array()
-        .and_then(|models| models.iter().find(|model| model["id"] == "iris_3b"))
-        .cloned()
-        .expect("iris_3b is in the builtin catalog")
+    Value::Object(crate::test_env::shipped_catalog_entry("iris_3b"))
 }
 
 #[cfg(not(target_os = "macos"))]

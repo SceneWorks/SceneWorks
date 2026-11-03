@@ -93,19 +93,12 @@ fn resolve_sdxl_edit_candle_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "SDXL edit modelPath").map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| sdxl_edit_candle_default_repo(&request.model));
     // sc-10813: a standard-tier turnkey (`mlx.standardTierLayout`, e.g. `SceneWorks/sdxl-base-mlx`)
     // descends into the request's packed q4/q8 tier (or bf16) via `standard_tier_subdir` — the SAME
@@ -313,12 +306,7 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
 
     let steps = sdxl_edit_candle_steps(request);
     let guidance = sdxl_edit_candle_guidance(request);
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| sdxl_edit_candle_default_repo(&request.model))
         .to_owned();
     // `pid_weights`/`use_pid`/`width`/`height` were resolved above (ahead of the source+mask fit) so the

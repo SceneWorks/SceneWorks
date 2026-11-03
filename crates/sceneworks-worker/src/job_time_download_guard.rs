@@ -21,7 +21,7 @@
 //!    Job-time sites build it as an inline literal. Removing a parameter from one seam does not
 //!    remove the ability to construct the context at another.
 //! 3. Decisively: the download helpers and all of their call sites are gated
-//!    `any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle"))`. The
+//!    `native_lane`. The
 //!    required `parity` CI lane is ubuntu-latest with default features, so **none of that code is
 //!    even compiled there**, and the `candle` lane runs `cargo check`/clippy but never `cargo test`.
 //!    A gate that inherits those cfgs never fires on any required check.
@@ -161,7 +161,9 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     // Dispatches `run_model_download_job` / `run_lora_download_job` from the job loop.
     ("lib.rs", DownloadRole::Installer),
     // The Model Manager executor: model + LoRA installs, tier fetches, conversions.
-    ("model_jobs.rs", DownloadRole::Installer),
+    ("model_jobs/download.rs", DownloadRole::Installer),
+    ("model_jobs/convert.rs", DownloadRole::Installer),
+    ("model_jobs/import.rs", DownloadRole::Installer),
     // -- Job-time: the population epic 17625 is migrating. Only ever shrinks. --------------------
     // Video/image tier fetches via `model_jobs::ensure_hf_files_cached` at generation time.
     ("image_jobs/base.rs", DownloadRole::JobTime),
@@ -511,10 +513,15 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "keypoint-uploads",
         CacheRole::Upload,
     ),
-    ("worker", "model_jobs.rs", "lora-uploads", CacheRole::Upload),
     (
         "worker",
-        "model_jobs.rs",
+        "model_jobs/import.rs",
+        "lora-uploads",
+        CacheRole::Upload,
+    ),
+    (
+        "worker",
+        "model_jobs/import.rs",
         "model-uploads",
         CacheRole::Upload,
     ),
@@ -526,7 +533,7 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     // Cross-process model-conversion locks.
     (
         "worker",
-        "model_jobs.rs",
+        "model_jobs/conversion_publication.rs",
         "worker-locks",
         CacheRole::Runtime,
     ),

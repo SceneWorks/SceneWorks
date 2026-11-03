@@ -31,7 +31,6 @@ mod tests {
     use crate::settings::Settings;
     use gen_core::{LoadSpec, WeightsSource};
     use gen_core_iris::{IrisTask, TEXT_ENCODER_COMPONENT};
-    use sceneworks_core::contracts::JsonObject;
     use serde_json::json;
     use serde_json::Value;
     use std::path::Path;
@@ -43,38 +42,6 @@ mod tests {
         let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
         settings.data_dir = data_dir.to_path_buf();
         settings
-    }
-
-    /// Neutralize the ambient HF cache env so the cache resolves under the temp data dir.
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
-
-    /// The shipped catalog entry, so the test exercises the real `coRequisite` declaration.
-    fn shipped_iris_entry() -> JsonObject {
-        let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .expect("builtin.models.jsonc embedded")
-            .1;
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text))
-                .expect("parse builtin.models.jsonc");
-        manifest
-            .get("models")
-            .and_then(Value::as_array)
-            .and_then(|models| {
-                models
-                    .iter()
-                    .find(|model| model.get("id").and_then(Value::as_str) == Some("iris_3b"))
-            })
-            .and_then(Value::as_object)
-            .cloned()
-            .expect("iris_3b is in the builtin catalog")
     }
 
     fn stage(root: &Path, repo: &str, revision: &str, file: &str) {
@@ -172,7 +139,7 @@ mod tests {
 
     #[test]
     fn generation_stages_the_installed_text_encoder_snapshot() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         stage_text_encoder(data.path());
         let settings = settings_at(data.path());
@@ -180,7 +147,7 @@ mod tests {
         let spec = super::super::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(backbone.clone())),
             "iris_3b",
-            &shipped_iris_entry(),
+            &crate::test_env::shipped_catalog_entry("iris_3b"),
             &settings,
         )
         .expect("an installed encoder stages");
@@ -199,13 +166,13 @@ mod tests {
 
     #[test]
     fn a_missing_text_encoder_is_a_typed_failure_before_load() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let settings = settings_at(data.path());
         let error = super::super::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(data.path().join("backbone"))),
             "iris_3b",
-            &shipped_iris_entry(),
+            &crate::test_env::shipped_catalog_entry("iris_3b"),
             &settings,
         )
         .expect_err("no encoder installed");
@@ -218,7 +185,7 @@ mod tests {
 
     #[test]
     fn a_torn_text_encoder_is_a_typed_failure_before_load() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         // Everything but the shards.
         for file in ["config.json", "tokenizer.json", "tokenizer_config.json"] {
@@ -227,7 +194,7 @@ mod tests {
         let error = super::super::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(data.path().join("backbone"))),
             "iris_3b",
-            &shipped_iris_entry(),
+            &crate::test_env::shipped_catalog_entry("iris_3b"),
             &settings_at(data.path()),
         )
         .expect_err("torn encoder");
@@ -281,7 +248,7 @@ mod tests {
         assert_eq!(model.default_steps(), gen_core_iris::DEFAULT_STEPS);
         assert_eq!(model.default_guidance(), gen_core_iris::DEFAULT_CFG_SCALE);
 
-        let entry = shipped_iris_entry();
+        let entry = crate::test_env::shipped_catalog_entry("iris_3b");
         let limits = entry.get("limits").and_then(Value::as_object).unwrap();
         let samplers: Vec<&str> = limits["samplers"]
             .as_array()
@@ -961,7 +928,7 @@ mod tests {
                     "height": 64,
                     "count": 1,
                     "loras": loras,
-                    "modelManifestEntry": Value::Object(shipped_iris_entry()),
+                    "modelManifestEntry": Value::Object(crate::test_env::shipped_catalog_entry("iris_3b")),
                 });
                 for (key, value) in extra.as_object().cloned().unwrap_or_default() {
                     payload[key] = value;
@@ -1765,7 +1732,7 @@ mod tests {
             .find("crate::transform_cache::evict_resident_transform().await?")
             .expect("the candle arm evicts a resident transform");
         let probe = body
-            .find("crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await")
+            .find("crate::vram_gate::live_capped_budget(&settings.gpu_id).await")
             .expect("the candle arm probes VRAM");
         assert!(evict < probe, "evict before the probe");
     }
@@ -1781,7 +1748,7 @@ mod tests {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn the_candle_gate_has_a_resident_and_a_staged_prediction_for_every_iris_tier_key() {
-        let iris = shipped_iris_entry();
+        let iris = crate::test_env::shipped_catalog_entry("iris_3b");
         for advanced in [
             json!({}),
             json!({ "mlxQuantize": 0 }),

@@ -10386,7 +10386,7 @@ mod tests {
     }
 
     /// SC-24114: the restated reference bound is the linked provider's own.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn qwen_image_2_1_reference_bound_matches_the_linked_provider() {
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -10510,4 +10510,227 @@ mod tests {
             }
         }
     }
+}
+
+/// Provider families with worker gate semantics. This closed registry owns all family policy;
+/// unknown ids have no optimized-policy fallback. Declaration-owned routes below must also have
+/// an explicit production route rule before they can use the generic evidence revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemoryGateFamily {
+    ZImage,
+    Qwen,
+    Flux1,
+    Flux2Dev,
+    Flux2Klein,
+    Mage,
+    Chroma,
+    Ideogram,
+    Kolors,
+    KolorsBespoke,
+    Sana,
+    Sd35,
+    Flux3,
+    Krea,
+    Sdxl,
+    Pulid,
+}
+
+pub(crate) fn gate_family(engine_id: &str) -> Option<MemoryGateFamily> {
+    use MemoryGateFamily::*;
+    Some(match engine_id {
+        "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control" => ZImage,
+        "qwen_image" | "qwen_image_edit" => Qwen,
+        "flux1_schnell" | "flux1_dev" | "flux1_dev_control" => Flux1,
+        "flux2_dev" => Flux2Dev,
+        "flux2_klein_9b" | "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit" => Flux2Klein,
+        "mage_flow"
+        | "mage_flow_base"
+        | "mage_flow_turbo"
+        | "mage_flow_edit"
+        | "mage_flow_edit_base"
+        | "mage_flow_edit_turbo" => Mage,
+        "chroma1_hd" | "chroma1_base" | "chroma1_flash" => Chroma,
+        "ideogram_4" | "ideogram_4_turbo" => Ideogram,
+        "kolors" => Kolors,
+        "candle_kolors_ipadapter" | "candle_kolors_control" => KolorsBespoke,
+        "sana_1600m" | "sana_sprint_1600m" => Sana,
+        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => Sd35,
+        "flux3_klein" | "flux3_klein_base" => Flux3,
+        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit" => Krea,
+        "sdxl" => Sdxl,
+        "pulid_flux" => Pulid,
+        _ => return None,
+    })
+}
+
+pub(crate) const MLX_REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const SD35_REQUEST_EVIDENCE_REVISION: &str = "sd3.5-candle-request-contract-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const SANA_REQUEST_EVIDENCE_REVISION: &str = "sana-candle-dense-request-contract-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const KOLORS_REQUEST_EVIDENCE_REVISION: &str = "kolors-candle-request-contract-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const SDXL_REQUEST_EVIDENCE_REVISION: &str = "sdxl-candle-request-contract-v3";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const DECLARATION_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-18456-candle-declaration-request-scope-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-15839-candle-pulid-flux-request-scope-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const IDEOGRAM_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-20789-candle-ideogram-request-scoped-staged-residency-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const CHROMA_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-20788-candle-chroma-staged-residency-v2";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-15813-candle-mage-flow-request-scope-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-15831-candle-flux2-klein-request-scope-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-15833-candle-flux2-dev-request-scope-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-15817-candle-qwen-image-request-scope-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-15815-candle-z-image-request-scope-v1";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn candle_gate_evidence_revision(engine_id: &str) -> Option<&'static str> {
+    use MemoryGateFamily::*;
+    Some(match gate_family(engine_id) {
+        Some(ZImage) => Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+        Some(Qwen) => QWEN_IMAGE_REQUEST_EVIDENCE_REVISION,
+        Some(Flux1) if engine_id != "flux1_dev_control" => FLUX1_REQUEST_EVIDENCE_REVISION,
+        Some(Flux2Dev) => FLUX2_DEV_REQUEST_EVIDENCE_REVISION,
+        Some(Flux2Klein) if engine_id == "flux2_klein_9b" => FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION,
+        Some(Mage) => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
+        Some(Chroma) => CHROMA_REQUEST_EVIDENCE_REVISION,
+        Some(Ideogram) => IDEOGRAM_REQUEST_EVIDENCE_REVISION,
+        Some(Kolors | KolorsBespoke) => KOLORS_REQUEST_EVIDENCE_REVISION,
+        Some(Sana) => SANA_REQUEST_EVIDENCE_REVISION,
+        Some(Sd35) => SD35_REQUEST_EVIDENCE_REVISION,
+        Some(Sdxl) => SDXL_REQUEST_EVIDENCE_REVISION,
+        Some(Pulid) => PULID_FLUX_REQUEST_EVIDENCE_REVISION,
+        _ if has_gate_policy(MemoryRouteBackend::Candle, engine_id) => {
+            DECLARATION_REQUEST_EVIDENCE_REVISION
+        }
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod gate_policy_tests {
+    use super::*;
+    #[test]
+    fn family_policy_is_closed_and_preserves_backend_route_identities() {
+        for (id, family) in [
+            ("ideogram_4_turbo", MemoryGateFamily::Ideogram),
+            ("flux1_dev_control", MemoryGateFamily::Flux1),
+            ("flux3_klein_base", MemoryGateFamily::Flux3),
+            ("candle_kolors_control", MemoryGateFamily::KolorsBespoke),
+            ("krea_2_turbo_edit", MemoryGateFamily::Krea),
+        ] {
+            assert_eq!(gate_family(id), Some(family));
+        }
+        for unknown in ["", "future_ideogram", "ideogram_5", "unknown"] {
+            assert_eq!(gate_family(unknown), None);
+        }
+    }
+    #[test]
+    fn every_registered_image_route_retains_gate_policy_without_a_parallel_family_list() {
+        for row in crate::engines::MODEL_TABLE {
+            assert!(
+                has_gate_policy(MemoryRouteBackend::Mlx, row.engine_id),
+                "{}",
+                row.engine_id
+            );
+            assert!(
+                has_gate_policy(MemoryRouteBackend::Candle, row.engine_id),
+                "{}",
+                row.engine_id
+            );
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            has_gate_policy(MemoryRouteBackend::Mlx, "qwen_image_control"),
+            "registered control contracts share the known base family without a duplicate id list"
+        );
+        assert!(!has_gate_policy(
+            MemoryRouteBackend::Mlx,
+            "unregistered_future_provider"
+        ));
+        assert!(!has_gate_policy(
+            MemoryRouteBackend::Candle,
+            "unregistered_future_provider"
+        ));
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn unknown_candle_provider_cannot_inherit_declaration_revision() {
+        assert_eq!(candle_gate_evidence_revision("unknown"), None);
+        assert_eq!(
+            candle_gate_evidence_revision("ideogram_4"),
+            Some(IDEOGRAM_REQUEST_EVIDENCE_REVISION)
+        );
+        assert_eq!(
+            candle_gate_evidence_revision("sdxl"),
+            Some(SDXL_REQUEST_EVIDENCE_REVISION)
+        );
+    }
+}
+
+/// Only explicit family contracts or production route rules authorize optimized gate semantics.
+pub(crate) fn has_gate_policy(backend: MemoryRouteBackend, provider: &str) -> bool {
+    // This explicitly injected contract is the unit selector's provider, never a production id.
+    #[cfg(test)]
+    if provider == "fixture_provider" {
+        return true;
+    }
+    if gate_family(provider).is_some()
+        || crate::engines::MODEL_TABLE
+            .iter()
+            .any(|row| row.engine_id == provider)
+        || RULES
+            .iter()
+            .any(|rule| rule.backend == backend && rule.provider == provider)
+    {
+        return true;
+    }
+    // Composed/control providers share a registered base family's contract, while their exact
+    // provider ids may have no ordinary MODEL_TABLE row or deferred RULES entry. Recognize these
+    // through the pinned provider descriptors; a descriptor from an unknown family grants nothing.
+    #[cfg(native_lane)]
+    if let Some(descriptor) = crate::inference_runtime::media_descriptor(provider) {
+        if descriptor.backend == backend.as_str() {
+            return crate::engines::MODEL_TABLE
+                .iter()
+                .filter_map(|row| crate::inference_runtime::media_descriptor(row.engine_id))
+                .any(|base| {
+                    base.backend == descriptor.backend && base.family == descriptor.family
+                });
+        }
+    }
+    false
 }
