@@ -22,6 +22,13 @@ export const MODEL_JOB_SPLIT_PATHS = Object.freeze([
   "crates/sceneworks-worker/src/model_jobs/import.rs",
 ]);
 
+// F-137 extracted these production owners from lib.rs. Keep their current compile inputs
+// in future captures without changing the recorded terminal candidate.
+export const WORKER_SPLIT_PATHS = Object.freeze([
+  "crates/sceneworks-worker/src/utility_dispatch.rs",
+  "crates/sceneworks-worker/src/worker_loop.rs",
+]);
+
 export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   ".github/workflows/starvector-terminal-readiness.yml",
   ".github/workflows/starvector-terminal.yml",
@@ -32,6 +39,7 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "apps/rust-api/src/main.rs",
   "apps/rust-api/src/generation.rs",
   "crates/sceneworks-core/src/download_receipt.rs",
+  "crates/sceneworks-core/src/file_lock.rs",
   "crates/sceneworks-worker/Cargo.toml",
   "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
   "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
@@ -39,6 +47,7 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "crates/sceneworks-worker/src/engines.rs",
   "crates/sceneworks-worker/src/inference_runtime.rs",
   "crates/sceneworks-worker/src/lib.rs",
+  ...WORKER_SPLIT_PATHS,
   "crates/sceneworks-worker/src/mlx_decode_cache.rs",
   "crates/sceneworks-worker/src/model_jobs.rs",
   ...MODEL_JOB_SPLIT_PATHS,
