@@ -379,11 +379,7 @@ pub fn iris_plan_memory_error(
 /// small-Mac emulation. `None` off macOS.
 #[cfg(target_os = "macos")]
 pub(crate) fn mlx_training_capacity_gb() -> Option<f64> {
-    crate::mlx_fit_gate::resolve_budget(
-        crate::mlx_fit_gate::probe_total_unified_memory_gib(),
-        crate::mlx_fit_gate::mlx_memory_cap_gb(),
-    )
-    .map(|budget| budget.total_gb)
+    crate::fit_gate::unified_total_gb()
 }
 
 /// The VRAM (GB) one rank can count on, on the NVIDIA card(s) this worker owns, honoring the
@@ -394,11 +390,7 @@ pub(crate) fn mlx_training_capacity_gb() -> Option<f64> {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) async fn candle_training_capacity_gb(gpu_id: &str) -> Result<f64, String> {
     worker_card_capacity_gb(gpu_id, |id| async move {
-        crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb(&id).await,
-            crate::vram_gate::cuda_vram_cap_gb(),
-        )
-        .map(|budget| budget.total_gb)
+        crate::fit_gate::lane_total_gb(&id).await
     })
     .await
 }

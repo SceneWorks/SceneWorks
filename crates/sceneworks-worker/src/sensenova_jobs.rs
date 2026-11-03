@@ -103,7 +103,7 @@ struct SenseNovaDirectAdmission {
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
-const SENSENOVA_BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const SENSENOVA_BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn sensenova_gib_bytes(gb: f64) -> u64 {
@@ -247,10 +247,7 @@ async fn sensenova_direct_admission(
                 ))
             },
         )?;
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let (total_gb, free_gb) = budget
         .map(|budget| (budget.total_gb, budget.free_gb))
         .unwrap_or((predicted_peak_gb, predicted_peak_gb));

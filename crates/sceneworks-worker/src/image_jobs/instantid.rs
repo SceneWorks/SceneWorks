@@ -105,7 +105,7 @@ use instantid_memory::{InstantIdMemoryIdentity, InstantIdRoute};
 /// Bytes per binary gigabyte — the currency the GB-denominated worker probes
 /// (`gpu::total_unified_memory_gb`, `vram_gate::VramBudget`) are converted into for
 /// [`gen_core::MemoryBudget`], which is byte-denominated.
-const INSTANTID_BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const INSTANTID_BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 /// GB → bytes. The float→int cast saturates (a negative reading lands on 0, an absurd one on
 /// `u64::MAX`), so a nonsense probe can never become a giant budget.
@@ -308,10 +308,7 @@ async fn instantid_memory_budget(
     settings: &Settings,
     predicted_peak_bytes: u64,
 ) -> gen_core::MemoryBudget {
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     match budget {
         Some(budget) => gen_core::MemoryBudget {
             total_bytes: instantid_gib_bytes(budget.total_gb),

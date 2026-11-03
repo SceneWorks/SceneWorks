@@ -19,6 +19,7 @@ pub mod credentials;
 pub mod dataset_quality;
 pub mod decoder_support;
 pub mod depth_map;
+pub mod disk;
 pub mod download_receipt;
 pub mod external_roots;
 pub mod file_lock;

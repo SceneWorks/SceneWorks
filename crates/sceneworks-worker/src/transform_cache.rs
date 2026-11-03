@@ -41,8 +41,10 @@ type TransformJob = CacheJob<TransformIdentity, Box<dyn Transform>>;
 
 /// Same knob and default as the generator and refine caches, so one setting bounds resident model
 /// memory across all three lanes.
-const TRANSFORM_CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
-const DEFAULT_TRANSFORM_CACHE_IDLE_SECONDS: u64 = 300;
+#[cfg(test)]
+const TRANSFORM_CACHE_IDLE_SECONDS_ENV: &str = cache_thread::CACHE_IDLE_SECONDS_ENV;
+#[cfg(test)]
+const DEFAULT_TRANSFORM_CACHE_IDLE_SECONDS: u64 = cache_thread::DEFAULT_CACHE_IDLE_SECONDS;
 
 /// Free the prior resident transform's backend allocation before a cold load (the refine cache's
 /// policy): a transform has no fit-gate/residency ladder that sizes the load inside the loader, so
@@ -105,11 +107,7 @@ fn directory_entry_fingerprints(dir: &Path) -> Vec<(String, Fingerprint)> {
 fn transform_worker() -> &'static mpsc::Sender<TransformJob> {
     TRANSFORM_WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<TransformJob>();
-        let idle_timeout = transform_cache_idle_timeout(
-            std::env::var(TRANSFORM_CACHE_IDLE_SECONDS_ENV)
-                .ok()
-                .as_deref(),
-        );
+        let idle_timeout = cache_thread::idle_timeout_from_env();
         thread::Builder::new()
             .name("sceneworks-transform-cache".to_owned())
             .spawn(move || run_transform_cache_worker(rx, idle_timeout))
@@ -134,6 +132,7 @@ fn run_transform_cache_worker(rx: mpsc::Receiver<TransformJob>, idle_timeout: Op
     );
 }
 
+#[cfg(test)]
 fn transform_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
     cache_thread::idle_timeout_from_secs(raw, DEFAULT_TRANSFORM_CACHE_IDLE_SECONDS)
 }

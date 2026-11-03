@@ -498,7 +498,7 @@ impl Candidate<'_> {
     }
 }
 
-const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 /// Evidence stores an integer byte ceiling. Admission converts that canonical value (after any
 /// allowance widening, which happens in integer bytes) to GiB exactly once; callers cannot submit
