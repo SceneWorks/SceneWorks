@@ -4671,11 +4671,35 @@ mod tests {
     #[test]
     fn moss_field_shapes_worker_and_submission_have_identical_refusals() {
         let targets = sceneworks_core::training::builtin_training_targets();
-        for target in targets
+        let targets: Vec<_> = targets
             .targets
             .iter()
             .filter(|t| t.kernel == "moss_image_lora")
-        {
+            .collect();
+        assert_eq!(targets.len(), 2, "both MOSS checkpoints must be covered");
+        let native_runtime = cfg!(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ));
+        for target in targets {
+            let engine_id = engine_trainer_id_for(&target.kernel, &target.base_model).unwrap();
+            assert_eq!(
+                crate::inference_runtime::trainer_descriptor(engine_id).is_some(),
+                native_runtime,
+                "MOSS registration must match this runtime's backend availability"
+            );
+            let unavailable =
+                format!("Native trainer '{engine_id}' is not registered in this worker runtime.");
+            let assert_worker_acceptance = |plan: &TrainingPlan| {
+                let worker = validate_training_target_config(plan);
+                if native_runtime {
+                    assert_eq!(worker.unwrap(), engine_id);
+                } else {
+                    assert!(
+                        matches!(worker, Err(WorkerError::InvalidPayload(message)) if message == unavailable)
+                    );
+                }
+            };
             for network in ["lora", "lokr"] {
                 let mut value = plan_json(
                     Path::new("/unused-moss-shape-test"),
@@ -4692,13 +4716,21 @@ mod tests {
                     &plan.config,
                 )
                 .unwrap();
-                validate_training_target_config(&plan).unwrap();
-                for (field, invalid) in [
-                    ("cacheLatents", json!("false")),
-                    ("cacheTextEmbeddings", json!(0)),
-                    ("loraTargetModules", json!([7])),
-                    ("modelOptions", json!({"vae_posterior":"sample"})),
-                    ("decomposeFactor", json!(0)),
+                sceneworks_core::training::validate_moss_training_field_shapes(
+                    &plan.config.advanced,
+                )
+                .unwrap();
+                assert_worker_acceptance(&plan);
+                for (field, invalid, early_worker_refusal) in [
+                    ("cacheLatents", json!("false"), None),
+                    (
+                        "cacheTextEmbeddings",
+                        json!(0),
+                        Some("Training config field 'cacheTextEmbeddings' must be a boolean."),
+                    ),
+                    ("loraTargetModules", json!([7]), None),
+                    ("modelOptions", json!({"vae_posterior":"sample"}), None),
+                    ("decomposeFactor", json!(0), None),
                 ] {
                     let mut refused = value.clone();
                     refused["config"]["advanced"][field] = invalid;
@@ -4709,9 +4741,23 @@ mod tests {
                             &plan.config,
                         )
                         .unwrap_err();
+                    let shape = sceneworks_core::training::validate_moss_training_field_shapes(
+                        &plan.config.advanced,
+                    )
+                    .unwrap_err();
+                    assert_eq!(shape.to_string(), submission.to_string(), "{field}");
                     let worker = validate_training_target_config(&plan).unwrap_err();
+                    // Generic type refusals precede registration; MOSS-specific checks follow it.
+                    // Neither-backend builds still exercise every pure field-shape assertion.
+                    let expected = early_worker_refusal.map(str::to_owned).unwrap_or_else(|| {
+                        if native_runtime {
+                            submission.to_string()
+                        } else {
+                            unavailable.clone()
+                        }
+                    });
                     assert!(
-                        matches!(worker, WorkerError::InvalidPayload(message) if message == submission.to_string()),
+                        matches!(worker, WorkerError::InvalidPayload(message) if message == expected),
                         "{field}"
                     );
                 }
@@ -4742,7 +4788,11 @@ mod tests {
                         &plan.config,
                     )
                     .unwrap();
-                    validate_training_target_config(&plan).unwrap();
+                    sceneworks_core::training::validate_moss_training_field_shapes(
+                        &plan.config.advanced,
+                    )
+                    .unwrap();
+                    assert_worker_acceptance(&plan);
                 }
             }
         }
