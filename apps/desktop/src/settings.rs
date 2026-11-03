@@ -1312,7 +1312,7 @@ fn sanitized_export_filename(value: &str) -> String {
 /// it. It stopped being unreachable when the Image Editor's untouched download became a byte-exact
 /// passthrough of the source file: every editor export used to be a canvas raster bounded by
 /// `EDITOR_CANVAS_MAX_SIDE`, and a 300 MB source now arrives here whole. The editor keeps its own
-/// mirror (`MAX_DESKTOP_EXPORT_BYTES` in `apps/web/src/screens/ImageEditor.jsx`) and falls back to
+/// mirror (`MAX_DESKTOP_EXPORT_BYTES` in `apps/web/src/screens/imageEditor/export.js`) and falls back to
 /// the raster BEFORE the invoke, so the user reads a sentence rather than catching this error —
 /// which is why the two numbers have to stay equal, and why a test says so.
 const MAX_EXPORT_BYTES: usize = 256 * 1024 * 1024;
@@ -1916,7 +1916,7 @@ mod tests {
     #[test]
     fn the_desktop_export_ceiling_matches_the_editors_mirror_of_it() {
         let editor = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/web/src/screens/ImageEditor.jsx");
+            .join("../../apps/web/src/screens/imageEditor/export.js");
         let source = std::fs::read_to_string(&editor)
             .unwrap_or_else(|error| panic!("read {}: {error}", editor.display()));
         let declared = format!(
@@ -1925,7 +1925,7 @@ mod tests {
         );
         assert!(
             source.contains(&declared),
-            "apps/web/src/screens/ImageEditor.jsx must declare `export const {declared}` to match \
+            "apps/web/src/screens/imageEditor/export.js must declare `export const {declared}` to match \
              this crate's MAX_EXPORT_BYTES; the editor decides BEFORE the invoke whether the \
              passthrough fits, so a drift is either a hard error on a file that used to download \
              or a needless fallback to the raster"
