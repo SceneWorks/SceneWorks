@@ -1,3 +1,4 @@
+import { useDismissOnOutsideOrEscape } from "../hooks/useDismissOnOutsideOrEscape.js";
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
 import { Icon } from "./Icons.jsx";
@@ -1080,27 +1081,7 @@ export function SavePresetPanel({
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const containerRef = useRef(null);
 
-  useEffect(() => {
-    if (!scopeMenuOpen) {
-      return undefined;
-    }
-    function onDocMouseDown(event) {
-      if (!containerRef.current?.contains(event.target)) {
-        setScopeMenuOpen(false);
-      }
-    }
-    function onDocKey(event) {
-      if (event.key === "Escape") {
-        setScopeMenuOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDocMouseDown);
-    document.addEventListener("keydown", onDocKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onDocKey);
-    };
-  }, [scopeMenuOpen]);
+  useDismissOnOutsideOrEscape(containerRef, scopeMenuOpen, setScopeMenuOpen);
 
   function saveWithScope(scope) {
     setScopeMenuOpen(false);

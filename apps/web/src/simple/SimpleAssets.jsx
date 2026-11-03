@@ -4,7 +4,7 @@ import { AssetThumbnail, assetCanRenderAsAudio, assetCanRenderAsVideo } from "..
 import { useAppContext } from "../context/AppContext.js";
 import { isLibraryAsset } from "../constants.js";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
-import { assetMatchesSearch } from "../screens/LibraryScreen.jsx";
+import { assetMatchesSearch } from "../assetSearch.js";
 import { assetGridColumns } from "./breakpoint.js";
 import { SimpleAudioTile } from "./simpleAudioParts.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";

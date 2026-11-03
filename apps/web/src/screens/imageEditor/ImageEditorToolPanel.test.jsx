@@ -25,6 +25,23 @@ afterEach(async () => {
 });
 
 describe("ImageEditorToolPanel memo boundary", () => {
+  it("creates a stable trampoline for a callback introduced after mount", async () => {
+    const calls = [];
+    let scope;
+    function Harness({ step }) {
+      scope = useStableImageEditorToolPanelScope(step ? { later: () => calls.push(step) } : {});
+      return null;
+    }
+    await act(async () => root.render(<Harness step={0} />));
+    await act(async () => root.render(<Harness step={1} />));
+    const callback = scope.later;
+    callback();
+    await act(async () => root.render(<Harness step={2} />));
+    expect(scope.later).toBe(callback);
+    callback();
+    expect(calls).toEqual([1, 2]);
+  });
+
   it("skips parent-only rerenders while a rendered handler sees its latest closure", async () => {
     const observer = vi.fn();
     const fitCalls = [];
