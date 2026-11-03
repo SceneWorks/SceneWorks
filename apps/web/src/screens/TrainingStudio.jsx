@@ -2284,7 +2284,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   );
 
   const sessionHandlers = useLatestHandlers({
-    onRefreshDatasets, datasetThumbAsset, startNewDataset, openDataset, setDraftName, discardDraft,
+    onRefreshDatasets, startNewDataset, openDataset, setDraftName, discardDraft,
     setAddDialogOpen, setRenamePrefix, applyOrderedNames, setCaptionDialog, saveDataset,
     removeUnavailableAsset, importParquetDataset, handleDeleteDataset, setItemReferences, addItemReferences,
     importItemReferences, setEditPairsMode, onPreview, updateCaption, addAssets, handleImport,
@@ -2295,14 +2295,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   });
 
   const datasetSession = useMemo(() => ({
-    loadingDatasets, onRefreshDatasets: sessionHandlers.onRefreshDatasets, busyDatasetId, datasetThumbAsset: sessionHandlers.datasetThumbAsset,
+    loadingDatasets, onRefreshDatasets: sessionHandlers.onRefreshDatasets, busyDatasetId, datasetThumbAsset,
     datasets, startNewDataset: sessionHandlers.startNewDataset, openDataset: sessionHandlers.openDataset, activeDataset, selectedDatasetId,
     datasetsError, datasetError, datasetMessage, draftName, setDraftName: sessionHandlers.setDraftName,
     dirty, discardDraft: sessionHandlers.discardDraft, setAddDialogOpen: sessionHandlers.setAddDialogOpen, renamePrefix, setRenamePrefix: sessionHandlers.setRenamePrefix,
     renaming, memberAssets, applyOrderedNames: sessionHandlers.applyOrderedNames, setCaptionDialog: sessionHandlers.setCaptionDialog, health,
     canSave, saveValidity, saveDataset: sessionHandlers.saveDataset, savingDataset, unavailableAssetIds, removeUnavailableAsset: sessionHandlers.removeUnavailableAsset, onImportParquet: sessionHandlers.importParquetDataset,
     onDeleteDataset: sessionHandlers.handleDeleteDataset, deletingDataset,
-  }), [loadingDatasets, sessionHandlers, busyDatasetId, datasets, activeDataset, selectedDatasetId,
+  }), [loadingDatasets, sessionHandlers, busyDatasetId, datasetThumbAsset, datasets, activeDataset, selectedDatasetId,
   datasetsError, datasetError, datasetMessage, draftName, dirty, renamePrefix, renaming, memberAssets, health,
   canSave, saveValidity, savingDataset, unavailableAssetIds, deletingDataset]);
   const editPairSession = useMemo(() => ({
