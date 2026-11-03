@@ -3742,6 +3742,7 @@
       "paths": {},
       "removable": true,
       "repairAvailable": false,
+      "supportsLastOnlyImageToVideo": false,
       "type": "image",
       "ui": {
         "label": "User"
@@ -3827,6 +3828,7 @@
       },
       "removable": false,
       "repairAvailable": false,
+      "supportsLastOnlyImageToVideo": false,
       "type": "image",
       "ui": {
         "label": "Z-Image"
