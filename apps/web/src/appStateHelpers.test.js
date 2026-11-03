@@ -83,7 +83,7 @@ describe("isCurrentProjectRequest", () => {
     expect(isCurrentProjectRequest(renderCurrentProjectId, sseProjectId)).toBe(false);
 
     const delegate = appSource.slice(appSource.indexOf("const refreshAssets = useProjectScopedList("),
-      appSource.indexOf("async function refreshModelAndLoras"));
+      appSource.indexOf("const hydrationRefreshers"));
     expect(delegate).toContain("token, activeProject, activeProjectRef");
     expect(delegate).toContain("load: assetsApi.listIncludingHidden");
     expect(delegate).not.toContain("admitFromRef: true");
