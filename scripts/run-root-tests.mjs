@@ -1,5 +1,6 @@
 import { readdirSync } from "node:fs";
 import path from "node:path";
+import { availableParallelism } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +18,9 @@ export function discoverRootTests(dir = root) {
     return entry.isFile() && entry.name.endsWith(".test.mjs") ? [relative] : [];
   }).sort();
 }
+export function rootTestConcurrency(parallelism = availableParallelism()) {
+  return Math.min(4, parallelism);
+}
 // Keep this suite in its original invocation after all parallel tests finish.
 export const SERIAL_TEST = "scripts/matrix-removed-sources.test.mjs";
 export function rootTestGroups(files = discoverRootTests()) {
@@ -29,7 +33,7 @@ export function rootTestGroups(files = discoverRootTests()) {
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   for (const tests of rootTestGroups()) {
-    const result = spawnSync(process.execPath, ["--test", ...tests], { cwd: root, stdio: "inherit" });
+    const result = spawnSync(process.execPath, ["--test", `--test-concurrency=${rootTestConcurrency()}`, ...tests], { cwd: root, stdio: "inherit" });
     if (result.error) throw result.error;
     if (result.status !== 0) { process.exitCode = result.status ?? 1; break; }
   }
