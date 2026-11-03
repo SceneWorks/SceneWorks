@@ -1,10 +1,7 @@
 //! Shared dataset parsing, analysis progress and sidecar scaffold.
 use super::*;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::CancelFlag;
 
 /// Strict analysis jobs reject malformed items and normalize text. Upscale historically skips
@@ -128,10 +125,7 @@ fn dataset_items<'a>(
 /// Per-item progress scaling shared by every batched analysis job: item `index` (0-based) of `total`
 /// maps to `0.12 + 0.78 * ((index + 1) / total)`, leaving `0.04/0.08` for prepare/load and `0.94/1.0`
 /// for save/complete. Extracted so the one magic ramp is defined (and unit-tested) once (sc-8836).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn item_progress(index: usize, total: usize) -> f64 {
     0.12 + 0.78 * ((index + 1) as f64 / total.max(1) as f64)
 }
@@ -139,10 +133,7 @@ pub(crate) fn item_progress(index: usize, total: usize) -> f64 {
 /// Build a batched-analysis-job [`ProgressRequest`] with the shared field defaults. Every stage of both
 /// analysis jobs stamped these identical constructors (`analysis_progress` / `face_progress`); this is
 /// the one copy (sc-8836).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn analysis_progress(
     status: JobStatus,
     stage: ProgressStage,
@@ -158,10 +149,7 @@ pub(crate) fn analysis_progress(
 /// embedding space, the cancel message, the saving-stage message, and the per-item progress-message
 /// builder. Everything that differs between the CLIP and face analysis jobs (beyond the item shape,
 /// the model loading, and the record fold) is expressed here.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct AnalysisJobConfig<'a> {
     /// The `.../training/datasets/{dataset_id}/<endpoint_suffix>` sidecar path segment
     /// (`analysis-embeddings` for CLIP, `face-embeddings` for the face stack).
@@ -190,10 +178,7 @@ pub(crate) struct AnalysisJobConfig<'a> {
 /// Split `items` into consecutive POST chunks whose JSON-encoded items total at most `max_bytes`
 /// (see [`AnalysisJobConfig::post_chunk_bytes`]); `None` → one chunk. Always at least one chunk,
 /// so an empty batch still makes its (empty) POST.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn chunk_post_items(items: Vec<Value>, max_bytes: Option<usize>) -> Vec<Vec<Value>> {
     let Some(max_bytes) = max_bytes else {
         return vec![items];
@@ -228,10 +213,7 @@ pub(crate) fn chunk_post_items(items: Vec<Value>, max_bytes: Option<usize>) -> V
 ///
 /// The per-item `index` a producer sends (0-based) is reported through [`item_progress`]. Returns the
 /// joined records so the caller can derive its completed-result fields (e.g. a with-face count).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_batched_analysis_job<R, P, C>(
     api: &ApiClient,
@@ -306,10 +288,7 @@ where
 /// `{ space, items }` bodies — in [`AnalysisJobConfig::post_chunk_bytes`]-style chunks when
 /// `post_chunk_bytes` is set — returning every response in POST order. Shared by the batched
 /// analysis jobs and the training run's subject-mask prepass (sc-2124).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn post_dataset_sidecar(
     api: &ApiClient,
     project_id: &str,
@@ -332,10 +311,7 @@ pub(crate) async fn post_dataset_sidecar(
 }
 
 /// The cancel copy and join-error label of one [`stream_batched_records`] run.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct BatchedStream<'a> {
     pub cancel_message: &'a str,
     pub join_error_label: &'a str,
@@ -347,10 +323,7 @@ pub(crate) struct BatchedStream<'a> {
 /// `rx`, heartbeats and polls cancel on each tick, and joins the records once the channel closes. A
 /// cancel trips the flag, waits for the task to stop, then posts the terminal `Canceled` and
 /// returns [`WorkerError::Canceled`].
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_batched_records<R, F>(
     api: &ApiClient,

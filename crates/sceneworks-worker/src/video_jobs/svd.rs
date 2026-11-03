@@ -26,10 +26,7 @@ pub(super) const SVD_ADAPTER: &str = "svd_video";
 
 /// The diffusers SVD-XT repo the engine loads directly (fp16 `vae/` + `unet/` + `image_encoder/`).
 /// Shared by the MLX (macOS) lane and the candle (Windows/CUDA) lane (sc-5493).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const SVD_REPO: &str = "stabilityai/stable-video-diffusion-img2vid-xt";
 
 /// SceneWorks model id → mlx-gen registry id for the SVD family (only `svd` → `svd_xt`), or `None`.
@@ -90,10 +87,7 @@ pub(super) fn resolve_svd_model_dir(settings: &Settings) -> WorkerResult<PathBuf
 /// then clamp to `[min, max]`. Mirrors the torch `safe_int(advanced.get(adv_key),
 /// target.get(manifest_key, default), min, max)` (advanced overrides the manifest, which overrides
 /// the builtin default; the resolved value is clamped).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn svd_i32(
     request: &VideoRequest,
     adv_key: &str,
@@ -114,10 +108,7 @@ pub(super) fn svd_i32(
 
 /// Read an SVD float knob: `advanced[adv_key]` → `modelManifestEntry[manifest_key]` → `default`
 /// (no clamp). Mirrors the torch `float(advanced.get(adv_key, target.get(manifest_key, default)))`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn svd_f32(
     request: &VideoRequest,
     adv_key: &str,
@@ -136,10 +127,7 @@ pub(super) fn svd_f32(
 /// Inference steps for an SVD request: `advanced.steps` → `modelManifestEntry.steps[quality]` (else
 /// its `balanced`) → the builtin quality ladder (fast 15 / balanced 25 / best 30), clamped 1..=80.
 /// Mirrors the torch `_num_inference_steps` for the `svd_video` adapter.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn svd_steps(request: &VideoRequest) -> u32 {
     let builtin = match request.quality.as_str() {
         "fast" => 15,
@@ -195,10 +183,7 @@ fn resolve_svd_conditioning(
 
 /// Raw-settings recorded on a real SVD asset (the resolved knobs + real-inference markers). Shared by
 /// the MLX (macOS) and candle (Windows/CUDA, sc-5493) lanes.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn svd_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));

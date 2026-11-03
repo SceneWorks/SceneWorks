@@ -117,7 +117,7 @@ impl<C: CancelHandle, F: Future> StreamSupervisor<C, F> {
 
     /// Stop accepting stream events before joining after handler failure. Closing the receiver
     /// wakes a native producer blocked in `blocking_send`, so cancellation cannot deadlock teardown.
-    #[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+    #[cfg(any(test, native_lane))]
     pub(crate) async fn finish_stream<E>(
         self,
         handling: WorkerResult<()>,

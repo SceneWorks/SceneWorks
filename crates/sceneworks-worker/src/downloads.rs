@@ -296,10 +296,7 @@ mod download_lock {
 // (Linux) lane the function is dead in the test build too. Gating the allow on `not(test)` compiles
 // on this Mac and fails `rust:check:candle` with `-D dead-code` — which is exactly what it did.
 #[allow(dead_code)]
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_cached_file(
     context: &DownloadContext<'_>,
     url: &str,
@@ -314,10 +311,7 @@ pub(crate) async fn ensure_cached_file(
 /// `expected_sha256` (a content digest — e.g. an HF `lfs.oid`) before returning
 /// (sc-8879). A malformed/absent digest is skipped by `verify_file_sha256`, so callers
 /// can pass whatever the source advertises; a mismatch removes the file and errors.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_cached_file_verified(
     context: &DownloadContext<'_>,
     url: &str,
@@ -449,10 +443,7 @@ async fn remote_content_length(
 // `backend-candle`. Compiled on every platform anyway so the bare lib build type-checks it too
 // (a gated-out helper is how parity goes blind to dead code); dead_code silenced only where
 // nothing calls it, the same idiom as `safe_weight_filename`.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn resolve_hf_component_file(
     settings: &Settings,
     repo: &str,
@@ -474,10 +465,7 @@ pub(crate) fn resolve_hf_component_file(
 /// Resolve a single Hugging Face file and stream it into an app cache target with
 /// size-aware resume/progress. This is for first-use runtime weights that are not
 /// installed through the full model-download flow.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_hf_cached_file(
     context: &DownloadContext<'_>,
     repo: &str,
@@ -534,10 +522,7 @@ async fn resolve_single_hf_file(
 /// their resumable state. Imported SDXL components are loader inputs shared by
 /// concurrent jobs, so a destination-path cache hit must be verified rather than
 /// inferred from `is_file()` (sc-21689).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_hf_cached_file_atomically(
     context: &DownloadContext<'_>,
     repo: &str,
@@ -562,10 +547,7 @@ pub(crate) async fn ensure_hf_cached_file_atomically(
 /// [`partial_download_path`] sibling. A final cache hit is reused only after it is
 /// checked against the same size and (when available) SHA-256 identity used for a
 /// freshly downloaded file.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_cached_file_verified_atomically(
     context: &DownloadContext<'_>,
     url: &str,
@@ -631,10 +613,7 @@ fn partial_download_path(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn cached_file_matches_expected(
     context: &DownloadContext<'_>,
     path: &Path,
@@ -786,7 +765,7 @@ impl HuggingFaceSnapshot {
 /// Obtain only the content digest of one pinned HF file for installed-receipt verification.
 /// LFS weights use their published SHA-256; small non-LFS metadata is streamed into a digest.
 /// No remote bytes or filesystem destination cross this boundary, and no model is installed.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) async fn huggingface_file_content_sha256(
     client: &reqwest::Client,
     settings: &Settings,

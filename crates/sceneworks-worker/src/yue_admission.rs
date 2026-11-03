@@ -959,7 +959,7 @@ pub(crate) async fn live_budget(gpu_id: &str) -> Option<YueBudget> {
     })
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn live_budget(_gpu_id: &str) -> Option<YueBudget> {
     None
 }

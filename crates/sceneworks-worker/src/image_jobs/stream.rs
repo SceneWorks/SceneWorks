@@ -46,11 +46,8 @@ enum GenEvent {
     //
     // The producers today are the candle imported-Krea and checkpoint-plan lanes (the routes whose
     // runtime handles answer `checkpoint_weight_facts()` at this pin), so builds without those
-    // lanes construct nothing here while the consumer arm still compiles everywhere.
-    #[cfg_attr(
-        not(all(not(target_os = "macos"), feature = "backend-candle")),
-        allow(dead_code)
-    )]
+    // lanes compile neither the variant nor its consumer arm. Candle tests retain both.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     CheckpointWeightFacts {
         facts: Value,
     },
@@ -58,13 +55,6 @@ enum GenEvent {
     /// the applied adapter stack (`lane_controls::image_facts`). Sent before that image's
     /// [`GenEvent::Image`] on the same channel; the consumer merges the block into that image's
     /// `rawAdapterSettings`. Lanes with nothing to report never produce it.
-    #[cfg_attr(
-        not(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        )),
-        allow(dead_code)
-    )]
     ImageFacts {
         index: usize,
         facts: JsonObject,
@@ -278,10 +268,7 @@ where
 /// Prompt-reporting sibling of [`drive_gen_items`]. Kept separate so the additive inference
 /// contract changes only the FLUX.2-dev-capable generic lanes; every other producer remains source-
 /// and behavior-identical.
-#[cfg_attr(
-    not(all(not(target_os = "macos"), feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn drive_gen_items_reported<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
@@ -325,15 +312,8 @@ where
 /// keeps using [`drive_gen_items`].
 //
 // The scored producers are all face-backend paths; off-Mac they compile only with the candle backend
-// (the angle-set scorer's backend legs are cfg-gated the same way), so allow this dead when neither
-// face backend is present.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+// (the angle-set scorer's backend legs are cfg-gated the same way). The native include owns
+// that boundary; no inverse dead-code suppression is needed here.
 fn drive_gen_items_scored<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
@@ -365,7 +345,7 @@ where
 /// [`drive_gen_items_scored`] plus the request-local prompt-report sink used by the shared MLX lane.
 /// Face likeness and prompt provenance remain independent per-image facts. The Candle FLUX.2-dev
 /// edit route does not admit the character-image mode, so it has no scored/reporting combination.
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[cfg(any(test, target_os = "macos"))]
 fn drive_gen_items_scored_reported<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
@@ -406,13 +386,6 @@ where
 /// image `k` on seed `seed + k`, the seed the engine drew its noise from, after its provenance
 /// `facts`. A cancel or an engine failure inside the call returns before any image is sent, so a
 /// partial batch is never published; a count that is not `expected` is a typed engine failure.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
 fn drive_native_prompt_batch<F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     seed: i64,
@@ -598,10 +571,7 @@ impl Drop for RequestCacheRelease {
 // `!Send` engine on the blocking thread and stream per-item events back. `G` is the loaded model
 // (MLX `Box<dyn Generator>` or candle `InstantId`) — created and consumed inside the one
 // `spawn_blocking`, so it never needs to be `Send`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn start_gen_stream<G, L, D>(
     job_id: String,
     engine_id: &'static str,

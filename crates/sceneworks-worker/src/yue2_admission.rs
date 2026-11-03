@@ -2305,7 +2305,7 @@ pub(crate) async fn transcription_unknown_decode_cap(gpu_id: &str) -> Result<u64
 
 /// `ReviewArtifact::open` replays persisted F32 model input. It reads raw bytes and constructs an
 /// F32 vector, so an existing artifact needs admission too, before replay allocates either copy.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) async fn check_transcription_replay(
     artifact_file_bytes: u64,
     gpu_id: &str,
@@ -2554,10 +2554,7 @@ pub(crate) fn budget_probes() -> usize {
 
 /// Let this thread's admissions read the real hardware budget (the profile capture entrypoint).
 #[cfg(test)]
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn probe_hardware_in_this_test() {
     HARDWARE_PROBE.with(|probe| probe.set(true));
 }
@@ -2693,7 +2690,7 @@ async fn probe_budget(gpu_id: &str) -> Option<Yue2Budget> {
     })
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 async fn probe_budget(_gpu_id: &str) -> Option<Yue2Budget> {
     None
 }
@@ -2770,10 +2767,7 @@ pub(crate) struct Yue2Admitted {
 async fn evict_for_admission(gpu_id: &str) -> Result<(), WorkerError> {
     #[cfg(test)]
     EVICTIONS.with(|evictions| evictions.set(evictions.get() + 1));
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         let evicted = crate::generator_cache::evict_cached_generator().await?;
         tracing::info!(
@@ -2782,10 +2776,7 @@ async fn evict_for_admission(gpu_id: &str) -> Result<(), WorkerError> {
             "YuE2 admission: evicted the resident generator to reclaim its memory (sc-23001)"
         );
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     let _ = gpu_id;
     Ok(())
 }

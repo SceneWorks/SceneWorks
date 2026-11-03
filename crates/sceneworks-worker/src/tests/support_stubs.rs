@@ -509,10 +509,7 @@ async fn cancel_peek_tolerates_transient_get_errors() {
 // "Cancelling…" update (so the worker row isn't freed while the in-flight step is still
 // running). This stub captures every progress POST body so a test can assert the
 // acknowledgement status is `running`, not the terminal `canceled`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn spawn_progress_capture_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
     use std::sync::{Arc, Mutex};
     type Posts = Arc<Mutex<Vec<Value>>>;

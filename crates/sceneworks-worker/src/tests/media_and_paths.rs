@@ -1418,10 +1418,7 @@ async fn ffmpeg_probe_timeout_kills_and_reaps_the_real_helper_process() {
     assert!(!temp.path().join("completed").exists());
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test]
 async fn ffmpeg_frame_count_probe_wrapper_preserves_timeout_but_not_ordinary_failure() {
     let temp = tempdir().expect("tempdir creates");

@@ -39,10 +39,7 @@ fn bernini_image_available(request: &ImageRequest, settings: &Settings) -> bool 
 /// edit), everything else → `t2i` (text→image). Selects the engine guidance/conditioning path
 /// (`resolve_vit_mode`/`task_to_vit_mode`); both still tasks resolve to `vae_txt_vit_wapg`. Shared by
 /// the MLX and candle (sc-10996) still lanes — the engine task string is backend-neutral.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn bernini_image_engine_task(mode: &str) -> &'static str {
     if mode == "edit_image" {
         "i2i"
@@ -69,10 +66,7 @@ fn resolve_bernini_image_quant(request: &ImageRequest) -> (Option<Quant>, Option
 /// or i2i, plus the standard repo/steps/guidance/quant knobs. Shared by the MLX and candle (sc-10996)
 /// still lanes — the recorded knobs are backend-neutral (the candle lane records `candle` in `backend`
 /// and `editEngine` stays `bernini`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn bernini_image_raw_settings(
     request: &ImageRequest,
     repo: &str,
@@ -154,10 +148,7 @@ fn bernini_image_generate_one(
 /// scope against. Both are `None` on the MLX lane and on any Candle render the shared evaluator
 /// declined.
 #[allow(clippy::too_many_arguments)]
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn bernini_image_generate_one_with_memory(
     generator: &dyn Generator,
     prompt: &str,

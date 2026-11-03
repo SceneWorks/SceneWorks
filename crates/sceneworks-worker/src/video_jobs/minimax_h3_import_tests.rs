@@ -6,10 +6,7 @@
 // REAL arm against a stub loader, asserting on the `LoadSpec` that reached the provider. The
 // controls remove exactly one thing — the binding, or the imported id — and must stop the arm before
 // any load.
-#![cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#![cfg(native_lane)]
 
 use super::*;
 use crate::video_jobs::minimax_h3::with_imported_h3_source_seals;
