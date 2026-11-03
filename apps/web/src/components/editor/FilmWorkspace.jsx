@@ -9,7 +9,7 @@ import {
   parseFilmScript,
   preflightFilm,
   startFilmPlanning,
-  exportFilmRun,
+  exportFilmRun, filmRequest, getFilmRun, startFilmRun,
 } from "../../api/films.js";
 import { useAppLive, useAppStatic } from "../../context/AppContext.js";
 import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
@@ -189,7 +189,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     setEngaged(false);
     setFocusShotId("");
     if (!activeProject?.id) return undefined;
-    apiFetch(`/api/v1/projects/${activeProject.id}/films`, token)
+    filmRequest(activeProject.id, null, token)
       .then((items) => {
         if (canceled) return;
         setDrafts(items);
@@ -306,7 +306,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     let canceled = false;
     (async () => {
       try {
-        const run = await apiFetch(`/api/v1/projects/${projectId}/film-runs/${encodeURIComponent(runId)}`, token);
+        const run = await getFilmRun(projectId, runId, token);
         const draftId = run?.locator?.draftId;
         if (canceled || !draftId) return;
         if (selectedDraftId.current !== draftId) {
@@ -335,7 +335,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     setBusy(true);
     setNotice("");
     try {
-      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films`, token, {
+      const created = await filmRequest(activeProject.id, null, token, {
         method: "POST",
         body: JSON.stringify({ title: `Film ${drafts.length + 1}` }),
       });
@@ -366,7 +366,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     }
     setBusy(true);
     try {
-      const loaded = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${id}`, token);
+      const loaded = await filmRequest(activeProject.id, id, token);
       setDraft(loaded);
       setSelectedShotIds(loaded.productionPlan.shots.map((shot) => shot.id));
       setPreflight(null);
@@ -394,7 +394,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
 
   async function saveDraft({ updateLocal = true } = {}) {
     if (!draft) return null;
-    const saved = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${draft.id}`, token, {
+    const saved = await filmRequest(activeProject.id, draft.id, token, {
       method: "PUT",
       body: JSON.stringify({ ...draft, reviewPlan: normalizedPlan(draft) }),
     });
@@ -495,14 +495,14 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
         setNotice("Preflight found fields that must be corrected before rendering.");
         return;
       }
-      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${saved.id}/runs`, token, { method: "POST", body: JSON.stringify({ selectedShotIds, expectedDraftRevision: saved.revision }) });
-      let run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}/start`, token, { method: "POST" });
+      const created = await filmRequest(activeProject.id, saved.id, token, { method: "POST", body: JSON.stringify({ selectedShotIds, expectedDraftRevision: saved.revision }) }, "/runs");
+      let run = await startFilmRun(activeProject.id, created.locator.id, "start", token);
       selectedRunExplicit.current = true;
       setLastRun(run);
       setNotice(`Render requested for ${selectedShotIds.length} selected shot${selectedShotIds.length === 1 ? "" : "s"}. Checking inputs and worker availability.`);
       while (run.controllerActive) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
-        run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}`, token);
+        run = await getFilmRun(activeProject.id, created.locator.id, token);
         setLastRun(run);
         const shotProgress = describeActiveFilmShots(run);
         if (shotProgress) setNotice(shotProgress);
@@ -545,7 +545,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
       setNotice("Export started from the current saved cut.");
       while (run.controllerActive) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
-        run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${runId}`, token);
+        run = await getFilmRun(activeProject.id, runId, token);
         setLastRun(run);
       }
       const exported = run.record?.export;

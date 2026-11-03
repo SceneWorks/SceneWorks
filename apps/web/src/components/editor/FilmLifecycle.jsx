@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch } from "../../api.js";
+import { getFilmPlanning, listFilmRuns, startFilmRun } from "../../api/films.js";
 
 function operationLabel(run) {
   const owner = run.controllerOwner || "";
@@ -27,8 +27,8 @@ export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId =
     if (!projectId || !draftId) return;
     const requestId = ++refreshRequest.current;
     const [runResult, planningResult] = await Promise.allSettled([
-      apiFetch(`/api/v1/projects/${projectId}/film-runs`, token),
-      apiFetch(`/api/v1/projects/${projectId}/films/${draftId}/planning`, token),
+      listFilmRuns(projectId, token),
+      getFilmPlanning(projectId, draftId, token),
     ]);
     if (refreshRequest.current !== requestId) return;
     if (runResult.status === "fulfilled") {
@@ -60,7 +60,7 @@ export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId =
     refreshRequest.current += 1;
     setPending(`${runId}:${action}`);
     try {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/film-runs/${runId}/${action}`, token, { method: "POST" });
+      const updated = await startFilmRun(projectId, runId, action, token);
       if (updated?.locator?.draftId === draftId) onRunChange?.(updated, { select: true });
       setNotice(action === "cancel" ? "Cancellation requested. Completed takes and spent attempts are preserved." : action === "start" ? "Start requested. Checking saved inputs and worker availability." : "Resume requested. Checking saved attempts and worker availability.");
       await refresh();

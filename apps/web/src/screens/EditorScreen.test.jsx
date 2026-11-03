@@ -395,8 +395,7 @@ describe("EditorScreen keep-alive keydown gating (sc-13589)", () => {
     expect(setActiveTimeline.mock.calls[1][0].tracks[0].items[0].id).toBe("item_1");
   });
 
-  it.each(["button", "a", '[role="button"]', '[role="tab"]', '[contenteditable="true"]'])
-  ("leaves Space to an interactive focus target %s", (selector) => {
+  it.each(["button", "a", '[role="button"]', '[role="tab"]', '[contenteditable="true"]'])("leaves Space to an interactive focus target %s", (selector) => {
     renderEditor(true);
     const target = document.createElement(selector.startsWith("[") ? "div" : selector);
     if (selector.startsWith("[")) {

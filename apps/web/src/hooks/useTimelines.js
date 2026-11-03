@@ -1,6 +1,7 @@
 import { appConfirm } from "../appConfirm.jsx";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
+import { isAbortError } from "../api.js";
+import { timelineRequest } from "../api/timelines.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
 import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { rebaseTimeline, timelineEdit } from "../timelineEdits.js";
@@ -104,7 +105,7 @@ export function useTimelines({
       if (inFlight) return;
       inFlight = true;
       try {
-        const stored = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${selectedTimelineId}`, token);
+        const stored = await timelineRequest(activeProject.id, selectedTimelineId, token);
         if (!disposed && activeProjectRef.current?.id === activeProject.id && selectedTimelineIdRef.current === selectedTimelineId) adoptStoredTimeline(stored);
       } catch (err) { if (!disposed) setError(err.message); }
       finally { inFlight = false; }
@@ -154,7 +155,7 @@ export function useTimelines({
         return refreshFailure("stale");
       }
       try {
-        const items = await apiFetch(`/api/v1/projects/${projectId}/timelines`, token, { signal });
+        const items = await timelineRequest(projectId, null, token, { signal });
         if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
           return refreshFailure("stale");
         }
@@ -187,7 +188,7 @@ export function useTimelines({
       return;
     }
     try {
-      const timeline = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token);
+      const timeline = await timelineRequest(projectId, timelineId, token);
       if (activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timelineId) {
         return;
       }
@@ -214,7 +215,7 @@ export function useTimelines({
         return null;
       }
       try {
-        const created = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines`, token, {
+        const created = await timelineRequest(activeProject.id, null, token, {
           method: "POST",
           body: JSON.stringify(payload),
         });
@@ -242,18 +243,17 @@ export function useTimelines({
       const workingAtSave = activeTimelineRef.current;
       try {
         const projectId = activeProject.id;
-        const path = `/api/v1/projects/${projectId}/timelines/${timeline.id}`;
         const initialBase = savedTimelineSnapshotRef.current ? JSON.parse(savedTimelineSnapshotRef.current) : timeline;
         let base = initialBase?.id === timeline.id ? initialBase : timeline;
         let candidate = timeline;
         let saved;
         for (let attempt = 0; attempt < 4; attempt += 1) {
           try {
-            saved = await apiFetch(path, token, { method: "PUT", body: JSON.stringify({ timeline: candidate, expectedRevision: base.revision ?? 0 }) });
+            saved = await timelineRequest(projectId, timeline.id, token, { method: "PUT", body: JSON.stringify({ timeline: candidate, expectedRevision: base.revision ?? 0 }) });
             break;
           } catch (error) {
             if (error.code !== "timeline_revision_conflict") throw error;
-            const stored = await apiFetch(path, token);
+            const stored = await timelineRequest(projectId, timeline.id, token);
             let merged = rebaseTimeline(base, candidate, stored);
             if (merged.conflicts.length) {
               const names = merged.conflicts.map((c) => c.label).join(", ");
@@ -303,9 +303,9 @@ export function useTimelines({
       return;
     }
     try {
-      const stored = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${saved.id}/film-deliveries`, token, {
+      const stored = await timelineRequest(activeProject.id, saved.id, token, {
         method: "POST", body: JSON.stringify({ runId, resolveShotId: shotId, resolution, expectedRevision: saved.revision ?? 0 }),
-      });
+      }, "/film-deliveries");
       if (activeProjectRef.current?.id === activeProject.id && selectedTimelineIdRef.current === saved.id) adoptStoredTimeline(stored);
     } catch (error) { setError(error.message); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -321,10 +321,10 @@ export function useTimelines({
         return;
       }
       try {
-        await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${saved.id}/exports`, token, {
+        await timelineRequest(activeProject.id, saved.id, token, {
           method: "POST",
           body: JSON.stringify({ ...options, requestedGpu }),
-        });
+        }, "/exports");
         setActiveView("Queue");
         setError("");
       } catch (err) {
@@ -340,10 +340,10 @@ export function useTimelines({
         return null;
       }
       try {
-        const job = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${timeline.id}/items/${item.id}/frames`, token, {
+        const job = await timelineRequest(activeProject.id, timeline.id, token, {
           method: "POST",
           body: JSON.stringify({ playheadSeconds, intendedUse, requestedGpu }),
-        });
+        }, `/items/${encodeURIComponent(item.id)}/frames`);
         setError("");
         return job;
       } catch (err) {
@@ -390,16 +390,15 @@ export function useTimelines({
       return;
     }
     try {
-      const path = `/api/v1/projects/${projectId}/timelines/${timelineId}`;
       let saved;
       let applyTimelineGenerationResult;
       for (let attempt = 0; attempt < 4; attempt += 1) {
-        const timeline = await apiFetch(path, token);
+        const timeline = await timelineRequest(projectId, timelineId, token);
         ({ applyTimelineGenerationResult } = await loadTimelineGeneration());
         const updated = applyTimelineGenerationResult(timeline, job);
         if (serializeTimeline(updated) === serializeTimeline(timeline)) { saved = timeline; break; }
         try {
-          saved = await apiFetch(path, token, { method: "PUT", body: JSON.stringify({ timeline: updated, expectedRevision: timeline.revision ?? 0 }) });
+          saved = await timelineRequest(projectId, timelineId, token, { method: "PUT", body: JSON.stringify({ timeline: updated, expectedRevision: timeline.revision ?? 0 }) });
           break;
         } catch (error) { if (error.code !== "timeline_revision_conflict") throw error; }
       }

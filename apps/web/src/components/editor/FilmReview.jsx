@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch } from "../../api.js";
+import { listFilmRuns } from "../../api/films.js";
 import { assetCanRenderAsVideo, assetDisplayUrl, posterUrl } from "../assetMedia.jsx";
 import {
   analyzeFilmTake,
@@ -112,7 +112,7 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
     try {
       let locatorId = runLocatorId;
       if (!locatorId) {
-        const runs = await apiFetch(`/api/v1/projects/${projectId}/film-runs`, token);
+        const runs = await listFilmRuns(projectId, token);
         const latest = runs.find((item) => item.locator.draftId === draft.id && item.record);
         if (refreshRequest.current !== requestId) return;
         if (!latest) {
