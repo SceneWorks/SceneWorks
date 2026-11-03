@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icons.jsx";
 import { AssetMedia, assetUrl } from "./assetMedia.jsx";
@@ -303,6 +304,7 @@ export function AudioDownloadButton({
   iconSize = 14,
   ariaLabel = "Download",
 }) {
+  useMediaTicket();
   const anchorRef = useRef(null);
   return (
     <>

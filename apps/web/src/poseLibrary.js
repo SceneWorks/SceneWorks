@@ -141,6 +141,7 @@ export function poseAssetToRecord(asset) {
     source: "user",
     assetId: asset.id,
     previewUrl,
+    previewAsset: asset,
   };
 }
 
