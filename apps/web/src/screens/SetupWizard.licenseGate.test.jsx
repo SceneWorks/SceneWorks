@@ -69,6 +69,7 @@ describe("SetupWizard license gate (sc-17227 / sc-17137 review)", () => {
   let container;
   let root;
   let errors;
+  const serverAcks = new Set();
 
   // The wizard wired to the REAL choke point: `onDownloadModel` is the hook's own
   // `createModelDownloadJob`, so what these tests observe is whether a POST leaves the client.
@@ -86,6 +87,7 @@ describe("SetupWizard license gate (sc-17227 / sc-17137 review)", () => {
     });
     return (
       <SetupWizard
+        token="tok"
         jobs={[]}
         macCapabilities={{ macGatingActive: false }}
         models={models}
@@ -152,7 +154,16 @@ describe("SetupWizard license gate (sc-17227 / sc-17137 review)", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
     apiFetchMock.mockReset();
-    apiFetchMock.mockResolvedValue({ id: "job-1", type: "model_download" });
+    serverAcks.clear();
+    apiFetchMock.mockImplementation(async (path, _token, options) => {
+      if (path.endsWith("/license-acknowledgment")) {
+        const id = path.split("/")[4];
+        if (options?.method === "PUT") serverAcks.add(id);
+        if (options?.method === "DELETE") serverAcks.delete(id);
+        return { modelId: id, acknowledged: serverAcks.has(id), termsSha256: "current" };
+      }
+      return { id: "job-1", type: "model_download" };
+    });
     errors = [];
     ({ container, root } = mountRoot());
   });
@@ -207,7 +218,7 @@ describe("SetupWizard license gate (sc-17227 / sc-17137 review)", () => {
     expect(retry.disabled).toBe(false);
   });
 
-  it("downloads a gated model once its license is accepted in the wizard, asserting the ack to the API", async () => {
+  it("downloads a gated model after persisting acceptance of the reviewed terms", async () => {
     await render([GATED_MODEL]);
     const checkbox = await tickLicenseAck();
     expect(checkbox.checked).toBe(true);
@@ -219,51 +230,33 @@ describe("SetupWizard license gate (sc-17227 / sc-17137 review)", () => {
     const posts = downloadPosts();
     expect(posts).toHaveLength(1);
     expect(posts[0][0]).toBe("/api/v1/models/flux1_dev/download");
-    // The API refuses this same request without the flag, so assert the BODY, not just the POST.
+    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/models/flux1_dev/license-acknowledgment", "tok", {
+      method: "PUT", headers: { "If-Match": '"current"' },
+    });
+    // Downloads consume that record without renewing acceptance.
     expect(JSON.parse(posts[0][2].body)).toEqual({
       requestedGpu: "auto",
-      licenseAcknowledged: true,
     });
     expect(rowMeta("FLUX.1 [dev]")).toBe("Download started");
     expect(container.querySelector(".setup-wizard-refusals")).toBeNull();
   });
 
-  // sc-17137 review, item 4. `writeLicenseAck` swallows a storage failure by design (private
-  // browsing, quota), so the wizard's mirrored `licenseAcks` can say "accepted" over a store that
-  // never took it — and the choke point reads the STORE. Gating the pre-flight on the mirror let
-  // that row fall through to the downstream refusal, whose message ("download did not start") names
-  // neither the licence nor the cause. The gate must stay closed AND say why.
-  it("names the storage failure when the acknowledgment could not be persisted", async () => {
-    const setItem = vi.spyOn(window.Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("QuotaExceededError");
-    });
+  it("uses server persistence even when the browser paint cache rejects writes", async () => {
+    const setItem = vi.spyOn(window.Storage.prototype, "setItem").mockImplementation(() => { throw new Error("QuotaExceededError"); });
     try {
       await render([GATED_MODEL]);
       const checkbox = await tickLicenseAck();
-      // The tick is mirrored in component state, so the box LOOKS accepted…
       expect(checkbox.checked).toBe(true);
-      // …but the store the choke point reads never took it.
+      expect(serverAcks.has("flux1_dev")).toBe(true);
       expect(window.localStorage.getItem("sceneworks-license-ack:flux1_dev")).toBeNull();
-
       await downloadSelected();
-      // Fail CLOSED: nothing leaves the client, and the row is not claimed started.
-      expect(downloadPosts()).toHaveLength(0);
-      expect(rowMeta("FLUX.1 [dev]")).not.toBe("Download started");
-      const refusal = container.querySelector(".setup-wizard-refusals");
-      expect(refusal, "the refusal notice").toBeTruthy();
-      expect(refusal.textContent).toContain(
-        "FLUX.1 [dev] was not downloaded — this browser could not save the license acknowledgment",
-      );
-      // Neither the generic downstream refusal nor "accept it first" — the user did accept.
-      expect(refusal.textContent).not.toContain("download did not start");
-      expect(refusal.textContent).not.toContain("accept its license above first");
-    } finally {
-      setItem.mockRestore();
-    }
+      expect(downloadPosts()).toHaveLength(1);
+      expect(rowMeta("FLUX.1 [dev]")).toBe("Download started");
+    } finally { setItem.mockRestore(); }
   });
 
   it("seeds a prior acknowledgment from the store, so a returning user is not re-asked", async () => {
-    window.localStorage.setItem("sceneworks-license-ack:flux1_dev", "true");
+    serverAcks.add("flux1_dev");
     await render([GATED_MODEL]);
     const checkbox = container.querySelector(".setup-wizard-license .model-license-ack input");
     expect(checkbox.checked).toBe(true);

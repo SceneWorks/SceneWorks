@@ -197,7 +197,7 @@ function CoverSetup({ model, setup, jobs, token, requestedGpu, onLicenseLapsed }
     setBusy(true);
     setError(null);
     try {
-      const body = { licenseAcknowledged: true };
+      const body = {}; // Use the current server acknowledgment; setup is not a new acceptance.
       if (requestedGpu) body.requestedGpu = requestedGpu;
       const response = await downloadYue2ConditionalComponents(model.id, "cover", body, token);
       setQueued({

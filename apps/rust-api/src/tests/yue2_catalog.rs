@@ -660,3 +660,157 @@ async fn repairing_a_partial_legacy_decoder_completes_legacy() {
             .collect()
     );
 }
+
+/// F-209: browser downloads reuse the current server record instead of reasserting
+/// acceptance. Withdrawal and changed terms must not be silently renewed by a POST.
+#[tokio::test]
+async fn downloads_use_current_server_license_acknowledgment_without_reasserting_it() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let app = app_with_yue1_and_yue2(&temp);
+    let ack_route = "/api/v1/models/yue2/license-acknowledgment";
+    let (status, accepted) = request(app.clone(), "PUT", ack_route, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    for route in [
+        "/api/v1/models/yue2/download",
+        "/api/v1/models/yue2/conditional-components/cover/download",
+    ] {
+        let (status, body) = request(app.clone(), "POST", route, json!({})).await;
+        assert_eq!(status, StatusCode::CREATED, "{route}: {body}");
+        if route.ends_with("/yue2/download") {
+            assert!(
+                body["payload"].get("licenseAcknowledged").is_none(),
+                "server record must not become a permanent retry assertion: {body}"
+            );
+        }
+    }
+    let (_, still_accepted) = request(app.clone(), "GET", ack_route, Value::Null).await;
+    assert_eq!(
+        still_accepted["acknowledgment"], accepted["acknowledgment"],
+        "downloads must not record a new acceptance"
+    );
+    let (status, _) = request(app.clone(), "DELETE", ack_route, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    for route in [
+        "/api/v1/models/yue2/download",
+        "/api/v1/models/yue2/conditional-components/cover/download",
+    ] {
+        let (status, body) = request(app.clone(), "POST", route, json!({})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{route}: {body}");
+        assert_eq!(body["code"], "license_acknowledgment_required");
+    }
+    request(app.clone(), "PUT", ack_route, Value::Null).await;
+    let mut changed = builtin_yue2();
+    changed["licenseNotice"] = json!("New terms require another explicit acceptance");
+    let changed_app = app_with_yue1_and(&temp, changed);
+    let (_, view) = request(changed_app.clone(), "GET", ack_route, Value::Null).await;
+    assert_eq!(view["acknowledged"], false);
+    let (status, body) = request(
+        changed_app.clone(),
+        "POST",
+        "/api/v1/models/yue2/download",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    // Existing API clients can still deliberately assert fresh acceptance.
+    let (status, body) = request(
+        changed_app,
+        "POST",
+        "/api/v1/models/yue2/download",
+        json!({"licenseAcknowledged": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[tokio::test]
+async fn a_stored_license_does_not_authorize_a_second_restricted_source() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    write_yue1_and(&temp, builtin_yue2());
+    let manifest_path = temp.path().join("config/manifests/builtin.models.jsonc");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let mut other = builtin_yue2();
+    other["id"] = json!("other_licensed");
+    other["downloads"] = json!([{"provider":"huggingface", "repo":"example/other-licensed", "files":["weights.bin"]}]);
+    other
+        .as_object_mut()
+        .unwrap()
+        .remove("conditionalComponents");
+    other.as_object_mut().unwrap().remove("coRequirements");
+    manifest["models"].as_array_mut().unwrap().push(other);
+    std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    request(
+        app.clone(),
+        "PUT",
+        "/api/v1/models/yue2/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    let repos = [Some("m-a-p/YuE2-3B"), Some("example/other-licensed")];
+    let error = crate::models::ensure_license_acknowledged_for_source(&state, &repos, None, false)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Some("license_acknowledgment_required"));
+    assert!(error.detail.contains("other_licensed"));
+    request(
+        app,
+        "PUT",
+        "/api/v1/models/other_licensed/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    crate::models::ensure_license_acknowledged_for_source(&state, &repos, None, false)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn accepting_a_license_can_bind_the_exact_terms_the_browser_reviewed() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let app = app_with_yue1_and_yue2(&temp);
+    let route = "/api/v1/models/yue2/license-acknowledgment";
+    let (_, view) = request(app.clone(), "GET", route, Value::Null).await;
+    assert!(view["terms"]["licenseNotice"].is_string());
+    let (status, error) = request_with_headers(
+        app.clone(),
+        "PUT",
+        route,
+        Value::Null,
+        &[("if-match", "\"outdated-terms\"")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{error}");
+    assert_eq!(error["code"], "license_terms_changed");
+    let (_, view) = request(app.clone(), "GET", route, Value::Null).await;
+    assert_eq!(view["acknowledged"], false);
+    let header = format!("\"{}\"", view["termsSha256"].as_str().unwrap());
+    let (status, accepted) = request_with_headers(
+        app.clone(),
+        "PUT",
+        route,
+        Value::Null,
+        &[("if-match", &header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["acknowledged"], true);
+    let mut changed = builtin_yue2();
+    changed["licenseNotice"] = json!("New terms not yet reviewed in the browser");
+    let changed_app = app_with_yue1_and(&temp, changed);
+    let (status, error) = request_with_headers(
+        changed_app.clone(),
+        "PUT",
+        route,
+        Value::Null,
+        &[("if-match", &header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{error}");
+    let (_, view) = request(changed_app, "GET", route, Value::Null).await;
+    assert_eq!(view["acknowledged"], false);
+}

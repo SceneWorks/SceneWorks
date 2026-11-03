@@ -151,7 +151,7 @@ pub(crate) async fn record_license_acknowledgment(
     .await
 }
 
-async fn current_license_acknowledgment(
+pub(crate) async fn current_license_acknowledgment(
     state: &AppState,
     entry: &Value,
 ) -> Result<Option<LicenseAcknowledgment>, ApiError> {
@@ -188,6 +188,7 @@ fn acknowledgment_view(entry: &Value, ack: Option<&LicenseAcknowledgment>) -> Va
         "modelId": entry.get("id").cloned().unwrap_or(Value::Null),
         "required": requires_license_acknowledgment(entry),
         "termsSha256": acks::terms_sha256(entry),
+        "terms": { "license": entry.get("license"), "licenseUrl": entry.get("licenseUrl"), "licenseNotice": entry.get("licenseNotice") },
         "acknowledged": ack.is_some(),
         "acknowledgment": ack,
     })
@@ -199,7 +200,22 @@ pub(crate) async fn get_license_acknowledgment(
     Path(model_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let entry = catalog_entry(&state, &model_id).await?;
-    let ack = current_license_acknowledgment(&state, &entry).await?;
+    let mut ack = current_license_acknowledgment(&state, &entry).await?;
+    if ack.is_some() {
+        if let Some(object) = entry.as_object() {
+            if let Err(error) = crate::models::ensure_inherited_component_licenses_acknowledged(
+                &state, object, false,
+            )
+            .await
+            {
+                if error.code == Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE) {
+                    ack = None;
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+    }
     Ok(Json(acknowledgment_view(&entry, ack.as_ref())))
 }
 
@@ -207,8 +223,24 @@ pub(crate) async fn get_license_acknowledgment(
 pub(crate) async fn put_license_acknowledgment(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let entry = catalog_entry(&state, &model_id).await?;
+    if let Some(expected) = headers.get(axum::http::header::IF_MATCH) {
+        let current = format!("\"{}\"", acks::terms_sha256(&entry));
+        if expected.to_str().ok() != Some(current.as_str()) {
+            return Err(ApiError::typed(StatusCode::PRECONDITION_FAILED,
+                "License terms changed. Refresh the model catalog and review them before accepting.",
+                "license_terms_changed", json!({ "modelId": model_id })));
+        }
+    }
+    // Imported cards show the trusted inherited component terms as part of their
+    // notice. Persist those through the same guard used by import/repair, rather
+    // than relying on a later download to assert a new acceptance implicitly.
+    if let Some(object) = entry.as_object() {
+        crate::models::ensure_inherited_component_licenses_acknowledged(&state, object, true)
+            .await?;
+    }
     let ack = record_license_acknowledgment(&state, &entry, "api").await?;
     Ok(Json(acknowledgment_view(&entry, Some(&ack))))
 }

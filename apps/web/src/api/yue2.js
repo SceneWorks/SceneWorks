@@ -21,14 +21,18 @@ export function submitYue2Jobs(projectId, body, token) {
 }
 
 // GET/PUT/DELETE /api/v1/models/:id/license-acknowledgment → { modelId, required, termsSha256,
-// acknowledged, acknowledgment }. The acknowledgment is stored server-side for the entry's CURRENT
+// terms, acknowledged, acknowledgment }. The acknowledgment is stored server-side for the entry's CURRENT
 // terms, so it survives a relaunch and lapses when the terms change.
 export function getLicenseAcknowledgment(modelId, token) {
   return apiFetch(`/api/v1/models/${enc(modelId)}/license-acknowledgment`, token);
 }
 
-export function putLicenseAcknowledgment(modelId, token) {
-  return apiFetch(`/api/v1/models/${enc(modelId)}/license-acknowledgment`, token, { method: "PUT" });
+// UIs pass the hydrated commitment so an old notice cannot accept unseen new terms.
+export function putLicenseAcknowledgment(modelId, token, termsSha256) {
+  return apiFetch(`/api/v1/models/${enc(modelId)}/license-acknowledgment`, token, {
+    method: "PUT",
+    ...(termsSha256 ? { headers: { "If-Match": `"${termsSha256}"` } } : {}),
+  });
 }
 
 export function deleteLicenseAcknowledgment(modelId, token) {

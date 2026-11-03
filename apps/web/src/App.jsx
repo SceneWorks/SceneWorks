@@ -4144,6 +4144,7 @@ export function App() {
 
         {showSetupWizard ? (
           <SetupWizard
+            token={token}
             jobs={jobs}
             macCapabilities={macCapabilities}
             models={models}

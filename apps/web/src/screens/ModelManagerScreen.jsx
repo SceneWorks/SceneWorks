@@ -39,11 +39,10 @@ import {
 } from "../modelCache.js";
 import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
+import { useLicenseAcknowledgments } from "../hooks/useLicenseAcknowledgments.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import {
-  readLicenseAck,
   requiresLicenseAcknowledgment,
-  writeLicenseAck,
 } from "../licenseAcknowledgment.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { tierLabel } from "../quantTier.js";
@@ -234,16 +233,10 @@ function loraGroupKey(lora) {
 
 // Per-model license acknowledgment (sc-7872). Gated models (FLUX.2 [dev],
 // SD3.5 Large/Turbo/Medium, …) carry a non-commercial / community license the
-// user must accept on Hugging Face before access is granted; we also require an
-// explicit in-app acknowledgment before queuing the download so the license terms
-// are surfaced and confirmed at the point of action. The ack is persisted per
-// model id in localStorage (origin-scoped, same store as the theme/token caches);
-// it's a UX gate only — the server-side download still needs the HF credential +
-// granted access. localStorage may be unavailable (private mode, quota), so the
-// getters/setters swallow failures and default to "not acknowledged".
-// The predicate and the localStorage accessors moved to `../licenseAcknowledgment.js` (sc-17227):
-// this screen is only ONE of the surfaces that can start a download, and the gate is now enforced
-// at the shared choke point (`createModelDownloadJob`) plus server-side, with the same predicate.
+// user must accept on Hugging Face before access is granted. In-app consent is
+// independent of that service credential: the server binds it to current terms,
+// and the shared download choke point rechecks it before every request. Browser
+// storage is a best-effort paint cache; server failures keep the gate closed.
 // See that module for why the acknowledgment is independent of the Hugging Face credential.
 // The MARKUP — the notice, `gatedRepoUrl`, the links and the checkbox — moved to
 // `../components/LicenseGateNotice.jsx` (sc-17137 review) once the Setup Wizard grew a second
@@ -733,46 +726,7 @@ export function ModelManagerScreen() {
   // `null` until the keychain is actually read: the import panel distinguishes "no credential" from
   // "never looked", and starting at `[]` would flash "no credential is stored" before the answer.
   const [credentials, setCredentials] = useState(null);
-  // Per-model license acknowledgments (sc-7872), seeded from localStorage so a
-  // returning user keeps prior accepts. Keyed by model id; toggling the gated
-  // notice checkbox both updates this map and persists to localStorage.
-  const [licenseAcks, setLicenseAcks] = useState(() =>
-    models.reduce((acc, model) => {
-      if (requiresLicenseAcknowledgment(model) && readLicenseAck(model.id)) {
-        acc[model.id] = true;
-      }
-      return acc;
-    }, {}),
-  );
-  const setLicenseAck = (modelId, acknowledged) => {
-    writeLicenseAck(modelId, acknowledged);
-    setLicenseAcks((current) => ({ ...current, [modelId]: acknowledged }));
-  };
-  // The `useState` initializer above runs only on first mount, but `models`
-  // arrives asynchronously (the catalog fetch resolves after the screen mounts).
-  // A returning user's persisted localStorage ack would otherwise never re-seed
-  // for gated models that weren't in the initial (often empty) catalog. Re-seed
-  // whenever the catalog changes: merge in any persisted ack for a gated model
-  // we haven't already recorded, without clobbering an in-session toggle (the
-  // user's explicit checkbox state always wins over the persisted value).
-  useEffect(() => {
-    setLicenseAcks((current) => {
-      let next = current;
-      for (const model of models) {
-        if (
-          requiresLicenseAcknowledgment(model) &&
-          current[model.id] === undefined &&
-          readLicenseAck(model.id)
-        ) {
-          if (next === current) {
-            next = { ...current };
-          }
-          next[model.id] = true;
-        }
-      }
-      return next;
-    });
-  }, [models]);
+  const { licenseAcks, setLicenseAck, licenseAckError } = useLicenseAcknowledgments(models, token);
   // Keyed on `gated` ALONE, not on the acknowledgment flag (sc-17227): this is what decides
   // whether to make the `list_credentials` keychain call at all. A licence-acknowledgment model
   // on a public repo has no credential to look up, and asking would be a pointless keychain
@@ -2251,6 +2205,7 @@ export function ModelManagerScreen() {
 
   return (
     <section className="page-frame models-surface">
+      {licenseAckError ? <p role="alert" className="inline-warning">{licenseAckError}</p> : null}
       <WorkPanel>
         <div className="models-tabbar">
         <div className="mode-tabs" role="tablist" aria-label="Model type">

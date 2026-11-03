@@ -17,10 +17,11 @@
 // `apps/rust-api/src/models.rs` for clients this module never runs in (a remote browser on the
 // LAN, curl, a workflow envelope's suggested action).
 //
-// The ack is persisted per model id in localStorage (origin-scoped, same store as the theme and
-// token caches). localStorage may be unavailable (private mode, quota) or may not survive a
-// desktop relaunch, so the accessors swallow failures and default to "not acknowledged" — the
-// gate fails CLOSED, and the user re-accepts.
+// Model acknowledgment authority lives in the existing terms-bound server store. The
+// localStorage helpers below are only a model paint cache. Separately namespaced
+// training-target notices retain their own consent contract. Neither downloads nor
+// model license controls authorize from the browser cache.
+import { getLicenseAcknowledgment } from "./api/yue2.js";
 
 const LICENSE_ACK_KEY_PREFIX = "sceneworks-license-ack:";
 
@@ -55,6 +56,13 @@ export function requiresLicenseAcknowledgment(model) {
   return model?.gated === true || model?.requiresLicenseAcknowledgment === true;
 }
 
+// A terms precondition must describe the notice actually displayed to the user.
+// Older servers lack the projection but still return the terms commitment.
+export function licenseTermsMatch(model, view) {
+  return !view?.terms || ["license", "licenseUrl", "licenseNotice"].every((field) =>
+    JSON.stringify(model?.[field] ?? null) === JSON.stringify(view.terms[field] ?? null));
+}
+
 export function readLicenseAck(modelId) {
   if (!modelId) {
     return false;
@@ -78,17 +86,19 @@ export function writeLicenseAck(modelId, acknowledged) {
       window.localStorage.removeItem(key);
     }
   } catch {
-    // localStorage unavailable — the ack just won't persist. The gate stays closed, which is
-    // the safe direction: the user is asked again rather than silently let through.
+    // The optional paint cache is unavailable; server-backed model consent still
+    // persists. Training-target notice callers retain their separate local contract.
   }
 }
 
-// The choke-point predicate: true when a download of `model` must be refused because its licence
-// has not been accepted. Read the STORED ack rather than any screen's in-memory state — the
-// Models screen persists on toggle, so the store is authoritative for every caller, including
-// the ones that never render a checkbox.
-export function licenseAcknowledgmentBlocked(model) {
-  return requiresLicenseAcknowledgment(model) && !readLicenseAck(model?.id);
+// Revalidate at each download, including clients that never render the Models screen.
+// Never turn a cached flag into a new acceptance assertion: withdrawal and changed
+// terms must require another explicit user acceptance, even in another browser.
+export async function licenseAcknowledgmentBlocked(model, token) {
+  if (!requiresLicenseAcknowledgment(model)) return false;
+  const view = await getLicenseAcknowledgment(model.id, token);
+  writeLicenseAck(model.id, view?.acknowledged === true);
+  return view?.acknowledged !== true;
 }
 
 // Whether a first-run / studio surface with NO licence UI may offer this model for download at
@@ -127,7 +137,7 @@ export function licenseAcknowledgmentSource(entry) {
 // The `licenseAcknowledgmentBlocked` of a borrowed acknowledgment: blocked when the row names a
 // gating model whose licence the user has not accepted. Reads the SAME store the model gate reads,
 // so accepting on the Models screen clears both.
-export function borrowedLicenseAcknowledgmentBlocked(entry) {
+export async function borrowedLicenseAcknowledgmentBlocked(entry, token) {
   const source = licenseAcknowledgmentSource(entry);
-  return source !== null && !readLicenseAck(source.id);
+  return source !== null && await licenseAcknowledgmentBlocked({ ...source, requiresLicenseAcknowledgment: true }, token);
 }

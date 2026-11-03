@@ -60,6 +60,7 @@ let root;
 let hookApi;
 let errors;
 let loraErrors;
+const serverAcks = new Set();
 
 function Harness({ children }) {
   hookApi = useModelsAndLoras({
@@ -82,13 +83,20 @@ function downloadPosts() {
 }
 
 function acknowledge(modelId) {
-  window.localStorage.setItem(`sceneworks-license-ack:${modelId}`, "true");
+  serverAcks.add(modelId);
 }
 
 beforeEach(async () => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
   apiFetchMock.mockReset();
-  apiFetchMock.mockResolvedValue({ id: "job-1", type: "model_download" });
+  serverAcks.clear();
+  apiFetchMock.mockImplementation(async (path) => {
+    if (path.endsWith("/license-acknowledgment")) {
+      const id = path.split("/")[4];
+      return { modelId: id, acknowledged: serverAcks.has(id), termsSha256: "current" };
+    }
+    return { id: "job-1", type: "model_download" };
+  });
   window.localStorage.clear();
   errors = [];
   loraErrors = [];
@@ -126,7 +134,24 @@ describe("createModelDownloadJob license-acknowledgment choke point (sc-17227)",
     ]);
   });
 
-  it("allows it once accepted, and asserts the acknowledgment to the API", async () => {
+  it("ignores an old browser acceptance after server withdrawal or changed terms", async () => {
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    await mount();
+    expect(await hookApi.createModelDownloadJob(ACK_MODEL)).toBeNull();
+    expect(downloadPosts()).toHaveLength(0);
+    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/models/minimax_h3/license-acknowledgment", "tok");
+  });
+
+  it("fails closed when the authoritative server check is unavailable", async () => {
+    acknowledge("minimax_h3");
+    apiFetchMock.mockRejectedValueOnce(new Error("license store unavailable"));
+    await mount();
+    expect(await hookApi.createModelDownloadJob(ACK_MODEL)).toBeNull();
+    expect(downloadPosts()).toHaveLength(0);
+    expect(errors).toContain("license store unavailable");
+  });
+
+  it("allows a server acceptance without asserting a new acceptance", async () => {
     acknowledge("minimax_h3");
     await mount();
     await act(async () => {
@@ -135,12 +160,10 @@ describe("createModelDownloadJob license-acknowledgment choke point (sc-17227)",
     const posts = downloadPosts();
     expect(posts).toHaveLength(1);
     expect(posts[0][0]).toBe("/api/v1/models/minimax_h3/download");
-    // The API refuses this same request without the flag, so the client must send it. Assert the
-    // BODY, not just that a POST happened — omitting the field would 403 server-side.
+    // The API uses its server record; this request must not renew acceptance.
     expect(JSON.parse(posts[0][2].body)).toEqual({
       requestedGpu: "auto",
       variant: "q4",
-      licenseAcknowledged: true,
     });
     expect(errors).toEqual([""]);
   });
@@ -208,7 +231,7 @@ describe("createModelDownloadJob license-acknowledgment choke point (sc-17227)",
       button.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
     expect(downloadPosts()).toHaveLength(1);
-    expect(JSON.parse(downloadPosts()[0][2].body).licenseAcknowledged).toBe(true);
+    expect(JSON.parse(downloadPosts()[0][2].body).licenseAcknowledged).toBeUndefined();
   });
 });
 
@@ -267,7 +290,6 @@ describe("createLoraDownloadJob license-acknowledgment choke point (sc-17227)", 
     // merely happened would still be a 403 the user cannot clear.
     expect(JSON.parse(posts[0][2].body)).toEqual({
       requestedGpu: "auto",
-      licenseAcknowledged: true,
     });
   });
 

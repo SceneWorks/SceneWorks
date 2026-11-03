@@ -3129,17 +3129,8 @@ mod web_assets {
     // self-hosted from this origin (no third-party font host — sc-8956), images/media as
     // self/data/blob, IPC for the Tauri webview. Same-origin API + SSE are covered by
     // connect-src 'self'.
-    pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
-script-src 'self'; \
-style-src 'self' 'unsafe-inline'; \
-font-src 'self'; \
-img-src 'self' data: blob:; \
-media-src 'self' data: blob:; \
-connect-src 'self' ipc: http://ipc.localhost; \
-object-src 'none'; \
-base-uri 'self'; \
-frame-ancestors 'none'; \
-form-action 'self'";
+    pub(super) const CONTENT_SECURITY_POLICY: &str =
+        include_str!("../../web/content-security-policy.txt");
 
     const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
     const REVALIDATE_CACHE: &str = "no-cache";

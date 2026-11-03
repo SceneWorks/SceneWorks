@@ -8,7 +8,6 @@ import {
   licenseAckRefusalMessage,
   licenseAcknowledgmentBlocked,
   licenseAcknowledgmentSource,
-  requiresLicenseAcknowledgment,
 } from "../licenseAcknowledgment.js";
 import { upsertJobNewest } from "../sorters.js";
 
@@ -302,11 +301,11 @@ export function useModelsAndLoras({
       // `requiresLicenseAcknowledgment` model the repo is PUBLIC, so nothing upstream refuses an
       // unacknowledged fetch and the weights would simply land. The API refuses the same request
       // independently (`apps/rust-api/src/models.rs`) for clients this code never runs in.
-      if (licenseAcknowledgmentBlocked(model)) {
-        setError(licenseAckRefusalMessage(model));
-        return null;
-      }
       try {
+        if (await licenseAcknowledgmentBlocked(model, token)) {
+          setError(licenseAckRefusalMessage(model));
+          return null;
+        }
         // sc-8509: install a specific quant tier when the caller passes one (the Models-page tier
         // picker for a quant-matrix model). Absent `variant` installs the model's default tier —
         // the back-compat single-download behavior every other caller relies on.
@@ -323,11 +322,8 @@ export function useModelsAndLoras({
         if (options.choices && typeof options.choices === "object" && Object.keys(options.choices).length) {
           body.choices = options.choices;
         }
-        // Carry the acknowledgment to the API, which refuses the download without it. Sent only
-        // when the model actually requires one, so no other download's body changes shape.
-        if (requiresLicenseAcknowledgment(model)) {
-          body.licenseAcknowledged = true;
-        }
+        // The server reads its current terms-bound record. No new acceptance assertion
+        // may be inferred from browser state, even after the preflight succeeded.
         const job = await apiFetch(`/api/v1/models/${model.id}/download`, token, {
           method: "POST",
           body: JSON.stringify(body),
@@ -374,16 +370,12 @@ export function useModelsAndLoras({
       // reads that stamp and the ack the Models screen already persists, so accepting the licence
       // once on the model's card is what makes its LoRAs downloadable.
       const licenseSource = licenseAcknowledgmentSource(lora);
-      if (borrowedLicenseAcknowledgmentBlocked(lora)) {
-        setLoraError(licenseAckRefusalMessage(licenseSource));
-        return null;
-      }
       try {
-        const body = { requestedGpu: "auto" };
-        // Sent only for a row the server flagged, so no other LoRA download changes shape.
-        if (licenseSource) {
-          body.licenseAcknowledged = true;
+        if (await borrowedLicenseAcknowledgmentBlocked(lora, token)) {
+          setLoraError(licenseAckRefusalMessage(licenseSource));
+          return null;
         }
+        const body = { requestedGpu: "auto" };
         const job = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}/download`, token, {
           method: "POST",
           body: JSON.stringify(body),
