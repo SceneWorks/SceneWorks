@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Arc;
@@ -4292,24 +4291,7 @@ fn write_manifest(root: &Path, descriptor: &CatalogDescriptor) -> CatalogResult<
 }
 
 fn atomic_write(path: &Path, payload: &[u8]) -> CatalogResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let token = random_hex(8)?;
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or("json");
-    let temporary = path.with_extension(format!("{extension}.{token}.tmp"));
-    let mut file = fs::File::create(&temporary)?;
-    file.write_all(payload)?;
-    file.sync_all()?;
-    drop(file);
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(CatalogError::Io(error));
-    }
-    Ok(())
+    Ok(crate::fsutil::write_atomic(path, payload)?)
 }
 
 fn random_hex(bytes: usize) -> CatalogResult<String> {
@@ -4366,7 +4348,9 @@ fn directory_file_bytes(root: &Path) -> CatalogResult<u64> {
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
-            let metadata = fs::symlink_metadata(entry.path())?;
+            let Some(metadata) = crate::fsutil::payload_entry_metadata(&entry.path())? else {
+                continue;
+            };
             if metadata.file_type().is_symlink() {
                 total = total.saturating_add(metadata.len());
             } else if metadata.is_dir() {
