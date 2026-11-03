@@ -19,7 +19,7 @@ use super::*;
 /// [`mage_scenarios`], reds this with that literal's line number.
 #[test]
 fn every_scenario_literal_declares_the_overlay_entry_the_protocol_settles() {
-    let source = include_str!("mlx.rs");
+    let source = crate::mlx_source_for_tests();
     let mut scanned = 0_usize;
     let mut cursor = 0_usize;
     while let Some(offset) = source[cursor..].find("\"scenarios\": [") {
@@ -241,7 +241,7 @@ fn prediction_basis_keeps_image_admission_conservative_and_video_resident() {
 ///  * a prose placeholder (`crates/<name>/src/<...>.rs`) — skipped, being no path at all.
 #[test]
 fn every_cited_workspace_source_path_exists() {
-    let source = include_str!("mlx.rs");
+    let source = crate::mlx_source_for_tests();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
@@ -305,7 +305,7 @@ fn every_cited_workspace_source_path_exists() {
 
 #[test]
 fn every_receipt_builder_is_bound_to_its_lane_prediction_wrapper() {
-    let source = include_str!("mlx.rs");
+    let source = crate::mlx_source_for_tests();
     // A SHAPE claim, not a count: EVERY `predicted_peaks` binding in this file must come from
     // the image policy wrapper. Asserting a fixed number instead made adding an image arm
     // (sc-22728 added the Qwen edit one) fail this test for the right reason with the wrong

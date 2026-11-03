@@ -331,7 +331,7 @@ fn the_arm_asks_the_admission_gate_exactly_what_production_asks_it() {
     // called the provider's admission gate, or a record that still claimed the three admission
     // scenarios passed, would be the sc-22735 defect wearing the sc-22738 predicate. The
     // measured render needs real weights, so the body is read as source.
-    let source = include_str!("mlx.rs");
+    let source = crate::mlx_source_for_tests();
     let start = source
         .find("\nfn run_krea_realtime(")
         .expect("the arm still exists");

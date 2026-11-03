@@ -288,7 +288,7 @@ fn a_stale_wider_bound_does_not_shadow_a_current_narrower_one() {
 /// guards in this file read `run_bernini` — the measured render needs real weights.
 #[test]
 fn both_bernini_routes_cut_every_declared_phase_on_an_engine_boundary() {
-    let source = include_str!("mlx.rs");
+    let source = crate::mlx_source_for_tests();
     let start = source
         .find("\nfn run_bernini(")
         .expect("the arm still exists");

@@ -1,5 +1,7 @@
 // CI_IMPACT: pure request/receipt validation only, <1 second; no model, CUDA context or build.
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { rustFacadeFunction } from "./lib/rust-facade-source.mjs";
 import assert from "node:assert/strict";
 import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -88,10 +90,10 @@ test("endpoint pair keeps one q4 artifact and renders only maximum and minimum",
 
 // CI_IMPACT: pure cross-language request/guard contract, <1 second; no adapter execution/build.
 test("both actual endpoint requests match the adapter's exact composition guard", async () => {
-  const source = await readFile(new URL("../crates/sceneworks-memory-adapter/src/bin/candle.rs", import.meta.url), "utf8");
-  const start = source.indexOf("fn run_sdxl_endpoint(");
-  assert.ok(start >= 0);
-  const adapter = source.slice(start, source.indexOf("\nfn main()", start));
+  const { source: adapter } = await rustFacadeFunction(
+    fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/candle.rs", import.meta.url)),
+    "run_sdxl_endpoint",
+  );
   const guarded = /let expected_parameters = if endpoint == "resident" \{([\s\S]*?)\n    \};/.exec(adapter);
   assert.ok(guarded, "endpoint validator owns an explicit resident/minimum contract");
   const parameterPairs = [...guarded[1].matchAll(/json!\((\{[\s\S]*?\})\)/g)].map((match) =>

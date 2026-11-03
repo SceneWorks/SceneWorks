@@ -584,7 +584,7 @@ fn a_zero_phase_is_refused_not_filed() {
 /// `decodeActivePeak`; declaring a `PhaseUnattributed` marker; dropping the preflight.
 #[test]
 fn the_sensenova_arm_cuts_every_declared_phase_on_an_engine_boundary() {
-    let source = include_str!("mlx.rs");
+    let source = crate::mlx_source_for_tests();
     let start = source
         .find("\nfn run_sensenova(")
         .expect("the arm still exists");

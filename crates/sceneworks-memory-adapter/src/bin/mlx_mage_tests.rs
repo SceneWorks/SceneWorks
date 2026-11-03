@@ -265,7 +265,7 @@ fn a_peak_above_the_engines_model_is_recorded_as_a_finding_with_its_delta() {
 /// carries the peak with no statement that the model missed it) reds the first and third.
 #[test]
 fn the_model_shortfall_reaches_the_record_and_never_refuses() {
-    let source = include_str!("mlx.rs");
+    let source = crate::mlx_source_for_tests();
     let start = source
         .find("\nfn run_mage_provider(")
         .expect("the arm still exists");
@@ -981,7 +981,7 @@ fn every_member_and_tier_is_admitted_by_the_pinned_providers_own_safety_predicat
 /// arm — the measured render needs real weights.
 #[test]
 fn every_mage_route_cuts_every_declared_phase_on_an_engine_boundary() {
-    let source = include_str!("mlx.rs");
+    let source = crate::mlx_source_for_tests();
     let start = source
         .find("\nfn run_mage_provider(")
         .expect("the arm still exists");
@@ -1021,7 +1021,7 @@ fn every_mage_route_cuts_every_declared_phase_on_an_engine_boundary() {
 /// went out the moment `generate` returned.
 #[test]
 fn the_coherence_note_is_deferred_rather_than_printed_at_the_render() {
-    let source = include_str!("mlx.rs");
+    let source = crate::mlx_source_for_tests();
     let start = source
         .find("fn report_gpu_view_retries(")
         .expect("the reporter still exists");

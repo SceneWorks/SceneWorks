@@ -2175,7 +2175,7 @@ fn the_exact_fit_probe_presents_the_boundary_host_not_a_nameplate_total() {
 /// Reintroducing an `Err` in either arm, or dropping the admission call, reds this.
 #[test]
 fn the_ordinary_ltx_path_has_no_unconditional_refusal_between_the_plan_and_the_load() {
-    let source = include_str!("mlx.rs");
+    let source = crate::mlx_source_for_tests();
     // Assembled so this test's own literal cannot satisfy the search.
     let refusal = format!("fn {}(", "refuse_unsafe_ltx_capture");
     assert!(
