@@ -8,6 +8,7 @@ use serde_json::{json, Map, Value};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use sceneworks_core::inference_provenance::INFERENCE_REVISION as INFERENCE_PIN;
@@ -2328,37 +2329,7 @@ pub fn diagnostics(
     })
 }
 
-pub fn captured_at() -> String {
-    // UTC conversion without adding a time-formatting dependency to the calibration-only crate.
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = (seconds / 86_400) as i64;
-    let day_seconds = seconds % 86_400;
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        day_seconds / 3_600,
-        (day_seconds % 3_600) / 60,
-        day_seconds % 60
-    )
-}
-
-fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
-    // Howard Hinnant's proleptic-Gregorian civil_from_days, shifted from 1970-01-01.
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    (year, month, day)
-}
+pub use sceneworks_core::time::utc_now as captured_at;
 
 pub struct PlainGatedFragment<'a> {
     pub artifact: Value,
@@ -2950,8 +2921,14 @@ mod tests {
 
     #[test]
     fn unix_epoch_formats_as_rfc3339() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(20_662), (2026, 7, 28));
+        assert_eq!(
+            sceneworks_core::time::format_unix_seconds(0),
+            "1970-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            sceneworks_core::time::format_unix_seconds(20_662 * 86_400),
+            "2026-07-28T00:00:00Z"
+        );
         assert!(captured_at().ends_with('Z'));
     }
 

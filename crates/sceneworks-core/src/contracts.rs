@@ -737,6 +737,9 @@ string_enum! {
     }
 }
 
+/// Selects Qwen-Image 2.1's official structured prompt rewrite in API and worker payloads.
+pub const QWEN_IMAGE_REWRITE_TASK: &str = "qwen_image_rewrite";
+
 /// Maximum number of images one Parquet materialization job may add.
 ///
 /// Shared by API validation and the worker clamp so a newer client cannot create

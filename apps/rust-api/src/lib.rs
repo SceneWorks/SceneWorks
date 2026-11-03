@@ -54,7 +54,7 @@ use sceneworks_core::project_store::{
     FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR,
     POSE_UPLOADS_CACHE_DIR,
 };
-use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
+use sceneworks_core::time::now_unix_seconds;
 use sceneworks_core::training::{
     build_training_plan, builtin_training_presets, builtin_training_targets, BuildTrainingPlan,
     LoraTrainingRequest, TrainingDataset, TrainingPresetProvenance, TrainingTarget,
@@ -4565,56 +4565,15 @@ fn normalize_inline_job_lora(lora: &Value, lora_id: &str) -> Value {
     }
 }
 
-fn json_size_to_u64(value: &Value) -> Option<u64> {
-    if let Some(value) = value.as_u64() {
-        return Some(value);
-    }
-    value.as_str().and_then(|value| value.parse::<u64>().ok())
-}
+use sceneworks_core::payload_util::json_size_to_u64;
 
-fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return true;
-    }
-    patterns
-        .iter()
-        .any(|pattern| pattern_matches(pattern, path))
-}
+use sceneworks_core::model_artifacts::artifact_selection::allow_pattern_matches;
 
-fn pattern_matches(pattern: &str, value: &str) -> bool {
-    let (pattern, value) = if cfg!(windows) {
-        (pattern.to_ascii_lowercase(), value.to_ascii_lowercase())
-    } else {
-        (pattern.to_owned(), value.to_owned())
-    };
-    glob::Pattern::new(&pattern).is_ok_and(|pattern| pattern.matches(&value))
-}
+use sceneworks_core::model_artifacts::artifact_selection::pattern_matches;
 
-fn quote_huggingface_repo(repo: &str) -> String {
-    let mut output = String::new();
-    for byte in repo.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
-            output.push(char::from(byte));
-        } else {
-            output.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    output
-}
+use sceneworks_core::display_util::quote_path as quote_huggingface_repo;
 
-fn format_bytes(value: u64) -> String {
-    let mut size = value as f64;
-    for unit in ["B", "KB", "MB", "GB", "TB"] {
-        if size < 1024.0 || unit == "TB" {
-            if unit == "B" {
-                return format!("{} {unit}", size as u64);
-            }
-            return format!("{size:.1} {unit}");
-        }
-        size /= 1024.0;
-    }
-    format!("{size:.1} TB")
-}
+use sceneworks_core::display_util::format_bytes;
 
 fn string_array_field(payload: &Value, field: &str) -> Vec<String> {
     payload
@@ -4728,9 +4687,7 @@ fn slugify_lora_id(value: &str) -> String {
     sceneworks_core::slug::slugify_with(value, "lora", None, '_')
 }
 
-fn now_rfc3339() -> String {
-    format_unix_seconds(now_unix_seconds())
-}
+use sceneworks_core::time::utc_now as now_rfc3339;
 
 fn huggingface_repo_cache_exists(path: &FsPath) -> bool {
     path.join("snapshots").is_dir() || path.join("blobs").is_dir()
@@ -6493,21 +6450,9 @@ fn required_finite_f64_field(payload: &Value, field: &str) -> Result<f64, ApiErr
     Ok(value)
 }
 
-fn env_string(name: &str, default: &str) -> String {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| default.to_owned())
-}
+use sceneworks_core::env_util::env_string;
 
-fn env_path_or(name: &str, default: &FsPath) -> PathBuf {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default.to_path_buf())
-}
+use sceneworks_core::env_util::env_path_or;
 
 #[cfg(test)]
 mod tests;
