@@ -1,3 +1,4 @@
+import { fileSha256 as hash } from "./lib/file-sha256.mjs";
 // sc-24163 E11. No imports, synthetic completion, downloads, or memory campaign.
 // The production API submits/resumes both jobs and registers their final adapters.
 import { enterMacMetalExecution, metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
@@ -5,7 +6,6 @@ import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { cp, lstat, mkdir, open, readFile, readdir, realpath, rename, stat, writeFile, copyFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -125,7 +125,7 @@ export function syntheticPng(edit = false) {
   return Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), chunk("IHDR", header), chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
 }
 
-async function hash(file) { const digest = createHash("sha256"); for await (const bytes of createReadStream(file)) digest.update(bytes); return digest.digest("hex"); }
+
 async function safetensorsMetadata(file) {
   const handle = await open(file, "r");
   try {
