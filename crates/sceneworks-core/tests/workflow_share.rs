@@ -743,7 +743,7 @@ const UNACCOUNTED_ADVANCED_ADVICE: &str = "\
     Every place the web app fills `advanced` must be accounted for, because four of those places \
     now feed a lane that embeds the map into the PNG (epic 15945). So either:\n\
     * add the (file, function) pair to `ADVANCED_BUILDERS` in \
-    crates/sceneworks-core/src/workflow_share.rs and classify every key it can emit; or\n\
+    crates/sceneworks-core/tests/common/workflow_registry.rs and classify every key it can emit; or\n\
     * if its lane does not embed yet, add it to `DEFERRED_ADVANCED_BUILDERS` with the story that \
     owns turning it on; or\n\
     * if this is not a job payload at all, RENAME THE LOCAL. This lint reads the name `advanced`, \
