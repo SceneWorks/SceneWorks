@@ -86,7 +86,7 @@ export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, 
 
   const active = runActive || projectRunsActive;
   useEffect(() => {
-    if (!screenActive || !visible || !active) return undefined;
+    if (!screenActive || !visible || !active || pending) return undefined;
     const controller = new AbortController();
     let timer;
     async function poll() {
@@ -95,11 +95,12 @@ export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, 
     }
     timer = window.setTimeout(poll, 1000);
     return () => { controller.abort(); refreshRequest.current += 1; window.clearTimeout(timer); };
-  }, [active, refresh, screenActive, visible]);
+  }, [active, pending, refresh, screenActive, visible]);
 
   async function mutate(runId, action) {
     // A list read started before this mutation cannot overwrite the accepted controller snapshot.
     refreshRequest.current += 1;
+    feedController.current?.abort();
     actionController.current?.abort();
     const controller = new AbortController();
     actionController.current = controller;

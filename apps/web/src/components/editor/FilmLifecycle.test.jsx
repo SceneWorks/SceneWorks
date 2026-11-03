@@ -91,6 +91,31 @@ describe("FilmLifecycle", () => {
     expect(onRunChange).toHaveBeenCalledWith(expect.objectContaining({ locator: expect.objectContaining({ id: "new" }) }), expect.anything());
   });
 
+  it("aborts an older feed read before a run action", async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    let oldSignal;
+    let resolveOld;
+    let resolveAction;
+    const onRunChange = vi.fn();
+    apiFetchMock.mockImplementation((url, _token, options) => {
+      if (url.endsWith("/planning")) return Promise.resolve(null);
+      if (url.endsWith("/cancel")) return new Promise((resolve) => { resolveAction = resolve; });
+      reads += 1;
+      if (reads === 1) return Promise.resolve([{ locator: { id: "run_1", draftId: "film_1" }, controllerActive: true }]);
+      oldSignal = options.signal;
+      return new Promise((resolve) => { resolveOld = resolve; });
+    });
+    await renderLifecycle(vi.fn(), onRunChange);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(oldSignal.aborted).toBe(false);
+    await act(async () => container.querySelector("button").click());
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => resolveOld([{ locator: { id: "stale", draftId: "film_1" }, controllerActive: false }]));
+    expect(onRunChange).not.toHaveBeenCalledWith(expect.objectContaining({ locator: expect.objectContaining({ id: "stale" }) }), expect.anything());
+    await act(async () => resolveAction({ locator: { id: "run_1", draftId: "film_1" }, controllerActive: false }));
+  });
+
   it("aborts a pending run action when the project changes", async () => {
     let resolveAction;
     let actionSignal;

@@ -658,7 +658,7 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
       {draft && !engaged && showStart ? <div hidden><FilmLifecycle
         draftId={draft.id} onRunChange={acceptRunSnapshot} onRuns={refreshFilmTimeline} planningSnapshot={planningOperation}
         projectId={activeProject.id} selectedRunId={lastRun?.locator?.id}
-        runActive={Boolean(lastRun?.controllerActive)} screenActive={screenActive}
+        runActive={Boolean(lastRun?.controllerActive)} screenActive={screenActive && !busy}
         setNotice={setNotice} token={token}
       /></div> : null}
       {draft && (engaged || !showStart) ? (
@@ -696,7 +696,7 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
               projectId={activeProject.id}
               selectedRunId={lastRun?.locator?.id}
               runActive={Boolean(lastRun?.controllerActive)}
-              screenActive={screenActive}
+              screenActive={screenActive && !busy}
               setNotice={setNotice}
               token={token}
             />
