@@ -67,7 +67,7 @@ pub(crate) async fn upload_iris_item_sidecar(
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<TrainingDataset>), ApiError> {
     let kind = sidecar_kind(&kind)?;
-    let mut staged: Option<(PathBuf, String)> = None;
+    let mut staged: Option<(Arc<tempfile::TempPath>, String)> = None;
     let (mut scale, mut min_depth, mut max_depth) = (None, None, None);
     let result = async {
         while let Some(field) = multipart
@@ -88,9 +88,23 @@ pub(crate) async fn upload_iris_item_sidecar(
                     let temp = write_upload_field_to_temp_file(&state, field).await?;
                     // The engine readers dispatch on the extension.
                     let named = temp.with_extension(&extension);
-                    std::fs::rename(&temp, &named)
+                    let original = tempfile::TempPath::try_from_path(temp)
                         .map_err(|error| ApiError::internal(error.to_string()))?;
-                    staged = Some((named, extension));
+                    #[cfg(test)]
+                    let test_gate = state.test_hooks.sidecar_before_rename_once.lock().take();
+                    let named = tokio::task::spawn_blocking(move || {
+                        #[cfg(test)]
+                        let _test_scope = test_gate.map(|gate| gate.pause());
+                        // Both paths have a cleanup owner, including if the awaiting
+                        // HTTP request is canceled while this task is still running.
+                        let named = tempfile::TempPath::try_from_path(named)?;
+                        std::fs::rename(&original, &named)?;
+                        Ok::<_, std::io::Error>(Arc::new(named))
+                    }).await.map_err(|error| ApiError::internal(error.to_string()))?
+                        .map_err(|error| ApiError::internal(error.to_string()))?;
+                    if let Some((previous, _)) = staged.replace((named, extension)) {
+                        let _ = tokio::task::spawn_blocking(move || drop(previous)).await;
+                    }
                 }
                 Some(name @ ("scale" | "minDepth" | "maxDepth")) => {
                     let name = name.to_owned();
@@ -108,8 +122,8 @@ pub(crate) async fn upload_iris_item_sidecar(
                 _ => {}
             }
         }
-        let (source, extension) = staged
-            .clone()
+        let (staged_owner, extension) = staged.as_ref()
+            .map(|(path, extension)| (Arc::clone(path), extension.clone()))
             .ok_or_else(|| ApiError::bad_request("Upload file field is required"))?;
         if kind != IrisSidecarKind::Depth && (scale.is_some() || min_depth.is_some() || max_depth.is_some())
         {
@@ -119,13 +133,18 @@ pub(crate) async fn upload_iris_item_sidecar(
             ));
         }
         let image = item_image(&state, &project_id, &dataset_id, &item_id).await?;
+        let source = staged_owner.to_path_buf();
         let check_source = source.clone();
-        tokio::task::spawn_blocking(move || match kind {
+        let check_owner = Arc::clone(&staged_owner);
+        tokio::task::spawn_blocking(move || {
+            let _staged_owner = check_owner;
+            match kind {
             IrisSidecarKind::Depth | IrisSidecarKind::DepthMask => {
                 sceneworks_worker::check_depth_sidecar(&check_source, &image).map(drop)
             }
             IrisSidecarKind::Degraded => {
                 sceneworks_worker::check_degraded_sidecar(&check_source, &image).map(drop)
+            }
             }
         })
         .await
@@ -138,14 +157,21 @@ pub(crate) async fn upload_iris_item_sidecar(
             min_depth,
             max_depth,
         };
+        #[cfg(test)]
+        let store_gate = state.test_hooks.sidecar_before_store_once.lock().take();
         project_call(state.clone(), move |store| {
+            #[cfg(test)]
+            let _test_scope = store_gate.map(|gate| gate.pause());
+            // Cancellation may detach the store operation; its input file stays
+            // owned until the accepted copy/transaction has finished.
+            let _staged_owner = staged_owner;
             store.set_iris_item_sidecar(&project_id, &dataset_id, &item_id, &sidecar)
         })
         .await
     }
     .await;
     if let Some((path, _)) = staged {
-        let _ = std::fs::remove_file(path);
+        let _ = tokio::task::spawn_blocking(move || drop(path)).await;
     }
     Ok((StatusCode::CREATED, Json(result?)))
 }

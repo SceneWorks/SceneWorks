@@ -18,8 +18,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -403,12 +401,8 @@ pub struct AppState {
     pub(crate) model_catalog_cache: Arc<ModelCatalogCache>,
     pub(crate) model_size_cache: Arc<Mutex<ModelSizeCache>>,
     #[cfg(test)]
-    pub(crate) model_size_estimate_test_hook:
-        Arc<Mutex<Option<crate::models::ModelSizeEstimateTestHook>>>,
-    #[cfg(test)]
-    pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
-    #[cfg(test)]
-    pub(crate) video_platform_override: Arc<Mutex<Option<&'static str>>>,
+    pub(crate) test_hooks: Arc<crate::test_hooks::TestHooks>,
+
     /// sc-10452 — memoized family detection for adapters scanned out of the operator's
     /// external model roots, keyed by each file's size + mtime. `lora_catalog` runs on
     /// every job-create; without this, every generation would re-parse every ComfyUI
@@ -449,54 +443,6 @@ pub struct AppState {
     /// asynchronously before entering Tokio's shared blocking pool, reserving
     /// capacity for status/query database work even when many catalogs run.
     pub(crate) catalog_scan_work_slots: Arc<Semaphore>,
-    /// Deterministic catalog scheduler seams. Production has no hook fields or
-    /// branch overhead.
-    #[cfg(test)]
-    pub(crate) catalog_scan_before_driver_start_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_stop_after_pass_once: Arc<AtomicBool>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_before_terminal_exit_once: Arc<AtomicBool>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_terminal_exit_reached: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_terminal_exit_release: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_preflight_delay_ms_once: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_preflight_started: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_preflight_admission_timeout_ms: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_preflight_execution_timeout_ms: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_preflight_test_ticks: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_injected_sqlite_busy_failures: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_contention_backoff_started: Arc<tokio::sync::Notify>,
-    /// Two-phase cancellation acknowledgment before reconciling a busy lease.
-    #[cfg(test)]
-    pub(crate) catalog_scan_busy_lease_cancel_barrier_once:
-        Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    /// Deterministic race hook for progress acceptance tests. Production builds
-    /// contain no hook or synchronization overhead.
-    #[cfg(test)]
-    pub(crate) progress_before_accept_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    /// Deterministic rendezvous after an SSE snapshot is read but before its
-    /// live subscription is installed. Production builds contain no hook.
-    #[cfg(test)]
-    pub(crate) sse_snapshot_before_subscribe_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    /// One-shot failure after terminal acceptance, used to prove the durable
-    /// pending handoff survives an error and resumes on the owner's retry.
-    #[cfg(test)]
-    pub(crate) progress_side_effects_fail_once: Arc<Mutex<bool>>,
-    /// Persistent per-job failures and attempt counts for recovery fairness
-    /// tests. Production builds contain neither field.
-    #[cfg(test)]
-    pub(crate) progress_side_effects_fail_job_ids: Arc<Mutex<std::collections::HashSet<String>>>,
-    #[cfg(test)]
-    pub(crate) progress_side_effects_attempts: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 #[derive(Clone)]

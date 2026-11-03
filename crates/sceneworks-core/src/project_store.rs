@@ -142,6 +142,8 @@ pub enum ProjectStoreError {
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
     BadRequest(String),
+    /// A valid mutation rejected because its observed store revision is stale.
+    Conflict(String),
     NotFound(String),
     TimelineConflict {
         code: &'static str,
@@ -171,6 +173,7 @@ impl std::fmt::Display for ProjectStoreError {
             Self::Sqlite(error) => write!(formatter, "{error}"),
             Self::Json(error) => write!(formatter, "{error}"),
             Self::BadRequest(detail) => write!(formatter, "{detail}"),
+            Self::Conflict(detail) => write!(formatter, "{detail}"),
             Self::NotFound(detail) => write!(formatter, "{detail}"),
             Self::TimelineConflict { code, context } => write!(formatter, "{code}: {context}"),
             Self::StorageNotWritable(detail) => write!(formatter, "{detail}"),
@@ -1086,7 +1089,7 @@ impl ProjectStore {
         }
         let current = Self::carry_film_draft_forward(read_json(&path)?)?;
         if draft.revision != current.revision {
-            return Err(ProjectStoreError::BadRequest(format!(
+            return Err(ProjectStoreError::Conflict(format!(
                 "Film draft revision conflict: expected {}, got {}",
                 current.revision, draft.revision
             )));
@@ -1201,7 +1204,7 @@ impl ProjectStore {
             ));
         }
         if input.draft_revision != draft.revision {
-            return Err(ProjectStoreError::BadRequest(format!(
+            return Err(ProjectStoreError::Conflict(format!(
                 "Film draft revision conflict: expected {}, got {}",
                 draft.revision, input.draft_revision
             )));
@@ -1282,7 +1285,7 @@ impl ProjectStore {
             ));
         }
         if draft.revision != draft_revision {
-            return Err(ProjectStoreError::BadRequest(format!(
+            return Err(ProjectStoreError::Conflict(format!(
                 "Film draft revision conflict: expected {}, got {draft_revision}",
                 draft.revision
             )));
@@ -1356,7 +1359,7 @@ impl ProjectStore {
             ));
         }
         if input.draft_revision != draft.revision {
-            return Err(ProjectStoreError::BadRequest(format!(
+            return Err(ProjectStoreError::Conflict(format!(
                 "Film draft revision conflict: expected {}, got {}",
                 draft.revision, input.draft_revision
             )));
@@ -1469,7 +1472,7 @@ impl ProjectStore {
             ));
         }
         if expected_revision.is_some_and(|expected| expected != draft.revision) {
-            return Err(ProjectStoreError::BadRequest(format!(
+            return Err(ProjectStoreError::Conflict(format!(
                 "Film draft revision conflict: expected {}, found {}; reload and preflight the draft before rendering",
                 expected_revision.expect("checked"), draft.revision)));
         }
@@ -1944,6 +1947,42 @@ impl ProjectStore {
     ) -> ProjectStoreResult<TrainingDataset> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path).update_dataset(project_id, dataset_id, input)
+    }
+
+    /// Finalize an empty import against its observed revision under the same
+    /// project lock as materialization and the dataset write.
+    pub fn finalize_training_dataset_import(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        expected_version: u32,
+        items: Vec<crate::training_store::TrainingDatasetItemInput>,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        let store = TrainingDatasetStore::new(project_path);
+        let current = store.get_dataset(project_id, dataset_id)?;
+        if current.version != expected_version {
+            return Err(ProjectStoreError::Conflict(format!(
+                "Dataset changed during Parquet import (expected version {}, found {}).",
+                expected_version, current.version
+            )));
+        }
+        if !current.items.is_empty() {
+            return Err(ProjectStoreError::Conflict(
+                "Dataset is no longer empty; Parquet import was not applied.".to_owned(),
+            ));
+        }
+        store.update_dataset(
+            project_id,
+            dataset_id,
+            TrainingDatasetUpdateInput {
+                name: None,
+                status: None,
+                character_id: None,
+                items: Some(items),
+                preserve_caption_item_ids: Vec::new(),
+            },
+        )
     }
 
     pub fn install_ltx_prepared_bundle(
@@ -16011,12 +16050,9 @@ mod tests {
                 .save_film_draft(&project.id, &draft.id, newer)
                 .unwrap();
             barrier.wait();
-            assert!(handle
-                .join()
-                .unwrap()
-                .unwrap_err()
-                .to_string()
-                .contains("revision conflict"));
+            let conflict = handle.join().unwrap().unwrap_err();
+            assert!(matches!(&conflict, ProjectStoreError::Conflict(_)));
+            assert!(conflict.to_string().contains("revision conflict"));
             assert!(store.list_film_runs(&project.id).unwrap().is_empty());
             assert!(!std::path::Path::new(&project.path)
                 .join("films/runs/run_stale")

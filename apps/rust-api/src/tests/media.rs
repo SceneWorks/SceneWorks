@@ -1078,7 +1078,7 @@ async fn sse_snapshot_precedes_a_concurrent_queue_publication() {
     let job_id = created["id"].as_str().expect("job id").to_owned();
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    *state.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
+    *state.test_hooks.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
     let stream = tokio::spawn(request_sse_prefix(app, "/api/v1/jobs/events", 4));
     barrier.wait().await;
 
@@ -1142,7 +1142,7 @@ async fn sse_revision_barrier_orders_a_delayed_equal_timestamp_job_event_behind_
     old_job.updated_at = terminal.updated_at.clone();
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    *state.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
+    *state.test_hooks.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
     let stream = tokio::spawn(request_sse_prefix_with_ids(app, "/api/v1/jobs/events", 4));
     barrier.wait().await;
 

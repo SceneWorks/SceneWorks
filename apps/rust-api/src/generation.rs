@@ -2767,7 +2767,7 @@ pub(crate) async fn create_video_job(
 
 pub(crate) fn video_job_platform(_state: &AppState) -> &'static str {
     #[cfg(test)]
-    if let Some(platform) = *_state.video_platform_override.lock() {
+    if let Some(platform) = *_state.test_hooks.video_platform_override.lock() {
         return platform;
     }
     std::env::consts::OS

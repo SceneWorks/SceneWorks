@@ -828,7 +828,10 @@ fn app_with_licensed_models(
     .unwrap();
     write_empty_sibling_manifests(&config);
     let (app, state) = create_app_with_state(test_settings(temp)).unwrap();
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     (app, state)
 }
 

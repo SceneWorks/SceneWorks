@@ -73,12 +73,12 @@ impl ApiError {
         }
     }
 
-    pub(crate) fn service_unavailable(detail: impl Into<String>) -> Self {
+    pub(crate) fn service_unavailable(code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             detail: detail.into(),
             context: None,
-            code: Some("catalog_preflight_unavailable"),
+            code: Some(code),
         }
     }
 
@@ -202,11 +202,7 @@ impl From<JobsStoreError> for ApiError {
 impl From<ProjectStoreError> for ApiError {
     fn from(error: ProjectStoreError) -> Self {
         match error {
-            ProjectStoreError::BadRequest(detail)
-                if detail.starts_with("Film draft revision conflict:") =>
-            {
-                Self::conflict(detail)
-            }
+            ProjectStoreError::Conflict(detail) => Self::conflict(detail),
             ProjectStoreError::BadRequest(detail) => Self::bad_request(detail),
             ProjectStoreError::TimelineConflict { code, context } => Self {
                 status: StatusCode::CONFLICT,
@@ -372,5 +368,24 @@ mod tests {
         let error = ApiError::from(JobsStoreError::Sqlite(sqlite));
         assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(error.code, Some("database_locked"));
+    }
+
+    #[test]
+    fn project_conflicts_use_the_variant_not_the_message_prefix() {
+        let conflict = ApiError::from(ProjectStoreError::Conflict("A stale mutation".into()));
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        assert_eq!(conflict.detail, "A stale mutation");
+        let bad_request = ApiError::from(ProjectStoreError::BadRequest(
+            "Film draft revision conflict: user-supplied wording".into(),
+        ));
+        assert_eq!(bad_request.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn service_unavailable_preserves_the_callers_machine_code() {
+        let error = ApiError::service_unavailable("other_service_unavailable", "Retry later");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, Some("other_service_unavailable"));
+        assert_eq!(error.detail, "Retry later");
     }
 }
