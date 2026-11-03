@@ -179,20 +179,11 @@ pub(crate) fn relative_string(root: &Path, path: &Path) -> ProjectStoreResult<St
         .replace('\\', "/"))
 }
 
-pub(crate) fn is_safe_relative_path(relative_path: &str) -> bool {
-    !relative_path.trim().is_empty()
-        && !relative_path.contains('\\')
-        && Path::new(relative_path)
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
+pub fn is_safe_relative_path(relative_path: &str) -> bool {
+    crate::safe_path::relative_normal_components(relative_path).is_ok()
 }
 
-pub(crate) fn is_safe_id(value: &str) -> bool {
-    !value.trim().is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-}
+pub use crate::ids::{is_safe_id, is_safe_id_with_max};
 
 /// Required string field; whitespace and empty strings are validated by each store's domain rules.
 pub(crate) fn required_str<'a>(value: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {

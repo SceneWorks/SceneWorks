@@ -621,20 +621,16 @@ impl CatalogFetchLease {
         processing: Option<CatalogProcessingLease>,
     ) -> CatalogImageFetchResult<Self> {
         let path = catalog.root().join(FETCH_LOCK_FILE);
-        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(CatalogImageFetchError::InvalidOptions(format!(
+        let file = sceneworks_core::file_lock::open_regular_lock_file(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidInput {
+                CatalogImageFetchError::InvalidOptions(format!(
                     "Catalog fetch lock must be a regular file: {}",
                     path.display()
-                )));
+                ))
+            } else {
+                CatalogImageFetchError::Io(error)
             }
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)?;
+        })?;
         let contended = fs2::lock_contended_error().raw_os_error();
         match FileLock::try_exclusive(file) {
             Ok(lock) => Ok(Self {
@@ -1830,18 +1826,16 @@ fn safe_catalog_file(
 }
 
 fn safe_relative_join(root: &Path, relative: &str) -> CatalogImageFetchResult<PathBuf> {
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            !matches!(component, Component::Normal(_))
-                || component.as_os_str().to_string_lossy().contains('\0')
-        })
-    {
-        return Err(CatalogImageFetchError::InvalidOptions(
+    sceneworks_core::safe_path::confine_under(
+        root,
+        relative,
+        sceneworks_core::safe_path::Confinement::Lexical,
+    )
+    .map_err(|_| {
+        CatalogImageFetchError::InvalidOptions(
             "catalog cache path must contain only normal relative components".to_owned(),
-        ));
-    }
-    Ok(root.join(path))
+        )
+    })
 }
 
 fn atomic_create(path: &Path, bytes: &[u8]) -> CatalogImageFetchResult<()> {

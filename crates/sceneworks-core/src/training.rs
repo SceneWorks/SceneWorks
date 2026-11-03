@@ -27,7 +27,6 @@ use serde_json::{json, Value};
 
 use crate::contracts::{string_enum, ContractNumber, ExtraFields, JsonObject};
 use crate::dataset_quality::{CachedTier0Scalars, QualityAck};
-use crate::store_util::is_safe_relative_path;
 
 pub mod flux3;
 pub mod iris;
@@ -3994,16 +3993,17 @@ fn resolve_item_path(
     dataset_root: &Path,
     relative_path: &str,
 ) -> Result<String, TrainingPlanError> {
-    if !is_safe_relative_path(relative_path) {
-        return Err(TrainingPlanError::InvalidConfig(
+    crate::safe_path::confine_under(
+        dataset_root,
+        relative_path,
+        crate::safe_path::Confinement::Lexical,
+    )
+    .map(|path| path.display().to_string())
+    .map_err(|_| {
+        TrainingPlanError::InvalidConfig(
             "Dataset item path must be relative to the dataset root.".to_owned(),
-        ));
-    }
-    let mut path = dataset_root.to_path_buf();
-    for component in Path::new(relative_path).components() {
-        path.push(component);
-    }
-    Ok(path.display().to_string())
+        )
+    })
 }
 
 /// The target limit naming how many ORDERED reference images one instruction-edit item may carry

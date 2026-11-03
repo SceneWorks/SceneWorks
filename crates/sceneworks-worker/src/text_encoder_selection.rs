@@ -116,7 +116,8 @@ fn display_name(source: &WeightsSource) -> String {
 fn source_key(source: &WeightsSource) -> Result<(SourceKind, PathBuf), std::io::Error> {
     Ok((
         source_kind(source),
-        std::path::absolute(source_path(source))?,
+        crate::paths::normalize_absolute_path(source_path(source))
+            .map_err(std::io::Error::other)?,
     ))
 }
 
@@ -241,7 +242,7 @@ fn allowed_roots(data_dir: &Path, external_roots: &[PathBuf]) -> Vec<PathBuf> {
     roots.extend(external_roots.iter().cloned());
     let mut expanded = Vec::new();
     for root in roots {
-        if let Ok(absolute) = std::path::absolute(&root) {
+        if let Ok(absolute) = crate::paths::normalize_absolute_path(&root) {
             expanded.push(absolute);
         }
         if let Ok(canonical) = std::fs::canonicalize(&root) {
@@ -542,7 +543,20 @@ mod tests {
             SourceKind::File => 0,
             SourceKind::Directory => 1,
         };
-        sources.get(&(kind, std::path::absolute(path).unwrap()))
+        sources.get(&(kind, crate::paths::normalize_absolute_path(path).unwrap()))
+    }
+
+    #[test]
+    fn allowed_roots_and_source_keys_share_lexical_normalization() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("child/../models");
+        let normalized = crate::paths::normalize_absolute_path(&root).unwrap();
+        assert!(allowed_roots(&root, &[]).contains(&normalized));
+        let source = WeightsSource::File(root.join("encoder.safetensors"));
+        assert_eq!(
+            source_key(&source).unwrap().1,
+            normalized.join("encoder.safetensors")
+        );
     }
 
     #[test]

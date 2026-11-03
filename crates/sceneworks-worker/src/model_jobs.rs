@@ -6632,11 +6632,7 @@ async fn authenticate_import_recovery(
             return Ok(false);
         };
         // IDs are server-generated, but do not interpolate an arbitrary persisted path.
-        if parent.is_empty()
-            || !parent
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
+        if !sceneworks_core::ids::is_safe_id(parent) {
             return Ok(false);
         }
         let previous: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{parent}")).await?;

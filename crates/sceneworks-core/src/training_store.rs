@@ -2672,11 +2672,7 @@ pub(crate) fn dataset_item_path(
 
 fn is_safe_file_stem(value: &str) -> bool {
     let value = value.trim();
-    !value.is_empty()
-        && value.chars().count() <= 96
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    crate::ids::is_safe_id_with_max(value, 96)
 }
 
 fn display_name_for_rename(

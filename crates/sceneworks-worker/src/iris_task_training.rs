@@ -225,29 +225,9 @@ pub(crate) fn shape_task_config(
     config
 }
 
-/// A plain dataset-relative path: non-empty, relative, no `..`, no backslash.
-fn safe_relative(relative: &str) -> bool {
-    !relative.is_empty()
-        && !relative.contains('\\')
-        && Path::new(relative)
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
-}
-
 fn resolve_under(root: &Path, relative: &str, label: &str) -> Result<PathBuf, String> {
-    if !safe_relative(relative) {
-        return Err(format!(
-            "{label} {relative:?} is not a dataset-relative path."
-        ));
-    }
-    let mut path = root.to_path_buf();
-    for component in Path::new(relative).components() {
-        path.push(component);
-    }
-    if !path.is_file() {
-        return Err(format!("{label} {} does not exist.", path.display()));
-    }
-    Ok(path)
+    sceneworks_core::safe_path::resolve_local_file(root, relative)
+        .map_err(|error| format!("{label} {relative:?} is not a confined dataset file: {error}"))
 }
 
 /// One task item → the engine `TrainingItem`: the RGB image, an empty caption (not read), and its
@@ -686,14 +666,9 @@ pub fn iris_task_dataset_report(
     let mut items = Vec::with_capacity(dataset.items.len());
     let mut engine_items = Vec::with_capacity(dataset.items.len());
     for item in &dataset.items {
-        let image = {
-            let mut path = dataset_root.to_path_buf();
-            for component in Path::new(&item.path).components() {
-                path.push(component);
-            }
-            path
-        };
-        match task_item(objective, dataset_root, image, &item.extra) {
+        match resolve_under(dataset_root, &item.path, "image")
+            .and_then(|image| task_item(objective, dataset_root, image, &item.extra))
+        {
             Ok(engine_item) => engine_items.push(Some(engine_item)),
             Err(reason) => {
                 items.push(DatasetCheckItem {

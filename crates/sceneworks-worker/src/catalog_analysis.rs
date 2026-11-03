@@ -7,6 +7,7 @@
 //! from each record so a crash cannot make incomplete rows look current.
 
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
@@ -484,12 +485,7 @@ impl CatalogAnalysisLease {
         let mut files = Vec::new();
         for name in [FETCH_LOCK_FILE, ANALYSIS_LOCK_FILE] {
             let path = catalog.root().join(name);
-            let file = OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .open(&path)?;
+            let file = sceneworks_core::file_lock::open_regular_lock_file(&path)?;
             let contended = fs2::lock_contended_error().raw_os_error();
             match FileLock::try_exclusive(file) {
                 Ok(lock) => files.push(lock),
@@ -1277,15 +1273,7 @@ fn persist_structured_analysis(
 }
 
 fn resolve_catalog_image(catalog: &Catalog, record: &CatalogRecord) -> std::io::Result<PathBuf> {
-    let root = std::fs::canonicalize(catalog.root())?;
-    let path = std::fs::canonicalize(catalog.root().join(&record.image_path))?;
-    if !path.starts_with(&root) || !path.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "catalog image path escapes the catalog root or is not a file",
-        ));
-    }
-    Ok(path)
+    catalog.resolve_local_image(record)
 }
 
 fn image_fingerprint(path: &Path) -> std::io::Result<String> {
@@ -1620,6 +1608,20 @@ mod tests {
                 .into_iter()
                 .find(|record| record.id == id)
                 .expect("record exists")
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn analysis_lease_rejects_symlink_lock_files() {
+        for name in [FETCH_LOCK_FILE, ANALYSIS_LOCK_FILE] {
+            let fixture = Fixture::new("symlink-lock", &[]);
+            let catalog = fixture.registry.open_attached(&fixture.catalog_id).unwrap();
+            let outside = fixture._temporary.path().join("outside.lock");
+            std::fs::write(&outside, b"untouched").unwrap();
+            std::os::unix::fs::symlink(&outside, fixture.root.join(name)).unwrap();
+            assert!(CatalogAnalysisLease::acquire_with_processing(&catalog, None).is_err());
+            assert_eq!(std::fs::read(outside).unwrap(), b"untouched");
         }
     }
 

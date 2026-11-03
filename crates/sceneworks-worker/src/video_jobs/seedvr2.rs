@@ -392,14 +392,12 @@ impl Seedvr2StreamAssembler {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
-    let mut path = project_path.to_path_buf();
-    for component in Path::new(rel).components() {
-        match component {
-            std::path::Component::Normal(value) => path.push(value),
-            _ => return None,
-        }
-    }
-    Some(path)
+    sceneworks_core::safe_path::confine_under(
+        project_path,
+        rel,
+        sceneworks_core::safe_path::Confinement::SymlinkSafe,
+    )
+    .ok()
 }
 
 /// The source decode command: every frame, in presentation order, to `in_%05d.png` (numbered from

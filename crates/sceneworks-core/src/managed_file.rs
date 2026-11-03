@@ -41,11 +41,8 @@ impl ManagedFileIdentity {
         if !hex(revision, 40)
             || !hex(sha256, 64)
             || files.len() != 1
-            || file.is_empty()
-            || file.contains(['*', '?', '\\'])
-            || !Path::new(file)
-                .components()
-                .all(|p| matches!(p, std::path::Component::Normal(_)))
+            || file.contains(['*', '?'])
+            || crate::safe_path::relative_normal_components(file).is_err()
         {
             return Err(
                 "managed file requires an immutable revision, one confined exact file and a SHA256"
@@ -167,6 +164,40 @@ mod tests {
     use serde_json::json;
     fn row(body: &[u8]) -> Value {
         json!({"repo":"test/predictor", "revision":"a".repeat(40), "files":["predictor.safetensors"], "expectedSizeBytes":body.len(), "expectedSha256":format!("{:x}",Sha256::digest(body))})
+    }
+    #[test]
+    fn managed_file_relative_paths_share_portable_syntax_and_keep_exact_file_policy() {
+        for file in [
+            "predictor.safetensors",
+            "models/encoder/model.safetensors",
+            "models//weights.safetensors",
+        ] {
+            let mut download = row(b"good");
+            download["files"] = json!([file]);
+            assert!(
+                ManagedFileIdentity::from_download(&download).is_ok(),
+                "{file}"
+            );
+        }
+        for file in [
+            "",
+            "../escape",
+            "models/../../escape",
+            "/absolute",
+            "C:/drive",
+            "models\\escape",
+            "./model",
+            "models/*.safetensors",
+            "model?.safetensors",
+            "model\n.safetensors",
+        ] {
+            let mut download = row(b"good");
+            download["files"] = json!([file]);
+            assert!(
+                ManagedFileIdentity::from_download(&download).is_err(),
+                "{file}"
+            );
+        }
     }
     #[test]
     fn managed_file_rejects_same_size_corruption_and_invalid_metadata() {

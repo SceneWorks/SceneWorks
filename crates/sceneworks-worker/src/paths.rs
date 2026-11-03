@@ -1,39 +1,15 @@
 //! Path normalization and app-managed-directory confinement helpers (the worker trust boundary).
 use super::*;
 
-pub fn safe_download_dir(value: &str) -> String {
-    let mut output = String::new();
-    let mut in_replacement = false;
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
-            output.push(character);
-            in_replacement = false;
-        } else if !in_replacement {
-            output.push_str("__");
-            in_replacement = true;
-        }
-    }
-    let output = output.trim_matches('_').to_owned();
-    if output.is_empty() {
-        "download".to_owned()
-    } else {
-        output
-    }
-}
+pub use sceneworks_core::model_artifacts::artifact_selection::safe_download_dir;
 
 pub(crate) fn safe_join(base: &Path, relative: &str) -> WorkerResult<PathBuf> {
-    let mut target = base.to_path_buf();
-    for component in Path::new(relative).components() {
-        match component {
-            std::path::Component::Normal(value) => target.push(value),
-            _ => {
-                return Err(WorkerError::InvalidPayload(format!(
-                    "Unsafe snapshot path: {relative}"
-                )))
-            }
-        }
-    }
-    Ok(target)
+    sceneworks_core::safe_path::confine_under(
+        base,
+        relative,
+        sceneworks_core::safe_path::Confinement::Lexical,
+    )
+    .map_err(|_| WorkerError::InvalidPayload(format!("Unsafe snapshot path: {relative}")))
 }
 
 /// Confine a payload-supplied weight *filename* that is joined under a resolved HF
@@ -56,10 +32,10 @@ pub(crate) fn safe_join(base: &Path, relative: &str) -> WorkerResult<PathBuf> {
 )]
 pub(crate) fn safe_weight_filename(filename: &str, label: &str) -> WorkerResult<String> {
     let filename = filename.trim();
-    let mut components = Path::new(filename).components();
-    let single_normal = matches!(components.next(), Some(std::path::Component::Normal(_)))
-        && components.next().is_none();
-    if single_normal && !filename.contains('/') && !filename.contains('\\') {
+    if sceneworks_core::safe_path::relative_normal_components(filename).is_ok()
+        && !filename.contains('/')
+        && !filename.contains('\\')
+    {
         Ok(filename.to_owned())
     } else {
         Err(WorkerError::InvalidPayload(format!(
@@ -949,33 +925,25 @@ pub(crate) fn lora_manifest_target(
 }
 
 pub(crate) fn safe_project_path(project_path: &Path, relative: &str) -> WorkerResult<PathBuf> {
-    if relative.trim().is_empty() {
-        return Err(WorkerError::InvalidPayload(
-            "Project-relative path is required.".to_owned(),
-        ));
-    }
-    let mut path = project_path.to_path_buf();
-    for component in Path::new(relative).components() {
-        match component {
-            std::path::Component::Normal(value) => path.push(value),
-            _ => {
-                return Err(WorkerError::InvalidPayload(format!(
-                    "Unsafe project-relative path: {relative}"
-                )))
-            }
-        }
-    }
-    Ok(path)
+    sceneworks_core::safe_path::confine_under(
+        project_path,
+        relative,
+        sceneworks_core::safe_path::Confinement::SymlinkSafe,
+    )
+    .map_err(|error| {
+        WorkerError::InvalidPayload(format!("Unsafe project-relative path: {relative}: {error}"))
+    })
 }
 
 pub(crate) fn relative_path(root: &Path, path: &Path) -> WorkerResult<String> {
-    // Project media paths are app-created filenames; keep recipe metadata best-effort
-    // if a host path contains non-UTF-8 bytes.
-    Ok(path
-        .strip_prefix(root)
-        .map_err(|_| WorkerError::InvalidPayload("Path is outside project.".to_owned()))?
-        .to_string_lossy()
-        .replace('\\', "/"))
+    let relative = if let Ok(relative) = path.strip_prefix(root) {
+        relative.to_path_buf()
+    } else {
+        path.strip_prefix(root.canonicalize()?)
+            .map_err(|_| WorkerError::InvalidPayload("Path is outside project.".to_owned()))?
+            .to_path_buf()
+    };
+    Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
 #[cfg(test)]
@@ -1098,5 +1066,42 @@ mod training_resume_bundle_tests {
         );
         assert!(resolve_training_output_dir_under(data, "/etc", "out").is_err());
         assert!(resolve_training_output_dir_under(data, "  ", "out").is_err());
+    }
+}
+
+#[cfg(test)]
+mod confinement_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_project_sources_keep_project_relative_metadata() {
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(temporary.path().join("source.png"), b"fixture").unwrap();
+        let resolved = safe_project_path(temporary.path(), "source.png").unwrap();
+        assert_eq!(
+            relative_path(temporary.path(), &resolved).unwrap(),
+            "source.png"
+        );
+        let output = safe_project_path(temporary.path(), "new/output.png").unwrap();
+        assert_eq!(
+            relative_path(temporary.path(), &output).unwrap(),
+            "new/output.png"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_join_retains_supported_huggingface_blob_symlink_entry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let snapshot = temporary.path().join("snapshots/revision");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::create_dir(temporary.path().join("blobs")).unwrap();
+        let blob = temporary.path().join("blobs/opaque");
+        std::fs::write(&blob, b"fixture").unwrap();
+        let entry = snapshot.join("model.safetensors");
+        std::os::unix::fs::symlink(&blob, &entry).unwrap();
+        assert_eq!(safe_join(&snapshot, "model.safetensors").unwrap(), entry);
+        assert!(safe_join(&snapshot, "model.safetensors").unwrap().is_file());
+        assert!(safe_join(&snapshot, "../outside").is_err());
     }
 }
