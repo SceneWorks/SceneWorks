@@ -10,6 +10,17 @@ import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
+// F-183 extracted these existing implementations without changing the historical
+// terminal candidate. New source closures include each extracted compile input.
+export const MODEL_JOB_SPLIT_PATHS = Object.freeze([
+  "crates/sceneworks-worker/src/model_jobs/download.rs",
+  "crates/sceneworks-worker/src/model_jobs/convert.rs",
+  "crates/sceneworks-worker/src/model_jobs/hf_snapshot.rs",
+  "crates/sceneworks-worker/src/model_jobs/receipts.rs",
+  "crates/sceneworks-worker/src/model_jobs/conversion_publication.rs",
+  "crates/sceneworks-worker/src/model_jobs/import.rs",
+]);
+
 export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   ".github/workflows/starvector-terminal-readiness.yml",
   ".github/workflows/starvector-terminal.yml",
@@ -29,6 +40,7 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "crates/sceneworks-worker/src/lib.rs",
   "crates/sceneworks-worker/src/mlx_decode_cache.rs",
   "crates/sceneworks-worker/src/model_jobs.rs",
+  ...MODEL_JOB_SPLIT_PATHS,
   "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
   "crates/sceneworks-worker/src/refine_model_cache.rs",
   "crates/sceneworks-worker/src/vector_admission.rs",
