@@ -215,12 +215,8 @@ fn open_conversion_lock(path: &Path) -> WorkerResult<std::fs::File> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    Ok(std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(path)?)
+    // Retain the typed precheck above; the shared opener also closes replacement races.
+    Ok(sceneworks_core::file_lock::open_regular_lock_file(path)?)
 }
 
 /// Resolve one worker-owned directory and prove its canonical location remains inside the
