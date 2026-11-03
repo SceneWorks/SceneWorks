@@ -1,6 +1,6 @@
 # Review log
 
-This log records the disposition of every review finding against the Shared Generation Architecture documents. Each finding is marked **Accepted** (the docs were changed), **Modified** (accepted in a different form), or **Rejected** (with the reason).
+This log records the disposition of every review finding against the Shared Generation Architecture documents. Dispositioned findings are marked **Accepted** (the docs were changed), **Modified** (accepted in a different form), or **Rejected** (with the reason). New findings are **Open** until the author records a disposition; a review does not approve or amend the requirements.
 
 ## Round 0: internal adversarial reviews of draft 0.1 → draft 0.2 (2026-11-03)
 
@@ -91,3 +91,25 @@ All 12 blockers were accepted. No finding was rejected outright. Where a finding
 | APP-43 | MINOR | Internal inconsistencies (tiers, counts, DEC-5 trigger, numbering, authority, Hires.fix owner, labels, pin sites). | **Accepted.** Fixes: tiers named in REQ; grep patterns instead of frozen counts; DEC-5 names its PRs; DECs renumbered in order; REG-3 settles authority; Hires.fix moved to HOOK-2 (engine work in ENG-2's Hires.fix route via PixelRoundTrip); §8 labels corrected; [H] noted as superseding [G] on pin sites. |
 
 ## Round 1: Michael (pending)
+
+## Round 2: Codex architecture review of draft 0.2 (2026-11-03)
+
+Reviewed design commit `3bc17e3a0587b0c2aff069f6bab384eca9eef047`. Full findings, source evidence, proposed resolutions and closure checks: [round2-codex.md](evidence/reviews/round2-codex.md).
+
+**Verdict: sound direction, but revise before implementation approval. Confidence: high.** Shared loop ownership, tensor-free policy, backend execution hooks, structural applicability and incremental route adoption address the stated problem. The remaining gaps concern the contracts those shared features need, rather than the desirability of sharing the pipeline. The backend-generic model rollout remains appropriately conditional on pilots; confidence in that end state is medium.
+
+**3 BLOCKER, 6 MAJOR findings; all Open.** These severities describe design approval risk, not defects in shipped code. Round-0 changes were considered; R2-03 and R2-07 identify remaining gaps in its history and Hires.fix resolutions.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| R2-01 | BLOCKER | Low-res start does not specify whether the transition consumes noisy latents or an x0 estimate, how that estimate is obtained, or which noise-scaling law applies. | **Open.** Define the boundary-state and transition contract before ENG-1. |
+| R2-02 | BLOCKER | Merging boundaries has no coordinate or ownership semantics across sliced schedules, fresh passes and explicit multi-stream tables. | **Open.** Define trajectory domains, boundary placement and whole-plan validation. |
+| R2-03 | MAJOR | `Carry` lacks an execution-state lifecycle, solver compatibility rules and stochastic draw-index continuity. | **Open.** Separate solver-history policy from request RNG and driver-state lifetime. |
+| R2-04 | MAJOR | The context key and prepare API omit adapter scales and guidance branch structure; Krea explicitly prepares adapter-dependent conditioning today. | **Open.** Declare cache dependencies and pass request-scoped preparation arguments. |
+| R2-05 | BLOCKER | Maximum-over-phases-and-streams pricing undercounts simultaneously live AV buffers and joint workspaces. | **Open.** Price a concurrent allocation live set, with transition peaks and shared allocations handled explicitly. |
+| R2-06 | MAJOR | ENG-1 assumes unchanged admission while adding transition allocations and new phase identities; plan-aware admission arrives only after ENG-6. | **Open.** Deliver the necessary plan pricing and legacy-scope integration with the first geometry-changing feature. |
+| R2-07 | MAJOR | A pixel round trip alone does not preserve Hires.fix: the second pass changes prompt enhancement, encoding and conditioning outside the phase loop. | **Open.** Model pass-local stage invocations and preserve their ordering, events and residency. |
+| R2-08 | MAJOR | Putting the shared Linear spine in media runtime crates while LLM crates consume it creates an MLX crate dependency cycle. | **Open.** Put backend primitives below both media and LLM consumers and sequence that extraction. |
+| R2-09 | MAJOR | FEAT-1 acceptance can pass with unusable images; step-domain, axis, rounding and schedule-shift choices are unresolved. | **Open.** Specify the complete low-res recipe and validate quality, replay and boundary cases as well as speed and dimensions. |
+
+Recommended next revision: settle these contracts without expanding the program's scope; demonstrate the design with weights-free worked traces for FLUX.1 low-res start, low-res plus Hires.fix, Krea adapter changes, and Wan/H3 state and memory. Preserve the full roadmap, but attach each contract and its consumer migration to the feature that first needs it. No implementation or tracker items were created by this review.
