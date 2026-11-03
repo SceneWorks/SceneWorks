@@ -11752,6 +11752,7 @@ fn apply_model_catalog_entry(
     // "nothing supports preview" on every server). Engine-KEYED on purpose — the flag genuinely
     // diverges by backend and never fully collapses. Additive: a model the generated table does not
     // know gets no `preview` key, which the UI reads as "unknown" and renders exactly as before.
+    apply_last_only_video_capability(object);
     sceneworks_core::preview_support::apply_to_model_entry(object);
     sceneworks_core::decoder_support::apply_to_model_entry(object);
     apply_decoder_availability(object, data_dir);
@@ -11769,6 +11770,94 @@ fn apply_model_catalog_entry(
         object.remove("mlxTierStates");
     }
     Ok(model)
+}
+
+// Use exactly the entry validation uses, including resolved imported partitions.
+fn apply_last_only_video_capability(object: &mut JsonObject) {
+    let imported_partition = object.get("id").and_then(Value::as_str).and_then(|_| {
+        use sceneworks_core::minimax_h3_import::{
+            entry_is_imported_minimax_h3, MiniMaxH3Partition,
+        };
+        entry_is_imported_minimax_h3(object)
+            .then(|| MiniMaxH3Partition::from_entry(object).ok())
+            .flatten()
+    });
+    let accepts_last_only =
+        sceneworks_core::h3_keyframes::accepts_last_only_resolved_image_to_video(
+            object.get("id").and_then(Value::as_str).unwrap_or_default(),
+            "image_to_video",
+            true,
+            imported_partition.map(|partition| partition.as_str()),
+        );
+    object.insert(
+        "supportsLastOnlyImageToVideo".to_owned(),
+        Value::Bool(accepts_last_only),
+    );
+}
+
+#[cfg(test)]
+mod last_only_projection_tests {
+    use super::*;
+
+    fn assert_matches_request_validator(entry: &JsonObject, expected: bool) {
+        assert_eq!(entry["supportsLastOnlyImageToVideo"], json!(expected));
+        let payload = json!({"mode": "image_to_video", "lastFrameAssetId": "last-frame"});
+        assert_eq!(
+            crate::validate_video_reference_asset_ids_payload(
+                payload.as_object().unwrap(),
+                &Value::Object(entry.clone()),
+            )
+            .is_ok(),
+            expected,
+            "projected last-only fact must match actual request admission for {entry:?}"
+        );
+    }
+
+    #[test]
+    fn imported_partitions_require_the_verified_plan_shape() {
+        use sceneworks_core::minimax_h3_import::{
+            MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION, MINIMAX_H3_IMPORT_FAMILY,
+            MINIMAX_H3_IMPORT_SOURCE_SHAPE,
+        };
+        for (partition, base, expected) in [
+            ("fl2va", "minimax_h3", true),
+            ("hybrid", "minimax_h3", true),
+            ("ref2va", "minimax_h3_ref", false),
+        ] {
+            let mut entry = json!({
+                "id": "custom", "family": MINIMAX_H3_IMPORT_FAMILY,
+                "importSourceShape": MINIMAX_H3_IMPORT_SOURCE_SHAPE,
+                "baseModel": base, "minimaxH3Partition": partition,
+                "importPlan": {"checkpointId": "managed/custom", "assembly": {
+                    "schemaVersion": MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION, "partition": partition
+                }}
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            apply_last_only_video_capability(&mut entry);
+            assert_matches_request_validator(&entry, expected);
+            entry["importPlan"]["assembly"]["partition"] = json!("forged-partition");
+            apply_last_only_video_capability(&mut entry);
+            assert_matches_request_validator(&entry, false);
+            entry.remove("importPlan");
+            apply_last_only_video_capability(&mut entry);
+            assert_matches_request_validator(&entry, false);
+        }
+    }
+
+    #[test]
+    fn stock_and_unknown_entries_match_the_validator() {
+        for (id, expected) in [
+            ("minimax_h3", true),
+            ("minimax_h3_ref", false),
+            ("unknown", false),
+        ] {
+            let mut entry = json!({"id": id}).as_object().unwrap().clone();
+            apply_last_only_video_capability(&mut entry);
+            assert_matches_request_validator(&entry, expected);
+        }
+    }
 }
 
 /// Give a provider-aliased model row the canonical provider's exact optional decoder donors.

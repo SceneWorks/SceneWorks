@@ -1,6 +1,40 @@
 use super::support::*;
 
 #[tokio::test]
+async fn film_planner_capabilities_use_core_sound_policy_without_inventing_installs() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (status, availability) = request(
+        app,
+        "GET",
+        "/api/v1/projects/project/films/draft/planners",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{availability}");
+    assert_eq!(
+        availability["soundSynthesisModels"],
+        json!(sceneworks_core::film_plan::SOUND_SYNTHESIS_MODELS)
+    );
+    assert_eq!(
+        availability["defaultSoundSynthesisModel"],
+        json!(sceneworks_core::film_plan::DEFAULT_SOUND_SYNTHESIS_MODEL)
+    );
+    for provider in availability["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["provider"] != "openai_compatible")
+    {
+        assert_eq!(
+            provider["available"], false,
+            "empty fixture catalog cannot imply an installation: {provider}"
+        );
+        assert_eq!(provider["installState"], "missing");
+    }
+}
+
+#[tokio::test]
 async fn film_render_options_are_previewable_and_preserve_explicit_or_legacy_controls() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
