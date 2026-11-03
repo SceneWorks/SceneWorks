@@ -4410,6 +4410,51 @@ fn directory_file_bytes(root: &Path) -> CatalogResult<u64> {
 mod tests {
 
     #[test]
+    fn catalog_local_image_uses_acquisition_cache_then_legacy_record_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = CatalogRegistry::new(temp.path().join("state"));
+        let mut catalog = registry
+            .create_catalog(&temp.path().join("catalog"), "local images")
+            .unwrap();
+        fs::create_dir(catalog.root().join("images")).unwrap();
+        fs::write(catalog.root().join("images/cached.png"), b"cached").unwrap();
+        fs::write(catalog.root().join("images/original.png"), b"original").unwrap();
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: "record".to_owned(),
+                image_path: "images/original.png".to_owned(),
+                thumbnail_path: None,
+                embedding_path: None,
+                artifact_path: None,
+                metadata: serde_json::json!({"acquisition":{"cachePath":"images/cached.png"}}),
+            }])
+            .unwrap();
+        let mut record = catalog.record_by_id("record").unwrap();
+        assert_eq!(
+            catalog.resolve_local_image(&record).unwrap(),
+            catalog
+                .root()
+                .join("images/cached.png")
+                .canonicalize()
+                .unwrap()
+        );
+        record.metadata = serde_json::json!({});
+        assert_eq!(
+            catalog.resolve_local_image(&record).unwrap(),
+            catalog
+                .root()
+                .join("images/original.png")
+                .canonicalize()
+                .unwrap()
+        );
+        record.metadata = serde_json::json!({"acquisition":{"cachePath":"../outside"}});
+        assert!(
+            catalog.resolve_local_image(&record).is_err(),
+            "an unsafe explicit cache path cannot fall back to another image"
+        );
+    }
+
+    #[test]
     fn shared_catalog_image_resolver_preserves_paths_and_rejects_traversal() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join("images")).unwrap();
