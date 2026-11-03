@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from "react";
+import { useDialogFocus } from "../components/Modal.jsx";
+import React, { useRef } from "react";
 import { Icon } from "../components/Icons.jsx";
 
 // The Simple UI's one picker/overlay chrome (design handoff): a bottom sheet on phone
@@ -11,23 +12,7 @@ import { Icon } from "../components/Icons.jsx";
 export function SimpleSheet({ title, onClose, phone, children, labelId = "su-sheet-title" }) {
   const panelRef = useRef(null);
 
-  useEffect(() => {
-    // `preventScroll` matters: the panel is pinned in view by CSS, so it never needs
-    // scrolling into view — but the browser would still scroll the shell to "reveal" a
-    // tall panel, yanking the whole screen behind the sheet.
-    panelRef.current?.focus({ preventScroll: true });
-  }, []);
-
-  useEffect(() => {
-    function onKey(event) {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        onClose();
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const onKeyDown = useDialogFocus(panelRef, onClose);
 
   return (
     <>
@@ -36,6 +21,10 @@ export function SimpleSheet({ title, onClose, phone, children, labelId = "su-she
         aria-labelledby={labelId}
         aria-modal="true"
         className="su-sheet su-scroll"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") event.stopPropagation();
+          onKeyDown(event);
+        }}
         ref={panelRef}
         role="dialog"
         tabIndex={-1}

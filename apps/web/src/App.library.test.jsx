@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { AssetDetail } from "./components/assetPanels.jsx";
 import { dropUpscaledVariants, foldUpscaledAssetVariants, restrictFoldedToScope } from "./assetVariants.js";
 import { DocumentStudio } from "./screens/DocumentStudio.jsx";
@@ -212,6 +213,30 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Ask").click();
     });
     expect(createVqaJob).toHaveBeenLastCalledWith(asset, "Write a detailed critique of this image.", 512);
+  });
+
+  it("keeps filtered assets visible when live jobs update under split providers", async () => {
+    const assets = [
+      { id: "a", type: "image", displayName: "Sunset", tags: ["warm"], status: {} },
+      { id: "b", type: "image", displayName: "Forest", tags: ["green"], status: {} },
+    ];
+    const staticValue = { activeProject: { id: "p", name: "Project" }, assets, imageModels: [],
+      setPreviewAsset: () => {}, sendAssetToImage: () => {}, sendAssetToVideo: () => {},
+      setSelectedAssetId: () => {}, setActiveView: () => {}, importAsset: () => {},
+      deleteAsset: () => {}, purgeAsset: () => {}, updateAssetStatus: () => {}, updateAssetTags: () => {} };
+    root = createRoot(container);
+    const render = (jobs) => act(() => root.render(
+      <AppStaticContext.Provider value={staticValue}><AppLiveContext.Provider value={{ jobs }}>
+        <LibraryScreen />
+      </AppLiveContext.Provider></AppStaticContext.Provider>,
+    ));
+    render([]);
+    await changeField(container.querySelector('select[aria-label="Asset tag"]'), "warm");
+    expect(container.querySelectorAll(".asset-tile")).toHaveLength(1);
+    expect(container.textContent).toContain("Sunset");
+    render([{ id: "j", type: "other", status: "running" }]);
+    expect(container.querySelectorAll(".asset-tile")).toHaveLength(1);
+    expect(container.querySelector('select[aria-label="Asset tag"]').value).toBe("warm");
   });
 
   it("filters library assets by tag and edits selected asset tags", async () => {

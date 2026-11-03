@@ -51,6 +51,12 @@ export default defineConfig({
   resolve: {
     dedupe: ["react", "react-dom"],
   },
+  // Keep the already-eager shared UI modules together. Without this grouping the
+  // asset-search ownership split fragments the initial closure into many small
+  // chunks, increasing its compressed size beyond the existing first-paint budget.
+  build: { rolldownOptions: { output: { manualChunks(id) {
+    if (/\/src\/(?:context\/AppContext|components\/(?:Modal|DocumentView|Icons|WorkerProgressCard|audioTakeParts)|(?:appConfirm|audioContext|characterMembership|formatting|imageJobs|macGating|modelEligibility|mossImage|presetUtils|uiPreferences|workflowEmbedPreferences|workflowShare)|hooks\/usePreviewArrowNavigation)\.[jt]sx?$/.test(id)) return "app-shared";
+  } } } },
   optimizeDeps: {
     include: ["react", "react-dom", "react-dom/client", "konva", "react-konva"],
   },
