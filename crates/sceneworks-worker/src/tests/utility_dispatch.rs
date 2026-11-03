@@ -122,4 +122,3 @@ async fn run_placeholder_job_proceeds_when_shutdown_flag_untripped() {
         "an untripped shutdown flag must NOT cancel a clean run — the first write is a work stage"
     );
 }
-
