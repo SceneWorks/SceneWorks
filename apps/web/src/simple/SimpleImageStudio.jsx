@@ -18,7 +18,7 @@ import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { resultGridColumns } from "./breakpoint.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
-import { preferredResolution } from "./modelDefaults.js";
+import { preferredResolution } from "../studioDefaults.js";
 import {
   buildSimpleImageRequest,
   referenceStrengthFor,

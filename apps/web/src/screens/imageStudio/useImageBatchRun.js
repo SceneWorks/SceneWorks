@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useInsertionEffect, useRef } from "react";
 import { iterateBatch, parsePromptResolution } from "../../promptBatch.js";
 import { batchItemStatus, recordBatchEnqueueFailure, settlePromptBatchRun, summarizeBatchRun } from "../../batchOps.js";
 import { serializeCaption, validateCaption } from "../../ideogramCaption.js";
@@ -42,15 +42,17 @@ export function useImageBatchRun({
 
   const batchProjectRef = useRef(activeProject?.id);
 
-  batchProjectRef.current = activeProject?.id;
-
   const batchJobsRef = useRef(jobs);
-
-  batchJobsRef.current = jobs;
 
   const batchJobActionRef = useRef(jobAction);
 
-  batchJobActionRef.current = jobAction;
+  // Async batch continuations and cleanup see only committed ownership. A
+  // suspended project render must not stop or cancel the still-visible batch.
+  useInsertionEffect(() => {
+    batchProjectRef.current = activeProject?.id;
+    batchJobsRef.current = jobs;
+    batchJobActionRef.current = jobAction;
+  }, [activeProject?.id, jobs, jobAction]);
 
   useEffect(() => {
     const waiters = batchSlotWaitersRef.current;
