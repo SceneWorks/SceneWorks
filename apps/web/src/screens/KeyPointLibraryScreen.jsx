@@ -1,8 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { jobsApi } from "../api/jobsResources.js";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import { mediaResponse } from "../api/media.js";
 import { useAppContext, useAppStatic } from "../context/AppContext.js";
-import { terminalStatuses } from "../jobTypes.js";
+import { useCaptureLifecycle } from "../useCaptureLifecycle.js";
 import { KpsOverlay } from "../components/KpsOverlay.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { assetUrl } from "../components/assetMedia.jsx";
@@ -127,31 +126,34 @@ function KeypointLibraryPanel({ hidden, presets, loading, error, onDelete, delet
 function KeypointCapturePanel({ hidden, onSaved }) {
   const { token, requestedGpu, jobs = [], assets = [], characters = [] } = useAppContext();
   const [source, setSource] = useState(null); // { path, displayName, previewUrl, sourceAssetId? }
-  const [phase, setPhase] = useState("idle"); // idle | extracting | review
-  const [jobId, setJobId] = useState(null);
   const [extraction, setExtraction] = useState(null); // { kps, lowConfidence, sourceWidth, sourceHeight }
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
 
-  const objectUrlRef = useRef(null);
-  const clearSource = useCallback(() => {
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
-    }
-  }, []);
-  useEffect(() => () => clearSource(), [clearSource]);
-
+  const { phase, begin, current, startJob, invalidate, ownUrl } = useCaptureLifecycle({
+    token, requestedGpu, jobs, setError,
+    project: { id: GLOBAL_KEYPOINTS_PROJECT_ID, name: "Key Point Library" },
+    failureMessage: "Face detection failed.",
+    onComplete: (job, setPhase) => {
+      const result = job.result ?? {};
+      if (!result.detected || !Array.isArray(result.kps)) {
+        setError("No usable face was found in that image. Try a clearer, front-facing photo where the face is large in frame.");
+        setPhase("idle");
+        return;
+      }
+      setExtraction({ kps: result.kps, lowConfidence: Boolean(result.lowConfidence),
+        sourceWidth: result.sourceWidth ?? null, sourceHeight: result.sourceHeight ?? null });
+      setPhase("review");
+    },
+  });
   const reset = useCallback(() => {
-    clearSource();
+    invalidate();
     setSource(null);
     setExtraction(null);
     setName("");
-    setPhase("idle");
-    setJobId(null);
-  }, [clearSource]);
+  }, [invalidate]);
 
   // A completed extraction whose landmarks + typed name are not yet saved — the
   // destructive-loss surface (the Key Point Library is GLOBAL, so this survives both a
@@ -178,27 +180,31 @@ function KeypointCapturePanel({ hidden, onSaved }) {
   // Stage a source, seed the name, and fire the extraction. `previewUrl` backs the overlay
   // preview; `sourceAssetId` records provenance when the source was an existing asset.
   const beginExtraction = useCallback(
-    async ({ file, displayName, previewUrl, sourceAssetId }) => {
+    async ({ file, displayName, previewUrl, sourceAssetId, id }) => {
       setError("");
       setExtraction(null);
       try {
         const staged = await stageKeypointSource(token, file);
+        if (!current(id)) return;
         if (!staged?.path) {
           throw new Error("Upload did not return a staged path.");
         }
         const label = displayName ?? staged.displayName ?? file.name ?? "image";
         setSource({ path: staged.path, displayName: label, previewUrl, sourceAssetId });
         setName(stripExtension(label));
-        const job = await postExtractJob(token, requestedGpu, staged.path);
-        setJobId(job.id);
-        setPhase("extracting");
+        const result = await startJob(id, "kps_extract", { sourcePath: staged.path });
+        if (result?.error && current(id)) {
+          invalidate();
+          setSource(null);
+        }
       } catch (err) {
-        clearSource();
+        if (!current(id)) return;
+        invalidate();
         setSource(null);
         setError(String(err?.message ?? err));
       }
     },
-    [token, requestedGpu, clearSource],
+    [token, current, invalidate, startJob],
   );
 
   // File upload (DatasetAddDialog onImport): stage the File directly; preview from an objectUrl.
@@ -209,12 +215,12 @@ function KeypointCapturePanel({ hidden, onSaved }) {
       if (!file || !file.type?.startsWith("image/")) {
         return;
       }
-      clearSource();
-      const objectUrl = URL.createObjectURL(file);
-      objectUrlRef.current = objectUrl;
-      await beginExtraction({ file, displayName: file.name, previewUrl: objectUrl });
+      invalidate();
+      const id = begin();
+      const objectUrl = ownUrl(file);
+      await beginExtraction({ file, displayName: file.name, previewUrl: objectUrl, id });
     },
-    [beginExtraction, clearSource],
+    [beginExtraction, invalidate, begin, ownUrl],
   );
 
   // Asset / character pick (DatasetAddDialog onAdd): re-fetch the asset's bytes and stage them
@@ -226,7 +232,8 @@ function KeypointCapturePanel({ hidden, onSaved }) {
       if (!asset) {
         return;
       }
-      clearSource();
+      invalidate();
+      const id = begin();
       setError("");
       const url = assetUrl(asset);
       try {
@@ -235,47 +242,21 @@ function KeypointCapturePanel({ hidden, onSaved }) {
           throw new Error(`Could not load the selected image (${response.status}).`);
         }
         const blob = await response.blob();
+        if (!current(id)) return;
         const file = new File([blob], asset.displayName ?? "image", { type: blob.type || "image/png" });
         await beginExtraction({
           file,
           displayName: asset.displayName ?? asset.id,
           previewUrl: url,
           sourceAssetId: asset.id,
+          id,
         });
       } catch (err) {
-        setError(String(err?.message ?? err));
+        if (current(id)) setError(String(err?.message ?? err));
       }
     },
-    [assets, beginExtraction, clearSource],
+    [assets, beginExtraction, invalidate, begin, current],
   );
-
-  // Watch the live (SSE-fed) jobs list for the extraction to finish.
-  useEffect(() => {
-    if (!jobId) return;
-    const job = jobs.find((item) => item.id === jobId);
-    if (!job || !terminalStatuses.has(job.status)) return;
-    setJobId(null);
-    if (job.status !== "completed") {
-      setError(job.error ?? job.message ?? "Face detection failed.");
-      setPhase("idle");
-      return;
-    }
-    const result = job.result ?? {};
-    if (!result.detected || !Array.isArray(result.kps)) {
-      setError(
-        "No usable face was found in that image. Try a clearer, front-facing photo where the face is large in frame.",
-      );
-      setPhase("idle");
-      return;
-    }
-    setExtraction({
-      kps: result.kps,
-      lowConfidence: Boolean(result.lowConfidence),
-      sourceWidth: result.sourceWidth ?? null,
-      sourceHeight: result.sourceHeight ?? null,
-    });
-    setPhase("review");
-  }, [jobId, jobs]);
 
   const save = useCallback(async () => {
     if (!source || !extraction || !name.trim()) return;
@@ -307,7 +288,7 @@ function KeypointCapturePanel({ hidden, onSaved }) {
           <button onClick={() => setPickerOpen(true)} type="button">
             {source ? "Choose another image" : "Choose image"}
           </button>
-          {phase === "extracting" ? <span className="muted">Detecting face landmarks…</span> : null}
+          {phase === "detecting" ? <span className="muted">Detecting face landmarks…</span> : null}
         </div>
 
         {phase === "review" && extraction ? (
@@ -640,20 +621,6 @@ function KeypointCollectionsPanel({ hidden, presets, collections, collectionsLoa
 
 function stripExtension(filename) {
   return String(filename || "").replace(/\.[^.]+$/, "");
-}
-
-async function postExtractJob(token, requestedGpu, sourcePath) {
-  return jobsApi.list(token, {
-    method: "POST",
-    body: JSON.stringify({
-      type: "kps_extract",
-      // The reserved keypoints project owns the staged upload; the worker reads sourcePath.
-      projectId: GLOBAL_KEYPOINTS_PROJECT_ID,
-      projectName: "Key Point Library",
-      requestedGpu,
-      payload: { projectId: GLOBAL_KEYPOINTS_PROJECT_ID, sourcePath },
-    }),
-  });
 }
 
 // --- Screen -----------------------------------------------------------------

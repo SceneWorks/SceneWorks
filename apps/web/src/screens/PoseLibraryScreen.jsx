@@ -1,9 +1,6 @@
 import { isImageUpload } from "../uploadFiles.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAbortError } from "../api.js";
-import { assetsApi } from "../api/assetsResources.js";
-import { jobsApi } from "../api/jobsResources.js";
-import { posesApi } from "../api/poses.js";
 import { posePreviewUrl } from "../api/media.js";
 import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetThumbnail } from "../components/assetMedia.jsx";
@@ -13,8 +10,8 @@ import { useAppLive, useAppStatic } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { POSE_DETECT_MODEL_ID } from "../constants.js";
 import { downloadOffersFor, modelInstallComplete, poseDetectModelUsable } from "../modelEligibility.js";
-import { terminalStatuses } from "../jobTypes.js";
-import { GLOBAL_POSES_PROJECT_ID } from "../poseLibrary.js";
+import { deletePose, loadPoseAssets, purgePose, savePoses, setPoseStatus, setPoseTags, stagePoseSources } from "../poseLibrary.js";
+import { useCaptureLifecycle } from "../useCaptureLifecycle.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { appConfirm } from "../appConfirm.jsx";
 
@@ -141,12 +138,25 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
   const { jobs = [] } = useAppLive();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [sources, setSources] = useState([]); // selected source asset records
-  const [phase, setPhase] = useState("idle"); // idle | detecting | review
-  const [jobId, setJobId] = useState(null);
   const [candidates, setCandidates] = useState([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
+
+  const existingPosesRef = useRef(existingPoses);
+  existingPosesRef.current = existingPoses;
+  const { phase, begin, snapshot, current, startJob, invalidate, ownUrl, releaseUrl } = useCaptureLifecycle({
+    token, project: activeProject, requestedGpu, jobs, setError,
+    failureMessage: "Pose detection failed.",
+    onComplete: (job, setPhase) => {
+      const built = annotateDuplicates(buildCandidates(job), existingPosesRef.current);
+      setCandidates(built);
+      setPhase("review");
+      if (!built.length) setError("No people were detected in the selected images.");
+    },
+  });
+  const sourcesRef = useRef([]);
+  sourcesRef.current = sources;
 
   // Sources are normalized entries (deduped by `key`): either an asset-backed pick
   // ({kind:"asset", asset, assetId}) or a transient File-Upload ({kind:"upload",
@@ -164,29 +174,26 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
     async (files) => {
       const images = Array.from(files).filter((file) => isImageUpload(file));
       if (!images.length) return;
+      const id = snapshot();
       setImporting(true);
       try {
-        const body = new FormData();
-        for (const file of images) body.append("file", file);
-        const result = await posesApi.sources(token, { method: "POST", body });
-        const staged = Array.isArray(result?.sources) ? result.sources : [];
-        mergeSources(
-          staged.map((src, index) => ({
-            key: src.path,
-            kind: "upload",
-            path: src.path,
-            displayName: src.displayName ?? images[index]?.name ?? "image",
-            objectUrl: images[index] ? URL.createObjectURL(images[index]) : undefined,
-          })),
-        );
-        setError("");
+        const results = await stagePoseSources(token, images);
+        if (!current(id)) return;
+        const staged = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
+        mergeSources(staged.map((src) => ({
+          key: src.id, kind: "upload", path: src.path,
+          displayName: src.displayName ?? src.file.name ?? "image",
+          objectUrl: ownUrl(src.file),
+        })));
+        const failed = results.find((result) => result.status === "rejected");
+        setError(failed ? String(failed.reason?.message ?? failed.reason) : "");
       } catch (err) {
-        setError(String(err?.message ?? err));
+        if (current(id)) setError(String(err?.message ?? err));
       } finally {
-        setImporting(false);
+        if (current(id)) setImporting(false);
       }
     },
-    [token, mergeSources],
+    [token, mergeSources, ownUrl, snapshot, current],
   );
 
   // Library / Character tabs: resolve the picked ids to asset records.
@@ -208,72 +215,23 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
     [assets, mergeSources],
   );
 
-  const removeSource = (key) =>
-    setSources((prev) => {
-      const target = prev.find((source) => source.key === key);
-      if (target?.objectUrl) URL.revokeObjectURL(target.objectUrl);
-      return prev.filter((source) => source.key !== key);
-    });
-
-  // Revoke any object URLs on unmount (latest set via ref).
-  const sourcesRef = useRef(sources);
-  sourcesRef.current = sources;
-  // Snapshot the existing saved poses for duplicate detection without re-running the
-  // job-watch effect (which would reset the user's keep toggles) when they change.
-  const existingPosesRef = useRef(existingPoses);
-  existingPosesRef.current = existingPoses;
-  useEffect(
-    () => () => {
-      for (const source of sourcesRef.current) if (source.objectUrl) URL.revokeObjectURL(source.objectUrl);
-    },
-    [],
-  );
+  const removeSource = (key) => {
+    const target = sourcesRef.current.find((source) => source.key === key);
+    if (target?.objectUrl) releaseUrl(target.objectUrl);
+    setSources((prev) => prev.filter((source) => source.key !== key));
+  };
 
   const generate = useCallback(async () => {
     if (!activeProject || !sources.length) return;
+    const id = begin();
     setError("");
     setCandidates([]);
-    try {
-      const job = await jobsApi.list(token, {
-        method: "POST",
-        body: JSON.stringify({
-          type: "pose_detect",
-          projectId: activeProject.id,
-          projectName: activeProject.name ?? null,
-          requestedGpu,
-          payload: {
-            projectId: activeProject.id,
-            sources: sources.map((source) =>
-              source.kind === "upload"
-                ? { path: source.path, displayName: source.displayName, temp: true }
-                : { assetId: source.assetId, displayName: source.displayName },
-            ),
-          },
-        }),
-      });
-      setJobId(job.id);
-      setPhase("detecting");
-    } catch (err) {
-      setError(String(err?.message ?? err));
-    }
-  }, [activeProject, sources, token, requestedGpu]);
-
-  // Watch the live (SSE-fed) jobs list for the fired detector job to finish.
-  useEffect(() => {
-    if (!jobId) return;
-    const job = jobs.find((item) => item.id === jobId);
-    if (!job || !terminalStatuses.has(job.status)) return;
-    if (job.status === "completed") {
-      const built = annotateDuplicates(buildCandidates(job), existingPosesRef.current);
-      setCandidates(built);
-      setPhase("review");
-      if (!built.length) setError("No people were detected in the selected images.");
-    } else {
-      setError(job.error ?? job.message ?? "Pose detection failed.");
-      setPhase("idle");
-    }
-    setJobId(null);
-  }, [jobId, jobs]);
+    await startJob(id, "pose_detect", {
+      sources: sources.map((source) => source.kind === "upload"
+        ? { path: source.path, displayName: source.displayName, temp: true }
+        : { assetId: source.assetId, displayName: source.displayName }),
+    });
+  }, [activeProject, sources, begin, startJob]);
 
   const updateCandidate = (key, changes) =>
     setCandidates((prev) => prev.map((candidate) => (candidate.key === key ? { ...candidate, ...changes } : candidate)));
@@ -286,15 +244,12 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
   // trip; a project switch remounts the screen (App keys it on activeProject.id), which is
   // the ONLY reset that fires without going through here.
   const resetSession = useCallback(() => {
-    setSources((prev) => {
-      for (const source of prev) if (source.objectUrl) URL.revokeObjectURL(source.objectUrl);
-      return [];
-    });
+    invalidate();
+    setSources([]);
+    setImporting(false);
     setCandidates([]);
-    setPhase("idle");
-    setJobId(null);
     setError("");
-  }, []);
+  }, [invalidate]);
 
   // A completed detection whose per-candidate edits (category / tags / keep) are not yet
   // saved — the destructive-loss surface a nav round trip must preserve and an explicit
@@ -336,7 +291,7 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
         height: candidate.height,
         pose: candidate.pose,
       }));
-      await posesApi.collection(token, { method: "POST", body: JSON.stringify({ poses }) });
+      await savePoses(token, poses);
       resetSession();
       onSaved?.();
     } catch (err) {
@@ -403,7 +358,7 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
             </button>
             <button
               className="primary-action"
-              disabled={!sources.length || phase === "detecting"}
+              disabled={!sources.length || importing || phase === "detecting"}
               onClick={generate}
               type="button"
             >
@@ -537,18 +492,15 @@ export function PoseLibraryScreen() {
     async (signal) => {
       try {
         setLoading(true);
-        const items = await assetsApi.listIncludingHidden(
-          GLOBAL_POSES_PROJECT_ID,
-          token,
-          signal ? { signal } : {},
-        );
-        setPoses((Array.isArray(items) ? items : []).filter((asset) => asset.type === "pose"));
+        const items = await loadPoseAssets(token, signal ? { signal } : {});
+        if (signal?.aborted) return;
+        setPoses(items);
         setError("");
       } catch (err) {
-        if (isAbortError(err)) return;
+        if (signal?.aborted || isAbortError(err)) return;
         setError(String(err?.message ?? err));
       } finally {
-        setLoading(false);
+        if (!signal?.aborted) setLoading(false);
       }
     },
     [token],
@@ -564,34 +516,28 @@ export function PoseLibraryScreen() {
   // app-level asset mutators refresh the *active* project, not this one.
   const updateAssetStatus = useCallback(
     async (asset, changes) => {
-      await assetsApi.status(asset.projectId, asset.id, token, {
-        method: "PATCH",
-        body: JSON.stringify(changes),
-      });
+      await setPoseStatus(token, asset, changes);
       await refresh();
     },
     [token, refresh],
   );
   const updateAssetTags = useCallback(
     async (asset, tags) => {
-      await assetsApi.tags(asset.projectId, asset.id, token, {
-        method: "PATCH",
-        body: JSON.stringify({ tags }),
-      });
+      await setPoseTags(token, asset, tags);
       await refresh();
     },
     [token, refresh],
   );
   const deleteAsset = useCallback(
     async (asset) => {
-      await assetsApi.item(asset.projectId, asset.id, token, { method: "DELETE" });
+      await deletePose(token, asset);
       await refresh();
     },
     [token, refresh],
   );
   const purgeAsset = useCallback(
     async (asset) => {
-      await assetsApi.purge(asset.projectId, asset.id, token, { method: "DELETE" });
+      await purgePose(token, asset);
       await refresh();
     },
     [token, refresh],

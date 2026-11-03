@@ -1,7 +1,7 @@
+import { accessApi } from "../api/access.js";
 import { backoffDelay } from "../retry.js";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-  apiFetch,
   isReauthenticating,
   isThrottled,
   setMediaTicket,
@@ -169,7 +169,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
         // Renew this client's credential through the header-authenticated endpoint.
         // Absolute expiry rotates it before the old credential expires, allowing
         // mounted playback to switch URLs while in-flight requests finish.
-        const response = await apiFetch("/api/v1/files/ticket", token, {
+        const response = await accessApi.mediaTicket(token, {
           method: "POST",
           body: "{}",
           headers: mediaTicketRef.current ? { "X-SceneWorks-Media-Ticket": mediaTicketRef.current } : {},
@@ -239,7 +239,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
     let attempt = 0;
     async function probe() {
       try {
-        const result = await apiFetch("/api/v1/access", "");
+        const result = await accessApi.inspect("");
         if (closed) {
           return;
         }
@@ -398,7 +398,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
     let attempt = 0;
     async function verify() {
       try {
-        const result = await apiFetch("/api/v1/auth/verify", token, { method: "POST" });
+        const result = await accessApi.verify(token, { method: "POST" });
         if (closed) {
           return;
         }
@@ -462,7 +462,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
         return;
       }
       try {
-        const result = await apiFetch("/api/v1/auth/verify", candidate, { method: "POST" });
+        const result = await accessApi.verify(candidate, { method: "POST" });
         if (!result?.ok) {
           setAuthError("Incorrect password. Try again.");
           return;
