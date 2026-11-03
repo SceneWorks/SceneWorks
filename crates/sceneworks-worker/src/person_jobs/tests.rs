@@ -372,7 +372,9 @@ fn yolo11_mlx_per_block_isolation() {
         cache_fixture("yolo11m_fused_mlx.safetensors"),
         cache_fixture("refs_ext.safetensors"),
     ) else {
-        eprintln!("skipping: fixtures not staged (run docs/sc-3734/torch_ref.py first)");
+        eprintln!(
+            "skipping: fixtures not staged (restore docs/sc-3734/torch_ref.py via docs/archive/historical-artifacts.md first)"
+        );
         return;
     };
     let model = Yolo::load(&weights).expect("weights load");

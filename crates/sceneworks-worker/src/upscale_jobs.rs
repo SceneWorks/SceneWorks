@@ -11,6 +11,7 @@
 //! `device = "cpu"`). The path-selection spike (`docs/sc-3489/spike-findings.md`)
 //! validated pixel parity vs the shipped torch upscaler (CoreML PSNR ~72–74 dB, visually
 //! identical) at ~9× the CPU-EP speed; the ONNX graph is identical off-Mac.
+//! Historical exporter/spike retrieval: `docs/archive/historical-artifacts.md`.
 //!
 //! Backend split: the Real-ESRGAN `ort` path compiles on macOS (the MLX worker) and on
 //! the candle lane (`backend-candle`, off-Mac) — the same gate as the module. The tiling
