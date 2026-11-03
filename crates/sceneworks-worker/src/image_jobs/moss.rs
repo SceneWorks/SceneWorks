@@ -460,7 +460,7 @@ fn write_moss_tensor_companion(
         "assets/tensors/{}/{index:04}.sceneworks-workflow.json",
         plan.genset_id
     );
-    let path = safe_join(project, &relative)?;
+    let path = safe_project_path(project, &relative)?;
     std::fs::write(path, &bytes)?;
     Ok(
         json!({"path":relative,"mimeType":"application/json","sha256":format!("{:x}",Sha256::digest(&bytes))}),
@@ -524,7 +524,7 @@ fn emit_moss_advanced_outputs(
                 )
                 .map_err(WorkerError::InvalidPayload)?;
                 let relative = format!("assets/tensors/{}/{index:04}.npy", plan.genset_id);
-                let path = safe_join(project, &relative)?;
+                let path = safe_project_path(project, &relative)?;
                 std::fs::create_dir_all(path.parent().expect("tensor directory"))?;
                 std::fs::write(&path, &bytes)?;
                 let metadata = sceneworks_core::tensor_artifact::inspect(&path)
