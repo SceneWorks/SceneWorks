@@ -87,3 +87,16 @@ test("every archived calibration frame preserves its historical source-session d
     if (receipt.bytes !== undefined) assert.equal(entry.bytes, receipt.bytes);
   }
 });
+
+
+test("Krea smoke defaults use canonical repository poses and retired MOSS scripts stay absent", async () => {
+  for (const file of ["crates/sceneworks-worker/src/krea_control_mlx_smoke.rs", "crates/sceneworks-worker/src/image_jobs/tests.rs"]) {
+    const source = await readFile(path.join(ROOT, file), "utf8");
+    assert.match(source, /"KREA_CTRL_POSE"/);
+    assert.match(source, /"\/\.\.\/\.\.\/apps\/web\/public\/poses\/dance_01\.png"/);
+    assert.doesNotMatch(source, /"\/Users\/[^"\n]*poses\/dance_01\.png"/);
+  }
+  for (const file of ["scripts/lib/moss-edit-terminal-actions.mjs", "scripts/ci/moss-upstream-reference-common.mjs", "scripts/ci/moss-upstream-quality.mjs", "scripts/lib/moss-edit-quality-amendment.test.mjs", "scripts/moss-edit-terminal-actions.test.mjs"]) {
+    await assert.rejects(readFile(path.join(ROOT, file)), { code: "ENOENT" });
+  }
+});

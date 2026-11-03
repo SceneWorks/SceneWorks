@@ -2,6 +2,7 @@
 // Historical evidence retrieval only. Never executes a spike or regenerates a measurement.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { sha256 as sha256Bytes } from "./lib/file-sha256.mjs";
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -34,7 +35,7 @@ export function validateManifest(manifest) {
 }
 
 export function verifyBytes(entry, bytes) {
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const sha256 = sha256Bytes(bytes);
   const blob = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
   if (bytes.length !== entry.bytes || sha256 !== entry.sha256 || blob !== entry.gitBlob) {
     throw new Error(`historical artifact digest/size mismatch: ${entry.path}`);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { discoverRootTests, rootTestConcurrency } from "./run-root-tests.mjs";
@@ -29,4 +30,18 @@ test("desktop's separately owned suite lists every desktop Node test", () => {
     return entry.isFile() && entry.name.endsWith(".test.mjs") ? [file] : [];
   });
   assert.deepEqual(listed, walk("").sort());
+});
+
+
+test("root discovery excludes named Cargo build caches while retaining nested source tests", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "root-test-discovery-"));
+  try {
+    for (const directory of ["target", "target-auth-security", "nested/source"]) {
+      mkdirSync(path.join(root, directory), { recursive: true });
+      writeFileSync(path.join(root, directory, "fixture.test.mjs"), "");
+    }
+    const files = discoverRootTests(root);
+    assert.equal(files.length, 1);
+    assert.ok(files[0].endsWith(path.join("nested", "source", "fixture.test.mjs").split(path.sep).join("/")));
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
