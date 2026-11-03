@@ -1,3 +1,4 @@
+import { useMoveToolPanel } from "./useImageEditorPanels.js";
 import { useEditorPanelActions } from "./useEditorPanelActions.js";
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -92,14 +93,13 @@ describe("ImageEditorToolPanel memo boundary", () => {
         fitToView: () => fitCalls.push(stageWidth),
         actualSize: () => {},
       };
-      const { working: image, layerCount, ...actions } = scope;
-      const stableActions = useEditorPanelActions(actions);
+      const panel = useMoveToolPanel(scope);
       return (
         <>
           <button data-action="parent-update" onClick={() => setStageWidth(200)} type="button">
             resize parent
           </button>
-          <ImageEditorToolPanel panelKey="move" working={image} layerCount={layerCount} {...stableActions} />
+          <ImageEditorToolPanel panelKey="move" {...panel} />
         </>
       );
     }

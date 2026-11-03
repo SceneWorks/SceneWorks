@@ -3,7 +3,7 @@ import { editOutputDims } from "./geometry.js";
 import { workingToPngFile, blobToEditorImage } from "./export.js";
 import { JOB_PATHS, submitJobRequest } from "../../api/jobs.js";
 import { mediaResponse } from "../../api/media.js";
-import { useCallback, useEffect } from "react";
+import { useInsertionEffect, useCallback, useEffect } from "react";
 import { nonCanvasJobOutputs } from "../../editorScratch.js";
 import { terminalStatuses } from "../../jobTypes.js";
 import { assetUrl } from "../../components/assetMedia.jsx";
@@ -159,9 +159,9 @@ export function useEditorAiOps({
     [working, aiOp, activeProject, confirmFlatten, setStatus, workingImageToFile, activeLayerToFile, importAsset, confirmWorkflowEmbeddingBeforeGeneration, mountedRef, purgeAsset, token, trackEditorScratchOp, setAiOp, setTool],
   );
 
-  // Keep the mask hook's bridge pointed at the latest runAiOp (sc-9752) — runSmartSelect
+  // Keep the mask hook's bridge pointed at the committed runAiOp (sc-9752) — runSmartSelect
   // stages a scratch image_segment job through this exact seam.
-  runAiOpRef.current = runAiOp;
+  useInsertionEffect(() => { runAiOpRef.current = runAiOp; }, [runAiOpRef, runAiOp]);
 
   function runUpscale() {
     if (upscaleEngineIsRestoration(upscaleEngine)) {

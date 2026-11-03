@@ -1,4 +1,14 @@
-import { useImageEditorPanels } from "./imageEditor/useImageEditorPanels.js";
+import {
+  useMoveToolPanel,
+  useTransformToolPanel,
+  useCropToolPanel,
+  useUpscaleToolPanel,
+  useDetailToolPanel,
+  useColorToolPanel,
+  useCutoutToolPanel,
+  useEditToolPanel,
+  useBoxesToolPanel
+} from "./imageEditor/useImageEditorPanels.js";
 import { useEditorSave } from "./imageEditor/useEditorSave.js";
 import { useEditorAiOps } from "./imageEditor/useEditorAiOps.js";
 import { useLayerOps } from "./imageEditor/useLayerOps.js";
@@ -24,7 +34,7 @@ export { InlineLayerName } from "./imageEditor/InlineLayerName.jsx";
 import { JOB_PATHS } from "../api/jobs.js";
 import { mediaResponse } from "../api/media.js";
 import { blobToImage } from "../imageDimensions.js";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useInsertionEffect, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Stage, Layer, Group, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
 import { isAbortError } from "../api.js";
@@ -249,7 +259,7 @@ export function ImageEditor() {
   const launchGuardRef = useRef(null);
   if (!launchGuardRef.current) launchGuardRef.current = createEditorLaunchGuard();
   const editorLaunchRef = useRef(editorLaunch);
-  editorLaunchRef.current = editorLaunch;
+  useInsertionEffect(() => { editorLaunchRef.current = editorLaunch; }, [editorLaunch]);
   const editorMountedRef = useRef(true);
   useEffect(() => {
     editorMountedRef.current = true;
@@ -883,12 +893,12 @@ export function ImageEditor() {
   // modified combos we own; the rest are single keys that mirror the toolbar and the
   // zoom bar. `?` toggles the quick reference and works before an image is open.
   const onEditorKeyDownRef = useRef(null);
-  onEditorKeyDownRef.current = (event) => {
+  const onEditorKeyDown = (event) => {
     // Under selective keep-alive (sc-11959) this editor stays mounted and this window
     // listener stays subscribed even when another view is foregrounded, so gate every
     // shortcut on the active flag — a backgrounded editor must never undo/redo, delete a
     // box, switch tools, or toggle the reference in response to keys meant for the visible
-    // screen (sc-13589). The handler is reassigned each render, so `screenActive` is fresh.
+    // screen (sc-13589). The handler is refreshed after each commit, so `screenActive` is current.
     if (!screenActive) return;
     const tag = event.target?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.target?.isContentEditable) return;
@@ -970,6 +980,8 @@ export function ImageEditor() {
     else if (key === "e") setTool("edit");
     else if (key === "b") selectBoxTool();
   };
+
+  useInsertionEffect(() => { onEditorKeyDownRef.current = onEditorKeyDown; }, [onEditorKeyDown]);
 
   useEffect(() => {
     const handler = (event) => onEditorKeyDownRef.current?.(event);
@@ -1302,7 +1314,7 @@ export function ImageEditor() {
     setWorking((cur) => replaceLayerBitmap(cur, id, { image, objectUrl, blob }));
   }, []);
   // Keep the color-grade hook's bridge pointed at the latest replaceLayerImage (sc-9752).
-  replaceLayerImageRef.current = replaceLayerImage;
+  useInsertionEffect(() => { replaceLayerImageRef.current = replaceLayerImage; }, [replaceLayerImage]);
 
   // Commit the currently refined color-key or SAM3 mask to its originating
   // active layer only. The mask is
@@ -1584,7 +1596,7 @@ export function ImageEditor() {
       y: clamp((pointer.y - view.y) / view.scale, 0, working.height),
     };
   }
-  stagePointToImageRef.current = stagePointToImage;
+  useInsertionEffect(() => { stagePointToImageRef.current = stagePointToImage; }, [stagePointToImage]);
 
   // SAM3 receives a scratch image of the active layer, not the composited
   // document. Convert the visible-stage drag through that layer's transform so
@@ -1875,44 +1887,234 @@ export function ImageEditor() {
     });
   }, [cropRect, working]);
 
-  const toolPanels = useImageEditorPanels({
-    move: {
-      state: { working, layerCount },
-      actions: { fitToView, actualSize },
-    },
-    transform: {
-      state: { working },
-      actions: { setActiveTransform, endTransformGesture, onTransformSlider, flipActiveLayer, resetActiveLayerTransform, setTool },
-    },
-    crop: {
-      state: { ratioKey, rotated, cropRect, straighten },
-      actions: { chooseRatio, toggleRotate, setCropDim, setStraighten, applyCrop, cancelCrop },
-    },
-    upscale: {
-      state: { availableUpscaleEngines, upscaleEngine, upscaleFactor, aiOp, working, token, irisRestore, upscaleSoftness, irisPlanStatus },
-      actions: { setUpscaleEngine, setUpscaleFactor, setIrisRestore, setIrisPlanStatus, setUpscaleSoftness, runUpscale, setTool },
-    },
-    detail: {
-      state: { detailModels, detailModel, selectedDetailModel, detailStrength, detailCnScale, tileControlNetReady, tileControlNet, tileControlNetDownloadRequested, aiOp },
-      actions: { createModelDownloadJob, setDetailModel, setDetailStrength, setDetailCnScale, requestTileControlNetDownload, runDetail, setTool },
-    },
-    color: {
-      state: { colorMode, colorAdjust, colorChannel, histogramRef, levels, curves, channelStroke, activeGradeIsIdentity },
-      actions: { setColorMode, setAdjustValue, resetAdjust, setColorChannel, setLevelsValue, setCurves, resetActiveColorMode, applyColorGrade },
-    },
-    cutout: {
-      state: { colorKeySeed, colorKeyGlobal, colorKeyTolerance, colorKeySoftness, smartSelectSupported, maskMode, maskSubTool, aiOp, smartSelectCapabilitySupported, smartSelectModel, smartSelectDownloadRequested, maskBrush, maskErase, maskRefineRadius, maskLines, maskBaseImage, cutoutKeepSelected, maskSource },
-      actions: { setColorKeyGlobal, setColorKeyTolerance, setColorKeySoftness, setColorKeySeed, clearMask, setCutoutKeepSelected, setMaskMode, setMaskSubTool, setMaskErase, requestSmartSelectDownload, setMaskBrush, setMaskRefineRadius, refineMask, applyMaskCutout, setTool },
-    },
-    edit: {
-      state: { mossEdit, mossEditReady, mossEditError, mossImageEdit, mossEditSettings, token, jobs, maxEditReferences, aiOp, canMask, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, editTransparent, selectedEditLoras, selectedEditModel, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, tensorAssets: assets, characters, projectId: activeProject?.id },
-      actions: { createLoraDownloadJob, createModelDownloadJob, setMossImageEdit, setMossEditSettings, clearMask, refineMask, setEditTransparent: setEditTransparentChoice, requestEditLoraDownload, requestSmartSelectDownload, runEdit, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, importTensorAsset: importAsset },
-    },
-    boxes: {
-      state: { mossEdit, mossEditReady, mossEditError, mossImageEdit, mossEditSettings, token, jobs, imageAssets, refAssetIds, maxEditReferences, aiOp, boxColor, boxes, composedPrompt, editModel, editModels, editPrompt, selectedBox, selectedBoxGaps, selectedBoxId, selectedEditModel, tensorAssets: assets, characters, projectId: activeProject?.id },
-      actions: { createModelDownloadJob, updateBox, setMossImageEdit, setMossEditSettings, setRefAssetIds, chooseBoxColor, clearBoxes, deleteBox, runBoxEdit, setEditModel, setEditPrompt, setSelectedBoxId, importTensorAsset: importAsset },
-    }
+  const movePanel = useMoveToolPanel({
+    working,
+    layerCount,
+    fitToView,
+    actualSize
   });
+  const transformPanel = useTransformToolPanel({
+    working,
+    setActiveTransform,
+    endTransformGesture,
+    onTransformSlider,
+    flipActiveLayer,
+    resetActiveLayerTransform,
+    setTool
+  });
+  const cropPanel = useCropToolPanel({
+    ratioKey,
+    rotated,
+    cropRect,
+    straighten,
+    chooseRatio,
+    toggleRotate,
+    setCropDim,
+    setStraighten,
+    applyCrop,
+    cancelCrop
+  });
+  const upscalePanel = useUpscaleToolPanel({
+    availableUpscaleEngines,
+    upscaleEngine,
+    upscaleFactor,
+    aiOp,
+    working,
+    token,
+    irisRestore,
+    upscaleSoftness,
+    irisPlanStatus,
+    setUpscaleEngine,
+    setUpscaleFactor,
+    setIrisRestore,
+    setIrisPlanStatus,
+    setUpscaleSoftness,
+    runUpscale,
+    setTool
+  });
+  const detailPanel = useDetailToolPanel({
+    detailModels,
+    detailModel,
+    selectedDetailModel,
+    detailStrength,
+    detailCnScale,
+    tileControlNetReady,
+    tileControlNet,
+    tileControlNetDownloadRequested,
+    aiOp,
+    createModelDownloadJob,
+    setDetailModel,
+    setDetailStrength,
+    setDetailCnScale,
+    requestTileControlNetDownload,
+    runDetail,
+    setTool
+  });
+  const colorPanel = useColorToolPanel({
+    colorMode,
+    colorAdjust,
+    colorChannel,
+    histogramRef,
+    levels,
+    curves,
+    channelStroke,
+    activeGradeIsIdentity,
+    setColorMode,
+    setAdjustValue,
+    resetAdjust,
+    setColorChannel,
+    setLevelsValue,
+    setCurves,
+    resetActiveColorMode,
+    applyColorGrade
+  });
+  const cutoutPanel = useCutoutToolPanel({
+    colorKeySeed,
+    colorKeyGlobal,
+    colorKeyTolerance,
+    colorKeySoftness,
+    smartSelectSupported,
+    maskMode,
+    maskSubTool,
+    aiOp,
+    smartSelectCapabilitySupported,
+    smartSelectModel,
+    smartSelectDownloadRequested,
+    maskBrush,
+    maskErase,
+    maskRefineRadius,
+    maskLines,
+    maskBaseImage,
+    cutoutKeepSelected,
+    maskSource,
+    setColorKeyGlobal,
+    setColorKeyTolerance,
+    setColorKeySoftness,
+    setColorKeySeed,
+    clearMask,
+    setCutoutKeepSelected,
+    setMaskMode,
+    setMaskSubTool,
+    setMaskErase,
+    requestSmartSelectDownload,
+    setMaskBrush,
+    setMaskRefineRadius,
+    refineMask,
+    applyMaskCutout,
+    setTool
+  });
+  const editPanel = useEditToolPanel({
+    mossEdit,
+    mossEditReady,
+    mossEditError,
+    mossImageEdit,
+    mossEditSettings,
+    token,
+    jobs,
+    maxEditReferences,
+    aiOp,
+    canMask,
+    editAspect,
+    editFitMode,
+    editGuidance,
+    editLora,
+    editLoraDownloadRequested,
+    editLoraInstalled,
+    editLoraRequiredMissing,
+    editLoraSelection,
+    editModel,
+    editModels,
+    editPrompt,
+    editSeed,
+    editorPickerLoras,
+    imageAssets,
+    maskActive,
+    maskBaseImage,
+    maskBrush,
+    maskErase,
+    maskLines,
+    maskMode,
+    maskRefineRadius,
+    maskSubTool,
+    multiRefCapable,
+    refAssetIds,
+    editTransparent,
+    selectedEditLoras,
+    selectedEditModel,
+    showIncompatibleEditLoras,
+    smartSelectCapabilitySupported,
+    smartSelectDownloadRequested,
+    smartSelectModel,
+    smartSelectSupported,
+    tensorAssets: assets,
+    characters,
+    projectId: activeProject?.id,
+    createLoraDownloadJob,
+    createModelDownloadJob,
+    setMossImageEdit,
+    setMossEditSettings,
+    clearMask,
+    refineMask,
+    setEditTransparent: setEditTransparentChoice,
+    requestEditLoraDownload,
+    requestSmartSelectDownload,
+    runEdit,
+    setEditAspect,
+    setEditFitMode,
+    setEditGuidance,
+    setEditModel,
+    setEditPrompt,
+    setEditSeed,
+    setMaskBrush,
+    setMaskErase,
+    setMaskMode,
+    setMaskRefineRadius,
+    setMaskSubTool,
+    setRefAssetIds,
+    setRefPickerOpen,
+    setShowIncompatibleEditLoras,
+    importTensorAsset: importAsset
+  });
+  const boxesPanel = useBoxesToolPanel({
+    mossEdit,
+    mossEditReady,
+    mossEditError,
+    mossImageEdit,
+    mossEditSettings,
+    token,
+    jobs,
+    imageAssets,
+    refAssetIds,
+    maxEditReferences,
+    aiOp,
+    boxColor,
+    boxes,
+    composedPrompt,
+    editModel,
+    editModels,
+    editPrompt,
+    selectedBox,
+    selectedBoxGaps,
+    selectedBoxId,
+    selectedEditModel,
+    tensorAssets: assets,
+    characters,
+    projectId: activeProject?.id,
+    createModelDownloadJob,
+    updateBox,
+    setMossImageEdit,
+    setMossEditSettings,
+    setRefAssetIds,
+    chooseBoxColor,
+    clearBoxes,
+    deleteBox,
+    runBoxEdit,
+    setEditModel,
+    setEditPrompt,
+    setSelectedBoxId,
+    importTensorAsset: importAsset
+  });
+  const toolPanels = { move: movePanel, transform: transformPanel, crop: cropPanel, upscale: upscalePanel, detail: detailPanel, color: colorPanel, cutout: cutoutPanel, edit: editPanel, boxes: boxesPanel };
   const renderToolPanel = (key) =>
     key === "depth" ? (
       <EditorDepthPanel dirty={dirty} working={working} />
