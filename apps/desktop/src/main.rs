@@ -111,7 +111,10 @@ fn main() {
             // Save an asset to a user-chosen destination + resolve an asset's
             // project-relative path to its absolute on-disk path (sc-8726).
             settings::save_asset_as,
+            settings::begin_image_export,
             settings::save_image_export,
+            settings::finish_image_export,
+            settings::cancel_image_export,
             settings::resolve_asset_path,
             settings::list_credentials,
             settings::set_credential,

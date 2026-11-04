@@ -4,8 +4,11 @@
 //! This scanner deliberately stores only metadata and source identities. It
 //! does not download images or create a SceneWorks training dataset.
 
+use crate::parquet_row::{
+    row_f64_alias, row_probability_alias, row_string_alias, row_u32_alias, MetadataField,
+};
 use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::{Field, Row};
+use parquet::record::Row;
 use sceneworks_core::catalog_store::{
     catalog_timestamp_now, Catalog, CatalogError, CatalogProcessingDesiredState,
     CatalogProcessingLease, CatalogProcessingProgress, CatalogProcessingState, CatalogRegistry,
@@ -1587,98 +1590,6 @@ fn requested_aliases<'a>(requested: Option<&'a str>, defaults: &'a [&'a str]) ->
         .unwrap_or_else(|| defaults.to_vec())
 }
 
-fn find_field<'a>(row: &'a Row, aliases: &[&str]) -> Option<&'a Field> {
-    row.get_column_iter()
-        .find(|(name, _)| {
-            aliases
-                .iter()
-                .any(|requested| name.eq_ignore_ascii_case(requested))
-        })
-        .map(|(_, field)| field)
-}
-
-fn row_string_alias(row: &Row, aliases: &[&str]) -> Option<String> {
-    match find_field(row, aliases)? {
-        Field::Str(value) => Some(value.clone()),
-        Field::Bytes(value) => std::str::from_utf8(value.data()).ok().map(str::to_owned),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum MetadataField<T> {
-    Missing,
-    Invalid,
-    Value(T),
-}
-
-fn row_u32_alias(row: &Row, aliases: &[&str]) -> MetadataField<u32> {
-    let Some(field) = find_field(row, aliases) else {
-        return MetadataField::Missing;
-    };
-    let value = match field {
-        Field::Byte(value) => u32::try_from(*value).ok(),
-        Field::Short(value) => u32::try_from(*value).ok(),
-        Field::Int(value) => u32::try_from(*value).ok(),
-        Field::Long(value) => u32::try_from(*value).ok(),
-        Field::UByte(value) => Some((*value).into()),
-        Field::UShort(value) => Some((*value).into()),
-        Field::UInt(value) => Some(*value),
-        Field::ULong(value) => u32::try_from(*value).ok(),
-        Field::Float(value) => exact_u32((*value).into()),
-        Field::Double(value) => exact_u32(*value),
-        Field::Str(value) => value.trim().parse().ok(),
-        Field::Bytes(value) => std::str::from_utf8(value.data())
-            .ok()
-            .and_then(|value| value.trim().parse().ok()),
-        _ => None,
-    };
-    match value {
-        Some(value) => MetadataField::Value(value),
-        None => MetadataField::Invalid,
-    }
-}
-
-fn row_f64_alias(row: &Row, aliases: &[&str]) -> MetadataField<f64> {
-    let Some(field) = find_field(row, aliases) else {
-        return MetadataField::Missing;
-    };
-    let value = match field {
-        Field::Byte(value) => Some((*value).into()),
-        Field::Short(value) => Some((*value).into()),
-        Field::Int(value) => Some((*value).into()),
-        Field::Long(value) => Some(*value as f64),
-        Field::UByte(value) => Some((*value).into()),
-        Field::UShort(value) => Some((*value).into()),
-        Field::UInt(value) => Some((*value).into()),
-        Field::ULong(value) => Some(*value as f64),
-        Field::Float(value) if value.is_finite() => Some((*value).into()),
-        Field::Double(value) if value.is_finite() => Some(*value),
-        Field::Str(value) => parse_metadata_score(value),
-        Field::Bytes(value) => std::str::from_utf8(value.data())
-            .ok()
-            .and_then(parse_metadata_score),
-        _ => None,
-    };
-    match value {
-        Some(value) if value.is_finite() => MetadataField::Value(value),
-        _ => MetadataField::Invalid,
-    }
-}
-
-fn row_probability_alias(row: &Row, aliases: &[&str]) -> MetadataField<f64> {
-    match row_f64_alias(row, aliases) {
-        MetadataField::Value(value) if (0.0..=1.0).contains(&value) => MetadataField::Value(value),
-        MetadataField::Value(_) => MetadataField::Invalid,
-        other => other,
-    }
-}
-
-fn exact_u32(value: f64) -> Option<u32> {
-    (value.is_finite() && value >= 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0)
-        .then_some(value as u32)
-}
-
 fn filtered_dimension(
     field: MetadataField<u32>,
     required: bool,
@@ -1705,17 +1616,6 @@ fn filtered_score(
         MetadataField::Invalid if required => Err(invalid_reason),
         MetadataField::Missing | MetadataField::Invalid => Ok(None),
     }
-}
-
-fn parse_metadata_score(value: &str) -> Option<f64> {
-    let normalized = value.trim().to_ascii_lowercase();
-    normalized.parse().ok().or(match normalized.as_str() {
-        "safe" | "sfw" | "false" => Some(0.0),
-        "unlikely" => Some(0.25),
-        "unsure" => Some(0.5),
-        "unsafe" | "nsfw" | "true" | "porn" => Some(1.0),
-        _ => None,
-    })
 }
 
 fn valid_public_http_url(value: &str) -> bool {

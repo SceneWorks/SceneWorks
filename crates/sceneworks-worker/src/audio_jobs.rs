@@ -3503,11 +3503,6 @@ mod tests {
         settings
     }
 
-    /// Neutralize the ambient HF cache env so a co-requisite snapshot resolves under the test's own
-    /// `data_dir` rather than a developer's real `HF_HOME` (sc-13679 trap) — the audio twin of the
-    /// model_jobs co_requisite seam tests' `isolate_hf_cache`.
-    use crate::test_env::isolate_hf_cache;
-
     /// Exercise the Audio Studio manifest resolver and the pinned runtime's real audio preparer
     /// together. The malformed index must win over a corrupt earlier shard: the provider validates
     /// the complete selection before reading any safetensors header. A normal HF blob link must
@@ -3517,7 +3512,7 @@ mod tests {
     fn staged_audio_shard_indexes_fail_closed_and_keep_hf_blob_access() {
         use std::os::unix::fs::symlink;
 
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let settings = Settings {
             data_dir: data.path().to_path_buf(),
@@ -3681,7 +3676,7 @@ mod tests {
         codec_revision: &str,
         codec_files: &[&str],
     ) -> StagedCodec {
-        let env = isolate_hf_cache();
+        let env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         for file in codec_files {
             stage_snapshot_file(data_dir.path(), codec_repo, codec_revision, file);
@@ -3721,7 +3716,7 @@ mod tests {
     }
 
     fn stage_chatterbox_components(settings: &mut Settings) -> StagedChatterboxComponents {
-        let env = isolate_hf_cache();
+        let env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         stage_snapshot_file(
             data_dir.path(),
@@ -3869,7 +3864,7 @@ mod tests {
     }
 
     fn stage_sft_cover(settings: &mut Settings) -> StagedSftCover {
-        let env = isolate_hf_cache();
+        let env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let snapshot =
             sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir.path(), SFT_COVER_REPO)
@@ -4632,7 +4627,7 @@ mod tests {
         let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
         let mut settings = cancel_test_settings(base_url);
         // Stage ONLY voice_embedding; perth's snapshot stays absent.
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         stage_snapshot_file(
             data_dir.path(),
@@ -4717,7 +4712,7 @@ mod tests {
         let mut settings = cancel_test_settings(base_url);
         // Isolate the HF cache at a FRESH empty data_dir — the XY_Tokenizer codec is NOT staged, so the
         // descriptor's `codec` required_component cannot resolve.
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         settings.data_dir = data_dir.path().to_path_buf();
         // A moss_ttsd_v05 request whose manifest entry advertises the (absent) codec coRequisite — the
@@ -5620,9 +5615,9 @@ mod yue_job_surface_tests {
         move |_id: &str, spec: &LoadSpec| {
             {
                 let mut record = seen.lock().expect("seen lock");
-                record.weights = match &spec.weights {
-                    WeightsSource::Dir(dir) | WeightsSource::File(dir) => Some(dir.clone()),
-                };
+                record.weights = Some(
+                    crate::weights_source::WeightsSourceExt::path(&spec.weights).to_path_buf(),
+                );
                 record.quantize = spec.quantize;
                 #[cfg(native_lane)]
                 {

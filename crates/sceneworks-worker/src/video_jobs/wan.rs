@@ -695,7 +695,7 @@ pub(super) fn resolve_wan_adapters(
     settings: &Settings,
     request: &VideoRequest,
     engine_id: &str,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     if request.loras.len() > MAX_JOB_LORAS {
         return Err(WorkerError::InvalidPayload(format!(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
@@ -703,7 +703,7 @@ pub(super) fn resolve_wan_adapters(
     }
     let is_wan_a14b = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
     let is_moe = is_wan_a14b || matches!(engine_id, "bernini" | "wan2_2_vace_fun_14b");
-    let mut specs: Vec<AdapterSpec> = Vec::new();
+    let mut specs = PreparedVideoAdapters::default();
 
     // Lightning distill (both A14B MoE models — T2V + I2V, sc-4997): 4-step, applied per-expert at
     // strength 1.0 through the standard adapter path. As of sc-10047 this is a **default-on toggle**
@@ -715,45 +715,56 @@ pub(super) fn resolve_wan_adapters(
         let (high, low) = resolve_lightning_loras(settings, engine_id)?;
         // macOS: the MLX provider crate builds the product's pair (strength 1.0, high/low experts).
         #[cfg(target_os = "macos")]
-        specs.extend(runtime_macos::providers::wan::product_load::lightning_adapters(high, low));
+        for adapter in runtime_macos::providers::wan::product_load::lightning_adapters(high, low) {
+            specs.push(settings, adapter)?;
+        }
         #[cfg(not(target_os = "macos"))]
         {
-            specs.push(moe_adapter(
-                high,
-                1.0,
-                gen_core::AdapterKind::Lora,
-                gen_core::MoeExpert::High,
-            ));
-            specs.push(moe_adapter(
-                low,
-                1.0,
-                gen_core::AdapterKind::Lora,
-                gen_core::MoeExpert::Low,
-            ));
+            specs.push(
+                settings,
+                moe_adapter(
+                    high,
+                    1.0,
+                    gen_core::AdapterKind::Lora,
+                    gen_core::MoeExpert::High,
+                ),
+            )?;
+            specs.push(
+                settings,
+                moe_adapter(
+                    low,
+                    1.0,
+                    gen_core::AdapterKind::Lora,
+                    gen_core::MoeExpert::Low,
+                ),
+            )?;
         }
     }
 
     for lora in &request.loras {
-        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = resolve_lora_file(
-            settings,
-            path,
-            crate::image_jobs::declared_adapter_file(lora),
-        )?;
-        let kind = crate::image_jobs::classify_adapter(&file)?;
+        let (file, kind) = specs.user(settings, lora, &request.model)?;
         let scale = lora_scale(lora);
-        match (is_moe, wan_moe_low_noise_sibling(&file)) {
+        // Sibling discovery historically used the normalized canonical filename, while the
+        // source token must retain the lexical entry to detect alias retargeting.
+        let sibling = specs
+            .pins
+            .get(&file)
+            .and_then(|pin| wan_moe_low_noise_sibling(pin.canonical_target_path()));
+        match (is_moe, sibling) {
             (true, Some(low)) => {
                 // A MoE pair → high half to the high-noise expert, the sibling to the low.
-                let low_kind = crate::image_jobs::classify_adapter(&low)?;
-                specs.push(moe_adapter(file, scale, kind, gen_core::MoeExpert::High));
-                specs.push(moe_adapter(low, scale, low_kind, gen_core::MoeExpert::Low));
+                let low_lora = json!({"path":low});
+                let (low, low_kind) = specs.user(settings, &low_lora, &request.model)?;
+                specs
+                    .specs
+                    .push(moe_adapter(file, scale, kind, gen_core::MoeExpert::High));
+                specs
+                    .specs
+                    .push(moe_adapter(low, scale, low_kind, gen_core::MoeExpert::Low));
             }
             _ => {
                 // Single-file → shared (both experts on MoE; the dense single model on the 5B).
-                specs.push(AdapterSpec {
+                specs.specs.push(AdapterSpec {
                     path: file,
                     scale,
                     kind,
@@ -793,7 +804,7 @@ pub(super) fn moe_adapter(
 pub(super) fn resolve_wan_vace_adapters(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 
@@ -811,7 +822,7 @@ pub(super) fn resolve_wan_vace_adapters(
 pub(super) fn resolve_scail2_adapters(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 
@@ -1298,7 +1309,7 @@ pub(super) struct VideoGenInput {
     pub(super) memory_transformer_variant:
         Option<sceneworks_core::memory_calibration::Ltx25TransformerVariant>,
     pub(super) memory_decoder: Option<sceneworks_core::memory_calibration::Ltx25Decoder>,
-    pub(super) adapters: Vec<AdapterSpec>,
+    pub(super) adapters: PreparedVideoAdapters,
     pub(super) conditioning: Vec<Conditioning>,
     pub(super) prompt: String,
     pub(super) negative_prompt: Option<String>,
@@ -1442,7 +1453,7 @@ impl Default for VideoGenInput {
             quant: None,
             memory_transformer_variant: None,
             memory_decoder: None,
-            adapters: Vec::new(),
+            adapters: PreparedVideoAdapters::default(),
             conditioning: Vec::new(),
             prompt: String::new(),
             negative_prompt: None,
@@ -1489,7 +1500,7 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(input.model_dir.clone()));
     spec.quantize = input.quant;
     spec.precision = Precision::Bf16;
-    spec.adapters = input.adapters.clone();
+    spec.adapters = input.adapters.specs.clone();
     // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` retains the provider's
     // legacy fallback. Video providers otherwise have no image-only control/PiD/identity sources.
     spec.text_encoder = input.text_encoder_dir.clone().map(WeightsSource::Dir);
@@ -2789,7 +2800,8 @@ pub(super) async fn generate_video_using(
         let host_probe_runtime = tokio::runtime::Handle::current();
         crate::load_progress::spawn(async move {
             let mut spec = video_load_spec(&input);
-            let (spec, h3_receipt) = if let Some(identity) = input.imported_h3_identity.clone() {
+            let (mut spec, h3_receipt) = if let Some(identity) = input.imported_h3_identity.clone()
+            {
                 let authority = input.imported_h3_authority.clone().ok_or_else(|| {
                     WorkerError::InvalidPayload(
                         "imported H3 load is missing its resolved source authority".into(),
@@ -2845,6 +2857,9 @@ pub(super) async fn generate_video_using(
             } else {
                 (spec, None)
             };
+            input.adapters.install(&mut spec).map_err(|error| {
+                crate::classify_engine_error("Video adapter source validation failed", error)
+            })?;
             let prepared_h3_context =
                 h3_receipt
                     .as_ref()

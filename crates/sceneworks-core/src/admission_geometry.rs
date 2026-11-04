@@ -241,14 +241,8 @@ mod tests {
     use serde_json::json;
 
     fn shipped_entry(id: &str) -> JsonObject<String, Value> {
-        let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(
-            crate::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .expect("builtin.models.jsonc embedded")
-                .1,
-        ))
-        .expect("builtin.models.jsonc parses");
+        let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         manifest["models"]
             .as_array()
             .expect("models array")

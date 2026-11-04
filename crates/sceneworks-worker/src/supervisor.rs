@@ -522,8 +522,11 @@ async fn report_worker_terminated(
 ) {
     let api = ApiClient::new(settings);
     let path = format!("/api/v1/workers/{worker_id}/terminated");
-    let outcome: WorkerResult<Value> = api
-        .post_json(&path, &json!({ "signal": signal, "exitCode": exit_code }))
+    let outcome = api
+        .post_control_json(
+            &path,
+            &json!({ "signal": signal, "exitCode": exit_code }).to_string(),
+        )
         .await;
     if let Err(error) = outcome {
         emit_event_value(

@@ -633,13 +633,8 @@ fn packaged_model_families() -> Result<&'static BTreeMap<String, String>, String
     static FAMILIES: OnceLock<Result<BTreeMap<String, String>, String>> = OnceLock::new();
     FAMILIES
         .get_or_init(|| {
-            let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .map(|(_, contents)| *contents)
-                .ok_or_else(|| "builtin.models.jsonc is not compiled into sceneworks-core".to_owned())?;
-            let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(raw))
-                .map_err(|error| format!("builtin.models.jsonc does not parse: {error}"))?;
+            let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+                .map_err(str::to_owned)?;
             let models = manifest
                 .get("models")
                 .and_then(Value::as_array)
