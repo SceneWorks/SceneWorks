@@ -1,3 +1,4 @@
+import { deferred } from "../testUtils/async.js";
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
@@ -68,13 +69,7 @@ async function setInputValue(input, value) {
 }
 const byText = (text, selector = "button") =>
   [...document.querySelectorAll(selector)].find((el) => el.textContent.includes(text));
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
+
 
 function makeContext(overrides = {}) {
   return { token: "test-token", requestedGpu: "auto", jobs: [], ...overrides };

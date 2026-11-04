@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -422,11 +423,8 @@ export function useTimelines({
     }
   }
 
-  return {
+  const context = useAppDomainValue({
     timelines,
-    setTimelines,
-    timelinesProjectId,
-    setTimelinesProjectId,
     selectedTimelineId,
     setSelectedTimelineId,
     activeTimeline,
@@ -439,7 +437,7 @@ export function useTimelines({
     resolveTimelineTrim,
     exportTimeline,
     extractTimelineFrame,
-    queueTimelineVideoJob,
-    enqueueTimelineGenerationApply,
-  };
+    queueTimelineVideoJob
+  });
+  return { ...context, setTimelines, timelinesProjectId, setTimelinesProjectId, enqueueTimelineGenerationApply, context };
 }

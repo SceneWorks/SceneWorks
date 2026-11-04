@@ -1,7 +1,7 @@
 import React, { useLayoutEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AssetThumbnail, assetCanRenderAsAudio, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
-import { useAppContext } from "../context/AppContext.js";
+import { useAppStatic } from "../context/AppContext.js";
 import { isLibraryAsset } from "../constants.js";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { assetMatchesSearch } from "../assetSearch.js";
@@ -28,7 +28,7 @@ export function SimpleAssets() {
     assetsReady = false,
     assetsLoading = false,
     assetsError = "",
-  } = useAppContext();
+  } = useAppStatic();
   const { breakpoint, openPreview, loadedTakeId } = useSimpleUi();
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");

@@ -3354,7 +3354,7 @@ mod tests {
         // A path INSIDE `data_dir` is accepted; a sibling path OUTSIDE it, and a `..`-traversal escape,
         // are rejected with a clear error — mirroring the JoyCaption `resolve_dataset_item_path` guard.
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut settings = crate::Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = dir.path().to_path_buf();
 
         // In-root: accepted (the on-disk file need not exist — confinement is path-structural).

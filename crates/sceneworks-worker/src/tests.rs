@@ -18,6 +18,8 @@
 //! Grouping is by subsystem; the heavily cross-cutting stub servers + `test_settings` cluster live in
 //! `tests/support_stubs.rs`. The `#[cfg(...)]` gates on the imports/tests are preserved as-is.
 
+pub(crate) mod test_api_stub;
+
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
