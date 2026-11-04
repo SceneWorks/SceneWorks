@@ -116,7 +116,7 @@ fn every_candle_text_encoder_route_resolves_from_the_runtime_registry() {
 #[test]
 fn default_and_absent_text_encoder_selection_leave_load_spec_untouched() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let default_request = request(json!({
         "projectId": "p",
@@ -160,7 +160,7 @@ fn default_and_absent_text_encoder_selection_leave_load_spec_untouched() {
 #[test]
 fn every_specialized_text_encoder_engine_rejects_an_unresolved_selection_before_load() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     for engine_id in [
@@ -471,7 +471,7 @@ fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_componen
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).expect("hub dir creates");
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
@@ -1861,7 +1861,7 @@ fn job_weight_resolution_uses_receipt_after_manifest_filename_change() {
         "manifestFiles": ["q4/transformer/old-*.safetensors", "q4/model_index.json"],
         "resolvedFiles": ["q4/transformer/old-1.safetensors", "q4/transformer/old-2.safetensors", "q4/model_index.json"]
     })).unwrap()).unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     // This is the job-time manifest snapshot after a catalog bump: only the new names are declared.
     let req = request(json!({
@@ -1911,7 +1911,7 @@ fn unconverted_true_v2_request() -> ImageRequest {
 #[test]
 fn unconverted_convert_at_install_model_fails_with_an_actionable_error() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let error = resolve_weights_dir(&unconverted_true_v2_request(), &settings)
@@ -1946,7 +1946,7 @@ fn unconverted_convert_at_install_model_fails_with_an_actionable_error() {
 #[test]
 fn converted_convert_at_install_model_resolves_its_injected_model_path() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     let converted = root
         .path()
@@ -1986,7 +1986,7 @@ fn converted_convert_at_install_model_resolves_its_injected_model_path() {
 #[test]
 fn off_mac_anima_is_not_refused_by_the_unconverted_preflight() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     let req = request(json!({
         "projectId": "p", "model": "anima_base", "prompt": "a lighthouse",
@@ -2021,7 +2021,7 @@ fn off_mac_anima_is_not_refused_by_the_unconverted_preflight() {
 #[test]
 fn builtin_flux2_klein_snapshot_resolution_is_untouched() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     for model in ["flux2_klein_9b", "flux2_klein_9b_kv"] {
         let entry = crate::tests::builtin_model_entry(model);
@@ -2097,7 +2097,7 @@ fn candle_dispatch_outcome(request: &ImageRequest, settings: &Settings) -> Candl
 #[test]
 fn unconverted_edit_image_job_is_refused_at_dispatch_never_stubbed() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
@@ -2157,7 +2157,7 @@ fn unconverted_edit_image_job_is_refused_at_dispatch_never_stubbed() {
 #[test]
 fn unconverted_non_edit_modes_keep_their_existing_candle_route() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
@@ -2188,7 +2188,7 @@ fn unconverted_non_edit_modes_keep_their_existing_candle_route() {
 #[test]
 fn converted_edit_image_job_still_reaches_the_flux2_edit_lane() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
     let converted = root
@@ -2397,7 +2397,7 @@ fn write_image_asset_confines_malicious_model_id() {
 /// Worker settings pointed at a scratch config dir, so the embed toggle can be written and read
 /// without touching the real install's `ui-preferences.json`.
 fn settings_with_config_dir(config_dir: &Path) -> Settings {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.config_dir = config_dir.to_path_buf();
     settings
 }
@@ -4413,7 +4413,7 @@ fn sensenova_edit_available_needs_a_reference() {
     // Plain T2I (no reference) is NOT the edit path — it rides the base mlx path.
     assert!(!sensenova_edit_available(
         &request(json!({ "projectId": "p", "model": "sensenova_u1_8b", "prompt": "a fox" })),
-        &Settings::from_env()
+        &crate::test_env::offline_settings()
     ));
     // edit_image needs a source; character_image needs a reference. (Weights may be
     // absent in CI, so only assert the negative/structural cases here.)
@@ -4627,7 +4627,7 @@ fn bernini_image_task_and_quant_mapping() {
     // any weight resolution), so a different model never diverts here.
     assert!(!bernini_image_available(
         &request(json!({ "projectId": "p", "model": "z_image_turbo", "prompt": "p" })),
-        &Settings::from_env()
+        &crate::test_env::offline_settings()
     ));
 }
 
@@ -6628,7 +6628,7 @@ fn kolors_real_weights_pose_generates_one_image() {
 #[cfg(target_os = "macos")]
 #[test]
 fn kolors_pose_lane_requires_reference_identity_for_scoring() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     // No referenceAssetId ⇒ the scoring lane is never entered (the gate is false before weights matter).
     let no_reference = request(json!({
         "projectId": "p", "model": "kolors",
@@ -7785,7 +7785,7 @@ fn flux2_edit_engine_id_maps_variants() {
 #[test]
 fn flux2_klein_edit_route_owns_invalid_cardinality_and_preflight_refuses_it() {
     let weights = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = weights.path().to_path_buf();
     let model_path = weights.path().to_string_lossy().to_string();
     let references = |count: usize| {
@@ -7957,7 +7957,7 @@ fn prompt_enhance_reads_advanced_settings() {
 #[test]
 fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
     #[allow(unused_mut)]
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
         settings.backend_candle_enabled = true;
@@ -8384,7 +8384,7 @@ fn flux2_control_repo_file_defaults_and_rejects_arbitrary_overrides() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_control_weight_filenames_reject_traversal() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     for filename in ["../../etc/hosts", "/etc/hosts", "sub/x.safetensors", ".."] {
         let req = request(json!({
             "projectId": "p",
@@ -8434,7 +8434,7 @@ fn mlx_control_weight_filenames_reject_traversal() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_control_weight_repositories_are_exactly_trusted() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     let arbitrary = request(json!({
         "projectId": "p",
         "advanced": {
@@ -8495,7 +8495,7 @@ fn mlx_control_weight_cache_reads_only_the_pinned_revision() {
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let artifact = sceneworks_core::control_weights::shipped_control_weight(
@@ -8600,7 +8600,7 @@ fn registered_control_overlay_requires_catalog_authority_and_pin() {
 fn krea_control_payload_overlay_path_confines_to_app_root() {
     let data = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data.path().to_path_buf();
     settings.external_model_roots = Vec::new();
 
@@ -8646,7 +8646,7 @@ fn krea_imported_payload_control_overlay_pins_the_lexical_entry() {
 
     let data = tempfile::tempdir().expect("data root");
     let outside = tempfile::tempdir().expect("outside root");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data.path().to_path_buf();
     settings.external_model_roots = Vec::new();
 
@@ -8722,7 +8722,7 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
     use std::os::unix::fs::symlink;
 
     let data = tempfile::tempdir().expect("data root");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data.path().to_path_buf();
     settings.external_model_roots = Vec::new();
 
@@ -8803,7 +8803,7 @@ fn legacy_direct_adapter_pin_retains_lexical_alias_and_rejects_retarget() {
     }
 
     let data = tempfile::tempdir().expect("data root");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data.path().to_path_buf();
     settings.external_model_roots = Vec::new();
     let first = data.path().join("loras").join("first");
@@ -8847,7 +8847,7 @@ fn legacy_direct_adapter_pin_retains_lexical_alias_and_rejects_retarget() {
 #[test]
 fn prepared_krea_imported_control_route_owns_overlay_and_adapter_tokens() {
     let data = tempfile::tempdir().expect("data root");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data.path().to_path_buf();
     settings.external_model_roots = Vec::new();
 
@@ -9891,7 +9891,7 @@ struct QwenImage21EditFixture {
 impl QwenImage21EditFixture {
     fn new() -> Self {
         let data = tempfile::tempdir().unwrap();
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = data.path().to_path_buf();
         let store = ProjectStore::new(settings.data_dir.clone(), "worker");
         let project = store.create_project("sc24110-qwen-image-2-1-edit").unwrap();
@@ -10878,7 +10878,7 @@ fn classify_adapter_rejects_truncated_safetensors() {
 #[test]
 fn instantid_resolves_user_loras_into_adapters() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
 
     // A real (tiny, valid) safetensors LoRA under the app-managed data dir — both the path
@@ -10915,7 +10915,7 @@ fn instantid_resolves_user_loras_into_adapters() {
 #[test]
 fn prepared_adapter_resolver_reads_under_the_exact_deduplicated_token() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let lora_file = dir.path().join("style.safetensors");
     write_min_lora(&lora_file);
@@ -10960,7 +10960,7 @@ fn prepared_adapter_directory_reconfines_the_selected_child() {
     let outside = dir.path().join("outside.safetensors");
     write_min_lora(&outside);
     symlink(&outside, install.join("escape.safetensors")).expect("escaping child link");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data;
     let req = request(json!({
         "projectId": "p", "model": "kreamania_variant5", "prompt": "portrait",
@@ -11175,7 +11175,7 @@ fn write_upscaled_asset_confines_malicious_model_id() {
 #[test]
 fn image_route_count_follows_dispatch_order() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11308,7 +11308,7 @@ fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() 
     assert!(work.iter().all(|(seed, _)| *seed == work[0].0));
     assert_eq!(work[0].0, 123);
     assert_eq!(
-        CandleImageRoute::SenseNovaEdit.image_count(&req, &Settings::from_env()),
+        CandleImageRoute::SenseNovaEdit.image_count(&req, &crate::test_env::offline_settings()),
         11
     );
     assert_eq!(
@@ -11330,7 +11330,7 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
     // Isolate the HF hub cache to the empty tempdir so the control base is genuinely absent regardless of
     // the machine's real cache (the weight resolvers read the global HF cache in preference to `data_dir`).
     let _hf = isolate_hf_hub_cache_to(dir.path());
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     // Empty data_dir + isolated HF cache + no `modelPath` → every `…_control_available` weight-gate (and
     // `mlx_available`) resolves nothing, so each wired-family pose job falls through to the reject arm.
     settings.data_dir = dir.path().to_path_buf();
@@ -11383,7 +11383,7 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
 #[test]
 fn image_route_wired_pose_with_base_present_routes_to_control_lane() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11421,7 +11421,7 @@ fn image_route_wired_pose_with_base_present_routes_to_control_lane() {
 #[test]
 fn image_route_refuses_flux1_ipadapter_plus_pose_without_dropping_conditioning() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11458,7 +11458,7 @@ fn image_route_refuses_flux1_ipadapter_plus_pose_without_dropping_conditioning()
 #[test]
 fn image_route_sends_exact_sdxl_pose_family_to_control_before_other_conditioning() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11515,7 +11515,7 @@ fn image_route_sends_exact_sdxl_pose_family_to_control_before_other_conditioning
 #[test]
 fn krea_turbo_on_raw_routes_only_with_accelerator_lora() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11583,7 +11583,7 @@ fn krea_turbo_on_raw_routes_only_with_accelerator_lora() {
 #[test]
 fn krea_multiphase_routes_only_with_phases_and_takes_precedence_over_turbo() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -12035,7 +12035,7 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_image_route_gates_on_flag_then_sdxl_control_then_txt2img() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
 
     // Candle disabled (default) → None (the job stubs), regardless of model.
     settings.backend_candle_enabled = false;
@@ -12117,7 +12117,7 @@ fn every_scheduler_routed_candle_image_has_a_native_worker_route() {
         &[("bernini_image", CandleImageRoute::Bernini)];
     const BESPOKE_BUILTIN_MODELS: &[&str] = &["bernini_image"];
 
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.backend_candle_enabled = true;
 
     let scheduler_models = sceneworks_core::jobs_store::candle_routed_image_models();
@@ -12190,7 +12190,7 @@ fn scheduler_only_unregistered_model_fails_native_generator_parity() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn qwen_image_2_1_candle_txt2img_route_carries_the_2_1_adapter_stamp() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.backend_candle_enabled = true;
 
     for payload in [
@@ -12233,7 +12233,7 @@ fn qwen_image_2_1_candle_txt2img_route_carries_the_2_1_adapter_stamp() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_image_route_sends_krea_img2img_to_txt2img() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.backend_candle_enabled = true;
 
     // krea_2_turbo + a reference, no poses, non-edit mode → the generic candle txt2img lane (the img2img
@@ -12300,7 +12300,7 @@ fn candle_image_route_sends_krea_img2img_to_txt2img() {
 #[test]
 fn candle_krea_multiphase_and_turbo_route_with_over_routing_guards() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     settings.backend_candle_enabled = true;
     // `resolve_weights_dir` honors an explicit `modelPath` first, so the tempdir resolves the Raw
@@ -12406,7 +12406,7 @@ fn candle_krea_multiphase_and_turbo_route_with_over_routing_guards() {
 #[test]
 fn candle_krea_multiphase_claims_conflicting_shapes_to_reject_them() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     settings.backend_candle_enabled = true;
     let model_path = dir.path().to_string_lossy().to_string();
@@ -12558,7 +12558,7 @@ fn cache_only_sdxl_mirror_replaces_a_corrupt_existing_destination() {
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).expect("hub dir");
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let source =
@@ -12622,7 +12622,7 @@ fn cache_only_sdxl_mirror_serializes_concurrent_same_process_publishers() {
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).expect("hub dir");
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let source =
@@ -12734,7 +12734,7 @@ fn cache_only_sdxl_mirror_rejects_unverified_staging_before_publication() {
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).expect("hub dir");
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let source =
@@ -12858,7 +12858,7 @@ fn krea_convrot_pose_route_is_claimed_by_the_immutable_dit_identity() {
     .unwrap();
     let _hf = isolate_hf_hub_cache_to(&hub);
 
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
     let req = request(json!({
@@ -12920,7 +12920,7 @@ fn sensenova_q8_floor_keeps_the_capability_downtier_off_q4() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"weights").unwrap();
     }
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let req = |advanced: serde_json::Value| {
@@ -12997,7 +12997,7 @@ fn sensenova_weights_resolution_takes_the_standard_tier_descent() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"weights").unwrap();
     }
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let req = |bits: Option<i64>| {
@@ -13052,7 +13052,7 @@ fn flux2_edit_candle_base_resolves_the_packed_turnkey_tier() {
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
@@ -13116,7 +13116,7 @@ fn flux2_edit_candle_base_resolves_the_packed_turnkey_tier() {
 fn flux2_edit_candle_base_is_absent_without_the_turnkey() {
     let dir = tempfile::tempdir().unwrap();
     let _hf = isolate_hf_hub_cache_to(dir.path());
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
@@ -13205,7 +13205,7 @@ fn flux2_klein_reference_routes_resolve_real_references_and_missing_refs_fail_cl
 #[test]
 fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_edit() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
     let model_path = root.path().to_string_lossy().to_string();
@@ -13368,7 +13368,7 @@ fn candle_image_route_rejects_wired_pose_when_control_base_absent() {
     // Isolate the HF hub cache to the empty tempdir so the control base is genuinely absent regardless of
     // the machine's real cache (the resolver reads the global HF cache in preference to `data_dir`).
     let _hf = isolate_hf_hub_cache_to(dir.path());
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     // A tempdir data_dir + isolated HF cache holds no HF snapshot, so `resolve_zimage_control_base` yields
     // `None` → the Z-Image control lane's weight-gate (`zimage_control_available`) fails and it falls through.
     settings.data_dir = dir.path().to_path_buf();
@@ -13420,7 +13420,7 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
     let external = root.path().join("external");
     std::fs::create_dir_all(&external).expect("external root");
 
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().join("data");
     settings.external_model_roots = vec![external.clone()];
     settings.backend_candle_enabled = true;
@@ -13625,7 +13625,7 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_strict_pose_route_image_count_is_pose_set_length() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     // 4 images requested, but 3 poses → the strict-pose lane renders 3 (one per pose).
     let zimage_pose = request(json!({
         "projectId": "p", "model": "z_image_turbo", "count": 4,
@@ -13825,7 +13825,7 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_image_route_selects_bernini_lane_for_bernini_image() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
 
     // Candle disabled (default) → None (the job stubs), regardless of model.
     settings.backend_candle_enabled = false;
@@ -13859,7 +13859,7 @@ fn generic_lane_conditioning_defaults_when_no_reference() {
     // fall-through. No disk access; just proves the dispatch order picks the right arm and each yields
     // the empty conditioning when its reference precondition is absent.
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let project_path = dir.path();
 
@@ -13955,7 +13955,7 @@ fn fit_edit_references_squares_a_landscape_character_reference() {
 fn character_image_likeness_source_gates_to_plain_with_character() {
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
 
     // A non-character mode (text_to_image / edit_image) is NEVER a With-Character generation: excluded
@@ -14216,7 +14216,7 @@ fn qwen_edit_engine_id_maps_variants() {
 #[test]
 fn an_alpha_carrying_reference_truncates_by_default_and_composites_only_on_request() {
     let data_dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data_dir.path().to_path_buf();
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.create_project("sc24113-alpha-reference").unwrap();
@@ -16524,7 +16524,7 @@ fn krea_control_declares_the_reference_count_gen_core_derives_from_its_request()
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_control_identity_source_is_none_without_reference() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     let project_path = std::path::Path::new("/tmp/sc4410-nonexistent");
     // A bare pose set (skeleton-only, no identity reference) → None → no scorer → field omitted.
     let pose_only = request(json!({
@@ -16559,7 +16559,7 @@ fn resolve_control_identity_source_is_none_without_reference() {
 #[test]
 fn resolve_control_identity_source_decodes_present_reference_for_base_zimage() {
     let data_dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data_dir.path().to_path_buf();
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.create_project("sc8822-base").unwrap();
@@ -17774,7 +17774,7 @@ fn candle_control_providers_resolve_models_and_repos() {
     // is unchanged (2512 base). (The clamp-to-only-q4 behavior is proved directly in
     // `qwen_control_tier_tests`.)
     let empty_data = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = empty_data.path().to_path_buf();
     let qwen = request(json!({ "projectId": "p", "model": "qwen_image" }));
     let (q_repo, q_file) = qwen_control_repo_file(&qwen, &settings).expect("defaults resolve");
@@ -17853,7 +17853,7 @@ fn candle_control_weight_filenames_reject_traversal() {
     // override rejects at `safe_weight_filename` BEFORE any snapshot probe, so an empty data_dir is
     // never read here.
     let empty_data = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = empty_data.path().to_path_buf();
     for filename in ["../../etc/hosts", "/etc/hosts", "sub/x.safetensors", ".."] {
         let req = request(json!({
@@ -17903,7 +17903,7 @@ fn candle_control_weight_filenames_reject_traversal() {
 #[test]
 fn candle_control_weight_repositories_are_exactly_trusted() {
     let empty_data = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = empty_data.path().to_path_buf();
     let arbitrary = request(json!({
         "projectId": "p",
@@ -18592,7 +18592,7 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     for (repo, revision, relative) in [
@@ -19174,7 +19174,7 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
     std::fs::create_dir_all(&refs).unwrap();
     std::fs::write(refs.join("main"), revision).unwrap();
 
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
 
     // A krea_2_turbo pose job whose manifest carries the tiered repo (the catalog default) — the exact
@@ -19282,7 +19282,7 @@ fn imported_krea_settings_with_file(dir: &std::path::Path) -> (Settings, PathBuf
         .join("kreamania_variant4.safetensors");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, b"dit").unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.to_path_buf();
     (settings, file)
 }
@@ -19511,7 +19511,7 @@ fn resolve_krea_imported_base_tier_requires_installed_base() {
     let hub = dir.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
 
     let assert_install_base_error = |label: &str| {
@@ -19688,7 +19688,7 @@ fn resolve_image_route_sends_registered_imported_sdxl_operations_to_fused_lane()
         .join("community-xl.safetensors");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, b"sdxl").unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let payload = |extra: Value| {
         let mut value = json!({
@@ -21055,7 +21055,7 @@ fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::
         b"dit",
     )
     .unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.to_path_buf();
     (settings, checkpoint)
 }
@@ -22846,7 +22846,7 @@ impl CheckpointPlanFixture {
             std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
             std::fs::write(repo_dir.join("refs/main"), revision).unwrap();
         }
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = data.path().to_path_buf();
         settings.external_model_roots = Vec::new();
         let library_dir = std::fs::canonicalize(library.path()).unwrap();
@@ -28841,13 +28841,7 @@ mod qwen_image_2_1_tiers {
     /// `the_shipped_catalog_pins_the_published_rehost` asserts so.
     const REHOST_REVISION: &str = "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0";
 
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
+    use crate::test_env::isolate_hf_cache;
 
     fn tier_root(data_dir: &Path, repo: &str, revision: &str, subdir: Option<&str>) -> PathBuf {
         let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, repo)

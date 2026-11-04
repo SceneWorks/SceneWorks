@@ -62,3 +62,18 @@ export async function unmountRoot(root, container) {
   await act(async () => root.unmount());
   container.remove();
 }
+
+// Preserve the caller's bounded flush contract. Timer-driven controls opt into a
+// delay; App-shell callers additionally wait for the shared lazy-route boundary.
+export async function settle({ microtasks = 6, lazy = false, delayMs = 0 } = {}) {
+  await act(async () => {
+    for (let index = 0; index < microtasks; index += 1) await Promise.resolve();
+    if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (lazy) {
+      await waitForLazyScreenImports();
+      for (let index = 0; index < microtasks; index += 1) await Promise.resolve();
+    }
+  });
+}
+
+export const settleLazyImports = () => settle({ lazy: true });

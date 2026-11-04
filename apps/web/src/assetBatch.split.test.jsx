@@ -1,3 +1,4 @@
+import { deferred } from "./testUtils/async.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -155,15 +156,7 @@ describe("useAssetBatch truthful bulk move outcomes (sc-21901)", () => {
     harness = null;
   });
 
-  function deferred() {
-    let resolve;
-    let reject;
-    const promise = new Promise((nextResolve, nextReject) => {
-      resolve = nextResolve;
-      reject = nextReject;
-    });
-    return { promise, resolve, reject };
-  }
+
 
   function mount(overrides = {}) {
     let latest;

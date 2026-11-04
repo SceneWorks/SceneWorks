@@ -1,4 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useStableActions } from "./modelManager/memo.js";
+import { ModelCard } from "./modelManager/ModelCard.jsx";
+import { LoraRow } from "./modelManager/LoraRow.jsx";
+import { LoraImportPanel } from "./modelManager/LoraImportPanel.jsx";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { installJobStatusLabel } from "../yue2Policy.js";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
@@ -30,14 +34,13 @@ import {
   describeMissingLocalCopy,
   describeRemovalPreview,
   entriesForModel,
-  fetchModelCache,
   isTransitionalEntry,
   previewCacheRemoval,
   removalIsAllowed,
   removeCacheEntry,
   setCacheEntryPin,
 } from "../modelCache.js";
-import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
+import { useModelCacheStatus } from "../hooks/useModelCacheStatus.js";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { useLicenseAcknowledgments } from "../hooks/useLicenseAcknowledgments.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
@@ -663,7 +666,7 @@ export function ModelManagerScreen() {
   // entry — on a bounded cadence, so a copy in flight visibly converges instead of freezing at
   // whatever state the screen happened to open on. A settled cache costs exactly the one mount
   // read it always did, which is what keeps the per-row cost sc-19708 removed from coming back.
-  const [modelCache, setModelCache] = useState(null);
+  const { cache: modelCache, error: cacheError, refresh: refreshModelCache, stalled: cacheConvergenceStalled } = useModelCacheStatus(token, { pollWhenDisabled: false, reportSnapshotError: true });
   // Linked-library state for the catalog rows (epic 20398, sc-20650). ONE scan per approved root,
   // read on mount, indexed by checkpoint id. A card whose linked checkpoint is Needs Relink /
   // Needs Rescan must show the corrective ACTION — the state comes from this seam and is never
@@ -673,7 +676,6 @@ export function ModelManagerScreen() {
   const [cacheBusyKey, setCacheBusyKey] = useState("");
   // Why the local-copy controls are absent, when they are. Held apart from `deleteMessage` so an
   // action outcome cannot clobber a standing explanation, and vice versa.
-  const [cacheError, setCacheError] = useState("");
   // Tabbed interface (epic 10309): the active tab, the tab to restore when a search
   // clears, and the persistent search query. Every model now renders as an always-open
   // card, so the old per-row expand state is gone. Tabs: image | video | utility | lora,
@@ -813,42 +815,8 @@ export function ModelManagerScreen() {
     }
   }, [jobs, pendingUpdate, createModelConvertJob]);
 
-  // One resolved-cache status read for the whole screen. A failure leaves `modelCache` null, which
-  // renders no local-copy blocks at all — never an empty-but-confident "no local copies". The
-  // reason is kept separately so the screen can say ONCE why the controls are missing: the failure
-  // is global, so repeating it on every model card would be noise, and staying silent would leave
-  // the user to guess whether they have no local copies or no answer.
-  const refreshModelCache = useCallback(async () => {
-    try {
-      const snapshot = await fetchModelCache();
-      setModelCache(snapshot);
-      // A 200 can still carry `error`: the store exists but could not be listed.
-      setCacheError(snapshot?.error ? String(snapshot.error) : "");
-    } catch (error) {
-      setModelCache(null);
-      setCacheError(String(error?.message ?? error));
-    }
-  }, []);
-
-  useEffect(() => {
-    refreshModelCache();
-  }, [refreshModelCache]);
-
-  // The cache endpoint is also the cross-platform source of truth for whether this feature is on.
-  // Keep every local-copy surface hidden until the policy is both known and explicitly enabled:
-  // the feature is off by default, and an unavailable status read must not make an opt-in feature
-  // appear enabled. A disabled cache can still contain entries left from an earlier session, but
-  // those should not advertise an opt-in feature across every model card.
+  // Local-copy controls are visible only when the running policy enables them.
   const localCopiesEnabled = modelCache?.policy?.enabled === true;
-
-  // Bounded convergence refresh. It runs ONLY while the enabled cache snapshot actually holds an
-  // entry the store is still moving (queued, copying, being removed) and stops the moment every
-  // entry is terminal, so an all-settled cache is read exactly once. A disabled cache never arms a
-  // hidden polling loop for old entries that may remain on disk.
-  const { stalled: cacheConvergenceStalled } = useCacheConvergence(
-    localCopiesEnabled ? modelCache : null,
-    refreshModelCache,
-  );
 
   // "Keep locally" / "Allow automatic removal" — the artifact pin. Re-reads the authoritative
   // status afterwards rather than optimistically flipping the row: the UI must not claim a state
@@ -994,6 +962,21 @@ export function ModelManagerScreen() {
     }
   }
 
+  async function performDeletion(key, action, successMessage) {
+    setDeletingItem(key);
+    setDeleteMessage({ tone: "neutral", text: "" });
+    try {
+      const result = await action();
+      setDeleteMessage(result?.cancelled
+        ? { tone: "neutral", text: "" }
+        : { tone: "success", text: successMessage(result) });
+    } catch (err) {
+      setDeleteMessage({ tone: "error", text: err.message });
+    } finally {
+      setDeletingItem("");
+    }
+  }
+
   async function deleteModel(model) {
     if (!onDeleteModel || model.removable === false) {
       return;
@@ -1026,20 +1009,8 @@ export function ModelManagerScreen() {
     ) {
       return;
     }
-    setDeletingItem(`model:${model.id}`);
-    setDeleteMessage({ tone: "neutral", text: "" });
-    try {
-      const result = await onDeleteModel(model);
-      if (result?.cancelled) {
-        setDeleteMessage({ tone: "neutral", text: "" });
-      } else {
-        setDeleteMessage({ tone: "success", text: deleteResultText(result, model.name ?? model.id) });
-      }
-    } catch (err) {
-      setDeleteMessage({ tone: "error", text: err.message });
-    } finally {
-      setDeletingItem("");
-    }
+    await performDeletion(`model:${model.id}`, () => onDeleteModel(model),
+      (result) => deleteResultText(result, model.name ?? model.id));
   }
 
   // Delete ONE installed quant tier of a model to reclaim its disk (sc-12024/sc-12025). Unlike
@@ -1073,24 +1044,10 @@ export function ModelManagerScreen() {
     ) {
       return;
     }
-    setDeletingItem(`variant:${model.id}:${tier}`);
-    setDeleteMessage({ tone: "neutral", text: "" });
-    try {
-      const result = await deleteModelVariantAction(model, tier);
-      if (result?.cancelled) {
-        setDeleteMessage({ tone: "neutral", text: "" });
-      } else {
-        const freed = result?.reclaimedLabel ?? "";
-        setDeleteMessage({
-          tone: "success",
-          text: `Deleted the ${tierName} tier of ${model.name ?? model.id}${freed ? ` and reclaimed ${freed}` : ""}.`,
-        });
-      }
-    } catch (err) {
-      setDeleteMessage({ tone: "error", text: err.message });
-    } finally {
-      setDeletingItem("");
-    }
+    await performDeletion(`variant:${model.id}:${tier}`, () => deleteModelVariantAction(model, tier), (result) => {
+      const freed = result?.reclaimedLabel ?? "";
+      return `Deleted the ${tierName} tier of ${model.name ?? model.id}${freed ? ` and reclaimed ${freed}` : ""}.`;
+    });
   }
 
   async function deleteLora(lora) {
@@ -1109,20 +1066,8 @@ export function ModelManagerScreen() {
     ) {
       return;
     }
-    setDeletingItem(`lora:${lora.scope ?? "global"}:${lora.id}`);
-    setDeleteMessage({ tone: "neutral", text: "" });
-    try {
-      const result = await onDeleteLora(lora);
-      if (result?.cancelled) {
-        setDeleteMessage({ tone: "neutral", text: "" });
-      } else {
-        setDeleteMessage({ tone: "success", text: deleteResultText(result, lora.name ?? lora.id) });
-      }
-    } catch (err) {
-      setDeleteMessage({ tone: "error", text: err.message });
-    } finally {
-      setDeletingItem("");
-    }
+    await performDeletion(`lora:${lora.scope ?? "global"}:${lora.id}`, () => onDeleteLora(lora),
+      (result) => deleteResultText(result, lora.name ?? lora.id));
   }
 
   const completedImportTimes = completedLoraImportTimes(jobs);
@@ -1162,28 +1107,32 @@ export function ModelManagerScreen() {
     .sort(([a], [b]) => (a === "compatible" ? 1 : b === "compatible" ? -1 : a.localeCompare(b)))
     .map(([family, items]) => ({ family, items }));
 
-  // Re-read every approved root's scan. Called after a relink or a rescan so the card's verdict is
-  // the seam's fresh answer rather than an optimistic local flip.
-  const refreshLinkedStatuses = useCallback(async () => {
+  const linkedOwner = useRef(null);
+  // Both initial enrichment and corrective actions share the same token-bound scan.
+  const loadLinkedStatuses = useCallback(async (signal) => {
     try {
-      const response = await fetchLibraryRoots(token);
+      const response = await fetchLibraryRoots(token, { signal });
       const roots = Array.isArray(response?.roots) ? response.roots : [];
-      if (roots.length === 0) {
-        setLinkedStatuses(new Map());
-        return;
-      }
-      const scans = await Promise.all(roots.map((root) => scanLibraryRoot(token, root.rootId).catch(() => null)));
-      setLinkedStatuses(linkedStatusIndex(scans.filter(Boolean)));
+      const scans = await Promise.all(roots.map((root) => scanLibraryRoot(token, root.rootId, { signal }).catch(() => null)));
+      if (!signal?.aborted) setLinkedStatuses(linkedStatusIndex(scans.filter(Boolean)));
     } catch {
-      // See the mount effect: an enrichment read, silent by design.
+      // Enrichment is best effort; preserve the last known state on failure.
     }
   }, [token]);
+  const refreshLinkedStatuses = useCallback(() => {
+    const owner = linkedOwner.current;
+    if (owner?.token !== token || owner.controller.signal.aborted) return;
+    return loadLinkedStatuses(owner.controller.signal);
+  }, [loadLinkedStatuses, token]);
 
   // The two corrective actions a non-Ready linked card offers. Both surface the store's own typed
   // refusal on failure — `describeRefusal` has no generic branch, so a rejection the user has to
   // act on can never arrive as "something went wrong".
   async function relinkLinkedModel(status) {
+    const owner = linkedOwner.current;
+    const isCurrent = () => Boolean(owner) && owner === linkedOwner.current && !owner.controller.signal.aborted;
     const picked = isDesktop ? await tauriInvoke("choose_folder").catch(() => null) : null;
+    if (!isCurrent()) return;
     if (!picked) {
       setDeleteMessage({
         tone: "error",
@@ -1197,591 +1146,118 @@ export function ModelManagerScreen() {
     try {
       await updateLibraryRoot(token, status.rootId, { path: String(picked) });
       await refreshLinkedStatuses();
-      setDeleteMessage({ tone: "success", text: "Library relinked. Its models are selectable again." });
+      if (isCurrent()) setDeleteMessage({ tone: "success", text: "Library relinked. Its models are selectable again." });
     } catch (error) {
-      setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
+      if (isCurrent()) setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
     } finally {
-      setDeletingItem("");
+      if (isCurrent()) setDeletingItem("");
     }
   }
 
   async function rescanLinkedModel(status) {
+    const owner = linkedOwner.current;
+    const isCurrent = () => Boolean(owner) && owner === linkedOwner.current && !owner.controller.signal.aborted;
     setDeletingItem(`rescan:${status.checkpointId}`);
     try {
       const next = await rescanLibraryCheckpoint(token, status.rootId, status.relativePath);
       await refreshLinkedStatuses();
-      setDeleteMessage(
+      if (isCurrent()) setDeleteMessage(
         next?.state === "ready"
           ? { tone: "success", text: `${status.relativePath} is usable again.` }
           : { tone: "error", text: next?.detail || `${status.relativePath} still cannot be used.` },
       );
     } catch (error) {
-      setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
+      if (isCurrent()) setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
     } finally {
-      setDeletingItem("");
+      if (isCurrent()) setDeletingItem("");
     }
   }
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const response = await fetchLibraryRoots(token);
-        const roots = Array.isArray(response?.roots) ? response.roots : [];
-        if (roots.length === 0 || cancelled) return;
-        const scans = await Promise.all(
-          roots.map((root) => scanLibraryRoot(token, root.rootId).catch(() => null)),
-        );
-        if (!cancelled) setLinkedStatuses(linkedStatusIndex(scans.filter(Boolean)));
-      } catch {
-        // A deployment with no linked libraries answers here; the cards simply keep their ordinary
-        // install-state rendering. Deliberately silent: this is an enrichment read, and a banner
-        // for it would fire on every install that has never used a linked library.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [token]);
+    const controller = new AbortController();
+    linkedOwner.current = { controller, token };
+    setLinkedStatuses(new Map());
+    setDeletingItem((item) => item.startsWith("relink:") || item.startsWith("rescan:") ? "" : item);
+    loadLinkedStatuses(controller.signal);
+    return () => controller.abort();
+  }, [loadLinkedStatuses, token]);
 
   function renderModelCard(model) {
-    const downloadJobs = downloadJobsFor(model);
-    const downloadJob = downloadJobs.find((job) => !terminalStatuses.has(job.status));
-    const installed = model.installState === "installed";
-    const cleanupOnly = model.platformCleanupOnly === true;
-    const incomplete = model.cacheState === "incomplete" || model.repairAvailable;
-    const repairVariant = model.variants?.find((variant) => !variant.installed && variant.cacheState === "incomplete");
-    const missingRequiredFiles = Array.isArray(model.missingRequiredFiles) ? model.missingRequiredFiles : [];
-    const localDownloadJob = cleanupOnly || installed ? null : downloadJobs.find((job) => job.status !== "completed");
-    const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
-    const downloadSize = downloadSizeText(model, "Unavailable");
-    const unassociated = !model.family;
-    const capabilities = Array.isArray(model.capabilities)
-      ? model.capabilities.filter((capability) => !RETIRED_MODEL_CAPABILITIES.has(capability))
-      : [];
-    // Audio-type cards describe themselves via the `audio` sub-block (voice count,
-    // languages, edit modes, multi-speaker) instead of the generic capabilities[].
-    const audioChips = audioCapabilityChips(model);
-    const deleteKey = `model:${model.id}`;
-    const canDelete = Boolean(onDeleteModel) && model.removable !== false;
-    // MLX (macOS) variant: only present when the catalog computed mlxConversionState.
-    // Conversion state is a platform capability supplied by the API, not a memory measurement.
-    // Keep that control surface intact while guarding the MLX memory block by the active lane.
-    const mlxState = cleanupOnly ? null : model.mlxConversionState;
-    const mlxMinGb = memoryBackend === "mlx" ? blanketFloorGb(model, "mlx", lightestInstallableTier(model)) : null;
-    const mlxEnoughMemory = unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
-    const convertJobs = convertJobsFor(model);
-    const convertJob = convertJobs.find((job) => !terminalStatuses.has(job.status));
-    const failedConvert = convertJobs.find((job) => terminalStatuses.has(job.status) && job.status !== "completed");
-    const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
-    const gated = Boolean(model.gated);
-    const credentialPresent = gated && hasPresentCredential(credentials, model.credentialHost);
-    // Quant-matrix models (sc-8509): render the per-tier download panel with a RAM-based suggestion
-    // + multi-select instead of the single Download button. Single-variant models are unchanged.
-    const matrixVariants = orderedMatrixVariants(model);
-    const hasTierMatrix = model.hasVariantMatrix === true && matrixVariants.length > 0;
-    // License-acknowledgment gate (sc-7872, decoupled from the credential by sc-17227): a model
-    // whose licence must be acknowledged can't be downloaded until the user accepts it in-app.
-    // The requirement comes from `gated` OR the standalone `requiresLicenseAcknowledgment` — the
-    // latter covers a public repo whose licence still binds the user (MiniMax-H3).
-    //
-    // The predicate follows the DOWNLOAD CONTROLS, and is derived from the same conditions that
-    // decide whether any of them render — deliberately, because deriving it independently is how
-    // this went wrong: `!installed || updateAvailable` read "installed" as "nothing left to
-    // download", which is FALSE for a quant matrix. `install_state_for` (apps/rust-api/src/models.rs)
-    // marks a matrix model installed when ANY tier is present, so a MiniMax-H3 with q4 installed and
-    // q8/bf16 missing reported `installed: true`, `updateAvailable: false` — no notice, no
-    // checkbox — while the tier panel still offered bf16 and q8 and the choke point
-    // (`licenseAcknowledgmentBlocked`) still refused the click, telling the user to accept a licence
-    // on a card that rendered nothing to accept. Unrecoverable through the UI, and hit on every
-    // desktop relaunch, where localStorage does not survive.
-    //
-    // Each disjunct is a control that can start a download:
-    //   !installed           → the footer Download button
-    //   incomplete           → the footer Fix button (a torn cache re-fetches)
-    //   updateAvailable      → the Update button (MLX block and footer); also the `breaking_update`
-    //                          shape, which reports installed:false + updateAvailable:true
-    //   an uninstalled tier  → the tier panel's checkboxes + its Download button
-    // An installed model with none of those shows no notice: the acknowledgment is a pre-download
-    // step, and re-blocking a finished install would be noise.
-    const licenseGated = requiresLicenseAcknowledgment(model);
-    const downloadOnOffer =
-      !installed ||
-      incomplete ||
-      model.updateAvailable === true ||
-      (hasTierMatrix && matrixVariants.some((variant) => variant.installState !== "installed"));
-    const licenseGateApplies = licenseGated && downloadOnOffer;
-    const licenseAcknowledged = licenseAcks[model.id] === true;
-    const licenseAckRequired = licenseGateApplies && !licenseAcknowledged;
-    const firstCapability = capabilities.length ? capabilityLabel(capabilities[0]) : null;
-    const familyMeta = [model.family ?? "unassociated", firstCapability].filter(Boolean).join(" · ");
-    const macBlock = macModelBlock(model, macCapabilities);
-    // Header install-status badge: warn tones for an incomplete cache, accent for installed,
-    // neutral for missing.
-    // A linked checkpoint whose library is detached, or whose file drifted, is NOT missing: the
-    // plans are intact and there is exactly one button to press (AC2, epic 20398). Rendering it as
-    // "missing" invites the user to re-download bytes they already own.
     const linkedStatus = modelLinkedStatus(model, linkedStatuses);
-    const linkedFix = linkedCorrection(linkedStatus);
-    const provenance = modelProvenance(model);
-    const statusClass = linkedFix
-      ? "status-badge warning"
-      : incomplete
-        ? "status-badge warning"
-        : installed
-          ? "status-badge installed"
-          : "status-badge";
-    const statusText = linkedFix
-      ? linkedFix.headline.toLowerCase()
-      : incomplete
-        ? "incomplete"
-        : installed
-          ? "installed"
-          : "missing";
-    // Where this model's files actually resolve from, straight off the typed judgement the one
-    // shared resolver produced (sc-19708). NEVER re-derived here from paths or error text — that
-    // discipline is the whole reason a second, drifting availability opinion can't exist.
-    // `local_ready` is itself local-copy messaging, so suppress even a stale catalog judgement
-    // until the current cache policy is known to be enabled. The other availability badges still
-    // matter with caching off (for example, that the external library is disconnected).
-    const availability =
-      model.modelAvailability === "local_ready" && !localCopiesEnabled
-        ? null
-        : availabilityBadge(model);
-    // How much of this model a local copy could ever serve, straight off the backend's typed
-    // `cacheEligibility` (sc-19712 F-5). Null for a fully cacheable model and for a row with no
-    // external requirement closure; a badge whenever the local-copy affordance would over-promise.
-    const cacheCoverage = localCopiesEnabled ? cacheEligibilityBadge(model) : null;
-    // Local copies of THIS model, joined by the backend.
     const localCopies = localCopiesEnabled ? entriesForModel(modelCache, model.id) : [];
-    // The block renders ONLY when the cache state is actually known. `modelCache` is null when the
-    // status read failed outright, and a returned snapshot carries `error` when the store exists
-    // but could not be listed — in both cases the entry list is empty for want of an answer, not
-    // because there are no copies. Gating on `cacheKnown` is what stops "No local copy yet." from
-    // being rendered as a confident claim over a read that never succeeded.
-    const cacheKnown = Boolean(modelCache) && !modelCache.error;
-    const showLocalCopySection =
-      localCopiesEnabled && cacheKnown && (localCopies.length > 0 || canHoldLocalCopy(model));
-    return (
-      <article className={model.recommended ? "model-card recommended" : "model-card"} key={model.id}>
-        <div className="model-card-head">
-          <span className="model-card-title">
-            <strong>{model.name}</strong>
-            <small>{familyMeta}</small>
-          </span>
-          <span className="model-card-status">
-            <span className={statusClass}>{statusText}</span>
-            {availability ? (
-              <span
-                className={availability.tone ? `status-badge ${availability.tone}` : "status-badge"}
-                title={availability.title}
-              >
-                {availability.text}
-              </span>
-            ) : null}
-            {cacheCoverage ? (
-              <span
-                className={cacheCoverage.tone ? `status-badge ${cacheCoverage.tone}` : "status-badge"}
-                title={cacheCoverage.title}
-              >
-                {cacheCoverage.text}
-              </span>
-            ) : null}
-            {model.updateAvailable ? <span className="status-badge warning">update available</span> : null}
-            {unassociated ? (
-              <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
-                needs family
-              </span>
-            ) : null}
-            {macBlock ? (
-              <span className="status-badge warning" title={macBlock.text}>
-                not on Mac
-              </span>
-            ) : null}
-          </span>
-        </div>
-        {isRecommendedModel(model) ? <span className="model-card-rec-chip">★ Recommended</span> : null}
-        {/* Licence-required UI attribution (sc-17227). Some upstream licences oblige the product
-            to display a specific string prominently — MiniMax H3 Community License §IV.2 requires
-            "MiniMax H3" on the user interface. Its own line above the description, not folded into
-            prose, so it is legible as attribution rather than marketing copy. */}
-        {model.ui?.attribution ? (
-          <p className="model-card-attribution">{model.ui.attribution}</p>
-        ) : null}
-        <p className="model-card-description">{model.ui?.description ?? model.family ?? model.id}</p>
-        {provenance ? (
-          <p className="model-card-provenance">
-            Source: {provenance.label}
-            {provenance.reference ? ` · ${provenance.reference}` : ""}
-          </p>
-        ) : null}
-        {linkedFix ? (
-          <div
-            aria-label={`${model.name ?? model.id} ${linkedFix.headline}`}
-            className="model-card-linked-fix"
-            role="group"
-          >
-            <p className="checkpoint-state-headline">{linkedFix.headline}</p>
-            <p>{linkedFix.summary}</p>
-            {linkedFix.detail ? <p className="checkpoint-import-detail">{linkedFix.detail}</p> : null}
-            <button
-              disabled={deletingItem === `relink:${linkedStatus.checkpointId}` || deletingItem === `rescan:${linkedStatus.checkpointId}`}
-              onClick={() => (linkedFix.action === "relink" ? relinkLinkedModel(linkedStatus) : rescanLinkedModel(linkedStatus))}
-              type="button"
-            >
-              {linkedFix.label}
-            </button>
-          </div>
-        ) : null}
-        {capabilities.length ? (
-          <ul className="model-capabilities">
-            {capabilities.map((capability) => (
-              <li className="chip" key={capability}>
-                {capabilityLabel(capability)}
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {audioChips.length ? (
-          <ul className="model-capabilities model-audio-capabilities">
-            {audioChips.map((chip) => (
-              <li className="chip" key={chip}>
-                {chip}
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {!cleanupOnly && licenseGateApplies ? (
-          <LicenseGateNotice
-            credentialRequired={gated}
-            host={model.credentialHost}
-            repoUrl={gated ? (gatedRepoUrl(model) ?? model.licenseUrl ?? null) : null}
-            licenseUrl={model.licenseUrl}
-            licenseNotice={model.licenseNotice}
-            present={credentialPresent}
-            acknowledged={licenseAcknowledged}
-            onAcknowledgeChange={(checked) => setLicenseAck(model.id, checked)}
-            onOpenSettings={() => setActiveView("Settings")}
-          />
-        ) : null}
-        {/* The PERSISTENT half of the licence surface (sc-24108). The gate above disappears the
-            moment the model finishes installing, which used to take the restriction with it — this
-            row keeps the licence name, the link and the full notice reachable from model details
-            for the whole life of the install. Its condition is the PRESENCE of licence terms, not
-            the install state; `gateVisible` only stops the same paragraphs being printed twice
-            while the gate is still on screen. */}
-        {!cleanupOnly ? (
-          <ModelLicenseSummary
-            licenseName={licenseComponentForModel(model.id)?.license}
-            licenseUrl={model.licenseUrl}
-            licenseNotice={model.licenseNotice}
-            nonCommercial={model.nonCommercial === true}
-            gateVisible={licenseGateApplies}
-          />
-        ) : null}
-        {/* Per-component installation details + supported limits (sc-24216). Collapsed by default;
-            renders only for an entry that declares per-download licences or a prompt limit. */}
-        {!cleanupOnly ? <ModelComponentDetails model={model} totalSizeText={model.downloadSizeLabel ? downloadSize : null} /> : null}
-        {/* The imported-checkpoint product surface (sc-26687): source variant, supported
-            operations/backends, component readiness and the repair steps that would complete the
-            assembly. Values come from the server's single derivation, so a repair offered here is
-            the repair the API describes. Collapsed by default, like the component table above. */}
-        {!cleanupOnly ? (
-          <ImportedCheckpointSurface
-            model={model}
-            onRepair={(repair) => {
-              if (repair.kind === "download") {
-                // An imported DiT is not downloadable. The server binds this resident component
-                // to the import's compatible base and tier; never retry an unrelated old job.
-                createModelDownloadJob(model, { componentId: repair.componentId });
-                return;
-              }
-              if (repair.kind === "reimport") {
-                if (model.importedSource?.ownershipMode === "managed") {
-                  setCheckpointRepairRequest({ model });
-                  setActiveTab(model.type === "video" ? "video" : "image");
-                }
-                return;
-              }
-              // relink / rescan: the linked-repair affordance above, which is the seam that decides
-              // which of the two the library root index calls for.
-              if (linkedStatus && linkedFix) {
-                if (linkedFix.action === "relink") {
-                  relinkLinkedModel(linkedStatus);
-                } else {
-                  rescanLinkedModel(linkedStatus);
-                }
-              }
-            }}
-          />
-        ) : null}
-        {incomplete ? (
-          <p className="inline-warning">
-            Cached files are incomplete
-            {missingRequiredFiles.length ? `: ${missingRequiredFiles.slice(0, 3).join(", ")}${missingRequiredFiles.length > 3 ? "..." : ""}` : ""}.
-          </p>
-        ) : null}
-        {cleanupOnly ? (
-          <p className="inline-warning">
-            This model is no longer available on this platform. Delete it to reclaim its existing local files.
-          </p>
-        ) : null}
-        {!cleanupOnly && localDownloadJob ? (
-          <WorkerProgressCard
-            job={localDownloadJob}
-            onCancel={onCancelJob}
-            onRetry={onResumeDownloadJob}
-            onFreshRetry={onFreshDownloadJob}
-            onOpenQueue={onOpenQueue}
-          />
-        ) : null}
-        {!cleanupOnly && mlxState ? (
-          <div className="mlx-status">
-            <div className="mlx-status-badges">
-              {/* sc-20529: device-neutral, like `mlxStatusText`. This block renders off-Mac too
-                  now (the candle convert lane), where an "MLX" chip mislabels a CUDA artifact. */}
-              <span className="status-badge">Conversion</span>
-              {/* The model-level `mlx.minMemoryGb` is a single blanket floor = the HEAVIEST tier's
-                  worst case (e.g. Wan A14B bf16, both MoE experts dense = 133 GB). Showing it
-                  tier-agnostically over-warns quant-matrix models whose default/installed tier is q4
-                  (measured ~24 GiB, one MoE expert resident at a time) — it reads "won't run" on Macs
-                  that run q4/q8 fine. For a matrix model the per-tier download panel below drives the
-                  per-tier RAM guidance instead (sc-10042); keep the blanket badge/warning only for
-                  single-variant MLX models, which have one legitimate footprint. */}
-              {mlxMinGb != null && !hasTierMatrix ? (
-                <span className={mlxEnoughMemory ? "status-badge" : "status-badge warning"}>needs ≥ {mlxMinGb} GB</span>
-              ) : null}
-            </div>
-            <p>{mlxStatusText(model)}</p>
-            {/* A conversion that left files the engine would refuse (sc-24216): the catalog reports
-                it as needing conversion and names the engine's reason. */}
-            {model.mlxConversionProblem ? (
-              <div className="inline-warning" role="alert">
-                <p>The converted files are damaged or incomplete, so this model cannot load. Convert again to rebuild them from the downloaded checkpoint; if that fails, delete the model and download it again.</p>
-                <details className="model-conversion-problem">
-                  <summary>Details</summary>
-                  <p>{model.mlxConversionProblem}</p>
-                </details>
-              </div>
-            ) : null}
-            {/* The last conversion's failure, so "Retry Conversion" is never offered without the
-                reason it failed (sc-24216). */}
-            {!convertJob && failedConvert && mlxState !== "converted" && (failedConvert.error || failedConvert.message) ? (
-              <p className="inline-warning" role="alert">
-                Conversion {failedConvert.status === "canceled" ? "was canceled" : "failed"}
-                {failedConvert.error ? `: ${failedConvert.error}` : failedConvert.message ? `: ${failedConvert.message}` : "."}
-              </p>
-            ) : null}
-            {!mlxEnoughMemory && !hasTierMatrix ? (
-              <p className="inline-warning">
-                Needs ≥ {mlxMinGb} GB unified memory; this Mac has ~{Math.round(unifiedMemoryGb)} GB. It may run out of memory.
-              </p>
-            ) : null}
-            {convertJob ? <WorkerProgressCard job={convertJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} /> : null}
-            {model.updateAvailable ? (
-              <>
-                <p className="inline-warning">
-                  A newer checkpoint is available. Update re-downloads it and re-converts it.
-                </p>
-                <button
-                  disabled={
-                    Boolean(downloadJob) ||
-                    Boolean(convertJob) ||
-                    Boolean(pendingUpdate[model.id]) ||
-                    !mlxEnoughMemory ||
-                    licenseAckRequired
-                  }
-                  onClick={() => handleUpdateModel(model)}
-                  title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
-                  type="button"
-                >
-                  {convertJob
-                    ? convertJob.status
-                    : downloadJob || pendingUpdate[model.id]
-                      ? "Updating…"
-                      : "Update"}
-                </button>
-              </>
-            ) : showConvertButton ? (
-              <button
-                disabled={mlxState === "converted" || Boolean(convertJob) || !mlxEnoughMemory}
-                onClick={() => onConvertModel?.(model)}
-                type="button"
-              >
-                {convertJob
-                  ? convertJob.status
-                  : mlxState === "converted"
-                    ? "Converted"
-                    : failedConvert
-                      ? "Retry Conversion"
-                      : model.mlxConversionProblem
-                        ? "Convert again"
-                        : "Convert"}
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-        {!cleanupOnly && hasTierMatrix ? (
-          <ModelTierDownloadPanel
-            model={model}
-            unifiedMemoryGb={unifiedMemoryGb}
-            backend={memoryBackend}
-            downloadJobs={downloadJobs}
-            licenseAckRequired={licenseAckRequired}
-            onDownloadVariant={onDownloadVariant}
-            onDeleteVariant={deleteModelVariant}
-            deletingItem={deletingItem}
-          />
-        ) : null}
-        {/* Convert-at-install models (mlxTiers) have no download panel; surface their installed
-            tiers with a per-tier delete so unused convert outputs can be reclaimed (sc-12025). */}
-        {!cleanupOnly && !hasTierMatrix ? (
-          <ConvertedTierList
-            model={model}
-            onDeleteVariant={deleteModelVariant}
-            deletingItem={deletingItem}
-          />
-        ) : null}
-        {/* Local copies of this model in the resolved-model cache (sc-19711). Separate from the
-            download/install job surface above on purpose: promoting or reclaiming a local copy is
-            not an install, and conflating them would make "removed" read as "uninstalled". */}
-        {showLocalCopySection ? (
-          <div className="model-local-copy">
-            <div className="model-local-copy-head">
-              <span className="status-badge">Local copy</span>
-              {model.modelAvailability === "installed_external_unavailable" && !localCopies.length ? (
-                <span className="status-badge warning">library disconnected</span>
-              ) : null}
-              {/* Convergence is visible, and it is honest about having stopped. While the store is
-                  still working the screen re-reads on its own; once the bounded refresh gives up it
-                  says so, and "Check again" remains the way to re-read at any point. */}
-              {localCopies.some(isTransitionalEntry) ? (
-                <>
-                  <span className="model-local-copy-progress">
-                    {cacheConvergenceStalled
-                      ? "Still in progress — SceneWorks has stopped checking automatically."
-                      : "Checking for changes…"}
-                  </span>
-                  <button onClick={refreshModelCache} type="button">
-                    Check again
-                  </button>
-                </>
-              ) : null}
-            </div>
-            {localCopies.length === 0 ? (
-              // The empty state must not promise a copy the cache can never serve: for a model the
-              // backend excluded (soft co-requisites, or a requirement with no recorded revision)
-              // this says so instead (sc-19712 F-5). The block itself stays VISIBLE — the exclusion
-              // is the thing the user has to be able to see.
-              <p>{describeMissingLocalCopy(model)}</p>
-            ) : (
-              <ul className="model-local-copy-list">
-                {localCopies.map((entry) => {
-                  const busy = cacheBusyKey === entry.cacheKey;
-                  const ready = entry.state === "complete";
-                  // What this state means, in words, straight off the store's typed value — with a
-                  // remedy attached for the states nothing resolves on its own.
-                  const stateNote = describeEntryState(entry);
-                  return (
-                    <li className="model-local-copy-entry" key={entry.cacheKey}>
-                      <span className="model-local-copy-text">
-                        <span>
-                          {entry.tier ? `${tierLabel(entry.tier)} · ` : ""}
-                          {formatBytes(entry.bytes)}
-                        </span>
-                        <small className={stateNote.failure ? "model-local-copy-failure" : undefined}>
-                          {stateNote.text}
-                        </small>
-                      </span>
-                      <span className="model-local-copy-actions">
-                        <button
-                          disabled={busy || !ready}
-                          onClick={() => toggleKeepLocalCopy(entry)}
-                          type="button"
-                        >
-                          {entry.pinned ? "Allow automatic removal" : "Keep locally"}
-                        </button>
-                        <button
-                          className="danger-action"
-                          disabled={busy}
-                          onClick={() => removeLocalCopy(model, entry)}
-                          type="button"
-                        >
-                          {busy ? "Working…" : "Remove local copy"}
-                        </button>
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-            <p>
-              Removing a local copy never uninstalls the model — the original files in the model
-              library are untouched.
-            </p>
-          </div>
-        ) : null}
-        {!cleanupOnly && model.updateAvailable && !mlxState ? (
-          <p className="inline-warning">A newer model download is available; the installed version remains usable.</p>
-        ) : null}
-        <div className="model-card-footer">
-          <span className="model-card-size">{downloadSize}</span>
-          <div className="model-card-footer-actions">
-            {cleanupOnly ? null : hasTierMatrix ? (
-              // A quant-matrix model installs its tiers from the panel above. Keep only a Fix
-              // affordance here for an incomplete cache or soft co-requisite update; otherwise
-              // there's no single-tier button. Repair the torn tier, including its companions.
-              incomplete || model.updateAvailable ? (
-                <button
-                  className="model-card-primary"
-                  disabled={!model.downloadable || Boolean(downloadJob) || licenseAckRequired}
-                  title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
-                  onClick={() =>
-                    failedDownload
-                      ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })
-                      : repairVariant
-                        ? onDownloadVariant(model, repairVariant.variant)
-                        : onDownloadModel(model)
-                  }
-                  type="button"
-                >
-                  {downloadJob ? downloadJob.status : failedDownload ? "Resume Download" : model.updateAvailable ? "Update" : "Fix"}
-                </button>
-              ) : null
-            ) : (
-              <button
-                className="model-card-primary"
-                disabled={(installed && !incomplete && !model.updateAvailable) || !model.downloadable || Boolean(downloadJob) || licenseAckRequired}
-                title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
-                onClick={() =>
-                  failedDownload
-                    ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })
-                    : onDownloadModel(model)
-                }
-                type="button"
-              >
-                {downloadJob
-                  ? downloadJob.status
-                  : failedDownload
-                      ? "Resume Download"
-                      : incomplete
-                        ? "Fix"
-                        : model.updateAvailable
-                          ? "Update"
-                        : installed
-                          ? "Ready"
-                          : model.downloadSizeLabel
-                            ? `Download ${downloadSize}`
-                            : "Download"}
-              </button>
-            )}
-            <button className="danger-action" disabled={!canDelete || deletingItem === deleteKey} onClick={() => deleteModel(model)} type="button">
-              {model.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
-            </button>
-          </div>
-        </div>
-      </article>
-    );
+    const cardDeletingItem = deletingItem === `model:${model.id}` || deletingItem.startsWith(`variant:${model.id}:`) || (linkedStatus && (deletingItem === `relink:${linkedStatus.checkpointId}` || deletingItem === `rescan:${linkedStatus.checkpointId}`)) ? deletingItem : "";
+    return <ModelCard
+      key={model.id ?? model.name}
+      model={model}
+      RETIRED_MODEL_CAPABILITIES={RETIRED_MODEL_CAPABILITIES}
+      audioCapabilityChips={audioCapabilityChips}
+      availabilityBadge={availabilityBadge}
+      blanketFloorGb={blanketFloorGb}
+      cacheBusyKey={localCopies.some((entry) => entry.cacheKey === cacheBusyKey) ? cacheBusyKey : ""}
+      cacheConvergenceStalled={cacheConvergenceStalled && localCopies.some(isTransitionalEntry)}
+      cacheEligibilityBadge={cacheEligibilityBadge}
+      canHoldLocalCopy={canHoldLocalCopy}
+      capabilityLabel={capabilityLabel}
+      convertJobs={convertJobsFor(model)}
+      createModelDownloadJob={createModelDownloadJob}
+      credentials={credentials}
+      deleteModel={stable.deleteModel}
+      deleteModelVariant={stable.deleteModelVariant}
+      deletingItem={cardDeletingItem}
+      describeEntryState={describeEntryState}
+      describeMissingLocalCopy={describeMissingLocalCopy}
+      downloadJobs={downloadJobsFor(model)}
+      downloadSizeText={downloadSizeText}
+      formatBytes={formatBytes}
+      gatedRepoUrl={gatedRepoUrl}
+      handleUpdateModel={stable.handleUpdateModel}
+      hasPresentCredential={hasPresentCredential}
+      isRecommendedModel={isRecommendedModel}
+      isTransitionalEntry={isTransitionalEntry}
+      licenseAcknowledged={licenseAcks[model.id] === true}
+      licenseComponentForModel={licenseComponentForModel}
+      lightestInstallableTier={lightestInstallableTier}
+      linkedCorrection={linkedCorrection}
+      linkedStatus={linkedStatus}
+      localCopiesEnabled={localCopiesEnabled}
+      macCapabilities={macCapabilities}
+      macModelBlock={macModelBlock}
+      memoryBackend={memoryBackend}
+      mlxStatusText={mlxStatusText}
+      localCopies={localCopies}
+      cacheKnown={Boolean(modelCache) && !modelCache.error}
+      modelProvenance={modelProvenance}
+      onCancelJob={stable.onCancelJob}
+      onConvertModel={onConvertModel}
+      onDeleteModel={onDeleteModel}
+      onDownloadModel={onDownloadModel}
+      onDownloadVariant={stable.onDownloadVariant}
+      onFreshDownloadJob={stable.onFreshDownloadJob}
+      onOpenQueue={stable.onOpenQueue}
+      onResumeDownloadJob={stable.onResumeDownloadJob}
+      orderedMatrixVariants={orderedMatrixVariants}
+      pendingUpdate={Boolean(pendingUpdate[model.id])}
+      refreshModelCache={refreshModelCache}
+      relinkLinkedModel={stable.relinkLinkedModel}
+      removeLocalCopy={stable.removeLocalCopy}
+      requiresLicenseAcknowledgment={requiresLicenseAcknowledgment}
+      rescanLinkedModel={stable.rescanLinkedModel}
+      setActiveTab={setActiveTab}
+      setActiveView={setActiveView}
+      setCheckpointRepairRequest={setCheckpointRepairRequest}
+      setLicenseAck={setLicenseAck}
+      terminalStatuses={terminalStatuses}
+      tierLabel={tierLabel}
+      toggleKeepLocalCopy={stable.toggleKeepLocalCopy}
+      unifiedMemoryGb={unifiedMemoryGb}
+      ConvertedTierList={ConvertedTierList}
+      ImportedCheckpointSurface={ImportedCheckpointSurface}
+      LicenseGateNotice={LicenseGateNotice}
+      ModelComponentDetails={ModelComponentDetails}
+      ModelLicenseSummary={ModelLicenseSummary}
+      ModelTierDownloadPanel={ModelTierDownloadPanel}
+      WorkerProgressCard={WorkerProgressCard}
+    />;
   }
 
   const loraEditKey = (lora) => `${lora.scope ?? "global"}:${lora.id}`;
@@ -1831,155 +1307,40 @@ export function ModelManagerScreen() {
   }
 
   function renderLoraRow(lora) {
-    const installed = lora.installState === "installed";
-    const missing = lora.installState === "missing";
-    const isBuiltin = lora.scope === "builtin";
-    // A built-in that isn't downloaded reads "not installed" (neutral) — it can be fetched.
-    // A user LoRA with no local files reads "unavailable" (danger) — it's registered but broken.
-    const userUnavailable = missing && !isBuiltin;
-    const statusText = installed ? "installed" : missing ? (isBuiltin ? "not installed" : "unavailable") : "pending";
-    const statusClass = installed ? "status-badge installed" : userUnavailable ? "status-badge danger" : "status-badge";
-    const rowClass = userUnavailable ? "lora-row unavailable" : "lora-row";
-    const deleteKey = `lora:${lora.scope ?? "global"}:${lora.id}`;
-    // Built-in LoRAs with a Hugging Face source can be fetched on demand (sc-5944) —
-    // user LoRAs are installed via the import form, so they get no Download affordance.
-    const hfSource = (lora.source?.provider ?? lora.provider) === "huggingface";
-    const canDownload = Boolean(onDownloadLora) && lora.scope === "builtin" && (!installed || lora.updateAvailable) && hfSource;
-    const downloadJob = loraDownloadJobsFor(lora).find((job) => !terminalStatuses.has(job.status));
-    const keywords = Array.isArray(lora.triggerWords) ? lora.triggerWords : [];
-    const notes = typeof lora.notes === "string" ? lora.notes : "";
     const isEditing = editingLora === loraEditKey(lora);
-    // A LoRA whose architecture family couldn't be resolved (no manifest family, no
-    // detected signature — e.g. an external ComfyUI adapter in a format we don't yet
-    // recognize) is listed so the user sees the file was found, but flagged unusable:
-    // the generate-time gate refuses it for every model, so no picker offers it
-    // (sc-10509). Built-in catalog LoRAs always declare a family, so this only marks
-    // user/external rows.
-    const unusable = !isBuiltin && !loraHasResolvableFamily(lora);
-    // Built-in entries are read-only (their manifest is compiled in); the backend
-    // rejects PATCH on them, so no Edit affordance is offered.
-    const canEdit = Boolean(onUpdateLora) && lora.scope !== "builtin";
-    // sc-24163: an unresolved family is chosen in place — except on an external (ComfyUI-folder)
-    // row, which no manifest backs: the API refuses the write, so it gets an import hint instead.
-    const isExternal = lora.scope === "external";
-    const canChooseFamily = unusable && !isExternal;
-    // What the adapter file itself declared in its safetensors `__metadata__` at import
-    // (sc-14057). Each part is shown only when the file stated it — a great many third-party
-    // adapters declare no rank/alpha, and showing an inferred value would be a lie about the
-    // file. `rank`/`alpha` are numbers; `== null` keeps a legitimate alpha of 0.
-    const declared = [
-      lora.networkType,
-      lora.rank == null ? null : `rank ${lora.rank}`,
-      lora.alpha == null ? null : `alpha ${lora.alpha}`,
-    ].filter(Boolean);
-    return (
-      <article className={rowClass} key={lora.id ?? lora.name}>
-        <span>
-          <strong>{lora.name ?? lora.id}</strong>
-          <small>{[lora.scope, unusable ? "unrecognized format" : lora.family ?? "compatible", ...declared].filter(Boolean).join(" | ")}</small>
-        </span>
-        {unusable ? (
-          <span className="status-badge warning">
-            unusable
-          </span>
-        ) : (
-          <>
-            <span className={statusClass}>{statusText}</span>
-            {lora.updateAvailable ? <span className="status-badge warning">update available</span> : null}
-          </>
-        )}
-        {unusable && isExternal ? <small className="lora-family-hint">Import a copy to choose its family.</small> : null}
-        <span className="lora-row-actions">
-          {canDownload ? (
-            <button disabled={Boolean(downloadJob)} onClick={() => onDownloadLora(lora)} type="button">
-              {downloadJob ? downloadJob.status : lora.updateAvailable ? "Update" : "Download"}
-            </button>
-          ) : null}
-          {canEdit && !isEditing ? (
-            <button onClick={() => startEditLora(lora)} type="button">
-              {canChooseFamily ? "Choose family" : "Edit"}
-            </button>
-          ) : null}
-          <button
-            className="danger-action"
-            disabled={!onDeleteLora || lora.removable === false || deletingItem === deleteKey}
-            onClick={() => deleteLora(lora)}
-            type="button"
-          >
-            {lora.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
-          </button>
-        </span>
-        {!isEditing && (keywords.length || notes) ? (
-          <div className="lora-row-meta">
-            {keywords.length ? (
-              <div className="lora-keywords">
-                {keywords.map((keyword) => (
-                  <span className="kw-chip" key={keyword}>
-                    {keyword}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-            {notes ? <p className="lora-notes">{notes}</p> : null}
-          </div>
-        ) : null}
-        {isEditing ? (
-          <div className="lora-row-editor">
-            {canChooseFamily ? (
-              <label>
-                Unresolved family — choose
-                <select
-                  disabled={savingLora || !families.length}
-                  onChange={(event) => setLoraEditDraft((current) => ({ ...current, family: event.target.value }))}
-                  value={loraEditDraft.family}
-                >
-                  <option value="">Choose family</option>
-                  {families.map((family) => (
-                    <option key={family} value={family}>
-                      {family}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-            <label>
-              Trigger keywords
-              <KeywordTagEditor
-                disabled={savingLora}
-                onChange={(triggerWords) => setLoraEditDraft((current) => ({ ...current, triggerWords }))}
-                suggestions={loraEditSuggestions}
-                value={loraEditDraft.triggerWords}
-              />
-            </label>
-            <label>
-              Notes
-              <textarea
-                disabled={savingLora}
-                onChange={(event) => setLoraEditDraft((current) => ({ ...current, notes: event.target.value }))}
-                placeholder="How to use this LoRA — keyword combinations, recommended weight, and other tips."
-                rows={2}
-                value={loraEditDraft.notes}
-              />
-            </label>
-            <div className="lora-row-editor-actions">
-              <button disabled={savingLora} onClick={() => saveEditLora(lora)} type="button">
-                {savingLora ? "Saving…" : "Save"}
-              </button>
-              <button disabled={savingLora} onClick={cancelEditLora} type="button">
-                Cancel
-              </button>
-            </div>
-            {loraEditError ? <p className="inline-warning">{loraEditError}</p> : null}
-          </div>
-        ) : null}
-        {downloadJob ? (
-          <div className="lora-row-progress">
-            <WorkerProgressCard job={downloadJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
-          </div>
-        ) : null}
-      </article>
-    );
+    const ownDeleteKey = `lora:${lora.scope ?? "global"}:${lora.id}`;
+    return <LoraRow
+      key={lora.id ?? lora.name}
+      lora={lora}
+      cancelEditLora={stable.cancelEditLora}
+      deleteLora={stable.deleteLora}
+      deletingItem={deletingItem === ownDeleteKey ? deletingItem : ""}
+      isEditing={isEditing}
+      families={families}
+      downloadJob={loraDownloadJobsFor(lora).find((job) => !terminalStatuses.has(job.status))}
+      loraEditDraft={isEditing ? loraEditDraft : null}
+      loraEditError={isEditing ? loraEditError : ""}
+      loraEditSuggestions={isEditing ? loraEditSuggestions : null}
+      loraHasResolvableFamily={loraHasResolvableFamily}
+      onCancelJob={stable.onCancelJob}
+      onDeleteLora={onDeleteLora}
+      onDownloadLora={onDownloadLora}
+      onOpenQueue={stable.onOpenQueue}
+      onUpdateLora={onUpdateLora}
+      saveEditLora={stable.saveEditLora}
+      savingLora={isEditing && savingLora}
+      setLoraEditDraft={setLoraEditDraft}
+      startEditLora={stable.startEditLora}
+      KeywordTagEditor={KeywordTagEditor}
+      WorkerProgressCard={WorkerProgressCard}
+    />;
   }
+
+  const stable = useStableActions({
+    onCancelJob, onResumeDownloadJob, onFreshDownloadJob, onDownloadVariant, onOpenQueue,
+    deleteModel, deleteModelVariant, deleteLora, handleUpdateModel, relinkLinkedModel, rescanLinkedModel,
+    removeLocalCopy, toggleKeepLocalCopy, startEditLora, cancelEditLora, saveEditLora, importLora,
+  });
 
   // --- Tabbed interface derivation (epic 10309) ---
   const query = search.trim().toLowerCase();
@@ -2106,9 +1467,9 @@ export function ModelManagerScreen() {
           families={families}
           macCapabilities={macCapabilities}
           models={models}
-          onCancelJob={onCancelJob}
+          onCancelJob={stable.onCancelJob}
           onImportModel={onImportModel}
-          onOpenQueue={onOpenQueue}
+          onOpenQueue={stable.onOpenQueue}
           // Relink / forget / rescan from inside the panel change the SAME linked statuses the
           // catalog cards render; without this the cards keep saying "Needs relink" after the
           // panel has already fixed it.
@@ -2259,197 +1620,30 @@ export function ModelManagerScreen() {
       {isLoraTab ? (
         <div className="models-tab-panel">
           {/* Import LoRA — same accent-band treatment as the Recommended band. */}
-          <form className="models-accent-band models-import-panel" aria-label="Import LoRA" onSubmit={importLora}>
-            <div className="models-accent-band-head">
-              <span className="models-accent-dot" aria-hidden="true" />
-              <p className="eyebrow">Import LoRA</p>
-              <span className="models-accent-band-caption">Add a LoRA from a URL or file — auto-detects family</span>
-            </div>
-            <div className="segmented-control compact-segment" aria-label="LoRA import source">
-              <button
-                className={importForm.mode === "url" ? "active" : ""}
-                disabled={importingLora}
-                onClick={() => setImportForm((current) => ({ ...current, mode: "url" }))}
-                type="button"
-              >
-                URL
-              </button>
-              <button
-                className={importForm.mode === "file" ? "active" : ""}
-                disabled={importingLora}
-                onClick={() => setImportForm((current) => ({ ...current, mode: "file" }))}
-                type="button"
-              >
-                Upload
-              </button>
-            </div>
-            <div className="models-import-grid">
-              <label>
-                Scope
-                <select
-                  disabled={importingLora}
-                  onChange={(event) => setImportForm((current) => ({ ...current, scope: event.target.value }))}
-                  value={importForm.scope}
-                >
-                  <option value="global">Global</option>
-                  <option disabled={!activeProject} value="project">
-                    Project
-                  </option>
-                </select>
-              </label>
-              <label>
-                Family
-                <select
-                  disabled={importingLora || !families.length}
-                  onChange={(event) =>
-                    setImportForm((current) => ({
-                      ...current,
-                      family: event.target.value,
-                      baseModel: "",
-                      secondaryFile: null,
-                    }))
-                  }
-                  value={importForm.family}
-                >
-                  {families.length ? (
-                    <>
-                      <option value="">Auto-detect</option>
-                      {families.map((family) => (
-                        <option key={family} value={family}>
-                          {family}
-                        </option>
-                      ))}
-                    </>
-                  ) : (
-                    <option value="">No model families</option>
-                  )}
-                </select>
-              </label>
-              {showBaseModelSelect ? (
-                <label>
-                  Base model
-                  <select
-                    disabled={importingLora}
-                    onChange={(event) => setImportForm((current) => ({ ...current, baseModel: event.target.value }))}
-                    value={importForm.baseModel}
-                  >
-                    <option value="">{ltxBaseModelRequired ? "Select LTX base model" : "Auto / unspecified"}</option>
-                    {baseModelOptions.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.name ?? model.id}
-                      </option>
-                    ))}
-                  </select>
-                  {ltxBaseModelRequired ? (
-                    <span className="field-hint">Required so LTX-2.3 and LTX-2.5 adapters stay on the correct base.</span>
-                  ) : null}
-                </label>
-              ) : null}
-              {isFileImport ? (
-                <>
-                  <label>
-                    LoRA File
-                    <span className="file-picker-row">
-                      <span className="file-upload-button">
-                        Choose
-                        <input
-                          accept=".safetensors,.ckpt,.pt,.bin"
-                          disabled={importingLora}
-                          key={fileInputKey}
-                          onChange={(event) => setImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
-                          type="file"
-                        />
-                      </span>
-                      <span className="selected-file-name">{importForm.file?.name ?? "No file selected"}</span>
-                    </span>
-                  </label>
-                  {showSecondaryFileSlot ? (
-                    <label>
-                      Low-noise expert (Wan A14B MoE)
-                      <span className="file-picker-row">
-                        <span className="file-upload-button">
-                          Choose
-                          <input
-                            accept=".safetensors,.ckpt,.pt,.bin"
-                            disabled={importingLora}
-                            key={`secondary-${fileInputKey}`}
-                            onChange={(event) => setImportForm((current) => ({ ...current, secondaryFile: event.target.files?.[0] ?? null }))}
-                            type="file"
-                          />
-                        </span>
-                        <span className="selected-file-name">{importForm.secondaryFile?.name ?? "No file selected"}</span>
-                      </span>
-                    </label>
-                  ) : null}
-                </>
-              ) : (
-                <label>
-                  Source URL
-                  <input
-                    disabled={importingLora}
-                    onChange={(event) => setImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
-                    placeholder="https://..."
-                    value={importForm.sourceUrl}
-                  />
-                </label>
-              )}
-              <label>
-                Name
-                <input
-                  disabled={importingLora}
-                  onChange={(event) => setImportForm((current) => ({ ...current, name: event.target.value }))}
-                  placeholder="Optional"
-                  value={importForm.name}
-                />
-              </label>
-              <button disabled={importDisabled} type="submit">
-                {importingLora ? (isFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
-              </button>
-            </div>
-            <div className="lora-import-metadata">
-              <label>
-                Trigger keywords
-                <KeywordTagEditor
-                  disabled={importingLora}
-                  onChange={(triggerKeywords) =>
-                    setImportForm((current) => ({ ...current, triggerKeywords }))
-                  }
-                  placeholder="e.g. sksStyle — press Enter or comma to add"
-                  value={importForm.triggerKeywords}
-                />
-              </label>
-              <label>
-                Notes
-                <textarea
-                  disabled={importingLora}
-                  onChange={(event) => setImportForm((current) => ({ ...current, notes: event.target.value }))}
-                  placeholder="How to use this LoRA — keyword combinations, recommended weight, and other tips."
-                  rows={2}
-                  value={importForm.notes}
-                />
-              </label>
-            </div>
-            {showSecondaryFileSlot ? (
-              <p className="helper-copy">
-                Wan A14B is a two-expert model. Upload both the high-noise file and the low-noise expert so each expert
-                gets its own weights.
-              </p>
-            ) : null}
-            {moeMissingSecondary ? (
-              <p className="inline-warning">
-                No low-noise expert selected — this LoRA will load into the high-noise expert only, leaving the
-                low-noise expert un-adapted.
-              </p>
-            ) : null}
-            {importForm.scope === "project" && !activeProject ? <p className="helper-copy">Open a project before importing a project LoRA.</p> : null}
-            {importMessage.text ? <p className={importMessage.tone === "success" ? "inline-success" : "inline-warning"}>{importMessage.text}</p> : null}
-          </form>
+          <LoraImportPanel
+            importLora={stable.importLora}
+            importForm={importForm}
+            setImportForm={setImportForm}
+            importingLora={importingLora}
+            activeProject={activeProject}
+            families={families}
+            showBaseModelSelect={showBaseModelSelect}
+            ltxBaseModelRequired={ltxBaseModelRequired}
+            baseModelOptions={baseModelOptions}
+            isFileImport={isFileImport}
+            fileInputKey={fileInputKey}
+            showSecondaryFileSlot={showSecondaryFileSlot}
+            importDisabled={importDisabled}
+            moeMissingSecondary={moeMissingSecondary}
+            importMessage={importMessage}
+            KeywordTagEditor={KeywordTagEditor}
+          />
           {localLoraImportJobs.length ? (
             <div className="lora-import-progress">
               <strong>LoRA imports in progress</strong>
               <div className="local-job-stack">
                 {localLoraImportJobs.map((job) => (
-                  <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                  <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={stable.onOpenQueue} />
                 ))}
               </div>
             </div>
