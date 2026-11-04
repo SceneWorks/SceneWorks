@@ -62,19 +62,12 @@ fn resolve_tokenizer(native_dir: &Path) -> PathBuf {
         return native_umt5;
     }
     // Cached turnkey: ~/.cache/huggingface/hub/models--SceneWorks--wan2.2-i2v-a14b-mlx/snapshots/*/tokenizer.json
-    if let Some(home) = std::env::var_os("HOME") {
-        let snapshots = PathBuf::from(home)
-            .join(".cache/huggingface/hub")
-            .join("models--SceneWorks--wan2.2-i2v-a14b-mlx")
-            .join("snapshots");
-        if let Ok(entries) = std::fs::read_dir(&snapshots) {
-            for entry in entries.flatten() {
-                let candidate = entry.path().join("tokenizer.json");
-                if candidate.is_file() {
-                    return candidate;
-                }
-            }
-        }
+    if let Some(root) =
+        super::smoke_support::cached_snapshot("SceneWorks/wan2.2-i2v-a14b-mlx", |root| {
+            root.join("tokenizer.json").is_file()
+        })
+    {
+        return root.join("tokenizer.json");
     }
     panic!(
         "no tokenizer.json found — set SCENEWORKS_WAN_I2V_14B_TOKENIZER, place one at {}, or cache \

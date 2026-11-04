@@ -177,7 +177,8 @@ impl<T: Clone> ExternalScanCache<T> {
 
 /// Walk a canonical external subtree with the caller's container filter and bounds.
 /// Follow links only within the subtree, skip hidden entries (including linked aliases), and
-/// visit canonical directories once so cycles cannot consume the depth/file budget.
+/// visit canonical directories at their shallowest depth so internal aliases cannot consume a
+/// shallower path's remaining depth budget; visit each directory once to bound cycles.
 pub fn walk_confined(
     root: &std::path::Path,
     max_depth: usize,
@@ -186,8 +187,8 @@ pub fn walk_confined(
 ) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut visited = std::collections::HashSet::new();
-    let mut stack = vec![(root.to_path_buf(), 0_usize)];
-    while let Some((dir, depth)) = stack.pop() {
+    let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0_usize)]);
+    while let Some((dir, depth)) = queue.pop_front() {
         if !visited.insert(dir.clone()) {
             continue;
         }
@@ -211,7 +212,7 @@ pub fn walk_confined(
             }
             if canonical.is_dir() {
                 if depth < max_depth {
-                    stack.push((canonical, depth + 1));
+                    queue.push_back((canonical, depth + 1));
                 }
             } else if accepts(&canonical) {
                 files.push(canonical);
@@ -292,6 +293,40 @@ mod tests {
             path.extension().is_some_and(|ext| ext == "safetensors")
         });
         assert_eq!(found, vec![root.join("real/one.safetensors")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_walk_internal_alias_cannot_spend_a_shallower_directory_depth_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        for (name, other) in [("left", "right"), ("right", "left")] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(dir.join("models")).unwrap();
+            std::fs::write(
+                dir.join("models/model.safetensors"),
+                b"metadata-only fixture",
+            )
+            .unwrap();
+            let mut deep = dir;
+            for _ in 0..6 {
+                deep = deep.join("deep");
+                std::fs::create_dir(&deep).unwrap();
+            }
+            std::os::unix::fs::symlink(root.join(other), deep.join("internal-alias")).unwrap();
+        }
+        let mut files = walk_confined(&root, 8, 10, |path| {
+            path.extension().is_some_and(|ext| ext == "safetensors")
+        });
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                root.join("left/models/model.safetensors"),
+                root.join("right/models/model.safetensors")
+            ]
+        );
+        assert_eq!(walk_confined(&root, 8, 1, |_| true).len(), 1);
     }
 
     /// Build an OS-native path list the same way an operator's shell would.

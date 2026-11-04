@@ -380,8 +380,8 @@ mod tests {
     use crate::api_client::ApiClient;
     use axum::extract::{Path as AxumPath, State};
     use axum::response::{IntoResponse, Response};
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
+
+    use axum::Json;
     use gen_core::{GenerationOutput, GenerationRequest, Generator, Progress};
     use sceneworks_core::contracts::JobSnapshot;
     use std::sync::{Arc, Mutex};
@@ -678,14 +678,12 @@ mod tests {
             .into_response()
         }
         let posts: Posts = Arc::default();
-        let app = Router::new()
-            .route("/api/v1/jobs/:job_id", get(job_route))
-            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-            .route(
-                "/api/v1/workers/:worker_id/heartbeat",
-                post(heartbeat_route),
-            )
-            .with_state((posts.clone(), cancel_requested));
+        let app = crate::test_api_stub::job_progress_heartbeat_routes(
+            job_route,
+            progress_route,
+            heartbeat_route,
+        )
+        .with_state((posts.clone(), cancel_requested));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         crate::load_progress::spawn(async move {

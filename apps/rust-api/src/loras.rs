@@ -1608,6 +1608,11 @@ pub(crate) fn validate_lora_specs_for_model(
         else {
             continue;
         };
+        // Only the current model catalog may supply the recorded base's compatibility facts.
+        normalized_lora
+            .as_object_mut()
+            .unwrap()
+            .remove("baseModelManifestEntry");
         if catalog_backed && matches!(model_id, "flux3_klein" | "flux3_klein_base") {
             for key in ["installedPath", "sourcePath", "path", "source"] {
                 if let Some(value) = lora.get(key) {
@@ -1806,6 +1811,10 @@ pub(crate) fn validate_lora_specs_for_model(
             .any(|family| matches!(family.as_str(), "wan-video" | "ltx-video"))
         {
             if let Some(base_model) = lora_base_model(lora) {
+                let base_manifest = models
+                    .iter()
+                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(&base_model))
+                    .and_then(Value::as_object);
                 // Shared with the worker's own gate (sc-15017): exact-id equality, plus the
                 // extra-compatible arm that keeps the 5B-vs-14B split while letting a Wan-14B
                 // LoRA onto a 14B-class model that accepts `wan-video` through the registry —
@@ -1815,10 +1824,7 @@ pub(crate) fn validate_lora_specs_for_model(
                     model_id,
                     &base_model,
                     model.as_object(),
-                    models
-                        .iter()
-                        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(&base_model))
-                        .and_then(Value::as_object),
+                    base_manifest,
                 ) {
                     let detail = if families.iter().any(|family| family == "ltx-video") {
                         "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable"
@@ -1828,6 +1834,10 @@ pub(crate) fn validate_lora_specs_for_model(
                     return Err(ApiError::bad_request(format!(
                         "LoRA {lora_id} was trained for base model {base_model}, not {model_id}; {detail}"
                     )));
+                }
+                if let Some(base_manifest) = base_manifest {
+                    normalized_lora["baseModelManifestEntry"] =
+                        Value::Object(base_manifest.clone());
                 }
             }
         }
@@ -2696,6 +2706,77 @@ mod base_model_gating_tests {
         bytes.extend_from_slice(&json);
         bytes.resize(bytes.len() + offset as usize, 0);
         std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn catalog_base_facts_survive_api_normalization_and_worker_validation() {
+        let models = vec![
+            json!({"id":"ltx_2_3", "family":"ltx-video", "loraCompatibility":{"families":["ltx-video"],"generation":"2.3"}}),
+            json!({"id":"custom_ltx_base", "family":"ltx-video", "loraCompatibility":{"families":["ltx-video"],"generation":"2.3"}}),
+        ];
+        let lora = json!({"id":"custom_adapter", "family":"ltx-video", "baseModel":"custom_ltx_base", "installState":"installed"});
+        for inline in [false, true] {
+            let mut attached = if inline {
+                lora.clone()
+            } else {
+                json!({"id":"custom_adapter"})
+            };
+            attached["baseModelManifestEntry"] =
+                json!({"id":"forged", "loraCompatibility":{"generation":"2.5"}});
+            let normalized = validate_lora_specs_for_model(
+                &models,
+                std::slice::from_ref(&lora),
+                "ltx_2_3",
+                &[attached],
+                inline,
+                "LoRA",
+            )
+            .unwrap();
+            let forwarded: Vec<Value> =
+                serde_json::from_slice(&serde_json::to_vec(&normalized).unwrap()).unwrap();
+            sceneworks_core::lora_family::validate_lora_compatibility_with_manifest(
+                &forwarded,
+                Some("ltx-video"),
+                "ltx_video",
+                Some("ltx_2_3"),
+                models[0].as_object(),
+            )
+            .expect("the worker must accept the same catalog-based pairing as API preflight");
+            assert_eq!(forwarded[0]["baseModelManifestEntry"], models[1]);
+            for bad in [
+                json!({"id":"different_base", "loraCompatibility":{"generation":"2.3"}}),
+                json!({"id":"custom_ltx_base", "loraCompatibility":{"generation":"2.5"}}),
+                Value::Null,
+            ] {
+                let mut changed = forwarded.clone();
+                changed[0]["baseModelManifestEntry"] = bad;
+                assert!(
+                    sceneworks_core::lora_family::validate_lora_compatibility_with_manifest(
+                        &changed,
+                        Some("ltx-video"),
+                        "ltx_video",
+                        Some("ltx_2_3"),
+                        models[0].as_object(),
+                    )
+                    .is_err()
+                );
+            }
+        }
+        let mut incompatible = models.clone();
+        incompatible[1]["loraCompatibility"]["generation"] = json!("2.5");
+        assert!(validate_lora_specs_for_model(
+            &incompatible,
+            &[],
+            "ltx_2_3",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA"
+        )
+        .is_err());
+        assert!(
+            validate_lora_specs_for_model(&models[..1], &[], "ltx_2_3", &[lora], true, "LoRA")
+                .is_err()
+        );
     }
 
     #[test]
