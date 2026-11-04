@@ -222,22 +222,9 @@ impl Settings {
     }
 }
 
-pub(crate) fn env_string(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| default.to_owned())
-}
+pub(crate) use sceneworks_core::env_util::env_trimmed_string as env_string;
 
-pub(crate) fn env_path_or(key: &str, default: &std::path::Path) -> PathBuf {
-    std::env::var(key)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default.to_path_buf())
-}
+pub(crate) use sceneworks_core::env_util::env_path_or;
 
 pub(crate) fn env_u64_any(keys: &[&str], default: u64) -> u64 {
     keys.iter()

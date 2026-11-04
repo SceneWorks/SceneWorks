@@ -1,35 +1,11 @@
 //! Small worker-wide utilities: byte/time formatting, asset ids, and HF auth.
 use super::*;
 
-pub fn format_bytes(value: u64) -> String {
-    let mut size = value as f64;
-    for unit in ["B", "KB", "MB", "GB", "TB"] {
-        if size < 1024.0 || unit == "TB" {
-            if unit == "B" {
-                return format!("{} {unit}", size as u64);
-            }
-            return format!("{size:.1} {unit}");
-        }
-        size /= 1024.0;
-    }
-    format!("{size:.1} TB")
-}
+pub use sceneworks_core::display_util::format_bytes;
 
-pub(crate) fn quote_path(value: &str) -> String {
-    let mut output = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
-            output.push(char::from(byte));
-        } else {
-            output.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    output
-}
+pub(crate) use sceneworks_core::display_util::quote_path;
 
-pub(crate) fn now_rfc3339() -> String {
-    format_unix_seconds(now_unix_seconds())
-}
+pub(crate) use sceneworks_core::time::utc_now as now_rfc3339;
 
 pub(crate) fn bounded_tail(value: &str, max_lines: usize, max_chars: usize) -> String {
     let mut lines = value.lines().rev().take(max_lines).collect::<Vec<_>>();
