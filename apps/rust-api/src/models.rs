@@ -1244,7 +1244,7 @@ pub(crate) async fn create_model_download_job(
         )
         .map_err(ApiError::bad_request)?;
         if payload.license_acknowledged {
-            for entry in [&model, base] {
+            for entry in [&model, &base] {
                 if model_requires_license_acknowledgment(entry) {
                     crate::yue2_jobs::record_license_acknowledgment(&state, entry, "download")
                         .await?;
