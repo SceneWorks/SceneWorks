@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…4 were approved by Michael on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-5…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
+| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…5 were approved by Michael on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-6…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
 | **Date** | 2026-11-03 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
 | **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
@@ -577,7 +577,7 @@ pub struct ComponentPlan {
   - **`MemoryRequestScope` receives,** for each phase, its geometry, mode and conditioning, selected rungs and transition identity, under the whole-plan budget reservation.
   - **ENG-2** extends the same integration to Hires.fix's intermediate codec and encoder stages, and to its own adopted routes.
   - **These are production interfaces that APP-4 keeps**, not temporary parallel implementations. APP-4 later centralizes the callers and budget hooks. ENG-1b and ENG-2 do not depend on it.
-  - **Gate:** ENG-1b's admission edits touch files in SW-F327 #3264, so they wait for that PR to merge (DEC-5).
+  - **Gate:** ENG-1b's admission edits touch files in SW-F327 #3264, so they wait for its remediation to reach `main` and re-baseline (approved DEC-5).
 - **iOS admission** (`ios_admission.rs`, per-family `ios_pricing/`) is replaced by plan-byte pricing plus quantum hooks (MEM-6).
 
 **Aggregate accounting walkthroughs (R5-01; illustrative units, not measurements).**
@@ -894,7 +894,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 ### 7.5 SW-F327 overlap ledger (snapshot 2026-11-03; refreshed at each feature's planning)
 
-**Live refresh during decision review:** #3258 and #3264 are merged into `feature/sw-f327-code-review-remediation`, with merge commits `1c3e121bc2` and `c04f551f9a`; neither is an ancestor of fetched `origin/main`. #3260, #3268 and #3270 remain open against that feature branch. The dispositions below describe ownership and intended reuse, not acceptance on main. Recheck at implementation planning. DEC-5 remains open, and this snapshot authorizes no implementation.
+**Snapshot from the DEC-4/5 discussion:** #3258 and #3264 are merged into `feature/sw-f327-code-review-remediation`, with merge commits `1c3e121bc2` and `c04f551f9a`; neither was an ancestor of fetched `origin/main`. #3260, #3268 and #3270 were open against that feature branch. The dispositions below describe ownership and intended reuse, not acceptance on main. Refresh this dated snapshot at implementation planning. DEC-5 is approved as a sequencing policy; no implementation is authorized during design review.
 
 | SW-F327 PR | Cards | SGA requirements touched | Disposition |
 |---|---|---|---|
@@ -905,10 +905,11 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 | #3270 | SW-6677/6679 cfg alias, SW-6686 AST architecture checks, SW-6812/6817/6824 dependency de-dup and direction guard | LANE-5, DEC-6, LANE-6 | **SW-F327-owned; PR open.** SGA builds on main-delivered changes. Structural guards extend `architecture_tests.rs` if DEC-6 allows. |
 | SW-F148 (`sc-8432`) | Krea Realtime interactive streaming, spike-gated; NO-GO permitted | PIPE-16, HOOK-1 | **Separate product owner; sequenced adoption (§6.9).** ENG-6 puts current batch output through the production terminal/repeated-chunk primitive. If a streaming path already exists, ENG-6 migrates it too; if delivered later, SW-F148 adopts that primitive with its first stream-only production hooks. NO-GO retains the batch user and removes no existing capability. No duplicate streaming delivery or orphan mock-only hook. |
 
-**Rule (DEC-5).**
-- `[INF]` items run now, behind unchanged worker-facing APIs.
-- Every `[SW]` item waits until the PRs above that touch its files have merged to `main`.
-- In-review cards are never absorbed.
+**Approved DEC-5 policy (2026-11-03), applied once implementation is authorized.**
+- Independent `[INF]` work may proceed while preserving worker-facing APIs and inference-pin compatibility. Check producer/consumer contracts and live overlap rather than treating every inference edit as independent.
+- Overlapping `[SW]` changes wait for their owning remediation to reach `main`, then re-baseline. Verify main ancestry; a merge into SW-F327's feature branch does not clear this dependency.
+- Reuse delivered remediation and leave in-review fixes with their current owner. Refresh the file/contract ledger at every feature's planning; unrelated work has no blanket dependency on completion of all SW-F327.
+- This is a design decision, not authorization to start implementation, create program tracker items or execute models.
 
 ---
 
@@ -949,7 +950,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 ### 9.1 Conventions
 
-- **Item tags:** `[INF]` items run in inference and can start now. `[SW]` items are gated by DEC-5.
+- **Item tags:** `[INF]` identifies inference work; independent items can proceed once implementation is authorized. `[SW]` overlap is checked against approved DEC-5's main-delivery gate.
 - **Feature size:** each feature is ≤6 weeks (DEC-12). A feature estimated above that is split at planning.
 - **Estimates:** agent-time at **low confidence**, re-estimated with `codegraph-plan`.
 - **Slices are sketches.** Each feature becomes 5–12 mechanism slices with 1–3 local acceptance criteria.
