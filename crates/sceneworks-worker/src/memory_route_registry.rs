@@ -10531,6 +10531,8 @@ pub(crate) enum MemoryGateFamily {
     Sd35,
     Flux3,
     Krea,
+    // The composed provider has its own overlay/load identity on every host; it is not a base DiT.
+    KreaControl,
     Sdxl,
     Pulid,
 }
@@ -10557,6 +10559,7 @@ pub(crate) fn gate_family(engine_id: &str) -> Option<MemoryGateFamily> {
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => Sd35,
         "flux3_klein" | "flux3_klein_base" => Flux3,
         "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit" => Krea,
+        "krea_2_turbo_control" => KreaControl,
         "sdxl" => Sdxl,
         "pulid_flux" => Pulid,
         _ => return None,
@@ -10651,6 +10654,7 @@ mod gate_policy_tests {
             ("flux3_klein_base", MemoryGateFamily::Flux3),
             ("candle_kolors_control", MemoryGateFamily::KolorsBespoke),
             ("krea_2_turbo_edit", MemoryGateFamily::Krea),
+            ("krea_2_turbo_control", MemoryGateFamily::KreaControl),
         ] {
             assert_eq!(gate_family(id), Some(family));
         }
@@ -10660,6 +10664,9 @@ mod gate_policy_tests {
     }
     #[test]
     fn every_registered_image_route_retains_gate_policy_without_a_parallel_family_list() {
+        for backend in [MemoryRouteBackend::Mlx, MemoryRouteBackend::Candle] {
+            assert!(has_gate_policy(backend, "krea_2_turbo_control"));
+        }
         for row in crate::engines::MODEL_TABLE {
             assert!(
                 has_gate_policy(MemoryRouteBackend::Mlx, row.engine_id),
