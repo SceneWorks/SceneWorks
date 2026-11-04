@@ -127,15 +127,7 @@ struct SourceCapturePlan {
     dev_adapter_inventory: Option<ArtifactInventory>,
 }
 
-fn target_string<'a>(
-    target: &'a serde_json::Map<String, Value>,
-    name: &str,
-) -> Result<&'a str, String> {
-    target
-        .get(name)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("planned.target.{name} must be a string"))
-}
+use protocol::target_str as target_string;
 
 fn validate_geometry(width: u32, height: u32, frames: u32) -> Result<Geometry, String> {
     const BASE: &[(u32, u32)] = &[(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)];
@@ -169,10 +161,7 @@ fn validate_geometry(width: u32, height: u32, frames: u32) -> Result<Geometry, S
 
 fn validate_target(request: &Value) -> Result<Target, String> {
     let planned = protocol::planned(request)?;
-    let target = planned
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let target = protocol::plan_object(planned, "/target")?;
     for name in ["provider", "modelId"] {
         let actual = target_string(target, name)?;
         if actual != LTX25_PROVIDER {
@@ -215,13 +204,7 @@ fn validate_target(request: &Value) -> Result<Target, String> {
         .get("geometry")
         .and_then(Value::as_object)
         .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
+    let axis = |name: &str| protocol::geometry_axis_u32(geometry, name);
     if axis("batch")? != 1 {
         return Err(format!("{LABEL} requires geometry.batch == 1"));
     }
@@ -236,27 +219,21 @@ fn validate_target(request: &Value) -> Result<Target, String> {
         geometry.frames,
         geometry.fps,
     );
-    let fixture = planned
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::plan_str(planned, "/fixture")?;
     if fixture != expected_fixture {
         return Err(format!(
             "{LABEL} fixture must bind tier, transformerVariant, decoder, geometry, cadence, and seed exactly: expected {expected_fixture:?}, got {fixture:?}"
         ));
     }
-    let fingerprint = planned
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let fingerprint = protocol::plan_str(planned, "/calibrationFingerprint")?;
     if fingerprint != FINGERPRINT {
         return Err(format!(
             "{LABEL} requires calibration fingerprint {FINGERPRINT:?}, got {fingerprint:?}"
         ));
     }
-    if planned.get("expectedResult").and_then(Value::as_str) != Some("passed")
-        || planned.get("negative").and_then(Value::as_bool) != Some(false)
-        || planned.get("modelLoadPolicy").and_then(Value::as_str) != Some("fresh_per_case")
+    if protocol::plan_optional_str(planned, "/expectedResult") != Some("passed")
+        || protocol::plan_optional_bool(planned, "/negative") != Some(false)
+        || protocol::plan_optional_str(planned, "/modelLoadPolicy") != Some("fresh_per_case")
         || !planned.get("modelLoadGroup").is_some_and(Value::is_null)
     {
         return Err(format!(
@@ -608,11 +585,7 @@ fn prepare_source_capture(request: &Value, target: Target) -> Result<SourceCaptu
             "SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX escaped SCENEWORKS_MEMORY_CAPTURE_DIR".to_owned(),
         );
     }
-    let logical_case_id = protocol::planned(request)?
-        .get("logicalCaseId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.logicalCaseId must be a string".to_owned())?
-        .to_owned();
+    let logical_case_id = protocol::planned_str(request, "/logicalCaseId")?.to_owned();
     if !valid_logical_case_id(&logical_case_id) {
         return Err(
             "planned.logicalCaseId must be implan- plus 20 lowercase hex characters".to_owned(),
@@ -1820,14 +1793,9 @@ mod tests {
 
     #[test]
     fn canonical_av_receipts_are_content_addressed_and_immutable() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let output_dir = std::env::temp_dir().join(format!(
-            "sceneworks-ltx25-av-receipt-{}-{nonce}",
-            std::process::id()
-        ));
+        let fixture_owner = crate::adapter_test_support::Fixtures::default();
+        let fixtures = &fixture_owner;
+        let output_dir = fixtures.path("canonical-av-receipts-are-content-addressed-and-immutable");
         std::fs::create_dir_all(&output_dir).unwrap();
         let plan = SourceCapturePlan {
             output_dir: output_dir.clone(),
@@ -1859,7 +1827,6 @@ mod tests {
         std::fs::write(&local_path, b"tampered").unwrap();
         let error = persist_canonical_av(&plan, "selected_av", &clip).unwrap_err();
         assert!(error.contains("different bytes"), "{error}");
-        std::fs::remove_dir_all(output_dir).unwrap();
     }
 
     #[test]
@@ -1917,14 +1884,10 @@ mod tests {
 
     #[test]
     fn source_capture_seals_enhancer_and_variant_exact_adapter_inputs() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let output_dir = std::env::temp_dir().join(format!(
-            "sceneworks-ltx25-shared-receipt-{}-{nonce}",
-            std::process::id()
-        ));
+        let fixture_owner = crate::adapter_test_support::Fixtures::default();
+        let fixtures = &fixture_owner;
+        let output_dir =
+            fixtures.path("source-capture-seals-enhancer-and-variant-exact-adapter-inputs");
         std::fs::create_dir_all(&output_dir).unwrap();
         let snapshot_root = output_dir.join("snapshot");
         let target = validate_target(&request("q4", "dev", "conv", 768, 512, BASE_FRAMES)).unwrap();
@@ -1997,7 +1960,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["base", "enhancer"]
         );
-        std::fs::remove_dir_all(output_dir).unwrap();
     }
 
     #[test]

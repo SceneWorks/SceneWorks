@@ -1,3 +1,4 @@
+import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
 /**
  * `node --test` coverage for `scripts/check-tier-integrity.mjs` (sc-15799).
  *
@@ -34,7 +35,7 @@ async function realInputs() {
     await Promise.all([
       readFile(path.join(ROOT, "config/tier-integrity.jsonc"), "utf8"),
       readFile(path.join(ROOT, "config/manifests/builtin.models.jsonc"), "utf8"),
-      readFile(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs"), "utf8"),
+      rustFacadeSource(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs")),
       readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/catalog.rs"), "utf8"),
       readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/candle.rs"), "utf8"),
       readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/mlx.rs"), "utf8"),

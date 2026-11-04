@@ -4721,7 +4721,11 @@ impl ProjectStore {
                 "Invalid project file path".to_owned(),
             ));
         }
+        if !is_public_project_file(Path::new(relative_path)) {
+            return Err(ProjectStoreError::NotFound("File not found".to_owned()));
+        }
         let project_path = self.find_project_path(project_id)?;
+        let root = fs::canonicalize(&project_path)?;
         let target = crate::safe_path::resolve_local_file(&project_path, relative_path).map_err(
             |error| match error.kind() {
                 std::io::ErrorKind::NotFound => {
@@ -4733,6 +4737,11 @@ impl ProjectStore {
                 _ => ProjectStoreError::Io(error),
             },
         )?;
+        // Recheck the canonical relative path too: a public-looking symlink must
+        // never turn this read-only media boundary into access to internal state.
+        if !target.is_file() || !target.strip_prefix(&root).is_ok_and(is_public_project_file) {
+            return Err(ProjectStoreError::NotFound("File not found".to_owned()));
+        }
         let content_type = guess_mime_from_filename(&target.display().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_owned());
         Ok(ProjectFile {
@@ -7350,6 +7359,104 @@ fn purge_asset_record(project_path: &Path, asset_id: &str) -> ProjectStoreResult
     transaction.execute("delete from assets where id = ?1", params![asset_id])?;
     transaction.commit()?;
     Ok(())
+}
+
+/// Public file downloads expose product media and explicit authoring/export documents,
+/// not the project storage tree. Keep the allowlist here so token and media-ticket
+/// callers share it, and check both the requested and canonical relative paths.
+fn is_public_project_file(path: &Path) -> bool {
+    let Some(path) = path.to_str() else {
+        return false;
+    };
+    let normalized = path.replace('\\', "/");
+    let parts = normalized.split('/').collect::<Vec<_>>();
+    if parts
+        .iter()
+        .any(|part| part.starts_with('.') || part.is_empty())
+    {
+        return false;
+    }
+    let name = parts
+        .last()
+        .copied()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    // Durable sidecars are API state, even when next to a public image or document.
+    if name.contains(".sceneworks.") {
+        return false;
+    }
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .unwrap_or_default();
+    let media = SAFE_UPLOAD_EXTENSIONS.contains(&extension)
+        || matches!(
+            extension,
+            "svg" | "mp3" | "flac" | "ogg" | "opus" | "m4a" | "aac" | "aiff" | "aif"
+        );
+    let tensor = matches!(extension, "safetensors" | "npy" | "npz");
+    let document = matches!(
+        extension,
+        "json" | "jsonc" | "txt" | "md" | "csv" | "tsv" | "srt" | "vtt" | "pdf"
+    );
+    match parts.as_slice() {
+        ["assets", "documents", ..] => media || document,
+        // MOSS writes one portable authoring envelope alongside each numbered
+        // tensor output. The UI downloads it and the asset-workflow reader verifies
+        // its recorded digest. This is not a general JSON/state-file allowance.
+        ["assets", "tensors", _, file]
+            if file
+                .strip_suffix(".sceneworks-workflow.json")
+                .is_some_and(|sample| {
+                    sample.len() >= 4 && sample.bytes().all(|byte| byte.is_ascii_digit())
+                }) =>
+        {
+            true
+        }
+        ["assets", "tensors", ..] => media || tensor,
+        ["assets", "depth", ..] => media || extension == "npy",
+        // Uploaded NPY assets and the importer's inert fallback .bin are public;
+        // training latent/optimizer caches with these suffixes are not media.
+        ["assets", "uploads", ..] => media || tensor || extension == "bin",
+        ["training", "uploads", ..] => media || extension == "bin",
+        // These numerical files are authored inputs with source-owned layouts,
+        // distinct from the trainer's private latent/optimizer caches.
+        ["training", "datasets", _, "prepared", _] => extension == "safetensors",
+        ["training", "datasets", _, "sidecars", file] if extension == "npy" => {
+            file.ends_with(".depth.npy") || file.ends_with(".mask.npy")
+        }
+        ["assets", ..]
+        | ["training", "datasets" | "samples", ..]
+        | ["films", "draft-assets", ..] => media,
+        // Project-scoped training stores previews beside the adapter, while
+        // global adapters keep theirs under training/samples. Do not expose
+        // adapter manifests, receipts or optimizer/checkpoint state.
+        ["loras", _, "samples", ..] | ["training", "loras", _, "samples", ..] => media,
+        ["films", "drafts", file] => file.ends_with(".json"),
+        ["films", "runs", _, file]
+            if matches!(
+                *file,
+                "authoring.json"
+                    | "plan.json"
+                    | "references.json"
+                    | "compiled.json"
+                    | "review.jsonc"
+            ) =>
+        {
+            true
+        }
+        ["films", "runs", _, ..] => media,
+        ["timeline-exports" | "exports", ..] => {
+            media
+                || tensor
+                || document
+                || matches!(
+                    extension,
+                    "bin" | "zip" | "otio" | "otioz" | "fcpxml" | "xml" | "edl" | "aaf" | "mlt"
+                )
+        }
+        _ => false,
+    }
 }
 
 /// Resolve a project-relative deletion target without following linked parents.
@@ -15774,6 +15881,126 @@ mod tests {
         assert!(!is_safe_relative_path("../outside.txt"));
         assert!(!is_safe_relative_path("assets\\..\\outside.txt"));
         assert!(!is_safe_relative_path("/absolute/path.png"));
+    }
+
+    #[test]
+    fn public_project_files_allow_product_media_and_refuse_internal_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Public files").unwrap();
+        let root = store.find_project_path(&project.id).unwrap();
+        for path in [
+            "assets/images/picture.png",
+            "assets/videos/movie.mp4",
+            "assets/tensors/latents.safetensors",
+            "assets/tensors/genset/0000.sceneworks-workflow.json",
+            "assets/tensors/genset/10000.sceneworks-workflow.json",
+            "assets/uploads/measurement.npy",
+            "assets/depth/set/map.npy",
+            "training/uploads/legacy.bin",
+            "training/datasets/ds/prepared/item.safetensors",
+            "training/datasets/ds/sidecars/item.depth.npy",
+            "training/datasets/ds/sidecars/item.mask.npy",
+            "exports/latents.npz",
+            "assets/uploads/source.bin",
+            "assets/uploads/legacy.ogv",
+            "assets/documents/script.json",
+            "assets/uploads/source.svg",
+            "training/datasets/ds/masks/mask.png",
+            "training/samples/lora/step-000250/sample.png",
+            "loras/lora/samples/step-000250/sample.png",
+            "training/loras/legacy/samples/step-000250/sample.png",
+            "films/draft-assets/film/references/ref.webp",
+            "films/drafts/film.json",
+            "films/runs/run/authoring.json",
+            "films/runs/run/plan.json",
+            "timeline-exports/cut.json",
+            "exports/cut.zip",
+        ] {
+            let target = root.join(path);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::write(&target, b"public fixture").unwrap();
+            assert!(store.project_file(&project.id, path).is_ok(), "{path}");
+        }
+        for path in [
+            "project.db",
+            "project.json",
+            ".marker",
+            "assets/.secret.png",
+            "assets/images/.hidden/secret.png",
+            "assets/images/project.db",
+            "assets/images/state.sqlite3",
+            "assets/images/image.sceneworks.json",
+            "assets/images/partial.png.tmp",
+            "cache/preview.png",
+            "recipes/recipe.json",
+            "films/runs/run/locator.json",
+            "films/planning/operations/request.json",
+            "training/datasets/ds/dataset.json",
+            "loras/lora/manifest.jsonc",
+            "loras/lora/optimizer.safetensors",
+            "loras/lora/samples/optimizer.safetensors",
+            "training/datasets/ds/latents/cache.npz",
+            "training/datasets/ds/optimizer.safetensors",
+            "training/datasets/ds/state.bin",
+            "training/datasets/ds/sidecars/state.npz",
+            "training/datasets/ds/prepared/optimizer.bin",
+            "assets/images/state.safetensors",
+            "assets/images/index.json",
+            "assets/tensors/latent.sceneworks-workflow.json",
+            "assets/tensors/genset/state.json",
+            "assets/tensors/genset/0000.sceneworks.json",
+            "assets/tensors/genset/000.sceneworks-workflow.json",
+            "assets/tensors/genset/latent.sceneworks-workflow.json",
+            "assets/tensors/genset/nested/0000.sceneworks-workflow.json",
+            "generation-sets/run.json",
+            "characters/mira.json",
+            "person-tracks/track.sceneworks.person-track.json",
+        ] {
+            let target = root.join(path);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            // Keep the real database/registry metadata intact so the later
+            // symlink checks still exercise canonical confinement on a valid project.
+            if !matches!(path, "project.db" | "project.json") {
+                fs::write(&target, b"private fixture").unwrap();
+            }
+            assert!(
+                matches!(
+                    store.project_file(&project.id, path),
+                    Err(super::ProjectStoreError::NotFound(_))
+                ),
+                "{path}"
+            );
+        }
+        assert!(store.project_file(&project.id, "../escape.png").is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                root.join("project.db"),
+                root.join("assets/tensors/genset/0001.sceneworks-workflow.json"),
+            )
+            .unwrap();
+            assert!(store
+                .project_file(
+                    &project.id,
+                    "assets/tensors/genset/0001.sceneworks-workflow.json"
+                )
+                .is_err());
+            std::os::unix::fs::symlink(
+                root.join("project.db"),
+                root.join("assets/images/alias.png"),
+            )
+            .unwrap();
+            assert!(store
+                .project_file(&project.id, "assets/images/alias.png")
+                .is_err());
+            let outside = temp.path().join("outside.png");
+            fs::write(&outside, b"outside").unwrap();
+            std::os::unix::fs::symlink(outside, root.join("assets/images/escape.png")).unwrap();
+            assert!(store
+                .project_file(&project.id, "assets/images/escape.png")
+                .is_err());
+        }
     }
 
     #[test]

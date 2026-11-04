@@ -1,5 +1,6 @@
+import { modelsApi } from "../api/modelsResources.js";
 import React, { useState } from "react";
-import { apiFetch } from "../api.js";
+
 import { mossComponentState } from "../mossImage.js";
 import { MossTensorControls } from "./MossTensorControls.jsx";
 
@@ -13,7 +14,7 @@ export function MossImageEditControls({ model, token, jobs = [], options, onChan
   async function install() {
     setDownload({ busy: true, error: "", jobs: [] });
     try {
-      const result = await apiFetch(`/api/v1/models/${model.id}/conditional-components/moss_image_edit/download`, token, {
+      const result = await modelsApi.mossImageEditDownload(model.id, token, {
         method: "POST", body: JSON.stringify({ licenseAcknowledged: acknowledged }),
       });
       setDownload({ busy: false, error: "", jobs: result.jobs ?? [] });

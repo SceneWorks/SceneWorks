@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { rustFacadeSources, rustFacadeFunction } from "./lib/rust-facade-source.mjs";
 import { execFile, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir, totalmem } from "node:os";
@@ -618,13 +619,9 @@ test("complete final-output quality may attest identical inputs without claiming
 });
 
 test("the Krea adapter's complete fragment shape passes the real harness with singleton axes", async () => {
-  const adapter = await readFile(
+  const { source: kreaArm } = await rustFacadeFunction(
     fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
-    "utf8",
-  );
-  const kreaArm = adapter.slice(
-    adapter.indexOf("fn run_krea_base(request:"),
-    adapter.indexOf("fn run_krea_control", adapter.indexOf("fn run_krea_base(request:")),
+    "run_krea_base",
   );
   assert.match(kreaArm, /"status": "complete"/);
   assert.match(kreaArm, /"sweep": krea_base_complete_sweep\(request\)\?/);
@@ -674,12 +671,10 @@ test("the Krea adapter's complete fragment shape passes the real harness with si
 });
 
 test("the SDXL adapter's runtime-complete fragment passes the real harness without inventing lifecycle coverage", async () => {
-  const adapter = await readFile(
+  const { source: sdxlArm } = await rustFacadeFunction(
     fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
-    "utf8",
+    "run_sdxl",
   );
-  const start = adapter.indexOf("fn run_sdxl(request:");
-  const sdxlArm = adapter.slice(start, adapter.indexOf("fn run_krea_control", start));
   assert.match(sdxlArm, /"status": "runtime_complete"/);
   assert.match(sdxlArm, /"sweep": sdxl_runtime_complete_sweep\(request\)\?/);
   assert.match(sdxlArm, /"warm_repeat", "result": "not_run"/);
@@ -3035,10 +3030,12 @@ async function adapterRecordFragments() {
   const bins = ["mlx.rs", "mlx_ltx25.rs", "mlx_wan_scail2.rs", "candle.rs", "candle_wan_scail2.rs"];
   const fragments = new Map();
   for (const bin of bins) {
-    const lines = (await readFile(
+    const owners = await rustFacadeSources(
       fileURLToPath(new URL(`../crates/sceneworks-memory-adapter/src/bin/${bin}`, import.meta.url)),
-      "utf8",
-    )).split("\n");
+    );
+    for (const owner of owners) {
+      const actualBin = path.basename(owner.path);
+      const lines = owner.source.split("\n");
     let fn = null;
     for (let i = 0; i < lines.length; i += 1) {
       const declaration = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z0-9_]+)/.exec(lines[i]);
@@ -3050,9 +3047,10 @@ async function adapterRecordFragments() {
         const key = /^ {8}"([A-Za-z_]+)":/.exec(lines[j]);
         if (key) keys.push(key[1]);
       }
-      fragments.set(`${bin}:${fn}`, keys);
+      fragments.set(`${actualBin}:${fn}`, keys);
     }
   }
+    }
   return fragments;
 }
 
@@ -3084,10 +3082,10 @@ test("every adapter calibration record fragment carries only properties the reco
   }
 
   for (const arm of [
-    "mlx.rs:run_minimax_h3",
-    "mlx.rs:run_bernini",
-    "mlx.rs:run_krea_realtime",
-    "mlx.rs:run_ltx_with_admission",
+    "mlx_minimax_family.rs:run_minimax_h3",
+    "mlx_bernini_family.rs:run_bernini",
+    "mlx_krea_realtime_family.rs:run_krea_realtime",
+    "mlx_ltx_family.rs:run_ltx_with_admission",
     "mlx_wan_scail2.rs:run",
     "mlx_ltx25.rs:run",
   ]) {
@@ -3098,9 +3096,9 @@ test("every adapter calibration record fragment carries only properties the reco
   // The other half of the same decision: the LTX CAMPAIGN carriers keep their `output` descriptor,
   // because `validate_ltx_campaign_entry_fragment` cross-checks `/output/*` against the diagnostics
   // of the same run. It is published for the campaign admissions and for nothing else.
-  const mlx = await readFile(
+  const { source: mlx } = await rustFacadeFunction(
     fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
-    "utf8",
+    "run_ltx_with_admission",
   );
   assert.match(
     mlx,

@@ -1,10 +1,11 @@
+import { JOB_PATHS } from "./api/jobs.js";
 // Iris-3B monocular depth (sc-25682): the shared, React-free contract behind the Image Editor depth
 // tool and the Library batch "Depth map" operation. One job per source image, posted to the typed
 // `POST /api/v1/image/depth/jobs` route; the result is a `type: "depth"` asset whose file is the raw
 // float32 `.npy` and whose `preview` is a separate PNG.
 
 export const DEPTH_MODEL_ID = "iris_3b_depth";
-export const DEPTH_ENDPOINT = "/api/v1/image/depth/jobs";
+export const DEPTH_ENDPOINT = JOB_PATHS.depth;
 export const DEFAULT_DEPTH_MAX_SIDE = 1024;
 export const MIN_DEPTH_MAX_SIDE = 64;
 export const MAX_DEPTH_MAX_SIDE = 8192;

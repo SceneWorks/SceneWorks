@@ -1,4 +1,6 @@
-import { apiFetch } from "./api.js";
+import { jobsApi } from "./api/jobsResources.js";
+import { imageApi } from "./api/imageResources.js";
+
 import { recipeResolution } from "./recipeFields.js";
 import { isMossImage, isMossEdit, mossComponentState, mossEditReferenceIds, mossEditControlsError, mossEditWireOptions } from "./mossImage.js";
 
@@ -86,7 +88,7 @@ export async function regenerateImage({ asset, projectId, projectName, token, re
   let original;
   if (jobId) {
     try {
-      original = await apiFetch(`/api/v1/jobs/${encodeURIComponent(jobId)}`, token);
+      original = await jobsApi.item(jobId, token);
     } catch (error) {
       if (error.status !== 404) throw error;
     }
@@ -96,7 +98,7 @@ export async function regenerateImage({ asset, projectId, projectName, token, re
     const request = imageRecipeRequest(asset);
     await validateMossReplay(request, { models, assets, projectId });
     if ((await beforeCreate()) === false || !isCurrentProject()) return null;
-    const job = await apiFetch("/api/v1/image/jobs", token, {
+    const job = await imageApi.imageJobs(token, {
       method: "POST",
       body: JSON.stringify({ ...request, projectId, projectName, requestedGpu }),
     });
@@ -111,7 +113,7 @@ export async function regenerateImage({ asset, projectId, projectName, token, re
   // Duplicate bypasses the typed image route's random-seed generation. A null seed would reuse
   // the old seeds array (or the worker's deterministic fallback), so supply fresh randomness.
   const seed = isMossEdit(original.payload?.model, original.payload?.mode) && original.payload?.advanced?.mossImageAdvanced?.noise ? null : crypto.getRandomValues(new Uint32Array(1))[0];
-  const job = await apiFetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/duplicate`, token, {
+  const job = await jobsApi.duplicate(jobId, token, {
     method: "POST",
     body: JSON.stringify({ requestedGpu, payloadChanges: { seed, seeds: [] } }),
   });

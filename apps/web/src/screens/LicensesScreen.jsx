@@ -1,3 +1,4 @@
+import { fetchResource } from "../api.js";
 import React, { useEffect, useMemo, useState } from "react";
 
 import { bundledLicenses, licensesIntro } from "../data/bundledLicenses.js";
@@ -36,7 +37,7 @@ export function LicensesScreen() {
     const controller = new AbortController();
     setDocumentText("");
     setDocumentError("");
-    fetch(activeDoc.url, { signal: controller.signal })
+    fetchResource(activeDoc.url, { signal: controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.text();

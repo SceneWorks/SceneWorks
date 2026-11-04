@@ -211,6 +211,28 @@ describe("useAccessGate (sc-9750)", () => {
     expect(setMediaTicketSpy).toHaveBeenCalledWith("media-1");
   });
 
+  it("renews its own ticket and re-renders the gate when absolute expiry rotates it", async () => {
+    vi.useFakeTimers();
+    try {
+      window.localStorage.setItem("sceneworks-token", "remote-token");
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: true });
+      let mints = 0;
+      apiResponders.set("/api/v1/files/ticket", () => ({ ticket: `client-${++mints}`, expiresInSeconds: 15 }));
+      const { get } = mount();
+      await settle();
+      const firstRender = get();
+      await act(async () => vi.advanceTimersByTime(5000));
+      await settle();
+      const calls = apiFetch.mock.calls.filter(([path]) => path === "/api/v1/files/ticket");
+      expect(calls.at(-1)[2].headers["X-SceneWorks-Media-Ticket"]).toBe("client-1");
+      expect(calls.at(-1)[2].body).toBe("{}");
+      expect(setMediaTicketSpy).toHaveBeenLastCalledWith("client-2");
+      expect(get()).not.toBe(firstRender);
+      expect(get().api.ready).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("pauses media-ticket refresh while hidden and leaves one timer after visibility churn", async () => {
     vi.useFakeTimers();
     try {

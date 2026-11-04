@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import appSource from "./App.jsx?raw";
+import scopedListSource from "./hooks/useProjectScopedList.js?raw";
 import {
   applySuccessfulProjectRefresh,
   hasVisibleLocalFailureForView,
@@ -81,13 +82,15 @@ describe("isCurrentProjectRequest", () => {
     expect(passiveRefProjectId).toBe(sseProjectId);
     expect(isCurrentProjectRequest(renderCurrentProjectId, sseProjectId)).toBe(false);
 
-    const refreshStart = appSource.slice(
-      appSource.indexOf("async function refreshAssets"),
-      appSource.indexOf("try {", appSource.indexOf("async function refreshAssets")),
-    );
-    expect(refreshStart).toContain(
-      "isCurrentProjectRequest(activeProject?.id ?? null, projectId)",
-    );
+    const delegate = appSource.slice(appSource.indexOf("const refreshAssets = useProjectScopedList("),
+      appSource.indexOf("async function refreshModelAndLoras"));
+    expect(delegate).toContain("token, activeProject, activeProjectRef");
+    expect(delegate).toContain("load: assetsApi.listIncludingHidden");
+    expect(delegate).not.toContain("admitFromRef: true");
+    const refreshStart = scopedListSource.slice(scopedListSource.indexOf("const admissionProjectId"),
+      scopedListSource.indexOf("const items = await config.load"));
+    expect(refreshStart).toContain("config.admitFromRef ? activeProjectRef?.current?.id : activeProject?.id");
+    expect(refreshStart).toContain("isCurrentProjectRequest(admissionProjectId ?? null, projectId)");
     expect(refreshStart).not.toContain("activeProjectRef.current");
   });
 });

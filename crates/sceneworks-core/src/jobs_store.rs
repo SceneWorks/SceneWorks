@@ -261,6 +261,21 @@ pub enum JobsStoreError {
     InvalidInitialStatus(String),
 }
 
+/// Permit the existing retry freshness control while keeping the authorized source immutable.
+pub fn download_binding_matches_payload(
+    binding: &Value,
+    payload: &serde_json::Map<String, Value>,
+) -> bool {
+    let Some(saved) = binding.get("payload").and_then(Value::as_object) else {
+        return false;
+    };
+    let mut saved = saved.clone();
+    let mut candidate = payload.clone();
+    saved.remove("downloadAction");
+    candidate.remove("downloadAction");
+    saved == candidate
+}
+
 impl std::fmt::Display for JobsStoreError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -679,6 +694,7 @@ impl JobsStore {
         // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
         // Only the API's validated-plan handoff may freeze this write-once column.
         ensure_column(&transaction, "jobs", "model_provenance_json", "text")?;
+        ensure_column(&transaction, "jobs", "download_binding_json", "text")?;
         // Durable worker-queue priority. Zero is the normal FIFO lane; positive ranks are
         // assigned monotonically whenever a job jumps to the front. Prompt-refinement jobs get a
         // rank automatically at creation, while the Queue screen can rank any still-pending jobs
@@ -1141,12 +1157,53 @@ impl JobsStore {
         request: CreateJob,
         provenance: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_download_binding(request, provenance, None)
+    }
+
+    /// The binding is a server-validated typed-download selection, never request metadata.
+    pub fn create_job_with_download_binding(
+        &self,
+        request: CreateJob,
+        provenance: Option<&Value>,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.create_job_on_connection(&transaction, request, None, provenance)?;
+        Self::write_download_binding(&transaction, &job.id, binding)?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    fn write_download_binding(
+        connection: &Connection,
+        job_id: &str,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<()> {
+        if let Some(binding) = binding {
+            connection.execute(
+                "update jobs set download_binding_json = ?1 where id = ?2",
+                params![dumps(binding)?, job_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Private authorization context, intentionally excluded from JobSnapshot.
+    pub fn download_binding(&self, job_id: &str) -> JobsStoreResult<Option<Value>> {
+        let connection = self.open_connection()?;
+        let encoded: Option<String> = connection
+            .query_row(
+                "select download_binding_json from jobs where id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+        encoded
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
     }
 
     /// Create a job under a caller-supplied id. Used when the payload must
@@ -2025,6 +2082,16 @@ impl JobsStore {
         request: RetryJob,
         provenance: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.retry_job_with_download_binding(job_id, request, provenance, None)
+    }
+
+    pub fn retry_job_with_download_binding(
+        &self,
+        job_id: &str,
+        request: RetryJob,
+        provenance: Option<&Value>,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2047,6 +2114,13 @@ impl JobsStore {
         });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
+        if let Some(binding) = binding {
+            if !download_binding_matches_payload(binding, &payload) {
+                return Err(JobsStoreError::InvalidStatus(
+                    "Download binding changed during replay".to_owned(),
+                ));
+            }
+        }
         let job = self.create_job_on_connection(
             &transaction,
             CreateJob {
@@ -2066,6 +2140,7 @@ impl JobsStore {
             None,
             source_provenance.as_ref(),
         )?;
+        Self::write_download_binding(&transaction, &job.id, binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2109,6 +2184,17 @@ impl JobsStore {
         request: DuplicateJob,
         provenance: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_download_binding(id, job_id, request, provenance, None)
+    }
+
+    pub fn duplicate_job_with_download_binding(
+        &self,
+        id: Option<String>,
+        job_id: &str,
+        request: DuplicateJob,
+        provenance: Option<&Value>,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2126,6 +2212,13 @@ impl JobsStore {
         });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
+        if let Some(binding) = binding {
+            if !download_binding_matches_payload(binding, &payload) {
+                return Err(JobsStoreError::InvalidStatus(
+                    "Download binding changed during replay".to_owned(),
+                ));
+            }
+        }
         // A duplicated YuE2 job is a new take with its own run directory (sc-22999).
         crate::yue2_score::jobs::refresh_block_for_duplicate(&mut payload);
         let job = self.create_job_on_connection(
@@ -2146,6 +2239,7 @@ impl JobsStore {
             id,
             source_provenance.as_ref(),
         )?;
+        Self::write_download_binding(&transaction, &job.id, binding)?;
         transaction.commit()?;
         Ok(job)
     }

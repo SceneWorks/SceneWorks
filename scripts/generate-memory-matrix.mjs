@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { sha256 } from "./lib/file-sha256.mjs";
+import { rustFacadeSource, rustSourceWithTests } from "./lib/rust-facade-source.mjs";
 
-import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -820,9 +821,6 @@ export function assertVideoOwnership(allModels, videoFamilyStories = VIDEO_FAMIL
   }
 }
 
-function sha256(body) {
-  return createHash("sha256").update(body).digest("hex");
-}
 
 function sortedUnique(values) {
   return [...new Set(values)].sort();
@@ -2797,7 +2795,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       canonicalSourceText(
         Object.hasOwn(sourceOverrides, name)
           ? sourceOverrides[name]
-          : await readFile(path.join(ROOT, relative), "utf8"),
+          : name === "mlxFitGate"
+            ? await rustSourceWithTests(path.join(ROOT, relative))
+            : relative.endsWith(".rs")
+              ? await rustFacadeSource(path.join(ROOT, relative))
+            : await readFile(path.join(ROOT, relative), "utf8"),
       ),
     ),
   );

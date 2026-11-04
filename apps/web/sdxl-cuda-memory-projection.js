@@ -7,19 +7,19 @@ import { buildEndpointConfig } from "../../scripts/package-sdxl-cuda-endpoints.m
 // Build-time projection of the same retained pair the worker uses. No capture paths, artifact
 // inventories or device identifiers enter the browser, and Vite's filesystem allowlist stays closed.
 const repositoryRoot = pathToFileURL(`${resolve(dirname(fileURLToPath(import.meta.url)), "../..")}/`);
-export function loadSdxlCudaMemoryProjection(root = repositoryRoot) {
+export function loadSdxlCudaMemoryProjection(root = repositoryRoot, { required = false } = {}) {
   try {
     const read = (path) => readFileSync(new URL(path, root), "utf8");
     const config = JSON.parse(read("config/sdxl-cuda-memory-endpoints.json"));
-    if (config.schemaVersion !== 1 || !config.pair) return null;
+    if (config.schemaVersion !== 1 || !config.pair) throw new Error("invalid endpoint configuration");
     const { resident, sequential, summary: receipt } = config.pair;
     const summaryRaw = read(receipt.path);
     const sha256 = (raw) => createHash("sha256").update(raw).digest("hex");
-    if (sha256(summaryRaw) !== receipt.sha256) return null;
+    if (sha256(summaryRaw) !== receipt.sha256) throw new Error("endpoint summary digest mismatch");
     const summary = JSON.parse(summaryRaw);
     const bundles = { resident: read(resident.source.path), sequential: read(sequential.source.path) };
     const rebuilt = buildEndpointConfig(summaryRaw, bundles, resident.source.loaderClosureDigest);
-    if (JSON.stringify(rebuilt) !== JSON.stringify(config)) return null;
+    if (JSON.stringify(rebuilt) !== JSON.stringify(config)) throw new Error("endpoint evidence does not match configuration");
     const optimized = summary.endpoints.find((endpoint) => endpoint.endpoint === "sequential");
     const projectEndpoint = (endpoint) => ({
       peakBytes: endpoint.overallAllocatorEnvelopeBytes,
@@ -43,8 +43,10 @@ export function loadSdxlCudaMemoryProjection(root = repositoryRoot) {
       reserveGb: 2,
       physicalEightGiBDeviceValidated: summary.physicalEightGiBDeviceValidated,
     };
-  } catch {
-    // Absent or malformed evidence leaves the existing conservative catalog estimate in place.
+  } catch (error) {
+    const message = `SDXL CUDA memory projection unavailable: ${error.message}`;
+    if (required) throw new Error(message, { cause: error });
+    console.warn(message);
     return null;
   }
 }

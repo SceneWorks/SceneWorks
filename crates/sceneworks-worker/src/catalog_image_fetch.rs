@@ -24,7 +24,6 @@ use std::fs::File;
 #[cfg(test)]
 use std::fs::OpenOptions;
 use std::future::Future;
-#[cfg(test)]
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;

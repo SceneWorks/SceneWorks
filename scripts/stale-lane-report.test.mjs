@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { rustFacadeSources, rustFacadeSource } from "./lib/rust-facade-source.mjs";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -723,6 +724,13 @@ test("a closure table derived at an older pin still grades, but a malformed one 
     await mkdir(path.dirname(path.join(scratch, relative)), { recursive: true });
     await copyFile(path.join(ROOT, relative), path.join(scratch, relative));
   }
+  for (const entry of [SOURCE_PATHS.mlxAdapter, SOURCE_PATHS.candleAdapter]) {
+    for (const owner of await rustFacadeSources(path.join(ROOT, entry))) {
+      const relative = path.relative(ROOT, owner.path);
+      await mkdir(path.dirname(path.join(scratch, relative)), { recursive: true });
+      await copyFile(owner.path, path.join(scratch, relative));
+    }
+  }
   const writeClosures = (value) =>
     writeFile(path.join(scratch, SOURCE_PATHS.closures), JSON.stringify(value, null, 2));
 
@@ -1135,7 +1143,7 @@ fn run_downstream(request: &Value) -> Result<Value, String> {
 /// this test is what proves a refusing pre-gate leaves all 20+ real arms readable behind it.
 test("both shipped adapter bins expose a resolvable run entry whose pre-gates all parse", async () => {
   for (const bin of ["mlx", "candle"]) {
-    const source = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${bin}.rs`), "utf8");
+    const source = await rustFacadeSource(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${bin}.rs`));
     const providers = adapterCapturableProviders(source, `${bin}.rs`);
     assert.ok(providers.length > 20, `${bin}.rs dispatches ${providers.length} providers`);
     assert.equal(runEntryName(source, `${bin}.rs`), "run");
@@ -1143,7 +1151,7 @@ test("both shipped adapter bins expose a resolvable run entry whose pre-gates al
   // The four lanes sc-22737 unblocked, named: each is served by a pre-gate shape the parser now
   // reads, and each read "uncapturable" before it did.
   const candle = adapterCapturableProviders(
-    await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8"),
+    await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs")),
     "candle.rs",
   );
   for (const provider of ["ltx_2_3_distilled", "minimax_h3", "sensenova_u1_8b", "sensenova_u1_8b_fast"]) {
