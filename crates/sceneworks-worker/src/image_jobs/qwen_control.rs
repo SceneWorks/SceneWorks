@@ -39,7 +39,6 @@ use crate::WorkerError;
 use crate::WorkerResult;
 
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
-use serde_json::json;
 
 // Candle (Windows/CUDA) Qwen-Image 2512-Fun-Controlnet-Union (strict control) route (sc-5489 origin /
 // sc-8350 repoint, epic 8236) — `qwen_image` + `advanced.poses` off-Mac via

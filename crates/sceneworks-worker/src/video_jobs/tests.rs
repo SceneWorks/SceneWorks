@@ -6,6 +6,8 @@ use super::*;
 use super::{bernini::*, krea_realtime::*, ltx::*, mochi::*, scail2::*, svd::*, vace::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use gen_core::AdapterKind;
 
 /// Admission must see the exact temporal chunk already resolved onto the engine input. Re-reading
 /// the sparse payload or dropping this field would turn the real 25-frame/chunk-8 SVD execution
@@ -20896,7 +20898,10 @@ fn a_selected_turbo_variant_changes_the_job_that_reaches_the_engine() {
         on_spec
             .adapters
             .iter()
-            .map(|adapter| adapter.path.clone())
+            .map(|adapter| {
+                std::fs::canonicalize(&adapter.path)
+                    .expect("the loaded adapter resolves to its staged file")
+            })
             .collect::<Vec<_>>(),
         vec![std::fs::canonicalize(&lora_path).expect("the staged adapter canonicalizes")],
         "the adapter itself must reach the LOAD — before sc-18726 the arm passed `Vec::new()` and \
@@ -20956,7 +20961,10 @@ fn built_in_turbo_and_community_lora_with_veda_reach_the_engine_as_one_stack() {
     assert_eq!(
         load.adapters
             .iter()
-            .map(|adapter| adapter.path.clone())
+            .map(|adapter| {
+                std::fs::canonicalize(&adapter.path)
+                    .expect("the loaded adapter resolves to its staged file")
+            })
             .collect::<Vec<_>>(),
         expected_paths,
         "neither adapter may be dropped or reordered before the engine load"

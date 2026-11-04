@@ -2745,7 +2745,7 @@ pub(super) async fn generate_candle_wan_vace(
         "wan_vace",
         resolve_candle_wan_vace_model_dir(settings)?,
         CANDLE_WAN_VACE_ADAPTER,
-        Vec::new(),
+        PreparedVideoAdapters::default(),
     )
     .await
 }
