@@ -3309,11 +3309,16 @@ fn extra_compatible_lora_families(normalized_family: &str) -> &'static [&'static
     }
 }
 
+// Preserve the established compatibility spelling after resolving shared catalog aliases.
+fn normalize_lora_compatibility_family(family: &str) -> String {
+    normalize_model_family(&canonical_lora_family(family))
+}
+
 /// The set of LoRA families a model of `model_family` can load (normalized; the
 /// model's own family plus its extra-compatible families). Empty when the family
 /// is unknown — callers treat that as "skip validation".
 pub fn accepted_lora_families(model_family: &str) -> Vec<String> {
-    let normalized = normalize_model_family(model_family);
+    let normalized = normalize_lora_compatibility_family(model_family);
     if normalized.is_empty() {
         return Vec::new();
     }
@@ -3391,7 +3396,7 @@ pub fn lora_declared_families(lora: &Value) -> Vec<String> {
     let mut families: Vec<String> = raw
         .iter()
         .filter_map(Value::as_str)
-        .map(normalize_model_family)
+        .map(normalize_lora_compatibility_family)
         .filter(|family| !family.is_empty())
         .collect();
     families.sort();
@@ -3608,7 +3613,9 @@ pub fn validate_lora_compatibility_with_manifest(
     model_id: Option<&str>,
     model: Option<&Map<String, Value>>,
 ) -> Result<(), String> {
-    let normalized_model_family = model_family.map(normalize_model_family).unwrap_or_default();
+    let normalized_model_family = model_family
+        .map(normalize_lora_compatibility_family)
+        .unwrap_or_default();
     let accepted = model_family.map(accepted_lora_families).unwrap_or_default();
     if loras.is_empty() {
         return Ok(());
@@ -3690,6 +3697,47 @@ pub fn validate_lora_compatibility_with_manifest(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn worker_compatibility_canonicalizes_declared_and_model_aliases() {
+        for (alias, family, other) in [
+            ("qwenimage", "qwen-image", "qwen-image-2-1"),
+            ("qwen-image-2.1", "qwen-image-2-1", "qwen-image"),
+        ] {
+            for key in ["family", "modelFamilies"] {
+                let declared = if key == "family" {
+                    json!(alias)
+                } else {
+                    json!([alias])
+                };
+                let lora = json!({ "id": "installed-alias", key: declared });
+                for model in [alias, family] {
+                    assert!(
+                        validate_lora_compatibility_with_manifest(
+                            std::slice::from_ref(&lora),
+                            Some(model),
+                            "worker",
+                            None,
+                            None
+                        )
+                        .is_ok(),
+                        "{key}: {alias} must load on {model}"
+                    );
+                }
+                assert!(
+                    validate_lora_compatibility_with_manifest(
+                        &[lora],
+                        Some(other),
+                        "worker",
+                        None,
+                        None
+                    )
+                    .is_err(),
+                    "versioned Qwen families remain distinct"
+                );
+            }
+        }
+    }
 
     #[test]
     fn recorded_base_metadata_precedes_later_family_aliases() {
