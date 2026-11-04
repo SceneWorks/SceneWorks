@@ -818,7 +818,7 @@ mod tests {
     /// A catalog without either pinned cover component is refused before the backend is entered.
     #[test]
     fn cover_snapshot_resolution_fails_closed_on_missing_component() {
-        let settings = Settings::from_env();
+        let settings = crate::test_env::offline_settings();
         let entry = json!({"conditionalComponents": []});
         let error = cover_snapshots(&settings, &entry).unwrap_err().to_string();
         assert!(error.contains("yue2_sheetsage2"), "{error}");

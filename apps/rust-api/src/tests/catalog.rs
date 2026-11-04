@@ -7887,7 +7887,7 @@ async fn license_acknowledgment_is_not_bypassed_by_a_git_suffix() {
         slashed_body["detail"]
             .as_str()
             .expect("detail")
-            .contains("owner/name form"),
+            .contains("Hugging Face repo components"),
         "the earlier refusal is the repo-form validator, not the licence gate: {slashed_body:?}"
     );
 
