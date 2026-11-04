@@ -519,7 +519,7 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
          added to the plan tables cannot skip this one and this one cannot drift off them.",
     ),
     (
-        "src/mlx_fit_gate.rs",
+        "src/mlx_fit_gate/tests.rs",
         "RESIDENT_ONLY_AUDIT_FAMILIES",
         "Not an import gate and not production: a `#[cfg(test)]`, macOS-only SCOPE for the \
          Resident-only estimate-band audit, over shipped MANIFEST `family` values — a different \
