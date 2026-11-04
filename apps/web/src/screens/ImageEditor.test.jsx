@@ -641,17 +641,16 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
 
   it("routes desktop-generated PNG bytes through the native save command", async () => {
     const file = {
-      name: "shot-edited.png",
-      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      name: "shot-edited.png", size: 3,
+      slice: () => ({ arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }),
     };
     const invoke = vi.fn().mockResolvedValue("/tmp/shot-edited.png");
     await expect(
       exportEditorFile(file, { desktop: true, invoke }),
     ).resolves.toBe("/tmp/shot-edited.png");
-    expect(invoke).toHaveBeenCalledWith("save_image_export", {
-      imageBytes: [1, 2, 3],
-      suggestedFilename: "shot-edited.png",
-    });
+    expect(invoke).toHaveBeenCalledWith("begin_image_export", { suggestedFilename: "shot-edited.png", totalBytes: 3 });
+    const [, chunk] = invoke.mock.calls.find(([command]) => command === "save_image_export");
+    expect([...new Uint8Array(chunk)]).toEqual([1, 2, 3]);
   });
 
   it("retains browser download behavior outside the desktop shell", async () => {
@@ -689,11 +688,11 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
     const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 250]);
     // jsdom's Blob has no `arrayBuffer()`, so the File stands in for one the same way the desktop
     // test above does. What is under test is that BOTH branches see this one object.
-    const file = { name: "shot.png", arrayBuffer: async () => bytes.buffer };
+    const file = { name: "shot.png", size: bytes.length, slice: () => ({ arrayBuffer: async () => bytes.buffer }), arrayBuffer: async () => bytes.buffer };
 
     const invoke = vi.fn().mockResolvedValue("/tmp/shot.png");
     await exportEditorFile(file, { desktop: true, invoke });
-    const [, payload] = invoke.mock.calls[0];
+    const [, payload] = invoke.mock.calls.find(([command]) => command === "save_image_export");
 
     vi.spyOn(window.HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     let downloaded = null;
@@ -707,9 +706,9 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
     await exportEditorFile(file, { desktop: false, documentRef: document, urlApi });
 
     expect(downloaded).toBe(file);
-    expect(payload.imageBytes).toEqual([...bytes]);
-    expect([...new Uint8Array(await downloaded.arrayBuffer())]).toEqual(payload.imageBytes);
-    expect(payload.suggestedFilename).toBe(file.name);
+    expect([...new Uint8Array(payload)]).toEqual([...bytes]);
+    expect([...new Uint8Array(await downloaded.arrayBuffer())]).toEqual([...new Uint8Array(payload)]);
+    expect(invoke.mock.calls[0][1].suggestedFilename).toBe(file.name);
     expect(document.querySelector("a[download]")).toBeNull();
   });
 });

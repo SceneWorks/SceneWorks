@@ -180,7 +180,7 @@ async fn check_for_update(app: &AppHandle, startup: bool) -> tauri_plugin_update
 #[tauri::command]
 pub async fn download_app_update(app: AppHandle) -> Result<(), String> {
     let state = app.state::<UpdateState>();
-    let update = {
+    let mut update = {
         let mut session = state.0.lock().expect("update lock");
         if session.downloading {
             return Err("An update is already downloading.".into());
@@ -192,16 +192,34 @@ pub async fn download_app_update(app: AppHandle) -> Result<(), String> {
         session.downloading = true;
         update
     };
-    let result = update.download(|_, _| {}, || {}).await;
+    const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+    update.timeout = Some(DOWNLOAD_TIMEOUT);
+    let result = download_with_deadline(update.download(|_, _| {}, || {}), DOWNLOAD_TIMEOUT).await;
+    settle_download(&state, result, |session, bytes| {
+        session.downloaded = Some((update, bytes))
+    })
+}
+
+fn settle_download<T>(
+    state: &UpdateState,
+    result: Result<T, String>,
+    save: impl FnOnce(&mut UpdateSession, T),
+) -> Result<(), String> {
     let mut session = state.0.lock().expect("update lock");
     session.downloading = false;
-    match result {
-        Ok(bytes) => {
-            session.downloaded = Some((update, bytes));
-            Ok(())
-        }
-        Err(error) => Err(error.to_string()),
-    }
+    // Publication and flag reset share one critical section: another invoke cannot
+    // start a duplicate download between reset and recording the verified bytes.
+    result.map(|bytes| save(&mut session, bytes))
+}
+
+async fn download_with_deadline<T, E: std::fmt::Display>(
+    future: impl std::future::Future<Output = Result<T, E>>,
+    timeout: Duration,
+) -> Result<T, String> {
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| "Update download timed out. Please try again.".to_owned())?
+        .map_err(|error| error.to_string())
 }
 
 /// Release downloaded bytes when the user defers or the final work check fails.
@@ -221,7 +239,9 @@ pub async fn install_app_update(app: AppHandle) -> Result<(), String> {
         .downloaded
         .take()
         .ok_or("The update has not finished downloading.")?;
-    install_update(&app, prepared.0, prepared.1).await;
+    tauri::async_runtime::spawn_blocking(move || install_update(&app, prepared.0, prepared.1))
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -261,7 +281,7 @@ fn nsis_install_dir_arg(current_exe: &Path) -> Option<OsString> {
 /// what produced the "Error opening file for writing: …\sceneworks-api.exe" abort.
 /// `tauri-plugin-updater`'s NSIS `/UPDATE` only kills the main app binary
 /// (`SceneWorks.exe`), never the sidecars this shell spawned.
-async fn install_update(app: &AppHandle, update: Update, bytes: Vec<u8>) {
+fn install_update(app: &AppHandle, update: Update, bytes: Vec<u8>) {
     // Stop the API + GPU-worker sidecars and BLOCK until `sceneworks-api.exe` is no
     // longer running, so the installer can overwrite it (no-op wait off Windows).
     tracing::info!("auto-update: stopping sidecars before install");
@@ -314,5 +334,41 @@ mod tests {
     #[test]
     fn nsis_install_dir_rejects_parentless_path() {
         assert_eq!(nsis_install_dir_arg(Path::new("")), None);
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    #[test]
+    fn stalled_and_successful_downloads_release_downloading_state() {
+        tauri::async_runtime::block_on(async {
+            let state = UpdateState::default();
+            state.0.lock().unwrap().downloading = true;
+            let result = download_with_deadline(
+                std::future::pending::<Result<(), String>>(),
+                Duration::from_millis(20),
+            )
+            .await;
+            let result = settle_download(&state, result, |_, _| {
+                panic!("stalled download cannot publish")
+            });
+            assert!(result.unwrap_err().contains("timed out"));
+            assert!(!state.0.lock().unwrap().downloading);
+            state.0.lock().unwrap().downloading = true;
+            let result = download_with_deadline(
+                async { Ok::<_, String>(b"signed".to_vec()) },
+                Duration::from_secs(1),
+            )
+            .await;
+            settle_download(&state, result, |session, bytes| {
+                assert_eq!(bytes, b"signed");
+                session.startup_requested = true;
+            })
+            .unwrap();
+            let session = state.0.lock().unwrap();
+            assert!(!session.downloading);
+            assert!(session.startup_requested);
+        });
     }
 }
