@@ -166,6 +166,8 @@ impl Settings {
         // The download watchdog reads its value when creating a transfer; validate it
         // here as well so an invalid operator setting fails before work begins.
         env_u64_any(&["SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS"], 0)?;
+        sceneworks_core::env_util::env_u64_any(&["SCENEWORKS_VIDEO_STALL_SECS"], 0, true)
+            .map_err(WorkerError::InvalidPayload)?;
         let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
         let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);
         let credentials_dir = sceneworks_core::credentials::credentials_dir(&config_dir);
@@ -277,23 +279,28 @@ mod numeric_env_tests {
             "SCENEWORKS_UTILITY_WORKERS",
             "SCENEWORKS_GPU_MEMORY_LIMIT_BYTES",
             "SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS",
+            "SCENEWORKS_VIDEO_STALL_SECS",
         ];
         // `set` removes empty values; use one lock for the complete environment fixture.
         let scratch = tempfile::tempdir().unwrap();
         let config = scratch.path().to_str().unwrap();
-        for invalid in keys {
+        for (setting, value, refuses) in keys.into_iter().map(|key| (key, "256G", true)).chain([
+            ("SCENEWORKS_VIDEO_STALL_SECS", "0", false),
+            ("SCENEWORKS_VIDEO_STALL_SECS", " 12 ", false),
+        ]) {
             let mut entries: Vec<_> = keys
                 .iter()
-                .map(|key| (*key, if *key == invalid { "256G" } else { "" }))
+                .map(|key| (*key, if *key == setting { value } else { "" }))
                 .collect();
             entries.push(("SCENEWORKS_CONFIG_DIR", config));
             entries.push(("SCENEWORKS_CREDENTIALS", ""));
             let _env = EnvVars::set(&entries);
-            let error = match Settings::try_from_env() {
-                Ok(_) => panic!("invalid setting accepted"),
-                Err(error) => error,
-            };
-            assert!(error.to_string().contains(invalid), "{error}");
+            match (refuses, Settings::try_from_env()) {
+                (true, Err(error)) => assert!(error.to_string().contains(setting), "{error}"),
+                (false, Ok(_)) => {}
+                (true, Ok(_)) => panic!("invalid setting {setting} accepted"),
+                (false, Err(error)) => panic!("valid setting {setting} refused: {error}"),
+            }
         }
     }
 }
