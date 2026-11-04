@@ -33,9 +33,9 @@ const candleBase = stage("rust-worker-candle-base");
 const candleRuntime = stage("rust-worker-candle");
 const runpod = stage("runpod");
 
-assert.equal(
+assert.match(
   candleBase.base,
-  "nvidia/cuda:12.9.1-runtime-ubuntu24.04",
+  /^nvidia\/cuda:12\.9\.1-runtime-ubuntu24\.04@sha256:[0-9a-f]{64}$/,
   "combined image must retain the validated CUDA 12.9.1 / Ubuntu 24.04 runtime",
 );
 assert.equal(candleRuntime.base, "rust-worker-candle-base", "standalone candle image must inherit the shared CUDA runtime");

@@ -1,5 +1,10 @@
 # Calibration measurement runbook
 
+> **Historical RGB retrieval:** the 61 former tracked RGB frames are preserved by digest in the
+> [immutable artifact archive](archive/historical-artifacts.md#calibration-reproduction). Restore
+> group `calibration` and pass its directory as `--source-root` for byte-level reproduction.
+> Existing receipt checks, measurement records, request/stdout receipts and logs remain unchanged.
+
 **One parameterized procedure for measuring one `<backend>:<provider>` lane, end to end.**
 
 Substitute a single lane name — for example `mlx:z_image_turbo` or `candle:krea_2_turbo` — and follow

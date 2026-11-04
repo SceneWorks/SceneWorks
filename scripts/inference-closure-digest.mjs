@@ -1,3 +1,4 @@
+import { sha256 } from "./lib/file-sha256.mjs";
 // Per-provider compile-closure digests over the pinned inference source (sc-17774).
 //
 // WHY THIS EXISTS
@@ -63,7 +64,6 @@
 //     measurements ran change?", never "did the measured quantity change?".
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -130,9 +130,7 @@ function git(repo, args, { maxBuffer = 64 * 1024 * 1024 } = {}) {
   return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", maxBuffer });
 }
 
-export function sha256(body) {
-  return createHash("sha256").update(body).digest("hex");
-}
+export { sha256 };
 
 /**
  * `path -> blob oid` for a whole revision. Git blob oids ARE content hashes, so the tree listing

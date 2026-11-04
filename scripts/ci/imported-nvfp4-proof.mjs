@@ -1,7 +1,7 @@
+import { fileSha256 } from "../lib/file-sha256.mjs";
 // Manual-only, fixed worker case. No user-controlled Cargo selectors or remote helper imports.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { createReadStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
@@ -136,9 +136,8 @@ export async function regularOutput(directory, name) {
   const info = await fs.lstat(file);
   assert(info.isFile() && !info.isSymbolicLink() && info.nlink === 1, `not an owned regular output: ${name}`);
   assert(info.size > 0 && info.size <= FILE_LIMITS[name], `invalid bounded output size: ${name}`);
-  const hash = createHash('sha256');
-  for await (const data of createReadStream(file)) hash.update(data);
-  return { relative_path: name, bytes: info.size, sha256: hash.digest('hex') };
+  const digest = await fileSha256(file);
+  return { relative_path: name, bytes: info.size, sha256: digest };
 }
 
 export async function stageArtifact(directory, evidence) {
@@ -218,11 +217,10 @@ async function checkpointIdentity(file) {
   const actual = await fs.realpath(file);
   const before = await fs.stat(actual);
   assert(before.isFile() && before.size > 0, 'required imported checkpoint is missing');
-  const hash = createHash('sha256');
-  for await (const bytes of createReadStream(actual)) hash.update(bytes);
+  const digest = await fileSha256(actual);
   const after = await fs.stat(actual);
   assert.equal(after.size, before.size); assert.equal(after.mtimeMs, before.mtimeMs);
-  return { path: file, resolved_path: actual, bytes: before.size, sha256: hash.digest('hex') };
+  return { path: file, resolved_path: actual, bytes: before.size, sha256: digest };
 }
 
 export async function main() {
