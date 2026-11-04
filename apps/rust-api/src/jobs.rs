@@ -993,7 +993,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 return Err(ApiError::bad_request("Invalid saved download binding"));
             }
             crate::models::validate_catalog_download_replay(state, binding, &merged).await?;
-        } else if matches!(job_type, JobType::ModelDownload) {
+        } else if is_license_gated_fetching_job(&job_type) {
             // An old payload assertion is not a current server receipt.
             merged.insert(
                 crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
@@ -1686,6 +1686,17 @@ fn dense_image_detail_error() -> ApiError {
     )
 }
 
+fn is_license_gated_fetching_job(job_type: &JobType) -> bool {
+    matches!(
+        job_type,
+        JobType::ModelDownload
+            | JobType::ModelImport
+            | JobType::ModelConvert
+            | JobType::LoraDownload
+            | JobType::LoraImport
+    )
+}
+
 /// Jobs created through the raw queue route do not pass a typed request validator. Keep this
 /// inventory aligned with worker payload fields that reach filesystem model resolution:
 /// `image_upscale`, `image_detail`, and `prompt_refine` consume `model`; the model-management jobs
@@ -1807,15 +1818,7 @@ async fn validate_raw_job_payload(
     // `"**"` downloads the entire named repo. Adding the job type alone would have been inert;
     // `ensure_job_payload_license_acknowledged` reads `baseRepo`/`sourceRepo` as well as `repo`
     // (`LICENSE_GATED_REPO_PAYLOAD_KEYS`), which is what makes this line bite.
-    if matches!(
-        job_type,
-        JobType::ModelDownload
-            | JobType::ModelImport
-            | JobType::ModelConvert
-            | JobType::LoraDownload
-            | JobType::LoraImport
-    ) && !trusted_download_binding
-    {
+    if is_license_gated_fetching_job(job_type) && !trusted_download_binding {
         crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
     }
     // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
