@@ -58,20 +58,7 @@ async fn spawn_api() -> (String, Posts) {
 }
 
 fn shipped_depth_entry() -> Value {
-    let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .unwrap()
-        .1;
-    let manifest: Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text)).unwrap();
-    manifest["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|model| model["id"] == DEPTH_MODEL_ID)
-        .cloned()
-        .unwrap()
+    Value::Object(crate::test_env::shipped_catalog_entry(DEPTH_MODEL_ID))
 }
 
 /// A little-endian EXIF block with one Orientation entry.

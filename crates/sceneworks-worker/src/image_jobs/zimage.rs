@@ -215,19 +215,7 @@ fn zimage_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
-    raw.insert("realModelInference".to_owned(), Value::Bool(true));
-    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    raw.insert("numInferenceSteps".to_owned(), json!(steps));
-    // Z-Image-Turbo is guidance-distilled — no CFG.
-    raw.insert("guidanceScale".to_owned(), Value::Null);
-    raw.insert(
-        "mlxQuantize".to_owned(),
-        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
-    );
-    raw.insert("controlScale".to_owned(), json!(control_scale));
-    raw.insert("poseCount".to_owned(), json!(pose_count));
-    raw
+    tier_resolver::control_raw_settings(request, repo, steps, control_scale, pose_count, tier_resolver::ControlBackend::Mlx(quant_bits), None, None)
 }
 
 /// Real Z-Image strict-pose generation: one image per pose, each conditioned on a DWPose

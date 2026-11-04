@@ -962,13 +962,14 @@ pub(crate) async fn ensure_ltx_bundle_gemma_present(
 pub(super) fn resolve_ltx_adapters(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Vec<AdapterSpec>> {
-    let mut specs = Vec::with_capacity(request.loras.len() + 1);
+) -> WorkerResult<PreparedVideoAdapters> {
+    let mut specs = PreparedVideoAdapters::default();
     // The auto distill LoRA is the model's base recipe (per-pass 1.0/0.4); user LoRAs stack on top.
-    if let Some(distill) = resolve_ltx_distill_adapter(settings, request)? {
-        specs.push(distill);
+    if let Some((distill, pin)) = resolve_ltx_distill_adapter(settings, request)? {
+        crate::adapter_resolution::retain_adapter_pin(&mut specs.pins, pin)?;
+        specs.specs.push(distill);
     }
-    specs.extend(resolve_ltx_user_adapters(settings, request)?);
+    specs.append(resolve_ltx_user_adapters(settings, request)?)?;
     Ok(specs)
 }
 
@@ -982,24 +983,18 @@ pub(super) fn resolve_ltx_adapters(
 pub(super) fn resolve_ltx_user_adapters(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     if request.loras.len() > MAX_JOB_LORAS {
         return Err(WorkerError::InvalidPayload(format!(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
         )));
     }
-    let mut specs = Vec::with_capacity(request.loras.len());
+    let mut specs = PreparedVideoAdapters::default();
     for lora in &request.loras {
-        let path = lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = resolve_lora_file(
-            settings,
-            path,
-            crate::image_jobs::declared_adapter_file(lora),
-        )?;
-        let kind = classify_adapter(&file)?;
-        specs.push(AdapterSpec::new(file, lora_scale(lora), kind));
+        let (file, kind) = specs.user(settings, lora, &request.model)?;
+        specs
+            .specs
+            .push(AdapterSpec::new(file, lora_scale(lora), kind));
     }
     Ok(specs)
 }
@@ -1024,7 +1019,7 @@ pub(super) fn resolve_ltx_user_adapters(
 pub(super) fn resolve_ltx_distill_adapter(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Option<AdapterSpec>> {
+) -> WorkerResult<Option<(AdapterSpec, gen_core::PinnedWeightsFile)>> {
     // LTX-2.5's distilled checkpoint already contains the refinement.  Its dev
     // checkpoint, by contrast, needs the bundled adapter only for stage two;
     // never let an absent selector double-apply it to the default path.
@@ -1157,10 +1152,11 @@ pub(super) fn resolve_ltx_distill_adapter(
              Re-download the model to fetch its co-requisite distill LoRA."
         ))
     })?;
-    let kind = classify_adapter(&path)?;
-    Ok(Some(
-        AdapterSpec::new(path, stage1, kind).with_pass_scales(vec![stage1, stage2]),
-    ))
+    let pin = crate::paths::pin_app_managed_model_file(settings, &path, "LTX distill adapter")?;
+    let kind = crate::image_jobs::classify_prepared_adapter(&pin)?;
+    let spec = AdapterSpec::new(pin.loader_path().to_path_buf(), stage1, kind)
+        .with_pass_scales(vec![stage1, stage2]);
+    Ok(Some((spec, pin)))
 }
 
 /// Optional I2V conditioning for LTX: a `source_asset_id` → a single `Reference` image

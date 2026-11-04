@@ -6,13 +6,12 @@
 
 use super::*;
 use crate::downloads::fetch_public_source_url_bytes;
+use crate::parquet_row::{row_string_alias, row_u32_with_policy, MetadataField};
 use futures_util::stream::{self, StreamExt};
 use image::GenericImageView;
 use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::Field;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::Cursor;
 
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGE_EDGE: u32 = 16_384;
@@ -489,29 +488,14 @@ fn scan_checkpoint(cancel: &gen_core::CancelFlag) -> WorkerResult<()> {
 }
 
 fn row_u32(row: &parquet::record::Row, requested: &str) -> Option<u32> {
-    row.get_column_iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(requested))
-        .and_then(|(_, field)| match field {
-            Field::Byte(value) => u32::try_from(*value).ok(),
-            Field::Short(value) => u32::try_from(*value).ok(),
-            Field::Int(value) => u32::try_from(*value).ok(),
-            Field::Long(value) => u32::try_from(*value).ok(),
-            Field::UByte(value) => Some((*value).into()),
-            Field::UShort(value) => Some((*value).into()),
-            Field::UInt(value) => Some(*value),
-            Field::ULong(value) => u32::try_from(*value).ok(),
-            _ => None,
-        })
+    match row_u32_with_policy(row, &[requested], false) {
+        MetadataField::Value(value) => Some(value),
+        MetadataField::Missing | MetadataField::Invalid => None,
+    }
 }
 
 fn row_string(row: &parquet::record::Row, requested: &str) -> Option<String> {
-    row.get_column_iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(requested))
-        .and_then(|(_, field)| match field {
-            Field::Str(value) => Some(value.clone()),
-            Field::Bytes(value) => std::str::from_utf8(value.data()).ok().map(str::to_owned),
-            _ => None,
-        })
+    row_string_alias(row, &[requested])
 }
 
 fn hex_prefix(bytes: &[u8], chars: usize) -> String {
@@ -534,19 +518,22 @@ async fn materialize_candidate(
     let bytes = fetch_public_source_url_bytes(&candidate.url, MAX_IMAGE_BYTES).await?;
     let target_for_write = target.clone();
     let dimensions = crate::load_progress::spawn_blocking(move || -> WorkerResult<(u32, u32)> {
-        let mut reader = image::ImageReader::new(Cursor::new(bytes))
-            .with_guessed_format()
-            .map_err(|error| {
-                WorkerError::InvalidPayload(format!("dataset image format failed: {error}"))
-            })?;
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(MAX_IMAGE_EDGE);
-        limits.max_image_height = Some(MAX_IMAGE_EDGE);
-        limits.max_alloc = Some(MAX_IMAGE_DECODE_ALLOC);
-        reader.limits(limits);
-        let image = reader.decode().map_err(|error| {
+        let (image, _) = sceneworks_core::image_decode::decode_image_bounded(
+            &bytes,
+            sceneworks_core::image_decode::ImageDecodeLimits {
+                max_bytes: MAX_IMAGE_BYTES,
+                max_width: MAX_IMAGE_EDGE,
+                max_height: MAX_IMAGE_EDGE,
+                max_pixels: u64::from(MAX_IMAGE_EDGE) * u64::from(MAX_IMAGE_EDGE),
+                max_alloc: MAX_IMAGE_DECODE_ALLOC,
+                catalog_formats_only: false,
+            },
+        )
+        .map_err(|error| {
             WorkerError::InvalidPayload(format!("dataset image decode failed: {error}"))
         })?;
+        // The previous owned reader freed the encoded input before PNG encoding too.
+        drop(bytes);
         let (width, height) = image.dimensions();
         if width < min_edge || height < min_edge {
             return Err(WorkerError::InvalidPayload(format!(

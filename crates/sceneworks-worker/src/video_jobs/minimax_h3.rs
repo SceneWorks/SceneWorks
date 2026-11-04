@@ -559,7 +559,7 @@ pub(super) fn ensure_minimax_h3_renderable(
 pub(super) fn resolve_minimax_h3_adapters(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     super::resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 

@@ -3,16 +3,11 @@
 //! (epic sc-22988 acceptance test 5).
 
 use super::*;
-use crate::builtin_manifests::BUILTIN_MANIFESTS;
 use serde_json::json;
 
 fn builtin_models() -> Vec<Value> {
-    let (_, contents) = BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("builtin.models.jsonc is embedded");
-    let manifest: Value =
-        serde_json::from_str(&crate::jsonc::strip_jsonc_comments(contents)).expect("parses");
+    let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("valid embedded model catalog");
     manifest["models"].as_array().expect("models").clone()
 }
 

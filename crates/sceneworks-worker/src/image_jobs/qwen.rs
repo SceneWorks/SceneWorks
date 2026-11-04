@@ -9,49 +9,6 @@ const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
 /// two-overlay ambiguity is naturally resolved.
 const QWEN_CONTROL_FILE: &str = "model.safetensors";
 
-/// The packed control tier subdir the request's `advanced.mlxQuantize` selects (sc-9870): `bf16` (opt
-/// out of quantization, `<= 0` / "none"), `q8` (`> 4`), `q4` for an explicit Q4 pick (`1..=4`), else —
-/// with NO explicit `mlxQuantize` — the **`q8`** default (sc-10726) — the SAME mapping
-/// `standard_tier_subdir` uses for the base transformer tier, so the control overlay tier tracks the
-/// base tier for a coherent A/B (a q8-default base pairs with the q8 control overlay). The whole control
-/// matrix (q4/q8/bf16) installs as co-requisites alongside the base, so the q8 overlay is on disk
-/// whenever the base is.
-///
-/// The Q8 default is CLAMPED to what's installed (sc-10726): `snapshot` is the control repo's HF cache
-/// snapshot, and — with NO explicit pick — the resolver picks the highest CLEAN overlay tier whose
-/// `<tier>/model.safetensors` is actually on disk (q8 → bf16 → q4), so a legacy/partial install that
-/// carries only the q4 overlay resolves q4 rather than forcing a NEW ~1.87 GB q8 fetch on the plain
-/// default path. An EXPLICIT pick is returned as-is (it may legitimately fetch its tier on demand), and
-/// an absent `snapshot` (nothing cached yet) falls back to `q8`, the fresh-install co-requisite the base
-/// download brings. Mirrors the candle `qwen_control_tier_subdir` (`qwen_control.rs`).
-fn qwen_control_tier_subdir(request: &ImageRequest, snapshot: Option<&Path>) -> &'static str {
-    request.quant_bits().map_or_else(
-        || qwen_control_installed_default_tier(snapshot),
-        |bits| crate::payload::tier_for_bits(Some(bits), "q8"),
-    )
-}
-
-/// The highest CLEAN control overlay tier (q8 → bf16 → q4) whose `<tier>/model.safetensors` is present
-/// in the control repo `snapshot`, else `"q8"` (the fresh-install co-requisite default). Keeps a plain
-/// default job from forcing a NEW on-demand fetch on a legacy/partial install that carries only q4
-/// (sc-10726) — the default tier only wins when it is actually on disk.
-fn qwen_control_installed_default_tier(snapshot: Option<&Path>) -> &'static str {
-    let present = |tier: &str| {
-        snapshot
-            .map(|root| root.join(tier).join(QWEN_CONTROL_FILE).is_file())
-            .unwrap_or(false)
-    };
-    if present("q8") {
-        "q8"
-    } else if present("bf16") {
-        "bf16"
-    } else if present("q4") {
-        "q4"
-    } else {
-        "q8"
-    }
-}
-
 /// True when this is the base-Qwen strict-pose tier: `qwen_image` + non-empty object
 /// `advanced.poses`, not edit mode, and base weights available. A `referenceAssetId`, if present,
 /// is ignored for parity with the Python torch `QwenImageControlNetPipeline` path; identity comes
@@ -216,22 +173,7 @@ fn qwen_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
-    raw.insert("realModelInference".to_owned(), Value::Bool(true));
-    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    raw.insert("numInferenceSteps".to_owned(), json!(steps));
-    raw.insert("guidanceScale".to_owned(), json!(guidance));
-    raw.insert(
-        "mlxQuantize".to_owned(),
-        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
-    );
-    raw.insert("controlScale".to_owned(), json!(control_scale));
-    raw.insert("poseCount".to_owned(), json!(pose_count));
-    raw.insert(
-        "controlEngine".to_owned(),
-        Value::String(QWEN_CONTROL_ENGINE_ID.to_owned()),
-    );
-    raw
+    tier_resolver::control_raw_settings(request, repo, steps, control_scale, pose_count, tier_resolver::ControlBackend::Mlx(quant_bits), Some(guidance), Some(QWEN_CONTROL_ENGINE_ID))
 }
 
 /// Real Qwen strict-pose generation: one image per pose, each conditioned on a full DWPose

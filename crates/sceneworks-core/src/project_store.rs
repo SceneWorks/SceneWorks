@@ -181,6 +181,15 @@ impl std::fmt::Display for ProjectStoreError {
 
 impl std::error::Error for ProjectStoreError {}
 
+impl From<crate::media_convert::IngestImageError> for ProjectStoreError {
+    fn from(error: crate::media_convert::IngestImageError) -> Self {
+        match error {
+            crate::media_convert::IngestImageError::Io(error) => Self::Io(error),
+            error => Self::BadRequest(error.to_string()),
+        }
+    }
+}
+
 impl From<std::io::Error> for ProjectStoreError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
@@ -3642,40 +3651,14 @@ impl ProjectStore {
         // decodable and never mislabeled (sc-6143) — without this an AVIF capture would be copied
         // verbatim under a `.png` name. A sniffable supported format keeps its bytes; when the magic
         // bytes aren't recognized at all (e.g. SVG) we fall back to the extension, then PNG.
-        let source_kind = crate::media_convert::sniff_image_kind_at(&canonical_source);
-        let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
-        let (ext, mime) = if needs_transcode {
-            ("png", "image/png")
-        } else {
-            sniff_image_format(&canonical_source)
-                .or_else(|| {
-                    canonical_source
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        .and_then(|value| match value.to_ascii_lowercase().as_str() {
-                            "jpg" | "jpeg" => Some(("jpg", "image/jpeg")),
-                            "webp" => Some(("webp", "image/webp")),
-                            "png" => Some(("png", "image/png")),
-                            _ => None,
-                        })
-                })
-                .unwrap_or(("png", "image/png"))
-        };
-        let media_path = dir.join(format!("{asset_id}.{ext}"));
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
-        if needs_transcode {
-            let kind = source_kind.expect("needs_transcode implies a sniffed kind");
-            crate::media_convert::transcode_to_png(&canonical_source, &media_path).map_err(
-                |error| {
-                    ProjectStoreError::BadRequest(format!(
-                        "Could not convert {} image to a supported format: {error}",
-                        kind.label()
-                    ))
-                },
-            )?;
-        } else {
-            fs::copy(&canonical_source, &media_path)?;
-        }
+        let ingested = crate::media_convert::ingest_image_with_naming(
+            &canonical_source,
+            &dir.join(&asset_id),
+            crate::media_convert::ImageCopyNaming::Canonical,
+        )?;
+        let media_path = ingested.path;
+        let mime = ingested.mime;
         let media_rel = relative_string(&project_path, &media_path)?;
 
         let source_asset_id = spec
@@ -6922,19 +6905,6 @@ fn build_document_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Va
     (file, recipe, lineage)
 }
 
-/// Parse + validate the 5-point normalized kps from a spec into a JSON `[[x,y]×5]` array.
-/// Sniff a still-image format from its magic bytes → `(extension, mime)`, or `None` when the
-/// header isn't a format the library retains. Used to label a captured keypoint source correctly
-/// regardless of the staged temp file's (extension-less) name.
-/// Recognize a natively-decodable image (png/jpeg/webp) from its magic bytes, returning the
-/// `(extension, mime)` to store it under. Returns `None` for any other format — the keypoint path's
-/// callers then fall back to the extension/PNG. Delegates to the shared [`crate::media_convert`]
-/// sniffer so there is one source of truth for image magic bytes (sc-6143).
-fn sniff_image_format(path: &Path) -> Option<(&'static str, &'static str)> {
-    let kind = crate::media_convert::sniff_image_kind_at(path)?;
-    kind.is_natively_supported().then(|| kind.canonical())
-}
-
 /// The outcome of import-time image normalization (sc-6143): the path whose bytes should be moved
 /// into the asset store, plus the mime type and file extension to record. When `transcoded_temp` is
 /// set, the move consumes that temp PNG (not the original upload), so the caller must remove the
@@ -8058,14 +8028,14 @@ mod tests {
         fail_next_asset_sidecar_remove, fail_next_upscale_lineage_db_read, find_timeline_file,
         guess_mime_from_filename, index_timeline, install_ensure_ready_before_lock_hook,
         is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags,
-        normalize_image_upload, read_json, read_registry_payload, sniff_image_format,
-        upload_extension, upscale_lineage_group, write_json, AssetIndexMutation, AssetScope,
-        AssetStatusPatch, CharacterCreateInput, CharacterLookInput, CharacterReferenceInput,
-        FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset, WorkflowScan,
-        ASSET_INDEX_DIRTY_MARKER, ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID,
-        GLOBAL_POSES_PROJECT_ID, IMPORTED_WORKFLOW_KEY, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR,
-        PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION,
-        SAFE_UPLOAD_EXTENSIONS, UPSCALE_LINEAGE_QUERY,
+        normalize_image_upload, read_json, read_registry_payload, upload_extension,
+        upscale_lineage_group, write_json, AssetIndexMutation, AssetScope, AssetStatusPatch,
+        CharacterCreateInput, CharacterLookInput, CharacterReferenceInput, FilmReferenceInput,
+        ProjectStore, ProjectStoreError, UploadAsset, WorkflowScan, ASSET_INDEX_DIRTY_MARKER,
+        ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
+        IMPORTED_WORKFLOW_KEY, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS,
+        PROJECT_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        UPSCALE_LINEAGE_QUERY,
     };
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
@@ -15334,20 +15304,37 @@ mod tests {
     }
 
     #[test]
-    fn sniff_image_format_reads_magic_bytes() {
+    fn ingest_image_names_extensionless_magic_bytes() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let png = temp_dir.path().join("a.bin");
-        std::fs::write(&png, b"\x89PNG\r\n\x1a\n....").unwrap();
-        assert_eq!(sniff_image_format(&png), Some(("png", "image/png")));
-        let jpg = temp_dir.path().join("b.bin");
-        std::fs::write(&jpg, [0xFF, 0xD8, 0xFF, 0xE0]).unwrap();
-        assert_eq!(sniff_image_format(&jpg), Some(("jpg", "image/jpeg")));
-        let webp = temp_dir.path().join("c.bin");
-        std::fs::write(&webp, b"RIFF\x00\x00\x00\x00WEBPVP8 ").unwrap();
-        assert_eq!(sniff_image_format(&webp), Some(("webp", "image/webp")));
-        let other = temp_dir.path().join("d.bin");
-        std::fs::write(&other, b"not an image").unwrap();
-        assert_eq!(sniff_image_format(&other), None);
+        for (name, bytes, expected) in [
+            (
+                "png",
+                b"\x89PNG\r\n\x1a\n....".as_slice(),
+                ("png", "image/png"),
+            ),
+            (
+                "jpg",
+                [0xff, 0xd8, 0xff, 0xe0].as_slice(),
+                ("jpg", "image/jpeg"),
+            ),
+            (
+                "webp",
+                b"RIFF\0\0\0\0WEBPVP8 ".as_slice(),
+                ("webp", "image/webp"),
+            ),
+            ("other", b"not an image".as_slice(), ("png", "image/png")),
+        ] {
+            let source = temp_dir.path().join(format!("{name}.bin"));
+            std::fs::write(&source, bytes).unwrap();
+            let result = crate::media_convert::ingest_image_with_naming(
+                &source,
+                &temp_dir.path().join(format!("stored-{name}")),
+                crate::media_convert::ImageCopyNaming::Canonical,
+            )
+            .unwrap();
+            assert_eq!((result.extension.as_str(), result.mime), expected);
+            assert_eq!(std::fs::read(result.path).unwrap(), bytes);
+        }
     }
 
     #[test]
