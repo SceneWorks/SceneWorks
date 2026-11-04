@@ -1316,25 +1316,35 @@ test("RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced, read from it
     ([, helper]) => helper,
   );
   assert.ok(helpers.length > 0, "is_receipt_priced delegates to per-family helpers");
-  const registry = await rustFacadeFunction(
+  assert.equal(body[1].replace(/\b(is_[a-z0-9_]+)\(engine_id\)|engine_id\s*==\s*"[^"]+"|\|\|/g, "").trim(), "",
+    "every receipt-priced expression must be understood");
+  const { source: registry } = await rustFacadeFunction(
     path.join(ROOT, "crates/sceneworks-worker/src/memory_route_registry.rs"), "gate_family",
   );
-  const familyArms = [...registry.source.matchAll(/((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*=>\s*([A-Za-z0-9_]+)/g)];
-  assert.ok(familyArms.length > 0, "the canonical gate-family registry has explicit provider arms");
+  const gateBody = registry.match(
+    /pub\(crate\) fn gate_family\(engine_id: &str\) -> Option<MemoryGateFamily> \{\s*use MemoryGateFamily::\*;\s*Some\(match engine_id \{([\s\S]*?)\n\s*\}\)\s*\}/,
+  );
+  assert.ok(gateBody, "the shared gate_family uses an engine-id match");
+  const families = new Map();
+  const arm = /((?:"[^"\n]+"\s*\|\s*)*"[^"\n]+")\s*=>\s*([A-Za-z0-9_]+)\s*,/g;
+  for (const [, patterns, family] of gateBody[1].matchAll(arm)) {
+    const ids = [...patterns.matchAll(/"([^"]+)"/g)].map(([, id]) => id);
+    families.set(family, [...(families.get(family) ?? []), ...ids]);
+  }
+  const remainder = gateBody[1].replace(arm, "").replace(/_\s*=>\s*return None\s*,/, "").trim();
+  assert.equal(remainder, "", "every gate_family arm must be understood");
   for (const helper of helpers) {
     const helperBody = source.match(
       new RegExp(`fn ${helper}\\(engine_id: &str\\) -> bool \\{([\\s\\S]*?)\\n\\}`),
     );
     assert.ok(helperBody, `${helper} is defined on the worker`);
     const family = helperBody[1].match(
-      /crate::memory_route_registry::gate_family\(engine_id\)\s*==\s*Some\(crate::memory_route_registry::MemoryGateFamily::([A-Za-z0-9_]+)\)/,
+      /^\s*crate::memory_route_registry::gate_family\(engine_id\)\s*==\s*Some\(crate::memory_route_registry::MemoryGateFamily::([A-Za-z0-9_]+)\)\s*$/,
     );
-    assert.ok(family, `${helper} reads the canonical gate-family predicate`);
-    const arms = familyArms.filter((arm) => arm[2] === family[1]);
-    assert.ok(arms.length > 0, `${family[1]} has canonical provider identities`);
-    for (const arm of arms) {
-      for (const [, literal] of arm[1].matchAll(/"([^"]+)"/g)) routes.add(literal);
-    }
+    assert.ok(family, `${helper} delegates to exactly one shared gate family`);
+    const ids = families.get(family[1]);
+    assert.ok(ids?.length, `${family[1]} has registered engine ids`);
+    for (const id of ids) routes.add(id);
   }
   assert.deepEqual(
     [...RECEIPT_PRICED_ROUTES].sort(),
