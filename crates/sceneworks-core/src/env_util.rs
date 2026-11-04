@@ -86,29 +86,6 @@ pub fn env_flag(key: &str, default: bool) -> bool {
     }
 }
 
-#[cfg(test)]
-mod bool_tests {
-    use super::*;
-
-    #[test]
-    fn boolean_policy_accepts_common_values_and_preserves_defaults() {
-        for value in ["1", " true ", "YES", "On", "tRuE"] {
-            assert_eq!(parse_bool(value), Some(true));
-        }
-        for value in ["0", " false ", "NO", "Off", "fAlSe"] {
-            assert_eq!(parse_bool(value), Some(false));
-        }
-        for value in ["", "  ", "maybe", "2"] {
-            assert_eq!(parse_bool(value), None);
-        }
-        for default in [false, true] {
-            for value in [None, Some(""), Some(" "), Some("invalid")] {
-                assert_eq!(flag_value("TEST_FLAG", value, default), default);
-            }
-        }
-    }
-}
-
 /// Read the first present numeric override, refusing malformed or non-Unicode
 /// values instead of falling through to an alias or default. `trim` preserves
 /// the calling setting's established whitespace policy.
@@ -141,4 +118,27 @@ fn invalid_u64(key: &str) -> String {
         "invalid unsigned integer environment value"
     );
     format!("{key} must be an unsigned 64-bit integer")
+}
+
+#[cfg(test)]
+mod bool_tests {
+    use super::*;
+
+    #[test]
+    fn boolean_policy_accepts_common_values_and_preserves_defaults() {
+        for value in ["1", " true ", "YES", "On", "tRuE"] {
+            assert_eq!(parse_bool(value), Some(true));
+        }
+        for value in ["0", " false ", "NO", "Off", "fAlSe"] {
+            assert_eq!(parse_bool(value), Some(false));
+        }
+        for value in ["", "  ", "maybe", "2"] {
+            assert_eq!(parse_bool(value), None);
+        }
+        for default in [false, true] {
+            for value in [None, Some(""), Some(" "), Some("invalid")] {
+                assert_eq!(flag_value("TEST_FLAG", value, default), default);
+            }
+        }
+    }
 }
