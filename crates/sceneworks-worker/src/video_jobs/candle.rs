@@ -2982,7 +2982,7 @@ mod plan_backed_wan_tests {
                 .prefix(&format!("wan-roles-lib-{label}-{}-", std::process::id()))
                 .tempdir()
                 .unwrap();
-            let mut settings = Settings::from_env();
+            let mut settings = crate::test_env::offline_settings();
             settings.data_dir = data.path().to_path_buf();
             settings.external_model_roots = Vec::new();
             let library_dir = std::fs::canonicalize(library.path()).unwrap();

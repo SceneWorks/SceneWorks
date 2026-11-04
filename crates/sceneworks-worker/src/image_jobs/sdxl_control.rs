@@ -117,10 +117,7 @@ fn sdxl_control_native_backend() -> &'static str {
     }
 }
 
-fn strict_optional_number(
-    advanced: &JsonObject,
-    key: &str,
-) -> WorkerResult<Option<f32>> {
+fn strict_optional_number(advanced: &JsonObject, key: &str) -> WorkerResult<Option<f32>> {
     let Some(value) = advanced.get(key) else {
         return Ok(None);
     };
@@ -168,9 +165,9 @@ fn optional_advanced_name(advanced: &JsonObject, key: &str) -> WorkerResult<Opti
     if value.is_null() {
         return Ok(None);
     }
-    let value = value.as_str().ok_or_else(|| {
-        WorkerError::InvalidPayload(format!("advanced.{key} must be a string"))
-    })?;
+    let value = value
+        .as_str()
+        .ok_or_else(|| WorkerError::InvalidPayload(format!("advanced.{key} must be a string")))?;
     let value = value.trim();
     if value.is_empty() || value.eq_ignore_ascii_case("default") {
         Ok(None)
@@ -220,9 +217,11 @@ fn validate_sdxl_control_request(request: &ImageRequest) -> WorkerResult<Vec<Pos
             )));
         }
     }
-    if request.advanced.get("usePid").is_some_and(|value| {
-        value.as_bool() != Some(false) && !value.is_null()
-    }) {
+    if request
+        .advanced
+        .get("usePid")
+        .is_some_and(|value| value.as_bool() != Some(false) && !value.is_null())
+    {
         return Err(WorkerError::InvalidPayload(
             "advanced.usePid cannot be combined with SDXL pose control".to_owned(),
         ));
@@ -257,9 +256,9 @@ fn validate_sdxl_control_request(request: &ImageRequest) -> WorkerResult<Vec<Pos
     let poses = request.advanced.get("poses").ok_or_else(|| {
         WorkerError::InvalidPayload("SDXL pose control requires advanced.poses".to_owned())
     })?;
-    let poses = poses.as_array().ok_or_else(|| {
-        WorkerError::InvalidPayload("advanced.poses must be an array".to_owned())
-    })?;
+    let poses = poses
+        .as_array()
+        .ok_or_else(|| WorkerError::InvalidPayload("advanced.poses must be an array".to_owned()))?;
     if poses.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "SDXL pose control requires at least one pose".to_owned(),
@@ -380,9 +379,7 @@ fn sdxl_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, Strin
             return Ok(None);
         };
         let value = value.as_str().ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "advanced.controlWeights.{key} must be a string"
-            ))
+            WorkerError::InvalidPayload(format!("advanced.controlWeights.{key} must be a string"))
         })?;
         let value = value.trim();
         if value.is_empty() {
@@ -399,12 +396,7 @@ fn sdxl_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, Strin
         &string_field("filename")?.unwrap_or_else(|| SDXL_CONTROL_FILE.to_owned()),
         "advanced.controlWeights.filename",
     )?;
-    let revision = trusted_control_weight_revision(
-        request,
-        SDXL_CONTROL_ENGINE_ID,
-        &repo,
-        &file,
-    )?;
+    let revision = trusted_control_weight_revision(request, SDXL_CONTROL_ENGINE_ID, &repo, &file)?;
     Ok((repo, file, revision))
 }
 
@@ -469,7 +461,9 @@ fn sdxl_control_admission_paths(spec: &LoadSpec) -> WorkerResult<(&Path, Vec<&Pa
     }
     overlays.extend(spec.adapters.iter().map(|adapter| adapter.path.as_path()));
     if let Some(pid) = &spec.pid {
-        overlays.push(crate::conditioning_fit::weights_source_path(&pid.checkpoint));
+        overlays.push(crate::conditioning_fit::weights_source_path(
+            &pid.checkpoint,
+        ));
         overlays.push(crate::conditioning_fit::weights_source_path(&pid.gemma));
     }
     if let Some(identity) = &spec.identity {
@@ -500,10 +494,7 @@ fn apply_sdxl_control_mlx_residency(spec: LoadSpec) -> WorkerResult<LoadSpec> {
     crate::mlx_fit_gate::apply_residency_policy(spec, SDXL_CONTROL_ENGINE_ID)
 }
 
-#[cfg(any(
-    test,
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 fn sdxl_control_flash_attn(request: &ImageRequest) -> bool {
     request
         .advanced
@@ -612,18 +603,29 @@ async fn generate_sdxl_control_stream(
         quant_bits,
         sampling.guidance,
     );
-    raw_settings.insert("controlEngine".to_owned(), Value::String(SDXL_CONTROL_ENGINE_ID.to_owned()));
+    raw_settings.insert(
+        "controlEngine".to_owned(),
+        Value::String(SDXL_CONTROL_ENGINE_ID.to_owned()),
+    );
     raw_settings.insert("controlRepo".to_owned(), Value::String(control_repo));
     raw_settings.insert("controlMode".to_owned(), Value::String("pose".to_owned()));
     raw_settings.insert("controlScale".to_owned(), json!(control_scale));
     raw_settings.insert("poseCount".to_owned(), json!(poses.len()));
     raw_settings.insert(
         "sampler".to_owned(),
-        sampling.sampler.clone().map(Value::String).unwrap_or(Value::Null),
+        sampling
+            .sampler
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
     );
     raw_settings.insert(
         "scheduler".to_owned(),
-        sampling.scheduler.clone().map(Value::String).unwrap_or(Value::Null),
+        sampling
+            .scheduler
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
     );
 
     let mut spec = sdxl_control_spec(
@@ -698,12 +700,8 @@ async fn generate_sdxl_control_stream(
                     stickwidth,
                     None,
                 )?;
-                let conditioning = build_control_conditioning(
-                    control,
-                    ControlKind::Pose,
-                    control_scale,
-                    None,
-                );
+                let conditioning =
+                    build_control_conditioning(control, ControlKind::Pose, control_scale, None);
                 let (out_w, out_h, pixels) = sdxl_control_generate_one(
                     generator.as_ref(),
                     &prompt,
@@ -748,13 +746,7 @@ mod sdxl_control_tests {
         ImageRequest::from_payload(value.as_object().expect("payload"))
     }
 
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
+    use crate::test_env::isolate_hf_cache;
 
     fn offline_settings_at(data_dir: &Path) -> Settings {
         Settings {
@@ -1018,8 +1010,9 @@ mod sdxl_control_tests {
                     apply_sdxl_control_mlx_residency(base_composition).is_ok(),
                     "the otherwise identical composition fits without the selected encoder"
                 );
-                let error = apply_sdxl_control_mlx_residency(complete)
-                    .expect_err("attaching the selected encoder alone must cross the fit threshold");
+                let error = apply_sdxl_control_mlx_residency(complete).expect_err(
+                    "attaching the selected encoder alone must cross the fit threshold",
+                );
                 assert!(error.to_string().contains("unified memory"), "{error}");
             },
         );

@@ -753,7 +753,7 @@ mod tests {
                 .clone();
             let mut manifest_entry = model.as_object().unwrap().clone();
             manifest_entry.insert("resolvedTextEncoder".to_owned(), resolution);
-            let mut settings = Settings::from_env();
+            let mut settings = crate::test_env::offline_settings();
             settings.data_dir = fixture.path().to_path_buf();
             settings.external_model_roots.clear();
 

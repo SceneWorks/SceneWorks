@@ -17,8 +17,7 @@
 use super::*;
 use crate::api_client::ApiClient;
 use axum::extract::{Path as AxumPath, State};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Json;
 use sceneworks_core::depth_map::decode_npy_f32;
 use std::sync::{Arc, Mutex};
 
@@ -50,10 +49,7 @@ async fn spawn_api() -> (String, Posts) {
         }))
     }
     let posts: Posts = Arc::default();
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job))
-        .route("/api/v1/jobs/:job_id/progress", post(progress))
-        .route("/api/v1/workers/:worker_id/heartbeat", post(heartbeat))
+    let app = crate::test_api_stub::job_progress_heartbeat_routes(job, progress, heartbeat)
         .with_state(posts.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
