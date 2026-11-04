@@ -55,10 +55,7 @@ use super::media_jobs::{
     run_ffmpeg_capture_stderr_with_timeout, run_ffmpeg_probe_command_with_timeout,
     run_ffmpeg_with_stdin_chunks_and_timeout, FfmpegContext, FFMPEG_EXECUTION_TIMEOUT_MAX,
 };
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::media_jobs::{
     mask_rollup_state, probe_source_frame_count_command_with_timeout, segment_assembly_frames,
     SegmentClip, SegmentOutcome,

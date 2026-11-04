@@ -73,7 +73,7 @@ use crate::vram_gate::VramBudget;
 /// [`crate::vram_gate`]'s and [`crate::krea_control_fit`]'s own `HEADROOM_GB` — allocator slack + CUDA
 /// context overhead, NOT an activation estimate (this gate makes no claim about activations; see the
 /// module note on why the floor stays a floor).
-const HEADROOM_GB: f64 = 2.0;
+const HEADROOM_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
 
 /// WHERE one candle conditioning lane is admitted — not whether.
 ///

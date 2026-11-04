@@ -57,10 +57,7 @@ pub(super) async fn admit_conditioning_overlay(
     settings: &Settings,
     footprint: &ConditioningFootprint,
 ) -> WorkerResult<()> {
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let (fit, _budget) = gate_with_evict_reclaim(
         &settings.gpu_id,
         raw_budget,

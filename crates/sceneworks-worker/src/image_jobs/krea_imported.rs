@@ -219,9 +219,7 @@ fn resolve_imported_krea_dit_pin(
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
         })
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
     else {
         return Ok(None);
     };
@@ -1232,11 +1230,7 @@ fn imported_model_quant(
         .and_then(Value::as_str)
         .map(str::trim)
         .map(str::to_ascii_lowercase);
-    let bits = request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    });
+    let bits = request.quant_bits();
     let selected = if krea_imported_native_nvfp4(request) {
         // Whether NVFP4 rides the LoadSpec at all is the PROVIDER's vocabulary, not the entry's:
         // a provider advertising `Quant::Nvfp4` (the Krea single-file lane) takes the explicit
@@ -1276,11 +1270,11 @@ fn imported_model_quant(
             }
         }
     } else {
-        match bits {
-            Some(1..=4) => Some(Quant::Q4),
-            Some(5..) => Some(Quant::Q8),
-            Some(i64::MIN..=0) => None,
-            None => return Ok((None, None)),
+        let Some(bits) = bits else { return Ok((None, None)) };
+        match crate::payload::tier_for_bits(Some(bits), "bf16") {
+            "q4" => Some(Quant::Q4),
+            "q8" => Some(Quant::Q8),
+            _ => None,
         }
     };
     if let Some(quant) = selected {

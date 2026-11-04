@@ -1,8 +1,6 @@
 //! JSONC manifest read/upsert/write helpers shared by the LoRA and model manifests.
 use super::*;
 
-use std::io::Write as _;
-
 use sceneworks_core::file_lock::FileLock;
 
 /// Max time to block waiting for the cross-process manifest lock before giving up
@@ -287,53 +285,49 @@ fn write_json_value_blocking_with_check(
     value: &Value,
     check: impl FnOnce() -> WorkerResult<()>,
 ) -> WorkerResult<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let mut output = serde_json::to_vec_pretty(value)?;
     output.push(b'\n');
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("json")
-    ));
-    let mut file = std::fs::File::create(&tmp_path)?;
-    file.write_all(&output)?;
-    file.sync_all()?;
-    drop(file);
-    // Validate AFTER the temporary-file I/O too: only the following rename changes the catalog.
-    if let Err(error) = check() {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(error);
-    }
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    // This call stays inside the manifest lock. The shared writer checks AFTER
+    // staging I/O, immediately before publication, preserving the claim fence.
+    sceneworks_core::fsutil::write_atomic_with(path, &output, Default::default(), check)
 }
 
 pub(crate) async fn write_json_value(path: &Path, value: &Value) -> WorkerResult<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let mut output = serde_json::to_vec_pretty(value)?;
-    output.push(b'\n');
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("json")
-    ));
-    let mut file = tokio::fs::File::create(&tmp_path).await?;
-    file.write_all(&output).await?;
-    file.sync_all().await?;
-    drop(file);
-    tokio::fs::rename(tmp_path, path).await?;
-    Ok(())
+    let path = path.to_path_buf();
+    let value = value.clone();
+    crate::load_progress::spawn_blocking(move || write_json_value_blocking(&path, &value))
+        .await
+        .map_err(|error| task_join_error("manifest write", error))?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_check_runs_after_staging_and_preserves_typed_claim_failure() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("models.jsonc");
+        let original = json!({"models": [{"id": "old"}]});
+        write_json_value_blocking(&path, &original).expect("seed");
+        let error = write_json_value_blocking_with_check(&path, &json!({"models": []}), || {
+            assert_eq!(
+                std::fs::read_dir(root.path()).expect("entries").count(),
+                2,
+                "the claim check must run after the temporary file was written"
+            );
+            Err(WorkerError::Canceled("claim lost after staging".to_owned()))
+        })
+        .expect_err("claim fence rejects publication");
+        assert!(
+            matches!(error, WorkerError::Canceled(message) if message == "claim lost after staging")
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            original
+        );
+        assert_eq!(std::fs::read_dir(root.path()).expect("entries").count(), 1);
+    }
 
     /// sc-22738: a released manifest lock must be free IMMEDIATELY, even while a descriptor this
     /// process handed to a child still references the same open file description. `flock(2)` locks

@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use sceneworks_core::project_store::ProjectStore;
 
@@ -7,23 +7,18 @@ pub(crate) struct ResolvedAssetMedia {
     pub display_name: Option<String>,
 }
 
+#[cfg(test)]
 fn lexically_confined_media_path(project_path: &Path, relative: &str) -> Option<PathBuf> {
-    let mut path = project_path.to_path_buf();
-    for component in Path::new(relative).components() {
-        match component {
-            Component::Normal(value) => path.push(value),
-            _ => return None,
-        }
-    }
-    Some(path)
+    sceneworks_core::safe_path::confine_under(
+        project_path,
+        relative,
+        sceneworks_core::safe_path::Confinement::Lexical,
+    )
+    .ok()
 }
 
 fn confined_media_path(project_path: &Path, relative: &str) -> Option<PathBuf> {
-    let project_path = project_path.canonicalize().ok()?;
-    let media_path = lexically_confined_media_path(&project_path, relative)?
-        .canonicalize()
-        .ok()?;
-    (media_path.starts_with(&project_path) && media_path.is_file()).then_some(media_path)
+    sceneworks_core::safe_path::resolve_local_file(project_path, relative).ok()
 }
 
 /// Resolve an asset sidecar's project-relative media path without accepting root,

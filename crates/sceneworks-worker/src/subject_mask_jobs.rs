@@ -21,47 +21,29 @@
 
 use super::*;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::CancelFlag;
 
 /// The segmentation space stamped on the POSTed masks; rust-api refuses any other value.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const SUBJECT_MASK_SPACE: &str = "sam3-person";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CANCEL_MESSAGE: &str = "Subject mask generation canceled by user.";
 /// Largest JSON-encoded mask payload per sidecar POST. Masks go up in chunks of at most this many
 /// bytes (rust-api's `/subject-masks` route accepts up to 256 MiB per body), so a dataset of any
 /// size never 413s after the GPU work. One mask is at most 32 MiB raw (~43 MiB base64), so a single
 /// mask always fits a chunk. The store treats each POST as an incremental write.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const SUBJECT_MASK_POST_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct SubjectMaskItem {
     image_path: PathBuf,
     content_hash: String,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 pub(crate) struct SubjectMaskRecord {
     content_hash: String,
@@ -73,10 +55,7 @@ pub(crate) struct SubjectMaskRecord {
 
 /// Union every detected person's binary mask (row-major `width*height`, 0/255) into one subject
 /// mask. No masks → an all-black mask. A mask of the wrong length is an engine error, never padded.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn union_person_masks(masks: &[Vec<u8>], width: u32, height: u32) -> WorkerResult<Vec<u8>> {
     let len = width as usize * height as usize;
     let mut subject = vec![0u8; len];
@@ -94,10 +73,7 @@ fn union_person_masks(masks: &[Vec<u8>], width: u32, height: u32) -> WorkerResul
     Ok(subject)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn encode_mask_png(mask: Vec<u8>, width: u32, height: u32) -> WorkerResult<Vec<u8>> {
     let image = image::GrayImage::from_raw(width, height, mask)
         .ok_or_else(|| WorkerError::Engine("subject mask buffer size mismatch".to_owned()))?;
@@ -109,18 +85,12 @@ fn encode_mask_png(mask: Vec<u8>, width: u32, height: u32) -> WorkerResult<Vec<u
 }
 
 /// Decodes dataset image `index` for the segmenter (see [`generate_subject_masks`]).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 type ImageLoader = Box<dyn FnMut(usize) -> WorkerResult<image::RgbImage> + Send>;
 
 /// Turns image `index` and every person SAM3 found on it into its stored record (see
 /// [`generate_subject_masks`]).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 type MaskFinisher =
     Box<dyn FnMut(usize, &image::RgbImage, Vec<Vec<u8>>) -> WorkerResult<SubjectMaskRecord> + Send>;
 
@@ -129,10 +99,7 @@ type MaskFinisher =
 /// runs a one-frame "person" propagate and hands the detected masks to `finish`. Here `load` decodes
 /// the item and `finish` unions every person, encodes the PNG and reports the item's index on `tx`.
 /// The segmenter is injected so the loop is testable without weights.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn generate_subject_masks<B>(
     items: Vec<SubjectMaskItem>,
     cancel: CancelFlag,
@@ -179,10 +146,7 @@ where
     segment_batch(count, load, finish)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_dataset_subject_mask_job(
     api: &ApiClient,
     settings: &Settings,
@@ -290,20 +254,14 @@ pub(crate) async fn run_dataset_subject_mask_job(
 }
 
 /// The segmenter [`generate_subject_masks`] drives: `segment_batch(count, load, finish)`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) type SegmentBatch = Box<
     dyn FnOnce(usize, ImageLoader, MaskFinisher) -> WorkerResult<Vec<SubjectMaskRecord>> + Send,
 >;
 
 /// The production segmenter: ONE SAM3 session over the batch (the model is built + quantized once,
 /// not per image) — MLX on macOS, candle off-Mac — honoring `cancel` between images.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn sam3_segment_batch(
     model_path: PathBuf,
     tokenizer_path: PathBuf,
@@ -335,10 +293,7 @@ fn sam3_segment_batch(
 /// Run `segment_batch` over `items` on a blocking thread, reporting each finished item's index on
 /// `tx`. Shared by the `dataset_subject_mask` job and the training run's subject-mask prepass
 /// (sc-2124).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn spawn_subject_mask_segmentation(
     segment_batch: SegmentBatch,
     items: Vec<SubjectMaskItem>,
@@ -361,19 +316,13 @@ fn spawn_subject_mask_segmentation(
 }
 
 /// Cancel copy of a training run stopped during its subject-mask prepass.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const PREPASS_CANCEL_MESSAGE: &str = "LoRA training canceled while generating subject masks.";
 
 /// Whether the dataset at `dataset_root` currently stores a mask (of any source — generated, an
 /// all-black "no subject" one, or a user upload) for the image with `content_hash`: an index record
 /// AND its file, like the coverage report.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn dataset_has_mask(
     dataset_root: &Path,
     index: &sceneworks_core::training_subject_masks::DatasetSubjectMasks,
@@ -386,10 +335,7 @@ fn dataset_has_mask(
 }
 
 /// The dataset's current mask index (absent ⇒ empty), read from its app-managed root.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn current_mask_index(
     settings: &Settings,
     dataset_root: &str,
@@ -422,10 +368,7 @@ fn current_mask_index(
 ///
 /// `make_segmenter` builds the segmenter only once there is something to segment (production:
 /// [`installed_sam3_segmenter`]); injected so the prepass is testable without weights.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_training_subject_mask_prepass_with<M>(
     api: &ApiClient,
     settings: &Settings,
@@ -522,10 +465,7 @@ where
 
 /// The production `make_segmenter` of [`run_training_subject_mask_prepass_with`]: the installed SAM3
 /// segmenter (resolve-only, sc-17629 — an actionable install error, never a download).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn installed_sam3_segmenter(
     settings: &Settings,
 ) -> impl FnOnce(CancelFlag) -> WorkerResult<SegmentBatch> + Send + '_ {
@@ -536,10 +476,7 @@ pub(crate) fn installed_sam3_segmenter(
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn subject_mask_records_payload(records: &[SubjectMaskRecord]) -> Vec<Value> {
     use base64::Engine as _;
     records
@@ -553,10 +490,7 @@ fn subject_mask_records_payload(records: &[SubjectMaskRecord]) -> Vec<Value> {
         .collect()
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn subject_mask_result(
     dataset_id: &str,
     masked: usize,
@@ -590,76 +524,28 @@ fn subject_mask_result(
     Ok(result)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn subject_mask_items(
     settings: &Settings,
     payload: &JsonObject,
 ) -> WorkerResult<Vec<SubjectMaskItem>> {
-    let dataset_root = payload
-        .get("datasetRoot")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Subject mask payload.datasetRoot must be an app-managed dataset path.".to_owned(),
-            )
-        })?;
-    let items = payload
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload("Subject mask payload.items must be an array.".to_owned())
-        })?;
-    items
-        .iter()
-        .map(|item| {
-            let object = item.as_object().ok_or_else(|| {
-                WorkerError::InvalidPayload("Subject mask item must be an object.".to_owned())
-            })?;
-            let field = |key: &str| {
-                object
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-            };
-            let item_id = field("itemId").ok_or_else(|| {
-                WorkerError::InvalidPayload("Subject mask item is missing itemId.".to_owned())
-            })?;
-            let content_hash = field("contentHash")
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Subject mask item {item_id} is missing contentHash."
-                    ))
-                })?
-                .to_owned();
-            let image_path = field("imagePath").ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "Subject mask item {item_id} is missing imagePath."
-                ))
-            })?;
-            let image_path = resolve_dataset_item_path(
-                settings,
-                dataset_root,
-                image_path,
-                &format!("Subject mask item {item_id} imagePath"),
-            )?;
+    parse_dataset_items(
+        settings,
+        payload,
+        "Subject mask",
+        DatasetItemPolicy::Strict,
+        |item| {
+            let content_hash = item.required("contentHash")?.to_owned();
+            let image_path = item.image_path()?;
             Ok(SubjectMaskItem {
                 image_path,
                 content_hash,
             })
-        })
-        .collect()
+        },
+    )
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_dataset_subject_mask_job(
     _api: &ApiClient,
     _settings: &Settings,
@@ -672,11 +558,5 @@ pub(crate) async fn run_dataset_subject_mask_job(
     ))
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod tests;
