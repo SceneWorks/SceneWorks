@@ -56,11 +56,14 @@ pub(crate) fn optional_id(payload: &JsonObject, key: &str) -> Option<String> {
 /// Read an optional int that may arrive as a JSON number or a numeric string. `None`
 /// when absent or unparseable.
 pub(crate) fn optional_i64(payload: &JsonObject, key: &str) -> Option<i64> {
-    payload.get(key).and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    })
+    payload.get(key).and_then(json_integer)
+}
+
+/// A JSON integer or trimmed integer string. Never truncates floating-point numbers.
+pub fn json_integer(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
 }
 
 /// The `safe_int` READ with no default applied: a JSON number or a numeric string, `None` when
@@ -186,6 +189,33 @@ mod tests {
     // The image lane historically used `string_or` = RAW and `nonempty_string_or` =
     // trim+empty-filter; the video lane's `string_or` was actually the trim+filter variant.
     // These lock the raw-vs-trim distinction so the dedup is provably behavior-preserving.
+
+    #[test]
+    fn image_and_video_quant_bits_share_exact_integer_parsing() {
+        use crate::{image_request::ImageRequest, video_request::VideoRequest};
+        for (value, expected) in [
+            (serde_json::json!(4), Some(4)),
+            (serde_json::json!(" 8 "), Some(8)),
+            (serde_json::json!(0), Some(0)),
+            (serde_json::json!(-1), Some(-1)),
+            (serde_json::json!(4.5), None),
+            (serde_json::json!(4.0), None),
+            (serde_json::json!(true), None),
+            (serde_json::json!(null), None),
+            (serde_json::json!(u64::MAX), None),
+            (serde_json::json!("9223372036854775808"), None),
+        ] {
+            let payload = serde_json::json!({"advanced":{"mlxQuantize":value}})
+                .as_object()
+                .unwrap()
+                .clone();
+            assert_eq!(ImageRequest::from_payload(&payload).quant_bits(), expected);
+            assert_eq!(VideoRequest::from_payload(&payload).quant_bits(), expected);
+        }
+        let empty = JsonObject::new();
+        assert_eq!(ImageRequest::from_payload(&empty).quant_bits(), None);
+        assert_eq!(VideoRequest::from_payload(&empty).quant_bits(), None);
+    }
 
     #[test]
     fn string_or_returns_raw_value_including_present_but_empty() {

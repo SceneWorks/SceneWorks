@@ -43,7 +43,7 @@ use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
 use crate::store_util::{
     ensure_column, is_safe_id, is_safe_relative_path, lock_project_files, optional_f64,
-    optional_str, optional_u64, random_hex, read_json, relative_string, write_json,
+    optional_str, optional_u64, random_hex, read_json, relative_string, required_str, write_json,
 };
 use crate::time::utc_now;
 use crate::training::TrainingDataset;
@@ -623,17 +623,8 @@ fn registry_content_sha256(file: &mut fs::File) -> ProjectStoreResult<[u8; 32]> 
     record_asset_list_filesystem_operation(AssetListFilesystemOperation::RegistryContentRead);
     let mut hasher = Sha256::new();
     let mut limited = file.take(MAX_REGISTRY_BYTES + 1);
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let read = limited.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        ensure_registry_size(total)?;
-        hasher.update(&buffer[..read]);
-    }
+    crate::hashing::update_sha256(&mut limited, &mut hasher)?;
+    ensure_registry_size(MAX_REGISTRY_BYTES + 1 - limited.limit())?;
     Ok(hasher.finalize().into())
 }
 
@@ -2739,7 +2730,11 @@ impl ProjectStore {
                 "Asset media path must be project-relative".to_owned(),
             ));
         }
-        Ok(project_path.join(media_rel))
+        crate::safe_path::resolve_local_file(&project_path, media_rel).map_err(|error| {
+            ProjectStoreError::BadRequest(format!(
+                "Asset media path is not a confined project file: {error}"
+            ))
+        })
     }
 
     pub fn list_characters(
@@ -2965,7 +2960,7 @@ impl ProjectStore {
     }
 
     pub fn get_person_track(&self, project_id: &str, track_id: &str) -> ProjectStoreResult<Value> {
-        if !is_safe_track_id(track_id) {
+        if !is_safe_id(track_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid person track ID".to_owned(),
             ));
@@ -3002,7 +2997,7 @@ impl ProjectStore {
         track_id: &str,
         corrections: Vec<Value>,
     ) -> ProjectStoreResult<Value> {
-        if !is_safe_track_id(track_id) {
+        if !is_safe_id(track_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid person track ID".to_owned(),
             ));
@@ -4748,19 +4743,17 @@ impl ProjectStore {
         }
         let project_path = self.find_project_path(project_id)?;
         let root = fs::canonicalize(&project_path)?;
-        let target = project_path.join(relative_path);
-        let target = fs::canonicalize(&target).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ProjectStoreError::NotFound("File not found".to_owned())
-            } else {
-                ProjectStoreError::Io(error)
-            }
-        })?;
-        if !target.starts_with(&root) {
-            return Err(ProjectStoreError::BadRequest(
-                "Invalid project file path".to_owned(),
-            ));
-        }
+        let target = crate::safe_path::resolve_local_file(&project_path, relative_path).map_err(
+            |error| match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    ProjectStoreError::NotFound("File not found".to_owned())
+                }
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput => {
+                    ProjectStoreError::BadRequest("Invalid project file path".to_owned())
+                }
+                _ => ProjectStoreError::Io(error),
+            },
+        )?;
         // Recheck the canonical relative path too: a public-looking symlink must
         // never turn this read-only media boundary into access to internal state.
         if !target.is_file() || !target.strip_prefix(&root).is_ok_and(is_public_project_file) {
@@ -7878,18 +7871,6 @@ fn read_dir_paths(path: &Path) -> ProjectStoreResult<Vec<PathBuf>> {
     fs::read_dir(path)?
         .map(|entry| entry.map(|entry| entry.path()).map_err(Into::into))
         .collect()
-}
-
-fn is_safe_track_id(track_id: &str) -> bool {
-    !track_id.trim().is_empty()
-        && track_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-}
-
-fn required_str<'a>(payload: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
-    optional_str(payload, key)
-        .ok_or_else(|| ProjectStoreError::BadRequest(format!("Missing required field: {key}")))
 }
 
 fn normalize_asset_tags(tags: &[String]) -> ProjectStoreResult<Vec<String>> {
@@ -13974,7 +13955,7 @@ mod tests {
             .resolve_asset_media_path(&project.id, &asset_id)
             .expect("resolve safe id");
         assert!(resolved.is_file());
-        assert!(resolved.starts_with(temp_dir.path()));
+        assert!(resolved.starts_with(temp_dir.path().canonicalize().unwrap()));
 
         // A `../` escape id is rejected outright (never joined into a path).
         for escape in ["../../etc/passwd", "..", "a/../../b"] {
@@ -13984,6 +13965,44 @@ mod tests {
                 "traversal id {escape:?} must be rejected, got {result:?}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_asset_media_path_rejects_replaced_media_symlink() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temporary.path().join("data"), "test");
+        let project = store.create_project("Symlink boundary").unwrap();
+        let source = temporary.path().join("source.png");
+        fs::write(&source, b"fixture").unwrap();
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "source.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .unwrap();
+        let id = asset["id"].as_str().unwrap();
+        let media = store.resolve_asset_media_path(&project.id, id).unwrap();
+        let outside = temporary.path().join("outside.png");
+        fs::write(&outside, b"outside").unwrap();
+        fs::remove_file(&media).unwrap();
+        std::os::unix::fs::symlink(&outside, &media).unwrap();
+        assert!(matches!(
+            store.resolve_asset_media_path(&project.id, id),
+            Err(ProjectStoreError::BadRequest(_))
+        ));
+        assert!(store
+            .project_file(
+                &project.id,
+                asset.pointer("/file/path").and_then(Value::as_str).unwrap()
+            )
+            .is_err());
     }
 
     /// sc-13517: `saved_voices` rows are DB-authoritative and MUST survive a reindex. The reindex

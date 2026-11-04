@@ -2169,25 +2169,8 @@ fn is_invisible_formatting(character: char) -> bool {
 /// this returns. `.` and `-` and `_` are legal INSIDE a segment, so a segment must additionally
 /// start with an alphanumeric — otherwise `../x` reads as the perfectly-shaped repo id `..`/`x`.
 fn hf_repo_id(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.chars().count() > LABEL_MAX_CHARS {
-        return None;
-    }
-    let mut segments = trimmed.split('/');
-    let (Some(owner), Some(name), None) = (segments.next(), segments.next(), segments.next())
-    else {
-        return None;
-    };
-    let segment_ok = |segment: &str| {
-        segment
-            .chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_alphanumeric())
-            && segment.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
-            })
-    };
-    (segment_ok(owner) && segment_ok(name)).then(|| trimmed.to_owned())
+    let repo = crate::hf_repo_id::namespaced(value).ok()?;
+    (repo.chars().count() <= LABEL_MAX_CHARS).then(|| repo.to_owned())
 }
 
 // ---------------------------------------------------------------------------

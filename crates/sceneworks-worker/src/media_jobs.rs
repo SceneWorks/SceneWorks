@@ -693,10 +693,7 @@ pub(crate) async fn run_person_detect(
 /// (native MLX, epic 3482 / sc-3633) AND the off-Mac candle GPU-worker lane (`ort`/CUDA,
 /// sc-5498); identical body — the platform backend is chosen inside `person_jobs`. A
 /// candle-disabled off-Mac build refuses the job (the stub below).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn run_yolo11_person_detect(
     api: &ApiClient,
     settings: &Settings,
@@ -729,7 +726,7 @@ async fn run_yolo11_person_detect(
     Ok((boxes, result.device))
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 async fn run_yolo11_person_detect(
     _api: &ApiClient,
     _settings: &Settings,
@@ -988,10 +985,7 @@ struct PersonTrackOutcome {
 /// orchestrator can't infer from the tracking result. `device_default` is the fallback device label
 /// used only if no frame reports one (zero-frame case); every frame's real device overrides it.
 /// `backend_label` / `segmenter_label` populate `tracker_meta`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct PersonTrackBackend {
     /// Fallback `tracker_meta.device` (macOS = `"mlx"`, off-Mac candle = `"cuda"`), overridden by
     /// the detector's real per-frame device.
@@ -1014,10 +1008,7 @@ struct PersonTrackBackend {
 /// every rendered frame's real device overrides `device_default`, so the default only shows through
 /// in the (unreachable) zero-frame case. The work dir is cleaned up on both the not-found error path
 /// and the success path.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track_shared<F, Fut>(
     api: &ApiClient,
@@ -1086,10 +1077,7 @@ where
 /// remove the staged-frame `work_dir` on every exit path (success or error, sc-8912). Returns the
 /// assembled track; the not-found case is still a typed `InvalidPayload` error (cleanup now happens
 /// in the caller, so this no longer removes the dir itself).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track_body<F, Fut>(
     api: &ApiClient,
@@ -1218,20 +1206,14 @@ where
 /// Render dimensions of the sampled track frames (`render_frame_png` above), and therefore the
 /// size of the masks the SAM segmenter emits. Shared by the macOS (SAM2/SAM3) and off-Mac candle
 /// (SAM3, sc-6247) segmentation passes.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const TRACK_FRAME_SIZE: (u32, u32) = (1280, 720);
 
 /// The clip a segmenter backend is asked to mask: the `first..=last` detected-span frame paths and
 /// their per-frame ByteTrack box anchors (`None` on the gap frames a video predictor fills from its
 /// memory bank). Handed to the backend closure so it can drive its own model without knowing the
 /// span math, sidecar layout, or PNG contract.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct SegmentClip {
     /// Rendered frame paths for `first..=last`, index-aligned with `anchors`.
     pub(crate) clip_paths: Vec<PathBuf>,
@@ -1243,10 +1225,7 @@ pub(crate) struct SegmentClip {
 /// shared orchestrator can distinguish the three outcomes without overloading `Ok(vec![])`:
 /// a user cancel is terminal for the whole job, a weights/engine failure degrades to box masks, and
 /// masks are the success path.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) enum SegmentOutcome {
     /// One binary mask per clip frame (detected + gap), index-aligned with `SegmentClip::clip_paths`.
     Masks(Vec<Vec<u8>>),
@@ -1273,10 +1252,7 @@ pub(crate) enum SegmentOutcome {
 /// Kept cfg-free next to the shared orchestrator so both lanes roll up identically without reaching
 /// into a per-backend, per-lane segmenter module (`person_segment` is Mac-only; the candle rollup
 /// lives in `person_segment_sam3_candle`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn mask_rollup_state(generated: usize, detected_total: usize) -> &'static str {
     if generated == 0 {
         "degraded"
@@ -1307,10 +1283,7 @@ pub(crate) fn mask_rollup_state(generated: usize, detected_total: usize) -> &'st
 /// so the keepalive inside the closure pings `Busy` every interval AND polls for a user cancel;
 /// that cancel is terminal for the whole job (never a degrade), any other failure keeps the degrade
 /// contract.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn segment_assembly_frames<F, Fut>(
     api: &ApiClient,
@@ -1617,10 +1590,7 @@ async fn run_candle_segmenter(
 /// returning the `(assembly_idx, rel)` of the frames that were written. A single frame's failure is
 /// non-fatal (matches Python's per-frame `except: continue`); it keeps `mask: null` and falls back
 /// to a box mask at replacement time. Shared by the macOS and off-Mac candle segmentation passes.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn write_track_mask_pngs(
     width: u32,
     height: u32,
@@ -1717,7 +1687,7 @@ async fn assemble_real_person_track(
     .await
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track(
     _api: &ApiClient,
@@ -1934,8 +1904,7 @@ pub(crate) async fn run_person_track(
         tracker_meta,
     } = outcome;
 
-    let track_name =
-        optional_payload_string(&job.payload, "trackName").unwrap_or("Selected person");
+    let track_name = optional_payload_text(&job.payload, "trackName").unwrap_or("Selected person");
     let representative_frame_asset_id = job
         .payload
         .get("representativeFrameAssetId")
@@ -2572,7 +2541,7 @@ pub(crate) fn export_request_from_job(job: &JobSnapshot) -> WorkerResult<Timelin
     Ok(TimelineExportRequest {
         project_id: required_payload_string(&job.payload, "projectId")?.to_owned(),
         timeline_id: required_payload_string(&job.payload, "timelineId")?.to_owned(),
-        timeline_name: optional_payload_string(&job.payload, "timelineName")
+        timeline_name: optional_payload_text(&job.payload, "timelineName")
             .unwrap_or("Timeline")
             .to_owned(),
         timeline_path: required_payload_string(&job.payload, "timelinePath")?.to_owned(),
@@ -2613,11 +2582,7 @@ fn frame_scale_pad_filter(width: u32, height: u32) -> String {
 /// EVERY caller to the slow accurate-seek fallback — a real regression that hid behind the
 /// documented non-fatal `None`, because the bundled 7.1 and current 9.0.1 both print `frame=`
 /// either way. Decoding reports `frame=   48` on all three builds (sc-19549).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 async fn probe_source_frame_count(ffmpeg: &str, source_path: &Path) -> WorkerResult<Option<usize>> {
     let program = resolve_probe_program(ffmpeg);
     let mut command = Command::new(&program);
@@ -2634,11 +2599,7 @@ async fn probe_source_frame_count(ffmpeg: &str, source_path: &Path) -> WorkerRes
     probe_source_frame_count_command_with_timeout(command, ffmpeg_execution_timeout()).await
 }
 
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) async fn probe_source_frame_count_command_with_timeout(
     command: Command,
     execution_timeout: Duration,
@@ -2709,10 +2670,7 @@ fn parse_ffmpeg_frame_count(stderr: &str) -> Option<usize> {
 /// produced. In the single-pass path, if the source is shorter than the grid implies and ffmpeg
 /// emits fewer than `count` frames, the last real frame is cloned forward so every sample index has
 /// a readable frame (the tracker records the logical `timestamps[i]` regardless).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn render_track_frames(
     ffmpeg: &str,
@@ -2833,10 +2791,7 @@ async fn render_track_frames(
 /// sub-cadence-fps sources the forward-only `select` exhausts the clip early and diverges grossly, which
 /// is exactly why [`render_track_frames`] gates this path behind the probe. Callers other than the gated
 /// wrapper (i.e. tests) must respect that.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn render_track_frames_single_pass(
     ffmpeg: &str,
@@ -2936,10 +2891,7 @@ async fn render_track_frames_single_pass(
 /// rendered frame is cloned forward instead of hard-erroring. That mirrors the single-pass path's own
 /// short-source tail handling and matches pre-PR frame *selection* for every sample pre-PR produced,
 /// while never failing the job on a short clip (the tracker still records the logical `timestamps[i]`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn render_track_frames_per_frame(
     ffmpeg: &str,
@@ -2985,10 +2937,7 @@ async fn render_track_frames_per_frame(
 /// Accurate-seek one frame like [`render_frame_png`], but instead of erroring when ffmpeg emits no
 /// output (a seek past the last real frame on a short/low-fps clip), return `Ok(false)` so the caller
 /// can decide whether to clone the previous frame forward. `Ok(true)` means the frame was written.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn try_render_frame_png(
     ffmpeg: &str,
     source_path: &Path,

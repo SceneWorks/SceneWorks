@@ -398,7 +398,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn real_generic_render_surface_transports_placement_document_to_generator() {
         struct Capture(gen_core::ModelDescriptor);

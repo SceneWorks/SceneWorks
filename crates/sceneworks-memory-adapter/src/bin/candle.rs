@@ -8574,10 +8574,7 @@ fn sdxl_endpoint_context_uuid() -> Result<String, String> {
         .uuid()
         .map_err(|error| error.to_string())?;
     let bytes = uuid.bytes.map(|byte| byte as u8);
-    let hex = bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let hex = sceneworks_core::hashing::hex(&bytes);
     Ok(format!(
         "GPU-{}-{}-{}-{}-{}",
         &hex[..8],

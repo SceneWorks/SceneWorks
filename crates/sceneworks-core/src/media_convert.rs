@@ -201,26 +201,7 @@ pub fn image_dimensions(path: &Path) -> Option<(u32, u32)> {
 /// invalidates a Tier-1 embedding exactly when the image bytes change (epic 6529 §6.3).
 /// Streams the file so it never holds a whole image in memory.
 pub fn file_content_hash(path: &Path) -> std::io::Result<String> {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
-    use std::io::Read as _;
-
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    // SHA-256 is always 32 bytes → 64 lowercase-hex chars.
-    let mut hex = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    Ok(hex)
+    crate::hashing::sha256_file(path)
 }
 
 /// Failure converting an image to PNG.

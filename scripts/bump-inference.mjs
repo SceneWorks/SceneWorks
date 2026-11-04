@@ -4,8 +4,7 @@
 // SceneWorks is its only consumer, so a formal release does not belong on the critical path between
 // the two repos -- releases stay for durable/shareable snapshots (inference's cut_release.py).
 //
-// The pins live in crates/sceneworks-worker/Cargo.toml and
-// crates/sceneworks-memory-adapter/Cargo.toml. The root Cargo.toml additionally `[patch]`es
+// The pins live in the core, worker and memory-adapter Cargo.toml manifests. The root Cargo.toml additionally `[patch]`es
 // candle-kernels and (after M5) candle-core to the vendored copies inside the same inference
 // revision. Those revs must move in lockstep with the direct crates. This
 // rewrites every `tag = "..."` / `rev = "..."` pin in those manifests and regenerates the lockfile.
@@ -100,10 +99,7 @@ function inferenceManifests() {
   return found;
 }
 
-const SEMANTIC_PROVENANCE = join(repoRoot, "crates/sceneworks-worker/src/catalog_semantic_jobs.rs");
-const SEMANTIC_PROVENANCE_RE = /(const INFERENCE_RUNTIME_REVISION: &str = ")[0-9a-f]{40}(";)/;
-const MEMORY_PROVENANCE = join(repoRoot, "crates/sceneworks-memory-adapter/src/lib.rs");
-const MEMORY_PROVENANCE_RE = /(pub const INFERENCE_PIN: &str = ")[0-9a-f]{40}(";)/;
+
 // The FLUX.2 compatibility audit's frozen end-of-window (sc-17497 / sc-17524 / sc-17606). Read, never
 // rewritten: unlike the two provenance stamps above, this constant is a claim about what a BUILD
 // proved, so substituting the string would fake the proof — the same reason
@@ -195,26 +191,6 @@ function verifyCandlePatches(manifestText, sha) {
       throw new Error(`root Candle [patch] must pin exactly one ${crate} at inference ${sha}`);
     }
   }
-}
-
-function repinSemanticProvenance(source, sha) {
-  if (!SEMANTIC_PROVENANCE_RE.test(source)) {
-    throw new Error(
-      `no INFERENCE_RUNTIME_REVISION constant found in ${SEMANTIC_PROVENANCE} -- the semantic ` +
-        "provenance stamp must move with the pin or its lockstep test goes red",
-    );
-  }
-  return source.replace(SEMANTIC_PROVENANCE_RE, `$1${sha}$2`);
-}
-
-function repinMemoryProvenance(source, sha) {
-  if (!MEMORY_PROVENANCE_RE.test(source)) {
-    throw new Error(
-      `no INFERENCE_PIN constant found in ${MEMORY_PROVENANCE} -- the calibration adapter ` +
-        "provenance stamp must move with the pin",
-    );
-  }
-  return source.replace(MEMORY_PROVENANCE_RE, `$1${sha}$2`);
 }
 
 // --- git / cargo orchestration ----------------------------------------------------------------
@@ -1047,29 +1023,8 @@ function selfTest() {
       staleCurrencyAttestations({}, SHA).length === 0,
   );
 
-  // The fixture deliberately carries a DECOY 40-hex constant: the real file declares
-  // CLIP_MODEL_REVISION (an upstream HF model revision) two lines above the stamp, and nothing else
-  // guards it -- it is only ever compared against itself. A loosened SEMANTIC_PROVENANCE_RE would
-  // silently overwrite it on every bump, so the fixture must prove the rewrite is anchored to the
-  // stamp's own name, not merely that the stamp moved.
-  const CLIP_DECOY = `const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";`;
-  const stampBefore =
-    `${CLIP_DECOY}\nconst CLIP_SPACE: &str = "clip-vit-l14";\nconst INFERENCE_RUNTIME_REVISION: &str = "${"b".repeat(40)}";\nconst DEFAULT_BATCH_SIZE: usize = 16;`;
-  const stampAfter =
-    `${CLIP_DECOY}\nconst CLIP_SPACE: &str = "clip-vit-l14";\nconst INFERENCE_RUNTIME_REVISION: &str = "${SHA}";\nconst DEFAULT_BATCH_SIZE: usize = 16;`;
-  const stampBumped = repinSemanticProvenance(stampBefore, SHA);
-  check("semantic provenance stamp bumps with the pin", stampBumped === stampAfter);
-  check(
-    "neighbouring 40-hex CLIP_MODEL_REVISION is left byte-identical",
-    stampBumped.includes(CLIP_DECOY) && !stampBumped.includes(`CLIP_MODEL_REVISION: &str = "${SHA}"`),
-  );
-  check(
-    "memory-strategy adapter provenance stamp bumps with the pin",
-    repinMemoryProvenance(
-      `pub const INFERENCE_PIN: &str = "${"b".repeat(40)}";`,
-      SHA,
-    ) === `pub const INFERENCE_PIN: &str = "${SHA}";`,
-  );
+  // Runtime and adapter provenance now derive from the neutral core dependency declaration;
+  // only dependency manifests move. Historical producer receipts are not stamp targets.
   const OLD_SHA = "b".repeat(40);
   const OLD_COMMIT = "c".repeat(40);
   const CURRENT_COMMIT = "d".repeat(40);
@@ -1175,14 +1130,6 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       metadataInvocation?.options.cwd === "/self-test/repo" &&
       !metadataInvocation?.args.includes("--no-deps"),
   );
-  let stampThrew = false;
-  try {
-    repinSemanticProvenance(`const OTHER: &str = "x";`, SHA);
-  } catch {
-    stampThrew = true;
-  }
-  check("throws when the semantic provenance stamp is missing", stampThrew);
-
   // --- engine-capability facts, over a real fixture tree (sc-17593) --------------------------
   //
   // Everything above is text in, text out. This check is here because the facts verification is the
@@ -1756,11 +1703,6 @@ function main() {
       rewrite: (text) => repin(path === ROOT_MANIFEST ? prepareInferencePatches(text, sha) : text, sha, path),
       updatesCargoLock: true,
     })),
-    { path: SEMANTIC_PROVENANCE, rewrite: (text) => repinSemanticProvenance(text, sha) },
-    {
-      path: MEMORY_PROVENANCE,
-      rewrite: (text) => repinMemoryProvenance(text, sha),
-    },
   ].map(({ path, rewrite, updatesCargoLock = false }) => {
     const current = readFileSync(path, "utf8");
     return { path, current, bumped: rewrite(current), updatesCargoLock };
