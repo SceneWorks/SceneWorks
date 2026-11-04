@@ -3,7 +3,7 @@ import { expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "../testUtils/dom.js";
 
 vi.mock("../modelCache.js", async (original) => ({ ...(await original()), fetchModelCache: vi.fn() }));
-import { CACHE_CONVERGENCE_POLL_MS, MAX_CACHE_CONVERGENCE_POLLS, fetchModelCache } from "../modelCache.js";
+import { CACHE_CONVERGENCE_POLL_MS, CACHE_ENTRY_STATE, MAX_CACHE_CONVERGENCE_POLLS, fetchModelCache } from "../modelCache.js";
 import { useModelCacheStatus } from "./useModelCacheStatus.js";
 
 function deferred() {
@@ -69,8 +69,8 @@ it.each([
 ])("%s accepts a settled response when cache reads outlast the polling interval", async (_screen, options) => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
-  const copying = { policy: { enabled: true }, entries: [{ state: "copying" }] };
-  const settled = { policy: { enabled: true }, entries: [{ state: "complete" }] };
+  const copying = { policy: { enabled: true }, entries: [{ state: CACHE_ENTRY_STATE.MATERIALIZING }] };
+  const settled = { policy: { enabled: true }, entries: [{ state: CACHE_ENTRY_STATE.COMPLETE }] };
   const pending = [];
   vi.mocked(fetchModelCache).mockReset().mockResolvedValueOnce(copying).mockImplementation(() => {
     const request = deferred();
@@ -85,7 +85,9 @@ it.each([
   const { root, container } = mountRoot();
   try {
     await act(async () => root.render(<Harness />));
-    await act(async () => { await vi.advanceTimersByTimeAsync(CACHE_CONVERGENCE_POLL_MS * 3); });
+    for (let poll = 0; poll < 3; poll += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(CACHE_CONVERGENCE_POLL_MS); });
+    }
     expect(pending.length).toBeGreaterThan(0);
     await act(async () => pending[0].resolve(settled));
     expect(status.cache).toEqual(settled);
