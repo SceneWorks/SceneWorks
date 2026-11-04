@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { jobActionRequest } from "../api/jobs.js";
 import { jobsApi } from "../api/jobsResources.js";
 import { useCallback } from "react";
@@ -125,5 +126,12 @@ export function useJobActions({
     },
     [setError, setJobs, token],
   );
-  return { jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob };
+  const context = useAppDomainValue({
+    jobAction,
+    clearCompletedJobs,
+    cancelPendingJobs,
+    prioritizeJobs,
+    clearJob
+  });
+  return { ...context, context };
 }

@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { trainingApi } from "../api/trainingResources.js";
 import { useCallback, useState } from "react";
@@ -397,14 +398,11 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     [token, activeProject, setJobs, setError],
   );
 
-  return {
+  const context = useAppDomainValue({
     trainingDatasets,
-    setTrainingDatasets,
     trainingDatasetsProjectId,
-    setTrainingDatasetsProjectId,
     loadingTrainingDatasets,
     trainingDatasetsError,
-    setTrainingDatasetsError,
     refreshTrainingDatasets,
     loadTrainingDataset,
     loadTrainingDatasetReadiness,
@@ -426,6 +424,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     uploadTrainingDatasetSubjectMask,
     smartCropTrainingDataset,
     stripExifTrainingDataset,
-    createTrainingJob,
-  };
+    createTrainingJob
+  });
+  return { ...context, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, context };
 }
