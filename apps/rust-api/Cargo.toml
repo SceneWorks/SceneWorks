@@ -82,3 +82,7 @@ parquet = { workspace = true }
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 [lints]
 workspace = true
+
+# Existing Unix signal-delivery fixtures retain their direct safe signal wrapper.
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true }

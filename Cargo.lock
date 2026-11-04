@@ -7498,6 +7498,7 @@ dependencies = [
  "hyper-util",
  "image",
  "mime_guess",
+ "nix 0.29.0",
  "parking_lot",
  "parquet",
  "reqwest 0.12.28",
