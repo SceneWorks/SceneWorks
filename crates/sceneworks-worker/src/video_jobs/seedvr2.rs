@@ -383,30 +383,39 @@ pub(super) struct Seedvr2SourceProbe {
 /// PNG decode), so the first/input `Video:` line can report the opposite orientation. Kept pure so
 /// the admission plan is tested without real media. We intentionally ignore encoder/status tokens
 /// outside sane dimensions.
-#[cfg(any(test, native_lane))]
+#[cfg(test)]
 pub(super) fn parse_seedvr2_source_probe(stderr: &str) -> Option<Seedvr2SourceProbe> {
-    let frame_count = stderr.rmatch_indices("frame=").find_map(|(idx, _)| {
-        stderr[idx + 6..]
-            .trim_start()
-            .split(|c: char| !c.is_ascii_digit())
-            .next()
-            .filter(|digits| !digits.is_empty())
-            .and_then(|digits| digits.parse::<u64>().ok())
-    })?;
+    let frame_count = seedvr2_frame_count(stderr)?;
     let video_line = stderr.lines().rev().find(|line| line.contains("Video:"))?;
-    let (width, height) = video_line
-        .split(|c: char| c.is_whitespace() || c == ',')
-        .find_map(|token| {
-            let token = token.trim_matches(|c: char| !c.is_ascii_digit() && c != 'x');
-            let (w, h) = token.split_once('x')?;
-            let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
-            (w > 0 && h > 0 && w <= 65_535 && h <= 65_535).then_some((w, h))
-        })?;
+    let (width, height) = seedvr2_video_geometry(video_line)?;
     (frame_count > 0).then_some(Seedvr2SourceProbe {
         frame_count,
         width,
         height,
     })
+}
+
+#[cfg(any(test, native_lane))]
+fn seedvr2_frame_count(stderr: &str) -> Option<u64> {
+    stderr.rmatch_indices("frame=").find_map(|(idx, _)| {
+        stderr[idx + 6..]
+            .trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .filter(|digits| !digits.is_empty())
+            .and_then(|digits| digits.parse().ok())
+    })
+}
+
+#[cfg(any(test, native_lane))]
+fn seedvr2_video_geometry(line: &str) -> Option<(u32, u32)> {
+    line.split(|c: char| c.is_whitespace() || c == ',')
+        .find_map(|token| {
+            let token = token.trim_matches(|c: char| !c.is_ascii_digit() && c != 'x');
+            let (w, h) = token.split_once('x')?;
+            let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
+            (w > 0 && h > 0 && w <= 65_535 && h <= 65_535).then_some((w, h))
+        })
 }
 
 /// The probe command: one FFmpeg null-mux pass that decodes every frame of the stream the decode
@@ -444,21 +453,84 @@ async fn probe_seedvr2_source(
     source: &Path,
 ) -> WorkerResult<(Seedvr2SourceProbe, Seedvr2SourceTiming)> {
     let ctx = FfmpegContext::new(api, settings, job_id, SEEDVR2_CANCEL_MESSAGE);
-    let stderr =
-        crate::media_jobs::run_ffmpeg_capture_stderr(seedvr2_source_probe_args(source), Some(ctx))
-            .await?;
-    let probe = parse_seedvr2_source_probe(&stderr).ok_or_else(|| {
+    probe_seedvr2_with_context(seedvr2_source_probe_args(source), Some(ctx)).await
+}
+
+#[cfg(native_lane)]
+pub(super) async fn probe_seedvr2_with_context(
+    args: Vec<String>,
+    context: Option<FfmpegContext<'_>>,
+) -> WorkerResult<(Seedvr2SourceProbe, Seedvr2SourceTiming)> {
+    let output =
+        crate::media_jobs::run_ffmpeg_with_stderr(args, context, read_seedvr2_stderr).await?;
+    let probe = output.data.probe().ok_or_else(|| {
         WorkerError::InvalidPayload(
             "Could not determine the source video's frame count and dimensions before upscale."
                 .to_owned(),
         )
     })?;
-    let timing = parse_seedvr2_source_timing(&stderr, probe.frame_count).ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "Could not determine the source video's frame timing before upscale.".to_owned(),
-        )
-    })?;
+    let timing = output
+        .data
+        .timing
+        .finish(probe.frame_count)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Could not determine the source video's frame timing before upscale.".to_owned(),
+            )
+        })?;
     Ok((probe, timing))
+}
+
+/// Only per-frame timestamps grow with the source; the shared reader bounds raw log storage.
+#[cfg(any(test, native_lane))]
+#[derive(Default)]
+pub(super) struct Seedvr2ProbeCollector {
+    frame_count: Option<u64>,
+    geometry: Option<(u32, u32)>,
+    timing: Seedvr2TimingCollector,
+}
+
+#[cfg(any(test, native_lane))]
+impl Seedvr2ProbeCollector {
+    pub(super) fn read_line(&mut self, line: &str) {
+        if let Some(count) = seedvr2_frame_count(line) {
+            self.frame_count = Some(count);
+        }
+        if line.contains("Video:") {
+            self.geometry = seedvr2_video_geometry(line);
+        }
+        self.timing.push_line(line);
+    }
+
+    fn probe(&self) -> Option<Seedvr2SourceProbe> {
+        self.frame_count
+            .zip(self.geometry)
+            .and_then(|(frame_count, (width, height))| {
+                (frame_count > 0).then_some(Seedvr2SourceProbe {
+                    frame_count,
+                    width,
+                    height,
+                })
+            })
+    }
+
+    #[cfg(test)]
+    pub(super) fn result(self) -> Option<(Seedvr2SourceProbe, Seedvr2SourceTiming)> {
+        let probe = self.probe()?;
+        Some((probe, self.timing.finish(probe.frame_count)?))
+    }
+}
+
+#[cfg(native_lane)]
+async fn read_seedvr2_stderr(
+    pipe: tokio::process::ChildStderr,
+) -> std::io::Result<sceneworks_core::media_process::ParsedStderr<Seedvr2ProbeCollector>> {
+    sceneworks_core::media_process::read_stderr_lines(
+        pipe,
+        Seedvr2ProbeCollector::default(),
+        Seedvr2ProbeCollector::read_line,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -643,76 +715,97 @@ impl Seedvr2SourceTiming {
 /// `None` when the log does not describe exactly `frame_count` frames, numbered in order, in one time
 /// base; the caller then fails the job rather than guess a rate, because a guessed rate is the bug
 /// this replaces.
-#[cfg(any(test, native_lane))]
+#[cfg(test)]
 pub(super) fn parse_seedvr2_source_timing(
     stderr: &str,
     frame_count: u64,
 ) -> Option<Seedvr2SourceTiming> {
-    fn ratio_after(text: &str, key: &str) -> Option<(u64, u64)> {
-        let value = text.split_once(key)?.1.trim_start();
-        let value = value.split([',', ' ']).next()?;
-        let (num, den) = value.split_once('/')?;
-        Some((num.parse().ok()?, den.parse().ok()?))
+    let mut timing = Seedvr2TimingCollector::default();
+    for line in stderr.lines() {
+        timing.push_line(line);
+    }
+    timing.finish(frame_count)
+}
+
+#[cfg(any(test, native_lane))]
+#[derive(Default)]
+struct Seedvr2TimingCollector {
+    time_base: Option<(u64, u64)>,
+    frame_rate: Option<(u64, u64)>,
+    pts: Vec<Option<i64>>,
+    segment_base: usize,
+    invalid: bool,
+}
+
+#[cfg(any(test, native_lane))]
+impl Seedvr2TimingCollector {
+    fn push_line(&mut self, line: &str) {
+        if !self.invalid && self.read_line(line).is_none() {
+            self.invalid = true;
+        }
     }
 
-    let mut time_base: Option<(u64, u64)> = None;
-    let mut frame_rate: Option<(u64, u64)> = None;
-    let mut pts: Vec<Option<i64>> = Vec::new();
-    // How many frames earlier filter configurations already logged; the current one numbers its
-    // frames from 0 again.
-    let mut segment_base = 0;
-    for line in stderr.lines() {
-        // `[Parsed_showinfo_0 @ 0x…] <body>`; every other line (and showinfo's own side-data and
-        // colour continuation lines) is skipped.
+    fn read_line(&mut self, line: &str) -> Option<()> {
+        fn ratio_after(text: &str, key: &str) -> Option<(u64, u64)> {
+            let value = text
+                .split_once(key)?
+                .1
+                .trim_start()
+                .split([',', ' '])
+                .next()?;
+            let (num, den) = value.split_once('/')?;
+            Some((num.parse().ok()?, den.parse().ok()?))
+        }
         let Some((_, body)) = line.split_once("[Parsed_showinfo_0 @ ") else {
-            continue;
+            return Some(());
         };
         let Some((_, body)) = body.split_once("] ") else {
-            continue;
+            return Some(());
         };
         if let Some(config) = body.strip_prefix("config in ") {
             let base = ratio_after(config, "time_base:")?;
             if base.0 == 0 || base.1 == 0 {
                 return None;
             }
-            match time_base {
-                // A mid-stream reconfiguration onto a different time base would make the pts
-                // before and after it incomparable.
+            match self.time_base {
                 Some(previous) if previous != base => return None,
-                Some(_) => segment_base = pts.len(),
+                Some(_) => self.segment_base = self.pts.len(),
                 None => {
-                    time_base = Some(base);
-                    frame_rate = ratio_after(config, "frame_rate:");
+                    self.time_base = Some(base);
+                    self.frame_rate = ratio_after(config, "frame_rate:");
                 }
             }
         } else if let Some(frame) = body.strip_prefix("n:") {
             let frame = frame.trim_start();
             let index: usize = frame.split_whitespace().next()?.parse().ok()?;
-            if segment_base + index != pts.len() {
+            if self.segment_base.checked_add(index)? != self.pts.len() {
                 return None;
             }
             let value = frame.split_once("pts:")?.1.split_whitespace().next()?;
-            // `NOPTS` (a frame the demuxer could not time) parses as `None`.
-            pts.push(value.parse().ok());
+            self.pts.push(value.parse().ok());
         }
+        Some(())
     }
-    if pts.len() as u64 != frame_count {
-        return None;
-    }
-    let (tb_num, tb_den) = time_base?;
-    let frames = classify_seedvr2_timing((tb_num, tb_den), frame_rate, &pts)?;
-    let start_micros = match pts.first().copied().flatten() {
-        Some(first) if first > 0 => {
-            let scaled = u128::from(first.unsigned_abs()) * u128::from(tb_num) * 1_000_000;
-            let tb_den = u128::from(tb_den);
-            u64::try_from((scaled + tb_den / 2) / tb_den).ok()?
+
+    fn finish(self, frame_count: u64) -> Option<Seedvr2SourceTiming> {
+        if self.invalid || self.pts.len() as u64 != frame_count {
+            return None;
         }
-        _ => 0,
-    };
-    Some(Seedvr2SourceTiming {
-        frames,
-        start_micros,
-    })
+        let (tb_num, tb_den) = self.time_base?;
+        let frames = classify_seedvr2_timing((tb_num, tb_den), self.frame_rate, &self.pts)?;
+        let start_micros = match self.pts.first().copied().flatten() {
+            Some(first) if first > 0 => {
+                let scaled = u128::from(first.unsigned_abs()) * u128::from(tb_num) * 1_000_000;
+                let tb_den = u128::from(tb_den);
+                u64::try_from((scaled + tb_den / 2) / tb_den).ok()?
+            }
+            _ => 0,
+        };
+        Some(Seedvr2SourceTiming {
+            frames,
+            start_micros,
+        })
+    }
 }
 
 /// Decide how the measured frames are laid out in time (sc-24391). Constant-rate when every frame
