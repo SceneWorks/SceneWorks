@@ -1559,9 +1559,8 @@ pub(crate) async fn create_training_dataset_upscale_job(
     Path((project_id, dataset_id)): Path<(String, String)>,
     ApiJson(payload): ApiJson<DatasetUpscaleJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    if !matches!(payload.factor, 2 | 4) {
-        return Err(ApiError::bad_request("Upscale factor must be 2 or 4."));
-    }
+    sceneworks_core::contracts::image_upscale_factor(u64::from(payload.factor))
+        .map_err(|_| ApiError::bad_request("Upscale factor must be 2 or 4."))?;
     if payload.item_ids.is_empty() {
         return Err(ApiError::bad_request("No items to upscale."));
     }

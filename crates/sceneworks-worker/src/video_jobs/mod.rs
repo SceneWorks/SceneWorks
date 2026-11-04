@@ -53,9 +53,9 @@ mod prelude {
     #[allow(unused_imports)]
     pub(super) use super::{
         advanced, assemble_scail2_animate_conditioning, lora_scale, non_empty_negative_prompt,
-        resolve_dense_adapters, resolve_lora_file, video_frame_count, wan_frame_count, AdapterSpec,
-        CancelFlag, CharacterStore, Conditioning, GenerationMetrics, GenerationOutput,
-        GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision,
+        resolve_dense_adapters, video_frame_count, wan_frame_count, AdapterSpec, CancelFlag,
+        CharacterStore, Conditioning, GenerationMetrics, GenerationOutput, GenerationRequest,
+        Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision, PreparedVideoAdapters,
         Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
     };
     #[allow(unused_imports)]
@@ -1464,40 +1464,23 @@ fn generate_stub_video(request: &VideoRequest, seed: i64) -> DecodedVideo {
 /// white, with a bright vertical band that sweeps left→right across the clip so frames
 /// differ (visible motion). Exactly `width * height * 3` RGB8 bytes.
 fn stub_video_rgb8(width: u32, height: u32, seed: i64, index: u32, frame_count: u32) -> Vec<u8> {
-    let seed = seed as u64;
-    let base = [
-        (seed & 0xFF) as u8,
-        ((seed >> 8) & 0xFF) as u8,
-        ((seed >> 16) & 0xFF) as u8,
-    ];
-    let v_span = height.saturating_sub(1).max(1) as f32;
-    // The sweeping band's centre column for this frame.
+    let mut buffer = crate::util::gradient_rgb8(width, height, seed);
     let progress = index as f32 / frame_count.max(1) as f32;
     let band_centre = progress * width.saturating_sub(1).max(1) as f32;
     let band_half = (width as f32 * 0.06).max(1.0);
-    let mut buffer = Vec::with_capacity((width as usize) * (height as usize) * 3);
     for y in 0..height {
-        let t = y as f32 / v_span;
-        let row = [lerp(base[0], t), lerp(base[1], t), lerp(base[2], t)];
         for x in 0..width {
             let dist = (x as f32 - band_centre).abs();
             if dist <= band_half {
-                // Brighten toward white inside the band (1.0 at centre → 0 at edge).
                 let highlight = 1.0 - dist / band_half;
-                buffer.push(lerp(row[0], highlight));
-                buffer.push(lerp(row[1], highlight));
-                buffer.push(lerp(row[2], highlight));
-            } else {
-                buffer.extend_from_slice(&row);
+                let offset = ((y as usize) * (width as usize) + (x as usize)) * 3;
+                for channel in &mut buffer[offset..offset + 3] {
+                    *channel = crate::util::lerp(*channel, highlight);
+                }
             }
         }
     }
     buffer
-}
-
-fn lerp(a: u8, t: f32) -> u8 {
-    let a = a as f32;
-    (a + (255.0 - a) * t).round().clamp(0.0, 255.0) as u8
 }
 
 /// A quiet 220 Hz mono tone matching the clip length (`frame_count / fps` seconds) at
@@ -1965,56 +1948,24 @@ fn non_empty_negative_prompt(request: &VideoRequest) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
-/// A LoRA spec's strength (`weight`, default 0.8 — matches the image path). Shared by both
+/// A LoRA spec's strength (`weight`, default 1.0 — matches the image path). Shared by both
 /// backends (sc-8830; formerly the byte-identical `lora_scale` / `candle_scail2_lora_scale`).
 #[cfg(native_lane)]
 fn lora_scale(lora: &Value) -> f32 {
-    lora.get("weight")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        // Last resort only — see `image_jobs::lora_weight`; matches the API/web default.
-        .unwrap_or(1.0) as f32
+    crate::adapter_resolution::lora_weight(lora) as f32
 }
 
-/// Resolve a LoRA spec's file (a directory → its first `.safetensors`, recursively via core's
-/// [`first_safetensors_path`]), verifying it exists. The `path` originates from
-/// attacker-controllable job payload, so it is first confined to an app-managed root
-/// (sc-5723 / WKA-002) via [`normalize_app_managed_lora_path`] before any on-disk use.
-///
-/// Shared by both backends (sc-8830). The old candle twin `candle_resolve_lora_file`
-/// re-implemented the directory scan with a shallow (non-recursive) case-sensitive `read_dir`,
-/// which missed nested `subdir/model.safetensors` snapshots and uppercase `.SAFETENSORS`
-/// extensions that the macOS path (core `first_safetensors_path`) resolved. Converging on the
-/// core helper fixes that latent candle-lane bug; path confinement is preserved identically.
+/// Compatibility test access to the shared directory resolver. Production video resolution pins
+/// each selected entry before inspecting its header and carries that token through cache/load.
 #[cfg(native_lane)]
+#[cfg(test)]
 fn resolve_lora_file(
     settings: &Settings,
     path: PathBuf,
     declared: Option<&str>,
 ) -> WorkerResult<PathBuf> {
-    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
-    let file = if path.is_dir() {
-        // Prefer the manifest-declared adapter over an arbitrary directory scan so a
-        // trained LoRA loads its final adapter, not a step checkpoint (sc-10221).
-        crate::resolve_adapter_in_dir(&path, declared).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                path.display()
-            ))
-        })?
-    } else {
-        path
-    };
-    if !file.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "LoRA file is missing: {}",
-            file.display()
-        )));
-    }
-    Ok(file)
+    let lora = json!({"path": path, "files": declared.map(|name| vec![name])});
+    crate::adapter_resolution::resolve_adapter_file(&lora, settings, "")
 }
 
 /// Build the adapter specs for a **dense** (single-transformer) video family — Wan-VACE and
@@ -2028,24 +1979,16 @@ fn resolve_dense_adapters(
     settings: &Settings,
     request: &VideoRequest,
     max_loras: usize,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     if request.loras.len() > max_loras {
         return Err(WorkerError::InvalidPayload(format!(
             "Generation supports at most {max_loras} LoRAs per job."
         )));
     }
-    let mut specs: Vec<AdapterSpec> = Vec::new();
+    let mut specs = PreparedVideoAdapters::default();
     for lora in &request.loras {
-        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = resolve_lora_file(
-            settings,
-            path,
-            crate::image_jobs::declared_adapter_file(lora),
-        )?;
-        let kind = crate::image_jobs::classify_adapter(&file)?;
-        specs.push(AdapterSpec {
+        let (file, kind) = specs.user(settings, lora, &request.model)?;
+        specs.specs.push(AdapterSpec {
             path: file,
             scale: lora_scale(lora),
             kind,
@@ -2130,3 +2073,55 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(native_lane)]
+#[derive(Clone, Debug, Default)]
+struct PreparedVideoAdapters {
+    specs: Vec<AdapterSpec>,
+    pins: BTreeMap<PathBuf, gen_core::PinnedWeightsFile>,
+}
+#[cfg(native_lane)]
+impl std::ops::Deref for PreparedVideoAdapters {
+    type Target = Vec<AdapterSpec>;
+    fn deref(&self) -> &Self::Target {
+        &self.specs
+    }
+}
+#[cfg(native_lane)]
+impl PreparedVideoAdapters {
+    fn push(&mut self, settings: &Settings, mut spec: AdapterSpec) -> WorkerResult<()> {
+        let pin = crate::paths::pin_app_managed_model_file(settings, &spec.path, "video adapter")?;
+        spec.path = pin.loader_path().to_path_buf();
+        crate::adapter_resolution::retain_adapter_pin(&mut self.pins, pin)?;
+        self.specs.push(spec);
+        Ok(())
+    }
+    fn append(&mut self, other: Self) -> WorkerResult<()> {
+        for pin in other.pins.into_values() {
+            crate::adapter_resolution::retain_adapter_pin(&mut self.pins, pin)?;
+        }
+        self.specs.extend(other.specs);
+        Ok(())
+    }
+    fn user(
+        &mut self,
+        settings: &Settings,
+        lora: &Value,
+        model: &str,
+    ) -> WorkerResult<(PathBuf, gen_core::AdapterKind)> {
+        let pin = crate::adapter_resolution::resolve_prepared_adapter_file(lora, settings, model)?;
+        let pin = crate::adapter_resolution::retain_adapter_pin(&mut self.pins, pin)?;
+        let kind = crate::image_jobs::classify_prepared_adapter(pin)?;
+        let file = pin.loader_path().to_path_buf();
+        Ok((file, kind))
+    }
+    fn install(&self, spec: &mut gen_core::LoadSpec) -> gen_core::Result<()> {
+        if self.specs.is_empty() {
+            return Ok(());
+        }
+        for pin in self.pins.values() {
+            spec.set_prepared_file_pin(pin.loader_path(), pin.clone())?;
+        }
+        spec.prepare_file_sources()
+    }
+}
