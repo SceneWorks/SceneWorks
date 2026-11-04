@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rustFacadeSource, rustFacadeSources } from "./lib/rust-facade-source.mjs";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -820,7 +821,7 @@ test("FLUX3 producer dispatch: all sixteen canonical anchors are published activ
   }
   for (const backend of ["candle", "mlx"]) {
     const relative = `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`;
-    const source = await readFile(path.join(ROOT, relative), "utf8");
+    const source = await rustFacadeSource(path.join(ROOT, relative));
     assert.ok(adapterCapturableProviders(source, relative).includes("flux3_klein"), `${backend} must dispatch to a real modular producer`);
     const module = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}_flux3.rs`), "utf8");
     assert.match(module, /catalog\.media\(\)|\.media\(\)/);
@@ -1610,7 +1611,7 @@ test("the extra artifacts declared per family are the ones the adapter source na
   assert.ok(instantid.every((entry) => (entry.files ?? []).length > 0), "and each declares what it must carry");
 
   const mlxLtx25 = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx_ltx25.rs"), "utf8");
-  const candle = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8");
+  const candle = await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"));
   assert.equal(/const DEV_ADAPTER: &str = "([^"]+)"/.exec(mlxLtx25)?.[1], LTX25_DEV_REFINEMENT_LORA);
   assert.equal(
     /const LTX25_DISTILL_LORA_RELATIVE_PATH: &str =\s*"([^"]+)"/.exec(candle)?.[1],
@@ -1619,7 +1620,7 @@ test("the extra artifacts declared per family are the ones the adapter source na
   );
   assert.match(mlxLtx25, new RegExp(`join\\("${LTX25_ENHANCER_DIR}"\\)`), "the MLX arm still opens the enhancer by that name");
 
-  const mlx = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8");
+  const mlx = await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"));
   assert.equal(
     /pub const QWEN_EDIT_LIGHTNING_FILE: &str =\s*"([^"]+)"/.exec(lib)?.[1],
     QWEN_EDIT_LIGHTNING_LORA.file,
@@ -1711,10 +1712,14 @@ test("every MLX adapter arm that emits a provider sourceCapture is declared, and
   ).sort();
   assert.ok(members.length >= 2, "expected the mlx bin plus its #[path] arm modules");
   const sources = new Map();
+  const facade = await rustFacadeSources(path.join(binDir, "mlx.rs"));
+  const globOwners = new Set(facade.slice(1).map((file) => path.basename(file.path)));
   for (const name of members) {
-    sources.set(name, stripRustTestModules(stripRustCommentsForScan(
-      await readFile(path.join(binDir, name), "utf8"),
-    )));
+    if (globOwners.has(name)) continue;
+    const text = name === "mlx.rs"
+      ? facade.map((file) => file.source).join("\n")
+      : await readFile(path.join(binDir, name), "utf8");
+    sources.set(name, stripRustTestModules(stripRustCommentsForScan(text)));
   }
   // Every sibling is indexed under the module path the bin calls it by, so a NEW arm module that
   // emits is walked rather than silently unreachable.
@@ -2000,8 +2005,8 @@ test("every sana/chroma env family and repository is the one the adapter binarie
     [...lib.matchAll(/pub const ([A-Z0-9_]+_REPOSITORY): &str =\s*"([^"]+)";/g)].map((match) => [match[2], match[1]]),
   );
   const binaries = {
-    mlx: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8"),
-    candle: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8"),
+    mlx: await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs")),
+    candle: await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs")),
   };
   const family = (id) => PROVIDER_FAMILIES[id];
   const expected = new Set(
@@ -3537,7 +3542,7 @@ pub fn load_i2v_14b(spec: &LoadSpec) -> Result<Box<dyn Generator>> {
 // binding a component the engine never sees, so the two lists are proven equal here.
 test("the staged SDXL component env vars agree between the catalog and the candle adapter", async () => {
   const adapterEnvs = async (binary) => {
-    const source = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${binary}.rs`), "utf8");
+    const source = await rustFacadeSource(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${binary}.rs`));
     return [...new Set([...source.matchAll(/"(SCENEWORKS_SDXL_COMPONENT_[A-Z0-9_]+)"/g)].map((match) => match[1]))];
   };
   const declared = await adapterEnvs("candle");
@@ -3837,8 +3842,8 @@ test("every sensenova env family and repository is the one the adapter binaries 
     [...lib.matchAll(/pub const ([A-Z0-9_]+_REPOSITORY): &str =\s*"([^"]+)";/g)].map((match) => [match[2], match[1]]),
   );
   const binaries = {
-    mlx: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8"),
-    candle: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8"),
+    mlx: await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs")),
+    candle: await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs")),
   };
   let checked = 0;
   for (const id of SENSENOVA_FAMILY) {
@@ -4327,7 +4332,7 @@ test("MAGE_COMPONENT_IDS are the adapter's own component-id constants", async ()
   assert.deepEqual(MAGE_COMPONENT_IDS, declared.map(([, value]) => value));
   // And both adapter arms stage exactly those two components rather than composing a path.
   for (const backend of ["mlx", "candle"]) {
-    const arm = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`), "utf8");
+    const arm = await rustFacadeSource(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`));
     for (const [name] of declared) {
       assert.ok(arm.includes(`protocol::${name}`), `${backend}.rs never stages ${name}`);
     }
@@ -4619,7 +4624,7 @@ test("the Krea Realtime arm's admitted routes are the pinned engine's own", { sk
       + "rather than record the three scenarios unexecuted",
   );
 
-  const arm = await readFile(path.join(ROOT, ADAPTER_BIN_PATHS.mlx), "utf8");
+  const arm = await rustFacadeSource(path.join(ROOT, ADAPTER_BIN_PATHS.mlx));
   const predicate = /fn krea_realtime_probes_admission\([\s\S]*?\n\}/.exec(arm);
   assert.ok(predicate, "the arm still declares krea_realtime_probes_admission");
   const armRoutes = [...predicate[0].matchAll(/"([a-z_]+)"/g)].map((match) => match[1]).sort();
@@ -5081,7 +5086,7 @@ function adapterArms() {
         Object.entries(ADAPTER_BIN_PATHS).map(async ([backend, relative]) => [
           backend,
           adapterCapturableProviders(
-            await readFile(path.join(ROOT, relative), "utf8"),
+            await rustFacadeSource(path.join(ROOT, relative)),
             relative,
           ),
         ]),
@@ -5181,7 +5186,7 @@ test("every SCENEWORKS_LTX_* root the adapters require is bound by the LTX-2.3 r
       lanes.map(async ([backend]) => [
         backend,
         requiredLtxEnv(
-          await readFile(path.join(ROOT, ADAPTER_BIN_PATHS[backend]), "utf8"),
+          await rustFacadeSource(path.join(ROOT, ADAPTER_BIN_PATHS[backend])),
           ADAPTER_BIN_PATHS[backend],
         ),
       ]),
@@ -5918,7 +5923,7 @@ test("--model selects every tier of one model and refuses a model the plan does 
 // the arm admits them through the production budget and the runner contains them with the same
 // footprint hard stop it puts around every Darwin capture.
 test("the MLX LTX-2.3 cells are ordinary anchors: admitted by the production budget, classified runnable or weights_missing", async () => {
-  const adapter = await readFile(path.join(ROOT, ADAPTER_BIN_PATHS.mlx), "utf8");
+  const adapter = await rustFacadeSource(path.join(ROOT, ADAPTER_BIN_PATHS.mlx));
   const harness = await readFile(path.join(ROOT, "scripts/memory-calibration-harness.mjs"), "utf8");
   // 1. The generic runner still sends exactly one provider action for a capture...
   assert.deepEqual(
@@ -6030,7 +6035,7 @@ test("the watchdog guard's footprint hard stop is the incident and host RAM, nev
 });
 
 test("the runner's incident footprint and unified reserve are the Rust declarations, not second literals", async () => {
-  const adapter = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8");
+  const adapter = await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"));
   const crash = /const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES: u64 = ([\d_]+);/.exec(adapter);
   assert.ok(crash, "the adapter declares the incident footprint");
   assert.equal(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES, Number(crash[1].replaceAll("_", "")));
