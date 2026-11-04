@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { rustFacadeSource, rustFacadeFunction } from "./lib/rust-facade-source.mjs";
 import { rootTestGroups } from "./run-root-tests.mjs";
 import { proofSelection, requireManualSelection, verifyProofResult, cudaDeviceEvidence, requireMetalHeadroom, observeMetalCase, streamProofBuild } from "./ci/h3-import-native-proof.mjs";
 import { writeFileSync } from "node:fs";
@@ -24,7 +25,12 @@ const LTX_CAMPAIGN_PLANS = [
 ];
 
 async function source(path) {
+  if (/crates\/sceneworks-memory-adapter\/src\/bin\/(mlx|candle)\.rs$/.test(path)) return rustFacadeSource(path);
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
+}
+
+async function adapterFunction(lane, name) {
+  return (await rustFacadeFunction(`crates/sceneworks-memory-adapter/src/bin/${lane}.rs`, name)).source;
 }
 
 const CANDLE_FACTS_UPLOAD_IF = "always() && (steps.verify_candle_capabilities.outcome == 'failure' || (github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && steps.verify_candle_capabilities.outcome == 'success'))";
@@ -3055,16 +3061,10 @@ test("MLX calibration probe derives the production wired ceiling without guessin
 test("memory adapters bind every emitted overlay verdict to the requested target", async () => {
   const mlx = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
   const candle = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
-  const krea = mlx.slice(mlx.indexOf("fn run_krea_control("), mlx.indexOf("fn run_qwen("));
-  const qwen = mlx.slice(mlx.indexOf("fn run_qwen_vae_probe("), mlx.indexOf("fn run(request:"));
-  const candleReference = candle.slice(
-    candle.indexOf("fn run_five_rung_reference("),
-    candle.indexOf("fn run(request:"),
-  );
-  const candleLtx25 = candle.slice(
-    candle.indexOf("fn run_ltx25_capture("),
-    candle.indexOf("const FIVE_RUNG_FIXTURE_PREFIX"),
-  );
+  const krea = await adapterFunction("mlx", "run_krea_control");
+  const qwen = (await Promise.all(["run_qwen_vae_probe", "run_qwen_provider"].map((name) => adapterFunction("mlx", name)))).join("\n");
+  const candleReference = (await Promise.all(["run_five_rung_reference", "run_five_rung_batch"].map((name) => adapterFunction("candle", name)))).join("\n");
+  const candleLtx25 = await adapterFunction("candle", "run_ltx25_capture");
 
   assert.match(
     krea,
@@ -3105,13 +3105,8 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   // So the claim is PER ARM: each function that assembles a `PlainGatedFragment` must reach a
   // builder in its OWN body.
   const candleFunctions = new Map();
-  for (const match of candle.matchAll(/^fn ([a-z0-9_]+)[(<]/gm)) {
-    const start = match.index;
-    const next = candle.indexOf("\nfn ", start + 1);
-    candleFunctions.set(
-      match[1],
-      candle.slice(start, next === -1 ? candle.length : next),
-    );
+  for (const match of candle.matchAll(/^(?:pub(?:\([^)]*\))?\s+)?fn ([a-z0-9_]+)[(<]/gm)) {
+    candleFunctions.set(match[1], await adapterFunction("candle", match[1]));
   }
   const gatedEmitters = [...candleFunctions].filter(([, body]) =>
     body.includes("protocol::PlainGatedFragment {"),
@@ -3142,10 +3137,7 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   assert.match(qwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
   assert.match(qwenEdit, /overlay: \(loaded_adapters > 0\)\.then\(\|\| "lora"\.to_owned\(\)\)/);
   // The MLX twin publishes the same claims off its own loaded stack.
-  const mlxQwenEdit = mlx.slice(
-    mlx.indexOf("fn run_qwen_edit_provider("),
-    mlx.indexOf("\nfn ", mlx.indexOf("fn run_qwen_edit_provider(") + 1),
-  );
+  const mlxQwenEdit = await adapterFunction("mlx", "run_qwen_edit_provider");
   assert.match(mlxQwenEdit, /let loaded_adapters = spec\.adapters\.len\(\);/);
   assert.match(mlxQwenEdit, /let overlay_scenario = if loaded_adapters > 0 \{/);
   assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
@@ -3212,10 +3204,7 @@ test("MLX parity control preserves the real comparison and applies only a planne
   assert.match(adapter, /"maximumError": mutated_maximum,\s*"meanError": mutated_mean/);
   assert.doesNotMatch(adapter, /MAX_THRESHOLD\s*=\s*[^;]*5e-2/);
   assert.doesNotMatch(adapter, /MEAN_THRESHOLD\s*=\s*[^;]*5e-2/);
-  const comparison = adapter.slice(
-    adapter.indexOf("fn decoded_max_mean_abs("),
-    adapter.indexOf("fn sweep("),
-  );
+  const comparison = await adapterFunction("mlx", "decoded_max_mean_abs");
   const shapeGuard = comparison.indexOf(
     "protocol::validate_comparison_shapes(left.shape(), right.shape())?",
   );
@@ -4935,12 +4924,13 @@ test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", as
     /const LTX_FRAME_ENVELOPE: \(u32, u32\) = ltx_frame_envelope\(\);/,
     "the frame envelope must stay DERIVED from the declared arrays, not written down",
   );
-  const envelopeTestAt = adapter.indexOf(
+  const envelopeTests = await source("crates/sceneworks-memory-adapter/src/bin/mlx_ltx_tests.rs");
+  const envelopeTestAt = envelopeTests.indexOf(
     "fn ltx_frame_envelope_is_derived_from_the_declared_durations_and_fps(",
   );
   assert.ok(envelopeTestAt >= 0, "the envelope derivation test must still exist");
   assert.match(
-    adapter.slice(envelopeTestAt, envelopeTestAt + 600),
+    envelopeTests.slice(envelopeTestAt, envelopeTestAt + 600),
     new RegExp(
       `assert_eq!\\(LTX_FRAME_ENVELOPE, \\(${Math.min(...reachable)}, ${Math.max(...reachable)}\\)\\)`,
     ),
@@ -4964,14 +4954,8 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     "the conservative canary stop must remain byte-bound to SC-18808 co-staged arithmetic",
   );
 
-  const campaign = adapter.slice(
-    adapter.indexOf("fn run_ltx_with_admission("),
-    adapter.indexOf("fn campaign_entry_diagnostic("),
-  );
-  const ordinary = adapter.slice(
-    adapter.indexOf("fn run_ltx(request:"),
-    adapter.indexOf("fn run(request:"),
-  );
+  const campaign = await adapterFunction("mlx", "run_ltx_with_admission");
+  const ordinary = await adapterFunction("mlx", "run_ltx");
   assert.match(
     ordinary,
     /run_ltx_with_admission\(request, LtxRunAdmission::Ordinary, &mut phases\)/,
@@ -5038,10 +5022,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     ordinary,
     /LTX_(?:CANARY|PRODUCT_CANARY)_FIXTURE|diagnostic_(?:product_envelope_)?canary_complete/,
   );
-  const campaignEntry = adapter.slice(
-    adapter.indexOf("fn run_ltx_campaign_entry("),
-    adapter.indexOf("fn run_ltx(request:"),
-  );
+  const campaignEntry = await adapterFunction("mlx", "run_ltx_campaign_entry");
   for (const required of [
     "prevalidate_ltx_campaign_entry(request)?",
     "consume_ltx_canary_watchdog_attestation(request)?",
@@ -5068,10 +5049,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
       < campaignEntry.indexOf("consume_ltx_canary_watchdog_attestation(request)?"),
     "the exact campaign row must be validated before the watchdog releases model allocation",
   );
-  const boundedCarrier = adapter.slice(
-    adapter.indexOf("fn run_ltx_bounded_carrier_proof("),
-    adapter.indexOf("fn run_ltx_campaign_entry("),
-  );
+  const boundedCarrier = await adapterFunction("mlx", "run_ltx_bounded_carrier_proof");
   for (const required of [
     "prevalidate_ltx_bounded_carrier_proof(request)?",
     "start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?",
@@ -5094,10 +5072,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   assert.equal((boundedCarrier.match(/scoped_generate\(/g) ?? []).length, 1,
     "SC-20254 must contain exactly one full-A/V render call");
   assert.match(adapter, /LTX_BOUNDED_CARRIER_ACTION => run_ltx_bounded_carrier_proof\(&request\)/);
-  const boundedCampaign = adapter.slice(
-    adapter.indexOf("fn run_ltx_bounded_campaign_entry("),
-    adapter.indexOf("fn run_ltx(request:"),
-  );
+  const boundedCampaign = await adapterFunction("mlx", "run_ltx_bounded_campaign_entry");
   for (const required of [
     "prevalidate_ltx_bounded_campaign_entry(request)?",
     "consume_ltx_canary_watchdog_attestation(request)?",
@@ -5127,10 +5102,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     "SC-20318 must reject a mismatched watchdog phase profile before model resolution",
   );
 
-  const canary = adapter.slice(
-    adapter.indexOf("fn validate_ltx_canary_plan_for("),
-    adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
-  );
+  const canary = (await Promise.all(["validate_ltx_canary_plan_for", "run_ltx_canary_for"].map((name) => adapterFunction("mlx", name)))).join("\n");
   for (const required of [
     "_diagnosticOnly",
     'Some("fixture")',
@@ -5180,10 +5152,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     'Self::Safety => "a sunlit pine branch, static camera"',
     'Self::ProductEnvelope => "sc-20169-product-envelope"',
   ]) assert.ok(profiles.includes(required), `diagnostic profiles must retain ${required}`);
-  const generationRequest = adapter.slice(
-    adapter.indexOf("fn ltx_canary_generation_request_for("),
-    adapter.indexOf("fn ltx_load_spec("),
-  );
+  const generationRequest = await adapterFunction("mlx", "ltx_canary_generation_request_for");
   assert.match(
     generationRequest,
     /video_mode: profile\.video_mode\(\)\.map\(str::to_owned\)/,
@@ -5196,16 +5165,10 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   assert.match(admissionBridge, /request\.video_mode = None;/);
   assert.match(admissionBridge, /request\.video_mode = Some\("no_audio"\.to_owned\(\)\);/);
   assert.match(admissionBridge, /scoped_generate_observed_after_configuration\(/);
-  const genericScope = adapter.slice(
-    adapter.indexOf("fn scoped_generate_observed("),
-    adapter.indexOf("fn scoped_generate_observed_after_configuration("),
-  );
+  const genericScope = await adapterFunction("mlx", "scoped_generate_observed");
   assert.match(genericScope, /None,/,
     "ordinary production generation must not gain the canary-only post-configure override");
-  const configuredScope = adapter.slice(
-    adapter.indexOf("fn scoped_generate_observed_after_configuration("),
-    adapter.indexOf("/// Combine the generator and request-scope terminals"),
-  );
+  const configuredScope = await adapterFunction("mlx", "scoped_generate_observed_after_configuration");
   assert.ok(
     configuredScope.indexOf(".configure_request(&mut request)")
       < configuredScope.indexOf("after_configuration(&mut request)"),
@@ -5219,10 +5182,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   for (const lifecycle of ["enter_phase", "leave_phase", "scope.finish", "settle_scoped_generation"]) {
     assert.ok(configuredScope.includes(lifecycle), `canary scope must retain ${lifecycle}`);
   }
-  const diagnosticRun = adapter.slice(
-    adapter.indexOf("fn run_ltx_canary_for("),
-    adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
-  );
+  const diagnosticRun = await adapterFunction("mlx", "run_ltx_canary_for");
   assert.match(
     diagnosticRun,
     /LtxCanaryProfile::ProductEnvelope => scoped_generate\(/,
@@ -5332,17 +5292,11 @@ test("the SC-20318 provider phase profile is exact across runner, watchdog and a
 
 test("the MLX FLUX.2 calibration arm is bound to the direct reference-free T2I contract", async () => {
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
-  const context = adapter.slice(
-    adapter.indexOf("fn flux2_admission_context("),
-    adapter.indexOf("fn flux2_complete_sweep("),
-  );
+  const context = await adapterFunction("mlx", "flux2_admission_context");
   // sc-22727 generalized `run_flux2_dev` to the whole family (`run_flux2`), resolved from the
   // plan's `(provider, modelId)`; the reference-free T2I claim below is unchanged and now covers
   // every member.
-  const arm = adapter.slice(
-    adapter.indexOf("fn run_flux2("),
-    adapter.indexOf("fn validate_z_image_batch("),
-  );
+  const arm = await adapterFunction("mlx", "run_flux2");
   const table = adapter.slice(
     adapter.indexOf("struct Flux2Arm {"),
     adapter.indexOf("fn validate_flux2_target("),

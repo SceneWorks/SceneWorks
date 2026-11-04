@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { rustFacadeSources } from "./lib/rust-facade-source.mjs";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -722,6 +723,13 @@ test("a closure table derived at an older pin still grades, but a malformed one 
   for (const relative of Object.values(SOURCE_PATHS)) {
     await mkdir(path.dirname(path.join(scratch, relative)), { recursive: true });
     await copyFile(path.join(ROOT, relative), path.join(scratch, relative));
+  }
+  for (const entry of [SOURCE_PATHS.mlxAdapter, SOURCE_PATHS.candleAdapter]) {
+    for (const owner of await rustFacadeSources(path.join(ROOT, entry))) {
+      const relative = path.relative(ROOT, owner.path);
+      await mkdir(path.dirname(path.join(scratch, relative)), { recursive: true });
+      await copyFile(owner.path, path.join(scratch, relative));
+    }
   }
   const writeClosures = (value) =>
     writeFile(path.join(scratch, SOURCE_PATHS.closures), JSON.stringify(value, null, 2));
