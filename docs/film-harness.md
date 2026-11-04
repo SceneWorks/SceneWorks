@@ -1744,7 +1744,7 @@ target/debug/film-harness fixture-sound  --out DIR
 `plan` and `compile` need a SceneWorks API with a worker advertising `prompt_refine`; `run`
 additionally needs `video_generate`, `audio_generate` when the pack carries a `dialogue` entry with
 `text` (sc-23404), and, unless `--no-export`, `timeline_export`. Default API
-`http://127.0.0.1:8000`, or `$SCENEWORKS_API_URL`; token from `$SCENEWORKS_ACCESS_TOKEN`. `compile`
+`http://127.0.0.1:8000`, or `$SCENEWORKS_API_URL`; token from `$SCENEWORKS_ACCESS_TOKEN` or `--token-stdin` (read up to 64 KiB from standard input, then EOF). Prefer these over the legacy `--token TOKEN` option, which exposes the secret in process listings. `--token-stdin` works with every subcommand and cannot be combined with `--token`. `compile`
 looks for `brief.json`/`brief.jsonc` beside the plan when `--brief` is not given, and re-checks beat
 coverage by the `beatId` each generated shot carries. `resume`, `replace-take`, `cancel` and
 `status` read everything else they need from the run record in `--out`. Exit codes: 0 completed,

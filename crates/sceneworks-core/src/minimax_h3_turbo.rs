@@ -104,28 +104,26 @@ static TURBO_RECIPES: OnceLock<Vec<TurboRecipe>> = OnceLock::new();
 ///
 /// Derived from the shipped manifest rather than retyped, so adding a fifth published variant is a
 /// manifest edit and nothing else — the studio control, the worker recipe and the guards below all
-/// read this one list. A malformed manifest yields an EMPTY list rather than a panic: the catalog is
-/// compile-time embedded and validated by the tests below, so an empty list at runtime can only mean
-/// a build that shipped a broken manifest, and degrading to "no turbo available" beats taking the
-/// worker down on a video job.
+/// read this one list. Invalid embedded catalogs fail closed instead of supplying empty policy.
 pub fn turbo_recipes() -> &'static [TurboRecipe] {
     TURBO_RECIPES.get_or_init(|| {
-        let contents = crate::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.loras.jsonc")
-            .map(|(_, contents)| *contents)
-            .unwrap_or("");
-        parse_turbo_recipes(contents)
+        turbo_recipes_from_manifest(
+            crate::builtin_manifests::builtin_manifest("builtin.loras.jsonc")
+                .expect("invalid embedded LoRA catalog"),
+        )
     })
 }
 
-/// Parse the turbo recipes out of a `builtin.loras.jsonc` body. Split out so the tests can drive it
-/// on synthetic catalogs as well as the shipped one.
+#[cfg(test)]
 fn parse_turbo_recipes(contents: &str) -> Vec<TurboRecipe> {
     let stripped = crate::jsonc::strip_jsonc_comments(contents);
     let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
         return Vec::new();
     };
+    turbo_recipes_from_manifest(&manifest)
+}
+
+fn turbo_recipes_from_manifest(manifest: &Value) -> Vec<TurboRecipe> {
     let Some(loras) = manifest.get("loras").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -318,13 +316,8 @@ mod tests {
     /// `limits.steps: [50]`, goes red here rather than at enqueue.
     #[test]
     fn every_turbo_recipe_step_count_clears_the_model_step_gate() {
-        let contents = crate::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .map(|(_, contents)| *contents)
-            .expect("builtin.models.jsonc is embedded");
-        let stripped = crate::jsonc::strip_jsonc_comments(contents);
-        let manifest: Value = serde_json::from_str(&stripped).expect("the model catalog parses");
+        let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         let models = manifest["models"].as_array().expect("a models array");
         for model_id in ["minimax_h3", "minimax_h3_ref"] {
             let entry = models

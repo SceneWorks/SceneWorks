@@ -28841,8 +28841,6 @@ mod qwen_image_2_1_tiers {
     /// `the_shipped_catalog_pins_the_published_rehost` asserts so.
     const REHOST_REVISION: &str = "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0";
 
-    use crate::test_env::isolate_hf_cache;
-
     fn tier_root(data_dir: &Path, repo: &str, revision: &str, subdir: Option<&str>) -> PathBuf {
         let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, repo)
             .expect("repo cache path resolves")
@@ -28883,13 +28881,13 @@ mod qwen_image_2_1_tiers {
     /// The shipped entry, which since sc-24114 IS the published catalog: the packed rows carry the
     /// real re-host revision and no `pendingArtifact` flag.
     fn entry_after_upload() -> serde_json::Map<String, Value> {
-        shipped_qwen_2_1_entry()
+        crate::test_env::shipped_catalog_entry("qwen_image_2_1")
     }
 
     /// The same entry with the packed rows put back into the sc-24112 PENDING shape (null-SHA
     /// placeholder + `pendingArtifact`), for the guard that must keep an unpublished tier inert.
     fn pending_entry() -> serde_json::Map<String, Value> {
-        let mut entry = shipped_qwen_2_1_entry();
+        let mut entry = crate::test_env::shipped_catalog_entry("qwen_image_2_1");
         for download in entry
             .get_mut("downloads")
             .and_then(Value::as_array_mut)
@@ -28914,7 +28912,7 @@ mod qwen_image_2_1_tiers {
     /// *Mutation that reds this:* restoring the null SHA (or `pendingArtifact`) on either row.
     #[test]
     fn the_shipped_catalog_pins_the_published_rehost() {
-        let entry = shipped_qwen_2_1_entry();
+        let entry = crate::test_env::shipped_catalog_entry("qwen_image_2_1");
         let rows: Vec<&Value> = entry["downloads"]
             .as_array()
             .expect("downloads array")
@@ -28937,7 +28935,7 @@ mod qwen_image_2_1_tiers {
     /// dense-only probe (the `packed` arm dropped).
     #[test]
     fn the_published_packed_layout_is_seen_as_installed() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
@@ -29003,7 +29001,7 @@ mod qwen_image_2_1_tiers {
     #[cfg(unix)]
     #[test]
     fn a_tier_installed_at_the_superseded_revision_resolves_after_the_pin_bump() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         let supersession =
@@ -29040,26 +29038,6 @@ mod qwen_image_2_1_tiers {
             !tier_root(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8")).exists(),
             "the uninstalled q8 tier is not conjured"
         );
-    }
-
-    fn shipped_qwen_2_1_entry() -> serde_json::Map<String, Value> {
-        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .expect("builtin.models.jsonc embedded")
-                .1,
-        ))
-        .expect("builtin.models.jsonc parses");
-        manifest["models"]
-            .as_array()
-            .expect("models array")
-            .iter()
-            .find(|model| model["id"] == "qwen_image_2_1")
-            .expect("qwen_image_2_1 is in the shipped catalog")
-            .as_object()
-            .expect("entry object")
-            .clone()
     }
 
     fn request(entry: &serde_json::Map<String, Value>, bits: Option<i64>) -> ImageRequest {
@@ -29107,7 +29085,7 @@ mod qwen_image_2_1_tiers {
     /// `Qwen/Qwen-Image-2.1/q4`.
     #[test]
     fn each_tier_resolves_into_its_own_repository() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
@@ -29150,7 +29128,7 @@ mod qwen_image_2_1_tiers {
     /// reason, as every other tier resolver.
     #[test]
     fn an_unselected_default_falls_back_densest_first() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         // Only bf16 and q4 on disk; the q8 default must land on bf16, not on q4.
@@ -29174,7 +29152,7 @@ mod qwen_image_2_1_tiers {
     /// fallback (`installed(tier).or_else(...)`).
     #[test]
     fn an_explicit_uninstalled_tier_is_refused_never_substituted() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
@@ -29207,7 +29185,7 @@ mod qwen_image_2_1_tiers {
     /// nothing-installed branch.
     #[test]
     fn nothing_installed_is_none_unselected_and_an_install_error_when_explicit() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         assert_eq!(resolved(data.path(), &entry_after_upload(), None), None);
         for bits in [0, 4, 8, 16] {
@@ -29231,7 +29209,7 @@ mod qwen_image_2_1_tiers {
     /// *Mutation that reds this:* the pre-fix `_ => "q8"` catch-all for every bit count above 4.
     #[test]
     fn a_dense_bit_width_selects_bf16_not_q8() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
@@ -29263,7 +29241,7 @@ mod qwen_image_2_1_tiers {
     /// is a syntactically valid pinned revision, so the staged directory below would resolve.
     #[test]
     fn pending_tiers_resolve_to_nothing_rather_than_a_missing_directory() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = pending_entry();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
@@ -29301,9 +29279,9 @@ mod qwen_image_2_1_tiers {
     /// *Mutation that reds this:* `split_repo_root_tier_key` returning `None` (the pre-fix mapping).
     #[test]
     fn the_shipped_bf16_root_is_gated_and_loaded_as_bf16() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
-        let entry = shipped_qwen_2_1_entry();
+        let entry = crate::test_env::shipped_catalog_entry("qwen_image_2_1");
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
         let (dir, tier) = resolved_with_tier(data.path(), &entry, None).expect("bf16 is installed");
         assert_eq!(tier, "bf16");
@@ -29355,7 +29333,7 @@ mod qwen_image_2_1_tiers {
     /// directory are the same answer for every installed tier — the two cannot drift.
     #[test]
     fn resolved_tier_identity_round_trips_through_the_directory() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
