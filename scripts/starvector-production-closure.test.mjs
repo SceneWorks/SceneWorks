@@ -71,10 +71,12 @@ test("packaged production closure retains integrity independently of source curr
   // Preserve the recorded provenance; source currency is advisory. Controlled
   // fixtures above and below verify that source drift changes the closure.
   validateProductionClosureShape(closure);
-  // This immutable recorded candidate predates F-183's source-only extraction.
-  // Preserve its exact recorded path set and digests; current closures include the
-  // extracted files, while historical evidence continues to name the old source.
-  const recordedPaths = PRODUCTION_CLOSURE_PATHS.filter((sourcePath) => !MODEL_JOB_SPLIT_PATHS.includes(sourcePath));
+  // Historical closure membership/digests predate both helper and model-job extractions.
+  // Future captures include the new dependencies; the recorded candidate stays immutable.
+  const addedDependencies = ["scripts/lib/canonical-json.mjs", "scripts/lib/exec-file-with-fds.mjs"];
+  for (const dependency of addedDependencies) assert.ok(PRODUCTION_CLOSURE_PATHS.includes(dependency));
+  const recordedPaths = PRODUCTION_CLOSURE_PATHS.filter(sourcePath =>
+    !addedDependencies.includes(sourcePath) && !MODEL_JOB_SPLIT_PATHS.includes(sourcePath));
   assert.deepEqual(closure.entries.map(({ path }) => path).sort(), [...recordedPaths].sort());
 });
 

@@ -1,15 +1,16 @@
+import { sha256 as hash } from "./lib/file-sha256.mjs";
 // Explicit FUTURE build producer; importing/planning never builds. No credentials, GPU or network.
 import assert from 'node:assert/strict';
 import { execFile as execCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { copyFile, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { assertPins } from './qwen-image-2-1-app-lifecycle.mjs';
 import { contained, fileHash, safeEnvironment } from './flux3-image-klein-terminal-session.mjs';
 const execFile = promisify(execCb), rootDefault = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+
 const manifests = ['Cargo.toml','crates/sceneworks-worker/Cargo.toml','crates/sceneworks-memory-adapter/Cargo.toml'];
 export function buildRecipe(backend, platform, role = 'api-worker') {
   assert((backend === 'candle' && platform === 'win32') || (backend === 'mlx' && platform === 'darwin'));

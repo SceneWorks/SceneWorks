@@ -195,6 +195,7 @@ use workers::{
 };
 mod events;
 use events::{create_event_ticket, job_events, EventHub, EventMessage};
+mod http_boundary;
 mod tickets;
 use tickets::{create_media_ticket, EventTicketContext, TicketResponse, TicketStore};
 mod dto;
@@ -1525,7 +1526,7 @@ fn create_app_with_state_mode(
             EVENT_TICKET_TTL_SECONDS,
             MAX_OUTSTANDING_EVENT_TICKETS,
         )),
-        media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
+        media_tickets: Arc::new(TicketStore::media(MEDIA_TICKET_TTL_SECONDS, 24 * 60 * 60)),
         thumbnail_generation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         workflow_strip_slots: Arc::new(tokio::sync::Semaphore::new(WORKFLOW_STRIP_SLOTS)),
         auth_throttle: Arc::new(AuthThrottle::default()),
@@ -1544,7 +1545,10 @@ fn create_app_with_state_mode(
         external_base_model_cache: Arc::new(Mutex::new(
             external_base_models::ExternalBaseModelCache::default(),
         )),
-        http_client: reqwest::Client::new(),
+        http_client: http_boundary::outbound_client()
+            .map_err(|error| JobsStoreError::Io(std::io::Error::other(error)))?,
+        planner_http_client: http_boundary::planner_client()
+            .map_err(|error| JobsStoreError::Io(std::io::Error::other(error)))?,
         interrupted_jobs_on_startup,
         startup_maintenance: if defer_upload_sweeps {
             StartupMaintenance::pending()
@@ -2386,6 +2390,7 @@ fn create_app_with_state_mode(
         // route (asset import, training uploads, pose/keypoint sources, and the
         // model/lora import routes above).
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
+.layer(middleware::from_fn(http_boundary::request_body_idle_timeout))
         .layer(middleware::from_fn_with_state(state.clone(), access_control))
         .layer(cors)
         .layer(middleware::from_fn_with_state(state, auth::browser_control))
@@ -2407,7 +2412,9 @@ fn create_app_with_state_mode(
         )
         // Outermost so auth failures, CORS responses, and handler responses are
         // all timed. Non-API frontend traffic is ignored by the middleware.
-        .layer(middleware::from_fn(api_request_timing));
+        .layer(middleware::from_fn(api_request_timing))
+        .layer(tower::limit::GlobalConcurrencyLimitLayer::new(http_boundary::MAX_CONCURRENT_REQUESTS))
+        .layer(middleware::from_fn(http_boundary::no_referrer));
     Ok((router, returned_state))
 }
 
@@ -3134,17 +3141,8 @@ mod web_assets {
     // self-hosted from this origin (no third-party font host — sc-8956), images/media as
     // self/data/blob, IPC for the Tauri webview. Same-origin API + SSE are covered by
     // connect-src 'self'.
-    pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
-script-src 'self'; \
-style-src 'self' 'unsafe-inline'; \
-font-src 'self'; \
-img-src 'self' data: blob:; \
-media-src 'self' data: blob:; \
-connect-src 'self' ipc: http://ipc.localhost; \
-object-src 'none'; \
-base-uri 'self'; \
-frame-ancestors 'none'; \
-form-action 'self'";
+    pub(super) const CONTENT_SECURITY_POLICY: &str =
+        include_str!("../../web/content-security-policy.txt");
 
     const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
     const REVALIDATE_CACHE: &str = "no-cache";
@@ -4186,10 +4184,32 @@ async fn create_generation_job_with_status(
     job_type: JobType,
     project_id: Option<String>,
     project_name: Option<String>,
-    mut payload: JsonObject,
+    payload: JsonObject,
     requested_gpu: String,
     initial_status: Option<JobStatus>,
 ) -> Result<JobSnapshot, ApiError> {
+    create_generation_job_with_binding(
+        state,
+        job_type,
+        project_id,
+        project_name,
+        payload,
+        requested_gpu,
+        (initial_status, None),
+    )
+    .await
+}
+
+async fn create_generation_job_with_binding(
+    state: AppState,
+    job_type: JobType,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    mut payload: JsonObject,
+    requested_gpu: String,
+    admission: (Option<JobStatus>, Option<Value>),
+) -> Result<JobSnapshot, ApiError> {
+    let (initial_status, mut download_binding) = admission;
     model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
     // sc-26687 / sc-26690: freeze the server-trusted provenance of the checkpoint this job
     // admitted, in the SAME transaction that enqueues it, so a later re-import or rescan cannot
@@ -4232,8 +4252,11 @@ async fn create_generation_job_with_status(
     if let Some(reference) = imported_reference_from_provenance(entry, model_provenance.as_ref()) {
         payload.insert("expectedImportedModelRef".to_owned(), reference);
     }
+    if let Some(binding) = download_binding.as_mut().and_then(Value::as_object_mut) {
+        binding.insert("payload".to_owned(), json!(payload));
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job_with_model_provenance(
+        store.create_job_with_download_binding(
             CreateJob {
                 job_type,
                 project_id,
@@ -4246,6 +4269,7 @@ async fn create_generation_job_with_status(
                 initial_status,
             },
             model_provenance.as_ref(),
+            download_binding.as_ref(),
         )
     })
     .await?;

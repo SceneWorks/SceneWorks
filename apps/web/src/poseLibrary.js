@@ -1,5 +1,7 @@
+import { posesApi } from "./api/poses.js";
 import { useCallback, useEffect, useState } from "react";
-import { apiFetch } from "./api.js";
+import { fetchResource } from "./api.js";
+import { assetsApi } from "./api/assetsResources.js";
 import { assetDisplayUrl } from "./components/assetMedia.jsx";
 import { useAppStatic } from "./context/AppContext.js";
 
@@ -7,6 +9,31 @@ import { useAppStatic } from "./context/AppContext.js";
 // crates/sceneworks-core::GLOBAL_POSES_PROJECT_ID. Hidden from the project switcher;
 // addressed directly by the Pose Library screen + the user-pose picker fetcher.
 export const GLOBAL_POSES_PROJECT_ID = "project_global_poses";
+
+// Stage each file independently: the server returns no client ID, so a response can
+// only be associated safely with the request that carried that file.
+let nextPoseSourceId = 0;
+export async function stagePoseSources(token, files) {
+  return Promise.allSettled(files.map(async (file) => {
+    const id = `pose-upload-${++nextPoseSourceId}`;
+    const body = new FormData();
+    body.append("file", file);
+    const result = await posesApi.sources(token, { method: "POST", body });
+    const source = result?.sources?.[0];
+    if (!source?.path) throw new Error(`Upload did not return a staged path for ${file.name}.`);
+    return { ...source, id, file };
+  }));
+}
+
+export const savePoses = (token, poses) => posesApi.collection(token, { method: "POST", body: JSON.stringify({ poses }) });
+export async function loadPoseAssets(token, options = {}) {
+  const items = await assetsApi.listIncludingHidden(GLOBAL_POSES_PROJECT_ID, token, options);
+  return (Array.isArray(items) ? items : []).filter((asset) => asset.type === "pose");
+}
+export const setPoseStatus = (token, asset, changes) => assetsApi.status(asset.projectId, asset.id, token, { method: "PATCH", body: JSON.stringify(changes) });
+export const setPoseTags = (token, asset, tags) => assetsApi.tags(asset.projectId, asset.id, token, { method: "PATCH", body: JSON.stringify({ tags }) });
+export const deletePose = (token, asset) => assetsApi.item(asset.projectId, asset.id, token, { method: "DELETE" });
+export const purgePose = (token, asset) => assetsApi.purge(asset.projectId, asset.id, token, { method: "DELETE" });
 
 // The pose library is the union of two sources:
 //  - BUILT-IN: the bundled OpenPose library (apps/web/public/poses/index.json) —
@@ -66,7 +93,7 @@ export function loadBuiltinPoses() {
         if (typeof fetch !== "function") {
           throw new Error("fetch unavailable");
         }
-        return fetch("/poses/index.json");
+        return fetchResource("/poses/index.json");
       })
       .then((response) => {
         if (!response.ok) {
@@ -114,6 +141,7 @@ export function poseAssetToRecord(asset) {
     source: "user",
     assetId: asset.id,
     previewUrl,
+    previewAsset: asset,
   };
 }
 
@@ -139,7 +167,7 @@ export async function loadPoseLibrary({ loadUserPoses, extraPoses = [] } = {}) {
 export function useUserPoseLoader() {
   const { token } = useAppStatic();
   return useCallback(async () => {
-    const items = await apiFetch(`/api/v1/projects/${GLOBAL_POSES_PROJECT_ID}/assets`, token);
+    const items = await assetsApi.list(GLOBAL_POSES_PROJECT_ID, token);
     return (Array.isArray(items) ? items : [])
       .filter((asset) => asset?.type === "pose")
       .map(poseAssetToRecord);

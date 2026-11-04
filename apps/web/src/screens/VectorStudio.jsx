@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
@@ -178,6 +179,7 @@ function VectorJobOutcome({
   onCancel,
   onViewAssets,
 }) {
+  useMediaTicket();
   if (job.status !== "completed") {
     return <WorkerProgressCard job={job} onCancel={onCancel} />;
   }

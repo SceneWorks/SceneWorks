@@ -1,9 +1,10 @@
+import { recipePresetsRequest } from "../api/scopedCatalogs.js";
 import { useScopedCrudList } from "./useScopedCrudList.js";
 
 export function usePresets(options) {
   const catalog = useScopedCrudList({
     ...options,
-    resourcePath: "/api/v1/recipe-presets",
+    request: recipePresetsRequest,
     projectRequiredMessage: "Create or open a project first.",
   });
   return {

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
+import { canonicalJson as stableJson, compareUtf8Keys as compareUtf8 } from "./lib/canonical-json.mjs";
+import { sha256 } from "./lib/file-sha256.mjs";
 
 // Deterministic source closure for the StarVector permanent-pin terminal candidate.
 // The catalog itself is intentionally excluded: embedding its own byte hash would be recursive.
 
-import { createHash } from "node:crypto";
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,6 +53,8 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "release/starvector-terminal-recovery-v1.json",
   "release/starvector-terminal-upstream-lock-v1.json",
   "scripts/lib/file-sha256.mjs",
+  "scripts/lib/canonical-json.mjs",
+  "scripts/lib/exec-file-with-fds.mjs",
   "scripts/lib/starvector-terminal-attempt.mjs",
   "scripts/lib/starvector-terminal-gpu.mjs",
   "scripts/lib/starvector-terminal-memory.mjs",
@@ -84,9 +87,6 @@ function fail(message) {
   throw new Error(`StarVector production closure: ${message}`);
 }
 
-function compareUtf8(left, right) {
-  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
-}
 
 export function normalizeClosurePath(input) {
   if (typeof input !== "string" || input.length === 0 || input.includes("\0")) {
@@ -105,17 +105,8 @@ export function normalizeClosurePath(input) {
   return normalized;
 }
 
-export function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort(compareUtf8).map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
+export { stableJson };
 
-function sha256(bytes) {
-  return createHash("sha256").update(bytes).digest("hex");
-}
 
 export function closureSha256(entries) {
   return sha256(stableJson({ entries }));
