@@ -8656,8 +8656,8 @@ async fn fetching_job_replays_require_current_receipts_for_every_source_type() {
                 "current receipt {kind}/{operation}: {replay}"
             );
             assert_eq!(
-                replay["payload"]["licenseAcknowledged"], false,
-                "old assertion cleared: {replay}"
+                replay["payload"]["licenseAcknowledged"], job["payload"]["licenseAcknowledged"],
+                "authorization must preserve the saved request: {replay}"
             );
         }
         jobs.push((kind, id));
