@@ -142,10 +142,6 @@ runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "67f525
 candle-gen-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "67f525f7c5d6abd07b49d3fa3f3d8d73513b805f", default-features = false, features = ["test-support"], optional = true }
 # Canonical NVIDIA inference composition; enabled only by `backend-candle`.
 runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "67f525f7c5d6abd07b49d3fa3f3d8d73513b805f", optional = true, features = ["cv"] }
-# The shared Candle training validator is a weights-free contract dependency. Keeping this direct
-# lets SceneWorks dry-run preflight use the exact optimizer/timestep/bias/loss parser the production
-# family trainers use instead of maintaining a second, inevitably drifting enum mirror.
-candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "67f525f7c5d6abd07b49d3fa3f3d8d73513b805f", optional = true }
 # Candle parity for the same weights-free LTX-2.5 prepared-request validation.
 candle-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "67f525f7c5d6abd07b49d3fa3f3d8d73513b805f", optional = true }
 # DWPose whole-body pose detection off-Mac (sc-5496, epic 5482) — the Windows/Linux/CUDA sibling of the
