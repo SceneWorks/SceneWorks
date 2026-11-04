@@ -970,10 +970,6 @@ mod tests {
 mod job_tests {
     use crate::api_client::ApiClient;
     use crate::error::{WorkerError, WorkerResult};
-    use axum::extract::{Path as AxumPath, State};
-    use axum::response::{IntoResponse, Response};
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
     use gen_core::{
         LoadSpec, Trainer, TrainerDescriptor, TrainingOutput, TrainingProgress, TrainingRequest,
         WeightsSource,
@@ -1166,43 +1162,16 @@ mod job_tests {
     }
 
     async fn spawn_job_api(cancel_requested: CancelSwitch) -> (String, Posts) {
-        async fn job_route(
-            State((_, cancel)): State<(Posts, CancelSwitch)>,
-            AxumPath(job_id): AxumPath<String>,
-        ) -> Response {
-            Json(crate::tests::job_snapshot_json(&job_id, requested(&cancel))).into_response()
-        }
-        async fn progress_route(
-            State((posts, cancel)): State<(Posts, CancelSwitch)>,
-            AxumPath(job_id): AxumPath<String>,
-            Json(body): Json<Value>,
-        ) -> Response {
-            posts.lock().unwrap().push(body);
-            Json(crate::tests::job_snapshot_json(&job_id, requested(&cancel))).into_response()
-        }
-        async fn heartbeat_route(AxumPath(worker_id): AxumPath<String>) -> Response {
-            Json(json!({
-                "id": worker_id, "gpuId": "cpu", "gpuName": null, "status": "busy",
-                "currentJobId": "job-iris-train", "capabilities": [], "loadedModels": [],
-                "registeredAt": "2026-07-01T00:00:00Z", "lastSeenAt": "2026-07-01T00:00:00Z"
-            }))
-            .into_response()
-        }
-        let posts: Posts = Arc::default();
-        let app = Router::new()
-            .route("/api/v1/jobs/:job_id", get(job_route))
-            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-            .route(
-                "/api/v1/workers/:worker_id/heartbeat",
-                post(heartbeat_route),
-            )
-            .with_state((posts.clone(), cancel_requested));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        crate::load_progress::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("http://{address}"), posts)
+        let posts = Posts::default();
+        let app = crate::test_api_stub::routes(
+            |state: &(Posts, CancelSwitch), id, _| {
+                crate::tests::job_snapshot_json(id, requested(&state.1))
+            },
+            |state, _, value| state.0.lock().unwrap().push(value),
+            |_, id| crate::tests::worker_snapshot_json(id),
+        )
+        .with_state((posts.clone(), cancel_requested));
+        (crate::test_api_stub::serve(app).await, posts)
     }
 
     fn stage(root: &Path, repo: &str, revision: &str, file: &str) -> PathBuf {

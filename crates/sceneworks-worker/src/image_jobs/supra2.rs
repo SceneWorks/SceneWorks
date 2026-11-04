@@ -287,8 +287,8 @@ mod tests {
         use crate::api_client::ApiClient;
         use axum::extract::{Path as AxumPath, State};
         use axum::response::{IntoResponse, Response};
-        use axum::routing::{get, post};
-        use axum::{Json, Router};
+
+        use axum::Json;
         use sceneworks_core::contracts::JobSnapshot;
         use std::sync::{Arc, Mutex};
 
@@ -366,14 +366,12 @@ mod tests {
                 ..JobApi::default()
             };
             let posts = api.posts.clone();
-            let app = Router::new()
-                .route("/api/v1/jobs/:job_id", get(job_route))
-                .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-                .route(
-                    "/api/v1/workers/:worker_id/heartbeat",
-                    post(heartbeat_route),
-                )
-                .with_state(api);
+            let app = crate::test_api_stub::job_progress_heartbeat_routes(
+                job_route,
+                progress_route,
+                heartbeat_route,
+            )
+            .with_state(api);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             crate::load_progress::spawn(async move {
@@ -738,8 +736,8 @@ mod tests {
         use super::*;
         use crate::api_client::ApiClient;
         use axum::extract::{Path as AxumPath, State};
-        use axum::routing::{get, post};
-        use axum::{Json, Router};
+        use axum::routing::post;
+        use axum::Json;
         use sceneworks_core::contracts::JobSnapshot;
         use sceneworks_core::project_store::ProjectStore;
         use std::sync::{Arc, Mutex};
@@ -774,9 +772,7 @@ mod tests {
                 }))
             }
             let posts: Posts = Arc::default();
-            let app = Router::new()
-                .route("/api/v1/jobs/:job_id", get(job_route))
-                .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            let app = crate::test_api_stub::job_progress_routes(job_route, progress_route)
                 .route("/api/v1/jobs/:job_id/metrics", post(metrics_route))
                 .route(
                     "/api/v1/workers/:worker_id/heartbeat",
@@ -988,9 +984,7 @@ mod tests {
                 ..LifecycleApi::default()
             };
             let posts = api.posts.clone();
-            let app = Router::new()
-                .route("/api/v1/jobs/:job_id", get(job_route))
-                .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            let app = crate::test_api_stub::job_progress_routes(job_route, progress_route)
                 .route("/api/v1/jobs/:job_id/metrics", post(metrics_route))
                 .route(
                     "/api/v1/workers/:worker_id/heartbeat",
@@ -1197,8 +1191,8 @@ mod tests {
         use super::*;
         use crate::api_client::ApiClient;
         use axum::extract::{Path as AxumPath, State};
-        use axum::routing::{get, post};
-        use axum::{Json, Router};
+        use axum::routing::post;
+        use axum::Json;
         use sceneworks_core::contracts::JobSnapshot;
         use sceneworks_core::project_store::ProjectStore;
         use std::sync::{Arc, Mutex};
@@ -1237,9 +1231,7 @@ mod tests {
                 }))
             }
             let posts: Posts = Arc::default();
-            let app = Router::new()
-                .route("/api/v1/jobs/:job_id", get(job_route))
-                .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            let app = crate::test_api_stub::job_progress_routes(job_route, progress_route)
                 .route("/api/v1/jobs/:job_id/metrics", post(metrics_route))
                 .route(
                     "/api/v1/workers/:worker_id/heartbeat",
