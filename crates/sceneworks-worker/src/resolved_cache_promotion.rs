@@ -382,7 +382,8 @@ mod tests {
             )],
             || {
                 let temp = tempfile::tempdir().expect("tempdir");
-                let settings = Settings::for_test(temp.path().join("data"));
+                let mut settings = Settings::for_test(temp.path().join("data"));
+                settings.resolved_cache.enabled = true;
                 let closure = vec![requirement("guardfx/corequisite-only", false)];
                 assert!(pending_for_plans(
                     &settings,

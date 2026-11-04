@@ -555,6 +555,8 @@ mod tests {
         "crates/sceneworks-worker/src/resolution_sweep.rs",
         "crates/sceneworks-worker/src/sana_mlx_smoke.rs",
         "crates/sceneworks-worker/src/sd3_5_mlx_smoke.rs",
+        // Shared HF/cache and metric helpers, gated by cfg(all(test, native_lane)) in lib.rs.
+        "crates/sceneworks-worker/src/smoke_support.rs",
         "crates/sceneworks-worker/src/voiceclone_smoke.rs",
         "crates/sceneworks-worker/src/wan_i2v_14b_tier_build.rs",
         "crates/sceneworks-worker/src/wan_t2v_14b_tier_build.rs",
