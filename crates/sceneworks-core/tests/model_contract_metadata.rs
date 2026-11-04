@@ -248,8 +248,22 @@ fn artifact_identity_stores_the_parser_normalized_repository() {
 }
 
 #[test]
-fn exact_lora_metadata_outweighs_earlier_broad_repository_heuristics() {
-    let header = json!({"__metadata__":{"baseModel":"community/Krea-style-adapter", "modelspec.architecture":"krea-realtime"}});
+fn recorded_base_precedence_preserves_explicit_native_family_authority() {
+    let mut header = json!({"__metadata__":{"baseModel":"community/Krea-style-adapter", "modelspec.architecture":"krea-realtime"}});
+    assert_eq!(
+        lora_family::detect_lora_family(&header).as_deref(),
+        Some("krea_2")
+    );
+    header["__metadata__"]["family"] = json!("krea-realtime");
+    assert_eq!(
+        lora_family::detect_lora_family(&header).as_deref(),
+        Some("krea-realtime")
+    );
+    header["__metadata__"]
+        .as_object_mut()
+        .unwrap()
+        .remove("family");
+    header["__metadata__"]["baseModel"] = json!("community/unclassified");
     assert_eq!(
         lora_family::detect_lora_family(&header).as_deref(),
         Some("krea-realtime")
