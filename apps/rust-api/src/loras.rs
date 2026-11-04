@@ -1608,6 +1608,11 @@ pub(crate) fn validate_lora_specs_for_model(
         else {
             continue;
         };
+        // Only the current model catalog may supply the recorded base's compatibility facts.
+        normalized_lora
+            .as_object_mut()
+            .unwrap()
+            .remove("baseModelManifestEntry");
         if catalog_backed && matches!(model_id, "flux3_klein" | "flux3_klein_base") {
             for key in ["installedPath", "sourcePath", "path", "source"] {
                 if let Some(value) = lora.get(key) {
@@ -1806,6 +1811,10 @@ pub(crate) fn validate_lora_specs_for_model(
             .any(|family| matches!(family.as_str(), "wan-video" | "ltx-video"))
         {
             if let Some(base_model) = lora_base_model(lora) {
+                let base_manifest = models
+                    .iter()
+                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(&base_model))
+                    .and_then(Value::as_object);
                 // Shared with the worker's own gate (sc-15017): exact-id equality, plus the
                 // extra-compatible arm that keeps the 5B-vs-14B split while letting a Wan-14B
                 // LoRA onto a 14B-class model that accepts `wan-video` through the registry —
@@ -1815,10 +1824,7 @@ pub(crate) fn validate_lora_specs_for_model(
                     model_id,
                     &base_model,
                     model.as_object(),
-                    models
-                        .iter()
-                        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(&base_model))
-                        .and_then(Value::as_object),
+                    base_manifest,
                 ) {
                     let detail = if families.iter().any(|family| family == "ltx-video") {
                         "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable"
@@ -1828,6 +1834,10 @@ pub(crate) fn validate_lora_specs_for_model(
                     return Err(ApiError::bad_request(format!(
                         "LoRA {lora_id} was trained for base model {base_model}, not {model_id}; {detail}"
                     )));
+                }
+                if let Some(base_manifest) = base_manifest {
+                    normalized_lora["baseModelManifestEntry"] =
+                        Value::Object(base_manifest.clone());
                 }
             }
         }

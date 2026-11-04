@@ -2231,6 +2231,11 @@ fn detect_metadata_family(header: &Value) -> Option<MetadataFamily> {
             continue;
         };
         if let Some(family) = crate::model_family::exact_identity(value) {
+            // A generic trainer label cannot erase a preceding versioned repository stamp.
+            // Leave it to the ordered fallback below, which still accepts generic-only metadata.
+            if family == crate::model_family::QWEN_IMAGE && is_generic_qwen_image_label(value) {
+                continue;
+            }
             return Some(MetadataFamily {
                 generic_qwen_label: family == crate::model_family::QWEN_IMAGE
                     && is_generic_qwen_image_label(value),
@@ -3665,6 +3670,12 @@ pub fn validate_lora_compatibility_with_manifest(
                     ));
                 }
                 if let Some(base) = base {
+                    let base_manifest = lora
+                        .get("baseModelManifestEntry")
+                        .and_then(Value::as_object)
+                        .filter(|entry| {
+                            entry.get("id").and_then(Value::as_str) == Some(base.as_str())
+                        });
                     // `base_model_satisfies_gate` keeps the 5B-vs-14B split while letting a
                     // Wan-14B LoRA through on a model that accepts `wan-video` via the registry
                     // (sc-15017) — its base can never equal that model's own id.
@@ -3673,7 +3684,7 @@ pub fn validate_lora_compatibility_with_manifest(
                         model_id,
                         &base,
                         model,
-                        None,
+                        base_manifest,
                     ) {
                         let detail = if families.iter().any(|family| family == "ltx-video") {
                             "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable."
