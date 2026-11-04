@@ -397,11 +397,13 @@ mod tests {
         let resolver: SecretResolver =
             Arc::new(|_| Some(("secret".to_owned(), CredentialScheme::Bearer)));
         let ipc = start_tcp(resolver).unwrap();
+        #[cfg(unix)]
         let address = match ipc.endpoint {
             CredIpcEndpoint::Tcp(address) => address,
-            #[cfg(unix)]
             CredIpcEndpoint::Unix(_) => panic!("tcp"),
         };
+        #[cfg(not(unix))]
+        let CredIpcEndpoint::Tcp(address) = ipc.endpoint;
         let mut slow = TcpStream::connect(address).unwrap();
         slow.write_all(b"partial").unwrap();
         let start = std::time::Instant::now();
