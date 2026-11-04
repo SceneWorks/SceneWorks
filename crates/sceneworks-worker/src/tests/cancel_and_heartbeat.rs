@@ -80,10 +80,7 @@ async fn run_placeholder_job_proceeds_when_shutdown_flag_untripped() {
 /// terminal `Canceled` (which frees the worker row) is posted by `generate_video`
 /// only after the blocking generation actually stops, so the next queued job waits
 /// until the GPU is genuinely free.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test]
 async fn begin_video_cancel_trips_flag_and_stays_non_terminal() {
     let (base_url, posts) = spawn_progress_capture_stub().await;
@@ -127,10 +124,7 @@ async fn begin_video_cancel_trips_flag_and_stays_non_terminal() {
 ///
 /// The discriminator is `status`: a `canceled` here would free the worker row and let the next
 /// queued job claim the GPU underneath a denoise that is still running.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test]
 async fn begin_image_cancel_acknowledges_a_candle_qwen_image_2_1_job_non_terminally() {
     let (base_url, posts) = spawn_progress_capture_stub().await;
@@ -201,10 +195,7 @@ async fn begin_image_cancel_acknowledges_a_candle_qwen_image_2_1_job_non_termina
 /// built from the request and a mode that failed to carry the model or the batch total would
 /// renumber the gallery mid-cancel. PROGRESS on the edit route is covered separately, by
 /// `image_jobs::tests::qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_cancel`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test]
 async fn begin_image_cancel_acknowledges_a_qwen_image_2_1_edit_non_terminally() {
     for (backend, mode, payload) in [
@@ -280,10 +271,7 @@ async fn begin_image_cancel_acknowledges_a_qwen_image_2_1_edit_non_terminally() 
 /// flag and acknowledges with a NON-terminal `running` update; the terminal
 /// `Canceled` is posted by `consume_training_events` after training stops. Compiled on the macOS MLX
 /// path AND the off-Mac candle training lane (sc-7817), where `begin_training_cancel` is also linked.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test]
 async fn begin_training_cancel_trips_flag_and_stays_non_terminal() {
     let (base_url, posts) = spawn_progress_capture_stub().await;
@@ -317,7 +305,7 @@ async fn begin_training_cancel_trips_flag_and_stays_non_terminal() {
 
 // sc-9646 (sc-9595 follow-up) — the streaming SeedVR2 upscale writes the whole upscaled PNG sequence
 // to a scratch dir before the final encode, so its disk footprint is unbounded after the sc-8829
-// host-RAM cap was removed. `check_seedvr2_output_disk` is a fail-loud-before-decode preflight that
+// host-RAM cap was removed. `check_seedvr2_scratch_disk` is a fail-loud-before-decode preflight that
 // mirrors the removed RAM guard: estimate the output footprint, compare against a generous fraction
 // of the scratch volume's free space, and reject a clip that would fill the disk.
 
@@ -348,52 +336,46 @@ fn seedvr2_output_bytes_scales_with_frames_and_pixels() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn seedvr2_disk_guard_passes_a_tiny_clip_and_is_noop_when_unknown() {
     let dir = tempdir().expect("tempdir");
     // A few small frames fit any real scratch volume — must pass.
-    crate::video_jobs::seedvr2::check_seedvr2_output_disk(dir.path(), 8, 64, 64)
+    crate::video_jobs::seedvr2::check_seedvr2_scratch_disk(dir.path(), 8, 64, 64, 64, 64)
         .expect("a tiny output footprint fits available disk");
     // Unknown frame count / dims short-circuit to Ok (the guard defers to the real count).
-    crate::video_jobs::seedvr2::check_seedvr2_output_disk(dir.path(), 0, 3840, 2160)
+    crate::video_jobs::seedvr2::check_seedvr2_scratch_disk(dir.path(), 0, 1920, 1080, 3840, 2160)
         .expect("zero frames is a no-op guard");
-    crate::video_jobs::seedvr2::check_seedvr2_output_disk(dir.path(), 1_000, 0, 0)
+    crate::video_jobs::seedvr2::check_seedvr2_scratch_disk(dir.path(), 1_000, 1920, 1080, 0, 0)
         .expect("zero dims is a no-op guard");
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn seedvr2_disk_guard_rejects_an_impossibly_large_clip() {
     let dir = tempdir().expect("tempdir");
-    // 100M frames at 4096×4096 ≈ 4.7 exabytes of PNG — no scratch volume holds that, so the guard
-    // must fail loud with an actionable message (unless the free-space probe is unavailable, in which
-    // case the guard is a documented no-op and we skip the assertion).
-    if crate::video_jobs::seedvr2::available_disk_bytes(dir.path()).is_some() {
-        let error =
-            crate::video_jobs::seedvr2::check_seedvr2_output_disk(
-                dir.path(),
-                100_000_000,
-                4096,
-                4096,
-            )
-                .expect_err("an exabyte-scale output must be rejected");
-        let message = error.to_string();
-        assert!(
-            message.contains("Not enough disk space"),
-            "the error names the disk-space limit: {message}"
-        );
-        assert!(
-            message.contains("Trim the clip"),
-            "the error is actionable (suggests trimming): {message}"
-        );
-    }
+    // The source plus upscaled PNG sequence is petabyte-scale. The native filesystem probe
+    // must work in this regression, so an unavailable probe cannot turn refusal coverage green.
+    crate::video_jobs::seedvr2::available_disk_bytes(dir.path())
+        .expect("the native test scratch volume must report available bytes");
+    let error = crate::video_jobs::seedvr2::check_seedvr2_scratch_disk(
+        dir.path(),
+        100_000_000,
+        1920,
+        1080,
+        4096,
+        4096,
+    )
+    .expect_err("a petabyte-scale scratch footprint must be rejected");
+    let message = error.to_string();
+    assert!(
+        message.contains("Not enough disk space"),
+        "the error names the disk-space limit: {message}"
+    );
+    assert!(
+        message.contains("Trim the clip"),
+        "the error is actionable (suggests trimming): {message}"
+    );
 }
 
 // sc-8917 (F-115) — the shared batched-analysis scaffold DEFERS the terminal `Canceled` to
@@ -406,10 +388,7 @@ fn seedvr2_disk_guard_rejects_an_impossibly_large_clip() {
 
 /// A capture stub for the analysis scaffold: the job GET/heartbeat report a user cancel (so the
 /// interval-tick poll trips), every progress POST body is recorded, and the heartbeat route answers.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn spawn_analysis_cancel_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
     use std::sync::{Arc, Mutex};
     type Posts = Arc<Mutex<Vec<Value>>>;
@@ -450,10 +429,7 @@ pub(crate) async fn spawn_analysis_cancel_stub() -> (String, std::sync::Arc<std:
     (format!("http://{address}"), posts)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test]
 async fn batched_analysis_defers_terminal_canceled_until_the_task_stops() {
     let (base_url, posts) = spawn_analysis_cancel_stub().await;
@@ -546,10 +522,7 @@ async fn batched_analysis_defers_terminal_canceled_until_the_task_stops() {
 /// sc-2126 review: with `post_chunk_bytes` set, the batched scaffold POSTs the records to the
 /// sidecar in several bounded requests — every record exactly once, in order, no body over the
 /// budget — and hands `completed` every response in POST order.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test]
 async fn batched_analysis_posts_records_in_bounded_chunks() {
     use std::sync::{Arc, Mutex};
@@ -1295,7 +1268,7 @@ async fn spawn_finishing_heartbeat_stub(state: FinishingHeartbeatStub) -> String
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }
-        Json(json!({})).into_response()
+        Json(worker_snapshot_json("test-worker")).into_response()
     }
     async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
         Json(job_snapshot_json(&job_id, true)).into_response()
@@ -1549,4 +1522,155 @@ async fn with_job_heartbeat_keeps_worker_live_through_a_long_staging_copy() {
         "at least one heartbeat must fire while a >interval region runs (got {})",
         beats.load(Ordering::SeqCst)
     );
+}
+
+/// F-005/F-035: arbitrary lane events, the independent progress cadence, and heartbeat cadence
+/// share one supervisor. A completed producer's buffered events are drained before returning.
+#[tokio::test]
+async fn stream_supervisor_drains_events_and_preserves_both_timers() {
+    let (base, beats) = spawn_heartbeat_counting_stub().await;
+    let mut settings = test_settings(base.clone(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let (release, ready) = tokio::sync::oneshot::channel();
+    let mut release = Some(release);
+    let task = crate::load_progress::spawn(async move {
+        ready.await.expect("timers observed");
+        tx.send("first").await.expect("first event");
+        tx.send("last").await.expect("last event");
+        42
+    });
+    let mut supervisor = crate::StreamSupervisor::new(
+        cancel.clone(), task, Duration::from_millis(5), Some(Duration::from_millis(3)),
+    );
+    let mut events = Vec::new();
+    let mut progress_ticks = 0;
+    loop {
+        match supervisor.next(&api, &settings, "job-1", Some(&mut rx)).await.expect("supervised event") {
+            crate::StreamSignal::Event(event) => events.push(event),
+            crate::StreamSignal::ProgressTick => {
+                progress_ticks += 1;
+                if beats.load(Ordering::SeqCst) > 0 {
+                    if let Some(release) = release.take() {
+                        release.send(()).expect("release task");
+                    }
+                }
+            }
+            crate::StreamSignal::CancelRequested => panic!("control run canceled"),
+            crate::StreamSignal::Finished => break,
+        }
+    }
+    let (canceled, output) = supervisor.finish_stream(Ok(()), &mut rx).await.expect("finish");
+    assert!(!canceled);
+    assert!(!cancel.is_cancelled());
+    assert_eq!(output.expect("task joined"), 42);
+    assert_eq!(events, ["first", "last"]);
+    assert!(progress_ticks > 0);
+    assert!(beats.load(Ordering::SeqCst) > 0);
+}
+
+/// A cancellation acknowledgment is only safe after the producer has stopped. This fake native
+/// task deliberately takes time to wind down after seeing its flag; no model work executes.
+#[tokio::test]
+async fn stream_supervisor_joins_before_cancel_acknowledgment() {
+    let (base, posts) = spawn_no_user_cancel_capture_stub().await;
+    let mut settings = test_settings(base.clone(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_stopped = stopped.clone();
+    let (release, ready) = std::sync::mpsc::channel();
+    let task = crate::load_progress::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !task_cancel.is_cancelled() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(task_cancel.is_cancelled(), "supervisor must cancel producer");
+        ready.recv_timeout(Duration::from_secs(5)).expect("release canceled task");
+        task_stopped.store(true, Ordering::SeqCst);
+    });
+    let shutdown = gen_core::CancelFlag::new();
+    shutdown.cancel();
+    let mut supervisor = crate::StreamSupervisor::new(cancel, task, Duration::from_millis(5), None);
+    crate::with_shutdown_flag(shutdown, async {
+        assert!(super::progress::shutdown_requested(), "shutdown scope is active");
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), supervisor.next::<()>(&api, &settings, "job-1", None)).await.expect("timely signal").expect("signal") {
+                crate::StreamSignal::CancelRequested => {
+                    assert!(!stopped.load(Ordering::SeqCst));
+                    release.send(()).expect("release task");
+                    assert!(posts.lock().expect("posts").is_empty());
+                }
+                crate::StreamSignal::Finished => break,
+                _ => {}
+            }
+        }
+    }).await;
+    let (canceled, result) = supervisor.finish(Ok(())).await.expect("finish");
+    result.expect("task joined");
+    assert!(canceled);
+    assert!(stopped.load(Ordering::SeqCst));
+    super::mark_job_canceled(&api, "job-1", "test canceled").await.expect("terminal acknowledgment");
+    assert_eq!(posts.lock().expect("posts")[0]["status"], "canceled");
+}
+
+/// An API failure must cancel and join a producer that may be blocked on a full progress channel.
+#[tokio::test]
+async fn stream_supervisor_error_closes_channel_and_joins_producer() {
+    let base = spawn_failing_heartbeat_stub().await;
+    let mut settings = test_settings(base.clone(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_stopped = stopped.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let task = crate::load_progress::spawn_blocking(move || {
+        while tx.blocking_send(1).is_ok() {}
+        task_stopped.store(true, Ordering::SeqCst);
+    });
+    let mut supervisor = crate::StreamSupervisor::new(cancel.clone(), task, Duration::from_millis(1), None);
+    let handling = async {
+        loop {
+            if matches!(supervisor.next(&api, &settings, "job-1", Some(&mut rx)).await?, crate::StreamSignal::Finished) {
+                break;
+            }
+        }
+        Ok(())
+    }.await;
+    assert!(handling.is_err());
+    assert!(supervisor.finish_stream(handling, &mut rx).await.is_err());
+    assert!(cancel.is_cancelled());
+    assert!(stopped.load(Ordering::SeqCst));
+}
+
+/// The generic task-only driver preserves the established sc-22999 completed-result policy even
+/// when an HTTP heartbeat/cancel read races the native task's completion.
+#[tokio::test]
+async fn stream_supervisor_keeps_result_completed_during_cancel_poll() {
+    let state = FinishingHeartbeatStub {
+        release: Default::default(),
+        progress: Default::default(),
+    };
+    let base = spawn_finishing_heartbeat_stub(state.clone()).await;
+    let mut settings = test_settings(base.clone(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+    let (release, ready) = std::sync::mpsc::channel();
+    let task = crate::load_progress::spawn_blocking(move || {
+        ready.recv_timeout(Duration::from_secs(5)).expect("heartbeat releases producer");
+        7
+    });
+    *state.release.lock().expect("release") = Some((release, task.abort_handle()));
+    let cancel = gen_core::CancelFlag::new();
+    let (canceled, result) = crate::StreamSupervisor::new(cancel.clone(), task, Duration::from_millis(5), None)
+        .wait(&api, &settings, "job-1").await.expect("supervised completion");
+    assert!(!canceled);
+    assert!(!cancel.is_cancelled());
+    assert_eq!(result.expect("task joined"), 7);
+    assert!(state.progress.lock().expect("progress").is_empty());
 }

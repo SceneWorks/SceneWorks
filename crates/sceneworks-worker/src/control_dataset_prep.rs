@@ -144,10 +144,7 @@ pub(crate) fn letterbox_to_square(img: &RgbImage) -> RgbImage {
 }
 
 /// Whether `path` contains a detected person (neural-inference build).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn target_has_person(path: &Path, filter: &PersonFilter) -> WorkerResult<bool> {
     let result = crate::person_jobs::detect_people_blocking(
         filter.weights_path.clone(),
@@ -157,10 +154,7 @@ fn target_has_person(path: &Path, filter: &PersonFilter) -> WorkerResult<bool> {
     Ok(!result.detections.is_empty())
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn target_has_person(_path: &Path, _filter: &PersonFilter) -> WorkerResult<bool> {
     Err(WorkerError::Engine(
         "person filter requires a neural-inference build (macOS or off-Mac backend-candle)"

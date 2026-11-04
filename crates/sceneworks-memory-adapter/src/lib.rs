@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "a43724b82fbae35c9227cef4bcdabba6dd1da12c";
+pub use sceneworks_core::inference_provenance::INFERENCE_REVISION as INFERENCE_PIN;
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 /// The Qwen-Image-Edit-2511 tiered rehost (sc-22728). Serves BOTH shipped edit catalog ids —
 /// `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` — on both lanes, because they are one
@@ -2114,13 +2114,11 @@ impl PulidIdentityBundle {
 }
 
 fn sha256_hex_of_file(path: &Path) -> Result<String, String> {
-    use sha2::Digest;
-    let mut file = std::fs::File::open(path)
+    let file = std::fs::File::open(path)
         .map_err(|error| format!("open {} for hashing: {error}", path.display()))?;
-    let mut hasher = sha2::Sha256::new();
-    io::copy(&mut file, &mut hasher)
-        .map_err(|error| format!("hash {}: {error}", path.display()))?;
-    Ok(format!("{:x}", hasher.finalize()))
+    sceneworks_core::hashing::sha256_reader_retry(file)
+        .map(|(digest, _)| digest)
+        .map_err(|error| format!("hash {}: {error}", path.display()))
 }
 
 /// The env-free half of [`pulid_identity_bundle`], so the file contract is unit-testable. Hashes

@@ -102,20 +102,13 @@ fn resolve_flux_ipadapter_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "FLUX IP-Adapter modelPath")
             .map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| flux_ipadapter_default_repo(&request.model));
     Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
         .map(|root| standard_tier_subdir(&root, request)))
@@ -314,12 +307,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         FLUX_IPADAPTER_IP_SCALE,
         0.0..=1.0,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| flux_ipadapter_default_repo(&request.model))
         .to_owned();
     let mut raw_settings = flux_ipadapter_raw_settings(request, &repo, steps, guidance, ip_scale);
@@ -353,10 +341,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
             )
             .with_offload_policy(gen_core::OffloadPolicy::Sequential),
     );
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,

@@ -1,14 +1,8 @@
 #[allow(unused_imports)]
 use super::prelude::*;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::run_blocking_with_heartbeat;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::wan::scail2_sampling;
 #[cfg(target_os = "macos")]
 use super::wan::{
@@ -18,19 +12,13 @@ use super::wan::{
 use super::{
     ltx::extract_clip_frames,
     vace::{load_source_video_frames, replacement_status_value, resolve_character_references},
-    wan::local_mlx_dir,
+    wan::resolve_mlx_family_dir,
 };
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS;
 
 /// Cancel message shared by every SCAIL-2 person-segmentation pass (both backends).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const SCAIL2_SEGMENT_CANCEL_MESSAGE: &str = "SCAIL-2 canceled during person segmentation.";
 
 /// Run a SCAIL-2 person-segmentation-and-paint pass on the blocking pool under the heartbeat
@@ -40,10 +28,7 @@ const SCAIL2_SEGMENT_CANCEL_MESSAGE: &str = "SCAIL-2 canceled during person segm
 /// (sc-8830): the caller's `segment` closure captures whichever SAM3 module the build links (MLX
 /// `person_segment_sam3` vs `person_segment_sam3_candle`) plus the paint background, so the
 /// heartbeat orchestration lives in exactly one place instead of a per-backend twin.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn scail2_segment_blocking<R, F>(
     api: &ApiClient,
     settings: &Settings,
@@ -87,10 +72,7 @@ where
 pub(super) const SCAIL2_ADAPTER: &str = "mlx_scail2";
 
 /// SceneWorks SCAIL-2 model id → mlx-gen registry id, or `None` if `model` is not SCAIL-2.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn scail2_engine_id(model: &str) -> Option<&'static str> {
     (model == "scail2_14b").then_some("scail2_14b")
 }
@@ -106,22 +88,12 @@ pub(super) fn scail2_available(_request: &VideoRequest, settings: &Settings) -> 
 /// (mirrors `resolve_bernini_model_dir`). Errors clearly if none is present (no stub fallback).
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_scail2_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
-    if let Some(dir) = local_mlx_dir(settings, "SCENEWORKS_MLX_SCAIL2_DIR", "scail2") {
-        return Ok(dir);
-    }
-    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, "SceneWorks/scail2-mlx") {
-        return Ok(dir);
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "scail2: no MLX weights found. Download the turnkey SceneWorks/scail2-mlx snapshot via the \
-         Model Manager, set $SCENEWORKS_MLX_SCAIL2_DIR, or place a converted snapshot at {}.",
-        settings
-            .data_dir
-            .join("models")
-            .join("mlx")
-            .join("scail2")
-            .display(),
-    )))
+    resolve_mlx_family_dir(
+        settings,
+        "SCENEWORKS_MLX_SCAIL2_DIR",
+        "scail2",
+        "SceneWorks/scail2-mlx",
+    )
 }
 
 /// MLX quantization for a SCAIL-2 load: Q4 default, Q8 opt-in via the advanced `mlxQuantize: 8`
@@ -140,10 +112,7 @@ pub(super) fn resolve_scail2_quant(request: &VideoRequest) -> Option<Quant> {
 /// the worker now descends into the chosen tier so a pre-packed snapshot loads with no install-time
 /// convert peak. The flat root files stay for back-compat with already-shipped workers that resolve
 /// the repo root; a new worker only ever resolves the tier subdirs.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const SCAIL2_REPO: &str = "SceneWorks/scail2-mlx";
 
 /// Pinned revision for [`SCAIL2_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The repo is a hard-coded
@@ -151,10 +120,7 @@ pub(super) const SCAIL2_REPO: &str = "SceneWorks/scail2-mlx";
 /// the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load. This is
 /// the commit that added the `q4/`/`q8/`/`bf16/` tier subdirs (sc-9944); the native downloader still verifies
 /// each file's own hash on download.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const SCAIL2_REVISION: &str = "ce88cfdb1008f395e9c820e525e6db7b6695f7b3";
 
 /// Map a SCAIL-2 model id to its `(quant-matrix repo, pinned revision)` for the on-demand tier fetch,
@@ -267,10 +233,7 @@ async fn ensure_scail2_tier_present(
 /// lightx2v lightning LoRA is applied (`lightning`, sc-5700), records the effective step-distill recipe
 /// the worker dispatched — so the chosen steps/CFG/shift is inspectable on the asset, not silent
 /// (mirrors `wan_raw_settings`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -300,10 +263,7 @@ pub(super) fn scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Va
 /// Map a SceneWorks video mode to the SCAIL-2 engine `video_mode` task string. `replace_person`
 /// (cross-identity, sc-5452) flips the engine `replace_flag`; everything else (`animate_character`)
 /// is plain animation.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn scail2_engine_video_mode(mode: &str) -> &'static str {
     match mode {
         "replace_person" => "replacement",
@@ -315,10 +275,7 @@ pub(super) fn scail2_engine_video_mode(mode: &str) -> &'static str {
 /// heartbeat-owned cancellation flag between references. A single all-images SAM3 invocation
 /// would blur reference association and could continue through five expensive encodes after a
 /// cancellation; the engine instead receives a strict image/mask pair for each character.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn segment_scail2_references<F>(
     references: Vec<Image>,
     cancel: &gen_core::CancelFlag,
@@ -352,10 +309,7 @@ where
 /// every character, followed by the driving `ControlClip`. In particular, do not use the generic
 /// image-only `MultiReference` carrier: it cannot associate each identity image with the color mask
 /// SCAIL-2 must encode alongside it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn scail2_animate_conditioning(
     reference_pairs: Vec<(Image, Image)>,
     driving: Vec<Image>,

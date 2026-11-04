@@ -1106,18 +1106,7 @@ async fn download_media(
 
 /// A project-relative media path that is safe to interpolate into the file route: no absolute
 /// path, no `..`, no escaping or encoding needed.
-fn is_safe_media_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.starts_with('/')
-        && !path.split('/').any(|segment| {
-            segment.is_empty()
-                || segment == ".."
-                || segment == "."
-                || !segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        })
-}
+use sceneworks_core::safe_path::is_safe_media_path;
 
 /// Copy one inherited file into the pending pack at the same relative path.
 fn copy_into(source: &Path, pending: &Path, relative: &str) -> Result<(), HarnessError> {

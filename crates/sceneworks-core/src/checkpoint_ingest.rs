@@ -53,8 +53,6 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use sha2::{Digest, Sha256};
-
 use crate::checkpoint_import::ManagedProvenanceV1;
 use crate::checkpoint_plan_store::{
     managed_checkpoint_id, portable_relative_path_parts, CheckpointPlanError, CheckpointPlanStore,
@@ -663,17 +661,7 @@ pub fn sweep_staging(
 }
 
 fn sha256_file(path: &Path) -> io::Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    crate::hashing::sha256_file(path)
 }
 
 #[cfg(test)]

@@ -214,12 +214,7 @@ fn invalid(message: impl Into<String>) -> ErrorData {
 
 fn record_id<'a>(value: &'a str, field: &str) -> Result<&'a str, ErrorData> {
     let value = value.trim();
-    if value.is_empty()
-        || value.len() > 64
-        || !value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-    {
+    if !sceneworks_core::ids::is_safe_id_with_max(value, 64) {
         return Err(invalid(format!(
             "{field} \"{value}\" is not a valid id (letters, digits, '-' or '_')"
         )));
