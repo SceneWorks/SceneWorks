@@ -42,12 +42,7 @@ use super::smoke_support::{
 };
 
 fn env_path(key: &str) -> PathBuf {
-    // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`.
-    PathBuf::from(
-        std::env::var(key)
-            .unwrap_or_else(|_| panic!("set ${key}"))
-            .trim(),
-    )
+    super::smoke_support::env_path(key)
 }
 
 fn render(

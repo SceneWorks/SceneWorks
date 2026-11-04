@@ -52,33 +52,12 @@ const MODEL_ID: &str = "mage_flow_base";
 /// The hub cache root this smoke reads from: whatever the environment already points at, else the
 /// standard `~/.cache/huggingface/hub` that `huggingface_hub` downloads into.
 fn hub_cache_root() -> Option<PathBuf> {
-    for key in ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"] {
-        if let Ok(value) = std::env::var(key) {
-            if !value.trim().is_empty() {
-                return Some(PathBuf::from(value));
-            }
-        }
-    }
-    if let Ok(value) = std::env::var("HF_HOME") {
-        if !value.trim().is_empty() {
-            return Some(PathBuf::from(value).join("hub"));
-        }
-    }
-    Some(PathBuf::from(std::env::var("HOME").ok()?).join(".cache/huggingface/hub"))
+    super::smoke_support::hub_cache_root()
 }
 
 /// The cached snapshot of `repo` whose `q8/` subdir exists. `None` when that tier is not pulled.
 fn cached_q8_snapshot(hub: &Path, repo: &str) -> Option<PathBuf> {
-    let snapshots = hub
-        .join(format!("models--{}", repo.replace('/', "--")))
-        .join("snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .find_map(|entry| {
-            let path = entry.path();
-            path.join("q8").is_dir().then_some(path)
-        })
+    super::smoke_support::cached_snapshot_at(hub, repo, |root| root.join("q8").is_dir())
 }
 
 #[test]
