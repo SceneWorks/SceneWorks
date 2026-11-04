@@ -1,3 +1,11 @@
+import { JOB_PATHS, jobActionRequest } from "./api/jobs.js";
+import { useProjectScopedList } from "./hooks/useProjectScopedList.js";
+import { systemApi } from "./api/systemResources.js";
+import { modelsApi } from "./api/modelsResources.js";
+import { trainingApi } from "./api/trainingResources.js";
+import { assetsApi } from "./api/assetsResources.js";
+import { projectsApi } from "./api/projectsResources.js";
+import { jobsApi } from "./api/jobsResources.js";
 import { AppVersion, useAppUpdate } from "./components/AppVersion.jsx";
 import React, {
   useCallback,
@@ -8,7 +16,7 @@ import React, {
   useState,
   useSyncExternalStore,
 } from "react";
-import { apiFetch, isAbortError } from "./api.js";
+import { isAbortError } from "./api.js";
 import {
   beginAssetRequest,
   recordStartupMark,
@@ -108,7 +116,6 @@ import {
 import {
   applySuccessfulProjectRefresh,
   hasVisibleLocalFailureForView,
-  isCurrentProjectRequest,
   reconcileSelectedAssetId,
   selectEditorMediaAssets,
 } from "./appStateHelpers.js";
@@ -1652,7 +1659,7 @@ export function App() {
   // F-067), which is why the writes go through `putUiPreferences` instead (sc-15136).
   useEffect(() => {
     let cancelled = false;
-    apiFetch("/api/v1/ui-preferences", "")
+    systemApi.uiPreferences("")
       .then((prefs) => {
         if (cancelled) {
           return;
@@ -1758,7 +1765,7 @@ export function App() {
     healthRequestRef.current?.abort();
     const controller = new AbortController();
     healthRequestRef.current = controller;
-    return apiFetch("/api/v1/health", "", { signal: controller.signal })
+    return systemApi.health("", { signal: controller.signal })
       .then((nextHealth) => {
         if (healthRequestRef.current === controller) {
           setHealth(nextHealth);
@@ -2019,7 +2026,7 @@ export function App() {
     setMacCapabilitiesAuthoritative(false);
     setMacCapabilitiesLoading(true);
     try {
-      const value = await apiFetch("/api/v1/capabilities/mac", token, { signal });
+      const value = await systemApi.capabilitiesMac(token, { signal });
       if (signal?.aborted || macCapabilitiesRequestRef.current !== requestId) {
         return false;
       }
@@ -2055,9 +2062,9 @@ export function App() {
   }, [token]);
 
   async function refreshShellData({ signal } = {}) {
-    const fetchInitial = async (domain, label, path, fallback, optional = false) => {
+    const fetchInitial = async (domain, label, load, fallback, optional = false) => {
       try {
-        const value = await apiFetch(path, token, { signal });
+        const value = await load(token, { signal });
         setDomainError(domain, "");
         return { label, value, error: "" };
       } catch (err) {
@@ -2072,7 +2079,7 @@ export function App() {
     const projectsPromise = fetchInitial(
       "projects",
       "Projects",
-      "/api/v1/projects",
+      projectsApi.projects,
       [],
     ).then((result) => {
       if (result.aborted) return result;
@@ -2084,13 +2091,13 @@ export function App() {
     // decoder requests fail-closed and gives affected users retry/reset recovery on failure.
     void refreshMacCapabilities({ signal });
     const shellPromises = [
-      fetchInitial("jobs", "Jobs", "/api/v1/jobs", []).then((result) => {
+      fetchInitial("jobs", "Jobs", jobsApi.list, []).then((result) => {
         if (result.aborted) return result;
         setJobs((current) => mergeFreshJobs(current, result.value));
         setQueueSummary(null);
         return result;
       }),
-      fetchInitial("workers", "Workers", "/api/v1/workers", []).then((result) => {
+      fetchInitial("workers", "Workers", systemApi.workers, []).then((result) => {
         if (result.aborted) return result;
         setWorkers(result.value.sort(sortWorkers));
         return result;
@@ -2105,7 +2112,7 @@ export function App() {
     // specifically the cold-start boundary where no availability answer exists yet.
     setModelCatalogStatus((current) => (current === "ready" ? current : "loading"));
     try {
-      const items = await apiFetch("/api/v1/models", token, { signal });
+      const items = await modelsApi.list(token, { signal });
       if (requestId !== modelCatalogRequestRef.current) {
         return refreshFailure("stale");
       }
@@ -2129,7 +2136,7 @@ export function App() {
 
   async function refreshTrainingTargets({ signal } = {}) {
     try {
-      const catalog = await apiFetch("/api/v1/training/targets", token, { signal });
+      const catalog = await trainingApi.targets(token, { signal });
       setTrainingTargets(catalog);
       setTrainingTargetsError("");
       domainErrors.trainingTargets("");
@@ -2144,7 +2151,7 @@ export function App() {
 
   async function refreshTrainingPresets({ signal } = {}) {
     try {
-      const catalog = await apiFetch("/api/v1/training/presets", token, { signal });
+      const catalog = await trainingApi.presets(token, { signal });
       setTrainingPresets(catalog);
       setTrainingPresetsError("");
       domainErrors.trainingPresets("");
@@ -2157,52 +2164,25 @@ export function App() {
     }
   }
 
-  async function refreshAssets(projectId = activeProject?.id, { signal } = {}) {
-    if (!projectId) {
-      return refreshFailure("missing-project");
-    }
-    // SSE job events may describe a background project. Use this render's
-    // project, not activeProjectRef: that ref advances in a passive effect while
-    // this closure is published from a layout effect. During A→B, the published
-    // B closure must reject an A refresh before the passive ref catches up.
-    if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
-      return refreshFailure("stale");
-    }
-    // Keep an already-settled grid usable during background/SSE refreshes.
-    // Initial loads, retries, and project switches still expose "loading".
-    setAssetLoadState((current) =>
-      loadedAssetsProjectId === projectId
+  const refreshAssets = useProjectScopedList({
+    token, activeProject, activeProjectRef,
+    load: assetsApi.listIncludingHidden,
+    setItems: setAssets,
+    setError: domainErrors.assets,
+    onStart: (projectId) => {
+      setAssetLoadState((current) => loadedAssetsProjectId === projectId
         ? { ...current, projectId, error: "" }
-        : { projectId, status: "loading", error: "" },
-    );
-    const timingStartedAt = beginAssetRequest();
-    try {
-      const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true&includeTrashed=true`, token, { signal });
-      // sc-8858: an SSE-triggered refresh for the just-active project can resolve
-      // after the user switches away; committing then would clobber the new
-      // project's assets with the old one's. Drop the stale response — mirrors
-      // refreshTimelines' guard (useTimelines.js).
-      if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
-        return refreshFailure("stale");
-      }
-      setAssets(items);
+        : { projectId, status: "loading", error: "" });
+      return beginAssetRequest();
+    },
+    onSuccess: (items, projectId) => {
       setLoadedAssetsProjectId(projectId);
       setSelectedAssetId((current) => reconcileSelectedAssetId(items, current));
       setAssetLoadState({ projectId, status: "ready", error: "" });
-      domainErrors.assets("");
-      return refreshSuccess(items);
-    } catch (err) {
-      if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
-        return refreshFailure("stale", err);
-      }
-      if (isAbortError(err)) return refreshFailure("aborted", err);
-      setAssetLoadState({ projectId, status: "error", error: err.message });
-      domainErrors.assets(err.message);
-      return refreshFailure("error", err);
-    } finally {
-      settleAssetRequest(timingStartedAt);
-    }
-  }
+    },
+    onError: (error, projectId) => setAssetLoadState({ projectId, status: "error", error: error.message }),
+    onSettled: ({ context }) => settleAssetRequest(context),
+  });
 
   async function refreshModelAndLoras(projectId = activeProjectRef.current?.id) {
     await Promise.all([
@@ -2506,7 +2486,7 @@ export function App() {
       return null;
     }
     try {
-      const created = await apiFetch("/api/v1/projects", token, {
+      const created = await projectsApi.projects(token, {
         method: "POST",
         body: JSON.stringify({ name: trimmed }),
       });
@@ -2531,7 +2511,7 @@ export function App() {
     async (event, prompt) => {
       event.preventDefault();
       try {
-        await apiFetch("/api/v1/jobs", token, {
+        await jobsApi.list(token, {
           method: "POST",
           body: JSON.stringify({
             type: "placeholder",
@@ -2600,7 +2580,7 @@ export function App() {
   const refinePrompt = useCallback(
     ({ prompt, modelId, workflow, guide, signal }) =>
       pollJobToCompletion({
-        createPath: "/api/v1/prompts/refine",
+        createPath: JOB_PATHS.refine,
         body: { prompt, modelId, workflow, guide },
         // 180 s, matching magicPrompt: a rewrite that runs to the worker's full 1536-token budget
         // (sc-24029) measures ~60-75 s on the dev Mac and can exceed 120 s on a slower host, so the
@@ -2642,7 +2622,7 @@ export function App() {
   const qwenRewritePrompt = useCallback(
     ({ prompt, modelId, projectId, sourceAssetIds, signal }) =>
       pollJobToCompletion({
-        createPath: "/api/v1/prompts/refine",
+        createPath: JOB_PATHS.refine,
         body: {
           prompt,
           modelId,
@@ -2677,7 +2657,7 @@ export function App() {
   const magicPrompt = useCallback(
     ({ prompt, modelId, aspectRatio, guide, signal }) =>
       pollJobToCompletion({
-        createPath: "/api/v1/prompts/refine",
+        createPath: JOB_PATHS.refine,
         body: { prompt, modelId, task: "magic_prompt", aspectRatio, guide },
         deadlineMs: 180000,
         resolveResult: (job) => {
@@ -2706,7 +2686,7 @@ export function App() {
   const imageCaption = useCallback(
     ({ sourceAssetId, sourceAssetIds, projectId, model, signal }) =>
       pollJobToCompletion({
-        createPath: "/api/v1/prompts/refine",
+        createPath: JOB_PATHS.refine,
         // A mood board (epic 8588, sc-8595) sends `sourceAssetIds` (plural); the API synthesizes ONE
         // caption from the shared aesthetic. A single reference keeps the scalar `sourceAssetId`.
         body: { task: "image_caption", sourceAssetId, sourceAssetIds, projectId, model },
@@ -2736,7 +2716,7 @@ export function App() {
   const imageDescribe = useCallback(
     ({ sourceAssetId, sourceAssetIds, projectId, model, captionStyle, signal }) =>
       pollJobToCompletion({
-        createPath: "/api/v1/prompts/refine",
+        createPath: JOB_PATHS.refine,
         // A mood board (epic 8588, sc-8595) sends `sourceAssetIds` (plural); the API synthesizes ONE
         // prompt from the aesthetic they share. A single reference keeps the scalar `sourceAssetId`.
         body: { task: "image_describe", sourceAssetId, sourceAssetIds, projectId, model, captionStyle },
@@ -2767,7 +2747,7 @@ export function App() {
   const compareFaceLikeness = useCallback(
     ({ sourceAssetId, candidateAssetId, projectId, signal }) =>
       pollJobToCompletion({
-        createPath: "/api/v1/face-likeness/compare",
+        createPath: JOB_PATHS.compareFaces,
         body: { sourceAssetId, candidateAssetId, projectId },
         deadlineMs: 180000,
         resolveResult: (job) => {
@@ -3100,7 +3080,7 @@ export function App() {
   const updateAssetStatus = useCallback(
     async (asset, changes) => {
       try {
-        const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/status`, token, {
+        const updated = await assetsApi.status(asset.projectId, asset.id, token, {
           method: "PATCH",
           body: JSON.stringify(changes),
         });
@@ -3116,7 +3096,7 @@ export function App() {
   const updateAssetTags = useCallback(
     async (asset, tags) => {
       try {
-        const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/tags`, token, {
+        const updated = await assetsApi.tags(asset.projectId, asset.id, token, {
           method: "PATCH",
           body: JSON.stringify({ tags }),
         });
@@ -3144,7 +3124,7 @@ export function App() {
   const moveAssetToLibrary = useCallback(
     async (asset) => {
       try {
-        const moved = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-library`, token, {
+        const moved = await assetsApi.moveToLibrary(asset.projectId, asset.id, token, {
           method: "POST",
         });
         const updated = mergeMovedAssets(moved);
@@ -3167,7 +3147,7 @@ export function App() {
   const moveAssetToCharacter = useCallback(
     async (asset, characterId) => {
       try {
-        const moved = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-character`, token, {
+        const moved = await assetsApi.moveToCharacter(asset.projectId, asset.id, token, {
           method: "POST",
           body: JSON.stringify({ characterId }),
         });
@@ -3186,7 +3166,7 @@ export function App() {
   const deleteAsset = useCallback(
     async (asset) => {
       try {
-        await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}`, token, { method: "DELETE" });
+        await assetsApi.item(asset.projectId, asset.id, token, { method: "DELETE" });
         setAssets((items) =>
           items.map((item) =>
             item.id === asset.id ? { ...item, status: { ...item.status, trashed: true } } : item,
@@ -3203,7 +3183,7 @@ export function App() {
   const purgeAsset = useCallback(
     async (asset) => {
       try {
-        let result = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge`, token, { method: "DELETE" });
+        let result = await assetsApi.purge(asset.projectId, asset.id, token, { method: "DELETE" });
         // The purge first tries the OS trash (recoverable). If that fails nothing was
         // removed; confirm before falling back to a permanent delete. Routed through the
         // desktop-safe appConfirm (sc-12068) — window.confirm no-ops in the Tauri WebView.
@@ -3219,7 +3199,7 @@ export function App() {
             setError("");
             return;
           }
-          result = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge?permanent=true`, token, { method: "DELETE" });
+          result = await assetsApi.purgePermanently(asset.projectId, asset.id, token, { method: "DELETE" });
         }
         setAssets((items) => items.filter((item) => item.id !== asset.id));
         setSelectedAssetId((current) => (current === asset.id ? null : current));
@@ -3290,7 +3270,7 @@ export function App() {
       if (options.sourceAssetId) body.append("sourceAssetId", options.sourceAssetId);
       if (options.provenance) body.append("provenance", JSON.stringify(options.provenance));
       try {
-        const imported = await apiFetch(`/api/v1/projects/${projectId}/assets`, token, {
+        const imported = await assetsApi.list(projectId, token, {
           method: "POST",
           body,
           signal: options.signal,
@@ -3473,7 +3453,6 @@ export function App() {
   const jobAction = useCallback(
     async (job, action, options = {}) => {
       try {
-        const path = action === "duplicate" ? `/api/v1/jobs/${job.id}/duplicate` : `/api/v1/jobs/${job.id}/${action}`;
         const body =
           action === "duplicate"
             ? {
@@ -3484,7 +3463,7 @@ export function App() {
                 },
               }
             : (options.body ?? {});
-        const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
+        const updatedJob = await jobActionRequest(job.id, action, token, { method: "POST", body: JSON.stringify(body) });
         setJobs((items) => upsertJobNewest(items, updatedJob));
         setError("");
       } catch (err) {
@@ -3504,7 +3483,7 @@ export function App() {
     async (projectId) => {
       try {
         const body = projectId && projectId !== "all" ? { projectId } : {};
-        const response = await apiFetch("/api/v1/jobs/clear", token, {
+        const response = await jobsApi.clear(token, {
           method: "POST",
           body: JSON.stringify(body),
         });
@@ -3530,7 +3509,7 @@ export function App() {
     async (projectId) => {
       try {
         const body = projectId && projectId !== "all" ? { projectId } : {};
-        const response = await apiFetch("/api/v1/jobs/cancel-pending", token, {
+        const response = await jobsApi.cancelPending(token, {
           method: "POST",
           body: JSON.stringify(body),
         });
@@ -3553,7 +3532,7 @@ export function App() {
   const prioritizeJobs = useCallback(
     async (jobIds) => {
       try {
-        const response = await apiFetch("/api/v1/jobs/prioritize", token, {
+        const response = await jobsApi.prioritize(token, {
           method: "POST",
           body: JSON.stringify({ jobIds }),
         });
@@ -3577,7 +3556,7 @@ export function App() {
   const clearJob = useCallback(
     async (job) => {
       try {
-        await apiFetch(`/api/v1/jobs/${job.id}/clear`, token, {
+        await jobsApi.clearJob(job.id, token, {
           method: "POST",
           body: JSON.stringify({}),
         });
@@ -4153,6 +4132,7 @@ export function App() {
 
         {showSetupWizard ? (
           <SetupWizard
+            token={token}
             jobs={jobs}
             macCapabilities={macCapabilities}
             models={models}

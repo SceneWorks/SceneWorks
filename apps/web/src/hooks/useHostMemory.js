@@ -1,5 +1,6 @@
+import { systemApi } from "../api/systemResources.js";
 import { useEffect, useState } from "react";
-import { apiFetch } from "../api.js";
+
 import { serverToken } from "../credentials.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { hostMemoryFromCapabilities, hostMemoryFromGpuInfo } from "../hostMemory.js";
@@ -30,7 +31,7 @@ export function useHostMemory() {
     } else {
       // Remote LAN browser: the Tauri probe is unavailable, so read the host's memory from the
       // auth-protected REST signal (unified memory on macOS / GPU VRAM on Windows).
-      apiFetch("/api/v1/host-capabilities", serverToken())
+      systemApi.hostCapabilities(serverToken())
         .then((caps) => {
           if (cancelled || !caps) {
             return;

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig } from "vite";
 
+import cspPlugin from "./vite-plugin-csp.js";
 import precompressPlugin from "./vite-plugin-precompress.js";
 import bundleReportPlugin from "./vite-plugin-bundle-report.js";
 import themeInitPlugin from "./vite-plugin-theme-init.js";
@@ -33,6 +34,7 @@ export default defineConfig(({ command }) => ({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
   plugins: [
+    cspPlugin(),
     themeInitPlugin(),
     editorGuidesPlugin(),
     bundleReportPlugin({ budgets: bundleBudgets }),

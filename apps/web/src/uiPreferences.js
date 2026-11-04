@@ -1,3 +1,4 @@
+import { systemApi } from "./api/systemResources.js";
 import { backoffDelay } from "./retry.js";
 // The single client seam for writing the durable UI-preferences blob (sc-15136).
 //
@@ -22,7 +23,6 @@ import { backoffDelay } from "./retry.js";
 // deliberately NOT routed here — it stays credential-less in `App.jsx` because it runs
 // before the gate has a token to send, and the server exempts it.
 
-import { apiFetch } from "./api.js";
 import { readAccessToken } from "./accessToken.js";
 
 // PUT a partial preferences patch. The endpoint MERGES, so a caller sends only the field it
@@ -55,7 +55,7 @@ import { readAccessToken } from "./accessToken.js";
 // Returns the `apiFetch` promise so a caller that reports failure (SettingsScreen) can await
 // it; the fire-and-forget callers attach their own `.catch`.
 export function putUiPreferences(patch) {
-  return apiFetch("/api/v1/ui-preferences", readAccessToken(), {
+  return systemApi.uiPreferences(readAccessToken(), {
     method: "PUT",
     body: JSON.stringify(patch),
   });

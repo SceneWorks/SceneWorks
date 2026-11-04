@@ -1,7 +1,6 @@
+import { useProjectScopedList } from "./useProjectScopedList.js";
+import { charactersApi } from "../api/charactersResources.js";
 import { useCallback, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
-import { isCurrentProjectRequest } from "../appStateHelpers.js";
-import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 
 // Owns the project's character roster plus every character CRUD/reference/look/LoRA
 // mutation. Extracted from App.jsx (sc-1651) to shrink the god module; behavior is
@@ -15,37 +14,12 @@ import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 export function useCharacters({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView }) {
   const [characters, setCharacters] = useState([]);
 
-  const refreshCharacters = useCallback(
-    async (projectId = activeProject?.id, { signal } = {}) => {
-      if (!projectId) {
-        return refreshFailure("missing-project");
-      }
-      if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
-        return refreshFailure("stale");
-      }
-      try {
-        const items = await apiFetch(`/api/v1/projects/${projectId}/characters`, token, { signal });
-        // sc-8858: an SSE-triggered refresh for the just-active project can resolve
-        // after the user switches away; committing then would clobber the new
-        // project's roster with the old one's. Drop the stale response — mirrors
-        // refreshTimelines' guard (useTimelines.js).
-        if (!isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)) {
-          return refreshFailure("stale");
-        }
-        setCharacters(items);
-        setError("");
-        return refreshSuccess(items);
-      } catch (err) {
-        if (!isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)) {
-          return refreshFailure("stale", err);
-        }
-        if (isAbortError(err)) return refreshFailure("aborted", err);
-        setError(err.message);
-        return refreshFailure("error", err);
-      }
-    },
-    [token, activeProject, activeProjectRef, setError],
-  );
+  const refreshCharacters = useProjectScopedList({
+    token, activeProject, activeProjectRef,
+    load: charactersApi.list,
+    setItems: setCharacters,
+    setError: setError,
+  });
 
   const withCharacterApi = useCallback(
     async (callback) => {
@@ -68,7 +42,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const createCharacter = useCallback(
     async (payload) =>
       withCharacterApi(async (projectId) => {
-        const created = await apiFetch(`/api/v1/projects/${projectId}/characters`, token, {
+        const created = await charactersApi.list(projectId, token, {
           method: "POST",
           body: JSON.stringify(payload),
         });
@@ -81,7 +55,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const updateCharacter = useCallback(
     async (characterId, changes) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}`, token, {
+        const updated = await charactersApi.item(projectId, characterId, token, {
           method: "PATCH",
           body: JSON.stringify(changes),
         });
@@ -94,7 +68,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const archiveCharacter = useCallback(
     async (characterId) =>
       withCharacterApi(async (projectId) => {
-        await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/archive`, token, { method: "POST" });
+        await charactersApi.archive(projectId, characterId, token, { method: "POST" });
         setCharacters((items) => items.filter((item) => item.id !== characterId));
         return { id: characterId, status: "archived" };
       }),
@@ -108,7 +82,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const unarchiveCharacter = useCallback(
     async (characterId) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}`, token, {
+        const updated = await charactersApi.item(projectId, characterId, token, {
           method: "PATCH",
           body: JSON.stringify({ archived: false }),
         });
@@ -125,11 +99,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const listArchivedCharacters = useCallback(
     async ({ signal } = {}) =>
       withCharacterApi(async (projectId) => {
-        const items = await apiFetch(
-          `/api/v1/projects/${projectId}/characters?include_archived=true`,
-          token,
-          { signal },
-        );
+        const items = await charactersApi.listIncludingArchived(projectId, token, { signal });
         return (items ?? []).filter((item) => item.archived);
       }),
     [withCharacterApi, token],
@@ -138,7 +108,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const addCharacterReference = useCallback(
     async (characterId, payload) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/references`, token, {
+        const updated = await charactersApi.references(projectId, characterId, token, {
           method: "POST",
           body: JSON.stringify(payload),
         });
@@ -151,7 +121,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const updateCharacterReference = useCallback(
     async (characterId, assetId, changes) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/references/${assetId}`, token, {
+        const updated = await charactersApi.reference(projectId, characterId, assetId, token, {
           method: "PATCH",
           body: JSON.stringify(changes),
         });
@@ -164,7 +134,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const removeCharacterReference = useCallback(
     async (characterId, assetId) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/references/${assetId}`, token, {
+        const updated = await charactersApi.reference(projectId, characterId, assetId, token, {
           method: "DELETE",
         });
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
@@ -176,7 +146,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const createCharacterLook = useCallback(
     async (characterId, payload) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/looks`, token, {
+        const updated = await charactersApi.looks(projectId, characterId, token, {
           method: "POST",
           body: JSON.stringify(payload),
         });
@@ -189,7 +159,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const updateCharacterLook = useCallback(
     async (characterId, lookId, changes) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/looks/${lookId}`, token, {
+        const updated = await charactersApi.look(projectId, characterId, lookId, token, {
           method: "PATCH",
           body: JSON.stringify(changes),
         });
@@ -202,7 +172,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const deleteCharacterLook = useCallback(
     async (characterId, lookId) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/looks/${lookId}`, token, {
+        const updated = await charactersApi.look(projectId, characterId, lookId, token, {
           method: "DELETE",
         });
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
@@ -214,7 +184,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const attachCharacterLora = useCallback(
     async (characterId, payload) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/loras`, token, {
+        const updated = await charactersApi.loras(projectId, characterId, token, {
           method: "POST",
           body: JSON.stringify(payload),
         });
@@ -227,7 +197,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const updateCharacterLora = useCallback(
     async (characterId, linkId, changes) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/loras/${linkId}`, token, {
+        const updated = await charactersApi.lora(projectId, characterId, linkId, token, {
           method: "PATCH",
           body: JSON.stringify(changes),
         });
@@ -240,7 +210,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const detachCharacterLora = useCallback(
     async (characterId, linkId) =>
       withCharacterApi(async (projectId) => {
-        const updated = await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/loras/${linkId}`, token, {
+        const updated = await charactersApi.lora(projectId, characterId, linkId, token, {
           method: "DELETE",
         });
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
@@ -252,7 +222,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const createCharacterTestJob = useCallback(
     async (characterId, payload) =>
       withCharacterApi(async (projectId) => {
-        await apiFetch(`/api/v1/projects/${projectId}/characters/${characterId}/test-jobs`, token, {
+        await charactersApi.testJobs(projectId, characterId, token, {
           method: "POST",
           body: JSON.stringify({ ...payload, requestedGpu }),
         });
