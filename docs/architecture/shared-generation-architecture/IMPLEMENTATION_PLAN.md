@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…5 were approved by Michael on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-6…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
+| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…6 were approved by Michael on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-7…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
 | **Date** | 2026-11-03 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
 | **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
@@ -78,11 +78,13 @@ SCENEWORKS                         ▼
 
 **Dependency rules.**
 - **Kept:** contracts stay tensor-free; no cross-backend edges; nothing depends upward; the graph is acyclic (`scripts/check-workspace.py`).
-- **Added**, enforced by structural tests if DEC-6 approves, otherwise one recorded grep per terminal item:
+- **Added**, protected by narrow structural checks under approved DEC-6 as each consolidation lands:
   - Family crates may depend on L0, L1 and L2. They define no layer-kit types, guidance combines, σ builders or encoder blocks.
   - Shared SceneWorks code has no model-id literals in conditionals.
   - SceneWorks links bundles and contracts only.
   - No SceneWorks file imports `runtime_*::providers`.
+
+**Approved DEC-6 enforcement:** prefer Rust visibility/types and Cargo dependency boundaries. Add focused syntax checks only where those leave gaps, extending the existing architecture test suite and CI lanes. Scope each check to its agreed ownership rule, with documented essential backend/native exceptions and actionable diagnostics. Prove a known violation is rejected and legitimate variants pass. No model execution, new CI lane, source-hash snapshot, evidence-currency assertion or formatting-sensitive check is introduced; memory/measurement gates remain prohibited. These checks protect source structure, while numerical/runtime evidence proves behavior. No implementation is authorized during design review.
 
 ### 1.2 Current → target crate map (engine)
 
@@ -902,7 +904,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 | #3260 | inference pin to the SW-F327 head | Pin choreography | Sequence per §7.4 |
 | #3264 | SW-6659 (`apply_vram_cap` sites), SW-6662 (YuE/YuE2 admission), SW-6753 (Mochi/SVD twins), SW-6754 (`hw.memsize` probes), SW-6640 (floor semantics); touches `krea_multiphase.rs`, `candle_memory_strategy.rs`, `generator_cache.rs`, `base_admission.rs`, `conditioning_gate.rs`, `moss.rs`, `instantid.rs` | ADM-2 (part), ENG-4b `[SW]`, APP-4 | **SW-F327-owned subset; merged to its feature branch.** Overlapping `[SW]` items wait for main delivery. APP-4 re-baselines after it. |
 | #3268 | Deletes `apps/web/src/modelCatalog.js` | TOOL-3, APPREG-2 | **SW-F327-owned; PR open.** SGA does not duplicate its deletion; re-baseline after main delivery. |
-| #3270 | SW-6677/6679 cfg alias, SW-6686 AST architecture checks, SW-6812/6817/6824 dependency de-dup and direction guard | LANE-5, DEC-6, LANE-6 | **SW-F327-owned; PR open.** SGA builds on main-delivered changes. Structural guards extend `architecture_tests.rs` if DEC-6 allows. |
+| #3270 | SW-6677/6679 cfg alias, SW-6686 AST architecture checks, SW-6812/6817/6824 dependency de-dup and direction guard | LANE-5, DEC-6, LANE-6 | **SW-F327-owned; PR open at snapshot.** SGA builds on main-delivered changes. Structural checks extend the existing architecture suite within approved DEC-6's limits. |
 | SW-F148 (`sc-8432`) | Krea Realtime interactive streaming, spike-gated; NO-GO permitted | PIPE-16, HOOK-1 | **Separate product owner; sequenced adoption (§6.9).** ENG-6 puts current batch output through the production terminal/repeated-chunk primitive. If a streaming path already exists, ENG-6 migrates it too; if delivered later, SW-F148 adopts that primitive with its first stream-only production hooks. NO-GO retains the batch user and removes no existing capability. No duplicate streaming delivery or orphan mock-only hook. |
 
 **Approved DEC-5 policy (2026-11-03), applied once implementation is authorized.**
@@ -1085,7 +1087,7 @@ A checked-in script counts `git ls-files` lines per area in both repos, separati
 | R2 | Numeric drift | Med/High | AP13 classes, bit-exact by design for pipeline adoption (variants, seed schemes, history policy); Tier 1 per batch; class (c) only with sign-off |
 | R3 | Performance loss (dynamic dispatch, batching, lost MLX fusion) | Med/High | Families batch branches; dyn only at family granularity; `ExecPolicy::fuse`; PERF-1 A/B |
 | R4 | Collisions with in-flight work | High/Med | DEC-5 gating; overlap ledger refreshed at each planning; file-ownership tables; new-model rule |
-| R5 | Agent failure modes (regrowth, stubs, scope narrowing, boundary gaps) | High/Med | DEC-6 guards or terminal greps; verification contract; stub grep at item end; terminal integration sweep |
+| R5 | Agent failure modes (regrowth, stubs, scope narrowing, boundary gaps) | High/Med | Approved DEC-6 structural checks; verification contract; stub grep at item end; terminal integration sweep |
 | R6 | iOS size and memory | Med/Med | Baseline in ENG-1a; feature-partitioned crates; MEM-6 |
 | R7 | Training regressions | Med/Med | Trainers in Tier 1 from ENG-8 |
 | R8 | Hardware contention | High/Med | Live pool discovery per planning; Tier 1 off the dev Mac; batching |
