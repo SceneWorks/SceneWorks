@@ -1216,7 +1216,10 @@ async fn cors_preflight_allows_frontend_origin_and_token_header() {
         .header("host", "localhost:8000")
         .header("origin", "http://localhost:5173")
         .header("access-control-request-method", "POST")
-        .header("access-control-request-headers", "X-SceneWorks-Token")
+        .header(
+            "access-control-request-headers",
+            "X-SceneWorks-Token, X-SceneWorks-Media-Ticket, If-Match",
+        )
         .body(Body::empty())
         .expect("request builds");
 
@@ -1235,6 +1238,18 @@ async fn cors_preflight_allows_frontend_origin_and_token_header() {
         .get("access-control-allow-headers")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.to_ascii_lowercase().contains("x-sceneworks-token")));
+    assert!(response
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("if-match")));
+    assert!(response
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value
+            .to_ascii_lowercase()
+            .contains("x-sceneworks-media-ticket")));
 }
 
 #[tokio::test]

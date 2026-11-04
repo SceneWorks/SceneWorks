@@ -240,26 +240,12 @@ pub(crate) async fn load_manifest_root(path: &FsPath) -> Result<JsonObject, ApiE
 }
 
 pub(crate) async fn write_manifest_atomic(path: &FsPath, payload: &str) -> Result<(), ApiError> {
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or("jsonc");
-    let tmp_path = path.with_extension(format!("{extension}.{}.tmp", Uuid::new_v4().simple()));
-    tokio::fs::write(&tmp_path, payload)
+    let path = path.to_path_buf();
+    let payload = payload.as_bytes().to_vec();
+    tokio::task::spawn_blocking(move || sceneworks_core::fsutil::write_atomic(&path, &payload))
         .await
-        .map_err(|error| {
-            ApiError::internal(format!(
-                "Failed to write manifest temp file {}: {error}",
-                tmp_path.display()
-            ))
-        })?;
-    tokio::fs::rename(&tmp_path, path).await.map_err(|error| {
-        let _ = std::fs::remove_file(&tmp_path);
-        ApiError::internal(format!(
-            "Failed to replace manifest {}: {error}",
-            path.display()
-        ))
-    })
+        .map_err(|error| ApiError::internal(format!("Manifest write task failed: {error}")))?
+        .map_err(|error| ApiError::internal(format!("Failed to replace manifest: {error}")))
 }
 
 pub(crate) async fn load_manifest_entries(

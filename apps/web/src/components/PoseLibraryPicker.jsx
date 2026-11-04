@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { usePoseLibrary } from "../poseLibrary.js";
+import { getMediaTicket, subscribeMediaTicket } from "../api.js";
+import { assetDisplayUrl } from "./assetMedia.jsx";
 import { MAX_JOB_POSES } from "../poseSelection.js";
 
 // Multi-select gallery of OpenPose poses, grouped by category. Controlled: the parent
@@ -20,6 +22,7 @@ export function PoseLibraryPicker({
   categoryFilter = false,
   preferredCategory = null,
 }) {
+  React.useSyncExternalStore(subscribeMediaTicket, getMediaTicket, getMediaTicket);
   const { poses, categories, loading, error } = usePoseLibrary({ loadUserPoses, extraPoses });
   // Which chip's grid is shown (categoryFilter layout only). Default to the design's
   // "standing" when present, else the first available category.
@@ -65,6 +68,7 @@ export function PoseLibraryPicker({
   const renderThumb = (pose, showCheck = false) => {
     const isSelected = selected.has(pose.id);
     const selectionDisabled = atPoseLimit && !isSelected;
+    const previewUrl = pose.previewAsset ? assetDisplayUrl(pose.previewAsset) : pose.previewUrl;
     return (
       <button
         aria-label={`${isSelected ? "Deselect" : "Select"} pose ${pose.label}`}
@@ -80,8 +84,8 @@ export function PoseLibraryPicker({
         }
         type="button"
       >
-        {pose.previewUrl || pose.preview ? (
-          <img alt={pose.label} loading="lazy" src={pose.previewUrl ?? `/${pose.preview}`} />
+        {previewUrl || pose.preview ? (
+          <img alt={pose.label} loading="lazy" referrerPolicy="no-referrer" src={previewUrl ?? `/${pose.preview}`} />
         ) : (
           <span
             aria-label={`${pose.label} preview unavailable`}

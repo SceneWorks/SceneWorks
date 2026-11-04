@@ -82,6 +82,7 @@ COPY apps/rust-worker ./apps/rust-worker
 # sources with production `include_str!`s. Copy the source root (not a hand-maintained file list) so a
 # newly added authoritative seam cannot compile in a checkout but disappear from Docker builds.
 COPY apps/web/src ./apps/web/src
+COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
 # Copied purely to satisfy workspace membership (the desktop crate is in the
 # workspace but is not built into either image).
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
@@ -266,6 +267,7 @@ COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
 # Keep the Candle builder on the same fail-closed compile-time matrix inputs as the plain builder.
 COPY apps/web/src ./apps/web/src
+COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
 # Workspace-membership only (not built into this image).
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
 COPY apps/desktop/build.rs ./apps/desktop/build.rs

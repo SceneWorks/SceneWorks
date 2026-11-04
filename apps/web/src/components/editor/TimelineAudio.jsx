@@ -1,10 +1,12 @@
+import { useMediaTicket } from "../../hooks/useMediaTicket.js";
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef } from "react";
-import { assetCanRenderAsAudio, assetCanRenderAsVideo, assetUrl } from "../assetMedia.jsx";
+import { TicketedPlayback, assetCanRenderAsAudio, assetCanRenderAsVideo, assetUrl } from "../assetMedia.jsx";
 import { createTimelineAudioPlayback } from "../../timelineAudioPlayback.js";
 
 function Layer({ placement, asset, playback }) {
+  useMediaTicket();
   const ref = useCallback((element) => playback.attach(placement.key, element, placement), [playback, placement.key]); // eslint-disable-line react-hooks/exhaustive-deps
-  return <audio ref={ref} src={assetUrl(asset)} crossOrigin="anonymous" preload="auto"
+  return <TicketedPlayback element="audio" forwardedRef={ref} src={assetUrl(asset)} crossOrigin="anonymous" preload="auto"
     aria-label={`${placement.track.name ?? placement.track.id}: ${placement.item.displayName ?? asset.displayName ?? asset.id}`}
     onError={() => playback.mediaError(placement.key)} />;
 }

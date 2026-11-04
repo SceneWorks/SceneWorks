@@ -9,14 +9,14 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 /// Connect timeout for every MCP tool's API call: bounds the TCP/TLS handshake so an
-/// unreachable API can't hang the tool. Mirrors the worker's `HTTP_CONNECT_TIMEOUT`
-/// (separate crate, so it's redeclared locally rather than shared) (sc-11149).
-const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// unreachable API can't hang the tool. Shared with worker and desktop transports
+/// through the core network policy (sc-11149, F-179).
+use sceneworks_core::network_policy::HTTP_CONNECT_TIMEOUT;
 
 /// Total-request timeout for every MCP tool's API call: guarantees a hung upstream can
 /// never hang the tool call forever (the "a stuck job can never hang the call"
 /// contract). These are non-streaming requests with no large bodies (sc-11149).
-const HTTP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+use sceneworks_core::network_policy::CONTROL_REQUEST_TIMEOUT as HTTP_REQUEST_TIMEOUT;
 
 /// How the MCP tools reach the SceneWorks API. `base_url` normally comes from
 /// `SCENEWORKS_API_URL` (the same variable the Rust worker uses) and the token is

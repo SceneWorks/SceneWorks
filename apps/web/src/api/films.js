@@ -1,3 +1,4 @@
+import { modelsApi } from "./modelsResources.js";
 import { apiFetch } from "../api.js";
 
 function base(projectId, draftId) {
@@ -38,7 +39,7 @@ export function applyFilmPlanning(projectId, draftId, operationId, token) {
 }
 
 export function installFilmPlanner(modelId, token) {
-  return apiFetch(`/api/v1/models/${encodeURIComponent(modelId)}/download`, token, {
+  return modelsApi.download(modelId, token, {
     method: "POST",
     body: JSON.stringify({}),
   });
