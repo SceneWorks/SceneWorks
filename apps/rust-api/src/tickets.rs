@@ -1,38 +1,26 @@
 use super::*;
 
-// Short-lived query-param tickets for endpoints the browser cannot reach with an
-// auth header (epic 4484). Two flavors share this store:
-//  - SSE (`/api/v1/jobs/events`): `EventSource` can't set headers → single-use
-//    `issue()` + `consume()` tickets (sc-4484 story: events ticket).
-//  - Media (`GET /api/v1/projects/:id/files/*`, `GET /api/v1/poses/preview/*`,
-//    `GET /api/v1/catalogs/:id/records/:id/thumbnail`):
-//    `<img src>`/`<video src>`/`<a download>` requests can't set headers either →
-//    reusable `issue_sliding()` + `validate()` tickets (sc-8810). A page renders
-//    dozens of media URLs (and <video> issues multiple Range requests), so these
-//    tickets are multi-use within their TTL; the web client refreshes well before
-//    expiry and `issue_sliding` keeps returning (and re-arming) the same ticket so
-//    already-rendered <img>/<video> URLs stay valid without a re-render.
-//
-// Separate `TicketStore` instances give scope isolation for free: an event ticket
-// is never accepted on the files route and vice versa.
+// Query credentials are isolated by route family and store: single-use SSE
+// tickets cannot unlock media. Media credentials are private to each client and
+// renewed only through the authenticated mint endpoint. Read access never extends
+// expiry, and authenticated renewal cannot extend the original absolute lifetime.
 #[derive(Debug)]
 pub(crate) struct TicketStore {
     ttl: Duration,
     max_outstanding: Option<usize>,
+    absolute_ttl: Duration,
     state: Mutex<TicketStoreState>,
 }
 
 #[derive(Debug, Default)]
 struct TicketStoreState {
     tickets: HashMap<String, TicketEntry>,
-    // Most recently issued ticket, so `issue_sliding` can hand the same value to
-    // every caller while it stays alive (URL stability across React re-renders).
-    latest: Option<String>,
 }
 
 #[derive(Debug)]
 struct TicketEntry {
     expires_at: Instant,
+    absolute_expires_at: Instant,
     event_context: EventTicketContext,
 }
 
@@ -47,6 +35,7 @@ impl TicketStore {
         Self {
             ttl: Duration::from_secs(ttl_seconds),
             max_outstanding: None,
+            absolute_ttl: Duration::from_secs(ttl_seconds),
             state: Mutex::new(TicketStoreState::default()),
         }
     }
@@ -56,11 +45,20 @@ impl TicketStore {
         Self {
             ttl: Duration::from_secs(ttl_seconds),
             max_outstanding: Some(max_outstanding),
+            absolute_ttl: Duration::from_secs(ttl_seconds),
             state: Mutex::new(TicketStoreState::default()),
         }
     }
 
+    pub(crate) fn media(idle_seconds: u64, absolute_seconds: u64) -> Self {
+        Self {
+            absolute_ttl: Duration::from_secs(absolute_seconds),
+            ..Self::new(idle_seconds)
+        }
+    }
+
     /// Issue a fresh single-use ticket (SSE flavor; pair with `consume`).
+    #[cfg(test)]
     pub(crate) fn issue(&self) -> TicketResponse {
         self.try_issue_event(EventTicketContext::default())
             .expect("unbounded ticket store issues")
@@ -87,43 +85,52 @@ impl TicketStore {
         state.tickets.insert(
             ticket.clone(),
             TicketEntry {
-                expires_at: now + self.ttl,
+                expires_at: now + self.ttl.min(self.absolute_ttl),
+                absolute_expires_at: now + self.absolute_ttl,
                 event_context,
             },
         );
-        state.latest = Some(ticket.clone());
         Some(TicketResponse {
             ticket,
             expires_in_seconds: self.ttl.as_secs(),
         })
     }
 
-    /// Issue a reusable ticket (media flavor; pair with `validate`). While the most
-    /// recent ticket is still valid this returns it again and re-arms its expiry to
-    /// a full TTL, so a client refreshing on an interval keeps one stable ticket
-    /// alive for its whole session. A leaked URL therefore dies at most one TTL
-    /// after the last authenticated refresh.
-    pub(crate) fn issue_sliding(&self) -> TicketResponse {
-        let now = Instant::now();
+    /// Renew only the client's supplied credential, never another client's latest
+    /// ticket. Rotate before the absolute boundary while the previous credential
+    /// still has idle overlap, so mounted media can switch URLs and finish ranges.
+    pub(crate) fn issue_sliding(&self, previous: Option<&str>) -> TicketResponse {
+        self.issue_sliding_at(previous, Instant::now())
+    }
+
+    fn issue_sliding_at(&self, previous: Option<&str>, now: Instant) -> TicketResponse {
         let mut state = self.state.lock();
         prune_tickets(&mut state.tickets, now);
-        if let Some(ticket) = state.latest.clone() {
-            if state.tickets.contains_key(&ticket) {
-                state.tickets.insert(
-                    ticket.clone(),
-                    TicketEntry {
-                        expires_at: now + self.ttl,
-                        event_context: EventTicketContext::default(),
-                    },
-                );
+        if let Some((ticket, entry)) =
+            previous.and_then(|ticket| state.tickets.get_mut(ticket).map(|entry| (ticket, entry)))
+        {
+            if entry.absolute_expires_at.saturating_duration_since(now) > self.ttl {
+                entry.expires_at = (now + self.ttl).min(entry.absolute_expires_at);
                 return TicketResponse {
-                    ticket,
-                    expires_in_seconds: self.ttl.as_secs(),
+                    ticket: ticket.to_owned(),
+                    expires_in_seconds: entry.expires_at.saturating_duration_since(now).as_secs(),
                 };
             }
         }
-        drop(state);
-        self.issue()
+        let ticket = Uuid::new_v4().simple().to_string();
+        let expires_at = now + self.ttl.min(self.absolute_ttl);
+        state.tickets.insert(
+            ticket.clone(),
+            TicketEntry {
+                expires_at,
+                absolute_expires_at: now + self.absolute_ttl,
+                event_context: EventTicketContext::default(),
+            },
+        );
+        TicketResponse {
+            ticket,
+            expires_in_seconds: expires_at.saturating_duration_since(now).as_secs(),
+        }
     }
 
     /// Redeem one SSE ticket and return the reconnect context minted with it.
@@ -136,6 +143,13 @@ impl TicketStore {
             .remove(ticket)
             .filter(|entry| entry.expires_at >= now)
             .map(|entry| entry.event_context)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self, ticket: &str) {
+        let mut state = self.state.lock();
+        let entry = state.tickets.get_mut(ticket).expect("test ticket exists");
+        entry.expires_at = Instant::now() - Duration::from_secs(1);
     }
 
     /// Non-consuming check for multi-use (media) tickets.
@@ -160,10 +174,57 @@ pub(crate) struct TicketResponse {
 /// POST /api/v1/files/ticket — auth-protected (header token or loopback trust via
 /// the access-control middleware), so only an already-authenticated client can
 /// mint a media ticket.
-pub(crate) async fn create_media_ticket(State(state): State<AppState>) -> Json<TicketResponse> {
-    Json(state.media_tickets.issue_sliding())
+pub(crate) async fn create_media_ticket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<TicketResponse> {
+    let previous = headers
+        .get("x-sceneworks-media-ticket")
+        .and_then(|value| value.to_str().ok());
+    Json(state.media_tickets.issue_sliding(previous))
 }
 
 fn prune_tickets(tickets: &mut HashMap<String, TicketEntry>, now: Instant) {
-    tickets.retain(|_, entry| entry.expires_at >= now);
+    tickets.retain(|_, entry| entry.expires_at >= now && entry.absolute_expires_at >= now);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_credentials_have_independent_idle_and_absolute_expiry() {
+        let store = TicketStore::media(30, 120);
+        let now = Instant::now();
+        let first = store.issue_sliding_at(None, now);
+        let other = store.issue_sliding_at(None, now);
+        assert_ne!(
+            first.ticket, other.ticket,
+            "different clients never share credentials"
+        );
+        for seconds in [20, 40, 60, 80] {
+            assert_eq!(
+                store
+                    .issue_sliding_at(Some(&first.ticket), now + Duration::from_secs(seconds))
+                    .ticket,
+                first.ticket
+            );
+            assert_eq!(
+                store.state.lock().tickets[&first.ticket].absolute_expires_at,
+                now + Duration::from_secs(120),
+                "renewal never extends absolute expiry"
+            );
+        }
+        let rotated = store.issue_sliding_at(Some(&first.ticket), now + Duration::from_secs(91));
+        assert_ne!(rotated.ticket, first.ticket);
+        // Refreshing the replacement or another client cannot resurrect the original.
+        let mut state = store.state.lock();
+        prune_tickets(&mut state.tickets, now + Duration::from_secs(121));
+        assert!(!state.tickets.contains_key(&first.ticket));
+        assert!(
+            !state.tickets.contains_key(&other.ticket),
+            "unrenewed clients idle out"
+        );
+        assert!(state.tickets.contains_key(&rotated.ticket));
+    }
 }

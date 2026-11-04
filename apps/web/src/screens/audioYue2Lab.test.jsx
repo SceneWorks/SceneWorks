@@ -381,6 +381,17 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(musicOptions).not.toContain("yue2");
   });
 
+  it.each([
+    ["https://example.test/LICENSE", "https://example.test/LICENSE"],
+    ["javascript:alert(1)", null],
+  ])("only links a safe licence URL %s", async (licenseUrl, expected) => {
+    await render(context({ models: [...STANDARD, YUE1, yue2Entry({ licenseUrl })] }));
+    await click(container.querySelector('[data-testid="yue2-lab-tab"]'));
+    await settle();
+    const link = container.querySelector('[data-testid="yue2-gate"] a');
+    expect(link?.getAttribute("href") ?? null).toBe(expected);
+  });
+
   it("opens only on an explicit click, behind the opt-in and the server licence acknowledgment", async () => {
     await render(context());
     await click(container.querySelector('[data-testid="yue2-lab-tab"]'));

@@ -405,8 +405,8 @@
         {
           "file": "crates/sceneworks-core/src/training.rs",
           "op": "replace",
-          "old": "\"supportsSubjectMaskLoss\":true}",
-          "new": "\"supportsSubjectMaskLoss\":true,\"appleSiliconOnly\":true}",
+          "old": "\"outputScopes\":[\"project\",\"global\"]}",
+          "new": "\"outputScopes\":[\"project\",\"global\"],\"appleSiliconOnly\":true}",
           "anchor": "fn moss_image_lora_target("
         }
       ]
@@ -435,8 +435,8 @@
         {
           "file": "crates/sceneworks-core/src/training.rs",
           "op": "replace",
-          "old": "\"supportsSubjectMaskLoss\":true}",
-          "new": "\"supportsSubjectMaskLoss\":true,\"requiresBackend\":\"mlx\"}",
+          "old": "\"outputScopes\":[\"project\",\"global\"]}",
+          "new": "\"outputScopes\":[\"project\",\"global\"],\"requiresBackend\":\"mlx\"}",
           "anchor": "fn moss_image_lora_target("
         }
       ]

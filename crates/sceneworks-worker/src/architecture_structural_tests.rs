@@ -972,6 +972,139 @@ fn build_script_alias_matches_the_full_platform_feature_truth_table() {
     );
 }
 
+#[test]
+fn native_stream_helper_and_training_hash_import_follow_their_callers() {
+    let image = parse(include_str!("image_jobs.rs"));
+    let include_attrs = |file: &str| {
+        image
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Macro(item)
+                    if item.mac.path.is_ident("include")
+                        && syn::parse2::<syn::LitStr>(item.mac.tokens.clone())
+                            .unwrap()
+                            .value()
+                            == file =>
+                {
+                    Some(&item.attrs)
+                }
+                _ => None,
+            })
+            .expect("native include exists")
+    };
+    let stream = include_attrs("image_jobs/stream.rs");
+    let base = include_attrs("image_jobs/base.rs");
+    let helper = function(
+        include_str!("image_jobs/stream.rs"),
+        "drive_gen_items_scored_reported",
+    );
+    let mac_caller = function(include_str!("image_jobs/base.rs"), "generate_stream_using");
+    let candle_caller = function(
+        include_str!("image_jobs/base.rs"),
+        "generate_candle_registry_stream_using",
+    );
+    for caller in [&mac_caller, &candle_caller] {
+        assert!(
+            caller
+                .block
+                .to_token_stream()
+                .to_string()
+                .contains("drive_gen_items_scored_reported"),
+            "the actual shared-helper call must remain in {}",
+            caller.sig.ident
+        );
+    }
+    let training = parse(include_str!("training_jobs.rs"));
+    let hash_import = training.items.iter().find_map(|item| match item {
+        Item::Use(item) if matches!(&item.tree, syn::UseTree::Path(path) if path.ident == "sha2") => Some(item),
+        _ => None,
+    }).expect("training SHA-256 import exists");
+    let portable_test = training
+        .items
+        .iter()
+        .find_map(|item| {
+            let Item::Mod(module) = item else {
+                return None;
+            };
+            if module.ident != "tests" {
+                return None;
+            }
+            module
+                .content
+                .as_ref()?
+                .1
+                .iter()
+                .find_map(|item| match item {
+                    Item::Fn(item)
+                        if item.sig.ident
+                            == "ltx_prepared_bundle_path_is_resolved_under_the_dataset_root" =>
+                    {
+                        Some(item)
+                    }
+                    _ => None,
+                })
+        })
+        .expect("portable prepared-bundle byte fixture exists");
+    assert!(portable_test
+        .block
+        .to_token_stream()
+        .to_string()
+        .contains("Sha256 :: digest"));
+    let enabled = |attrs: &[syn::Attribute], mac, candle, test| {
+        attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg"))
+            .all(|attr| {
+                cfg_meta(&attr.parse_args::<syn::Meta>().unwrap(), mac, candle, test)
+                    .expect("known platform/test predicate")
+            })
+    };
+    for mac in [false, true] {
+        for candle in [false, true] {
+            for test in [false, true] {
+                let native =
+                    worker_build_script::native_lane(if mac { "macos" } else { "linux" }, candle);
+                let context = format!("mac={mac} candle={candle} test={test}");
+                assert_eq!(
+                    enabled(stream, mac, candle, test),
+                    native,
+                    "stream include: {context}"
+                );
+                assert_eq!(
+                    enabled(base, mac, candle, test),
+                    native,
+                    "base include: {context}"
+                );
+                assert_eq!(
+                    native && enabled(&helper.attrs, mac, candle, test),
+                    native,
+                    "shared scored/report helper must exist for every native caller: {context}"
+                );
+                assert_eq!(
+                    native && enabled(&mac_caller.attrs, mac, candle, test),
+                    mac,
+                    "MLX eligibility unchanged: {context}"
+                );
+                assert_eq!(
+                    native && enabled(&candle_caller.attrs, mac, candle, test),
+                    !mac && candle,
+                    "Candle eligibility unchanged: {context}"
+                );
+                assert_eq!(
+                    enabled(&hash_import.attrs, mac, candle, test),
+                    native || test,
+                    "SHA-256 needed by native witness or ordinary tests only: {context}"
+                );
+                assert!(
+                    enabled(&portable_test.attrs, mac, candle, test),
+                    "portable byte-fixture test remains portable"
+                );
+            }
+        }
+    }
+}
+
 fn helper_fingerprint(function: &syn::ItemFn) -> String {
     #[derive(Default)]
     struct Bindings(BTreeMap<String, String>);

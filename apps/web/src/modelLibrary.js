@@ -1,4 +1,5 @@
-import { apiFetch } from "./api.js";
+import { modelLibraryApi } from "./api/modelLibraryResources.js";
+
 
 // The unavailable-external-library recovery flow (sc-19709).
 //
@@ -54,13 +55,13 @@ export function modelLibraryContextForModel(model) {
 
 // One write-free identity probe of the configured library. This is what a retry gates on.
 export function fetchModelLibraryStatus(token, options) {
-  return apiFetch("/api/v1/model-library", token, options);
+  return modelLibraryApi.modelLibrary(token, options);
 }
 
 // Check a candidate library root without writing anything, anywhere. Every ordinary refusal — the
 // wrong folder, a library missing installed models — lands here, BEFORE either durable write.
 export function validateModelLibrary(token, path) {
-  return apiFetch("/api/v1/model-library/relocate", token, {
+  return modelLibraryApi.modelLibraryRelocate(token, {
     method: "POST",
     body: JSON.stringify({ path, dryRun: true }),
   });
@@ -69,7 +70,7 @@ export function validateModelLibrary(token, path) {
 // Adopt a different library root: the API re-binds the durable identity. It never downloads and
 // never rewrites install receipts.
 export function relocateModelLibrary(token, path) {
-  return apiFetch("/api/v1/model-library/relocate", token, {
+  return modelLibraryApi.modelLibraryRelocate(token, {
     method: "POST",
     body: JSON.stringify({ path }),
   });

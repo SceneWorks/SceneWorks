@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { rootTestGroups } from "./run-root-tests.mjs";
 import { proofSelection, requireManualSelection, verifyProofResult, cudaDeviceEvidence, requireMetalHeadroom, observeMetalCase, streamProofBuild } from "./ci/h3-import-native-proof.mjs";
 import { writeFileSync } from "node:fs";
 
@@ -39,7 +40,7 @@ function workflowExpression(block, field = "if") {
 }
 function evaluateWorkflow(expression, event, inputs = {}, steps = {}) {
   const github = { event_name: event, repository: "SceneWorks/SceneWorks", event: { pull_request: { head: { repo: { full_name: "SceneWorks/SceneWorks" } } } } };
-  return Function("github", "inputs", "steps", "always", `return (${expression});`)(github, inputs, steps, () => true);
+  return Function("github", "inputs", "steps", "always", "success", `return (${expression});`)(github, inputs, steps, () => true, () => true);
 }
 
 function workflowJob(workflow, name) {
@@ -887,6 +888,7 @@ function dispatchInputs(workflow) {
   assert.ok(end > start, "could not find the end of the workflow_dispatch block");
   const names = [];
   const defaults = {};
+  const types = {};
   let current = null;
   for (const line of workflow.slice(start, end).split("\n")) {
     // Deliberately permissive: GitHub allows digits, case and hyphens in an input name, and this
@@ -897,13 +899,86 @@ function dispatchInputs(workflow) {
       current = header[1];
       names.push(current);
       defaults[current] = undefined;
+      types[current] = undefined;
       continue;
     }
+    const type = current && line.match(/^ {8}type: (.*)$/);
+    if (type) types[current] = type[1].trim();
     const def = current && line.match(/^ {8}default: (.*)$/);
     if (def) defaults[current] = def[1].trim().replace(/^"|"$/g, "");
   }
-  return { names, defaults };
+  return { names, defaults, types };
 }
+
+test("Windows manual H3 opt-out defaults off and changes only that smoke condition", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults, types } = dispatchInputs(workflow);
+  assert.equal(names.length, 23, "the single H3 opt-out keeps the dispatch surface below GitHub's 25-input cap");
+  assert.equal(names.filter((name) => name === "skip_manual_h3_import_smoke").length, 1);
+  assert.equal(types.skip_manual_h3_import_smoke, "boolean");
+  assert.equal(defaults.skip_manual_h3_import_smoke, "false");
+  assert.match(workflow, /description: "Skip only the implicit manual MiniMax-H3 ConvRot smoke; other explicit profiles and their existing admission rules are unchanged"/);
+  assert.equal([...workflow.matchAll(/inputs\.skip_manual_h3_import_smoke\b/g)].length, 1,
+    "the opt-out must have no job-routing, device, budget or other profile effect");
+  const smoke = stepBody(workflow, "Run the synthetic MiniMax-H3 ConvRot CUDA import projection");
+  const prior = "github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && !inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_ltx_eros_acceptance && !inputs.run_epic_20738_terminal_cuda && !inputs.run_iris_worker_smoke && !inputs.run_supra2_worker_smoke";
+  const condition = workflowExpression(smoke);
+  assert.equal(condition, `${prior} && !inputs.skip_manual_h3_import_smoke`);
+  for (const event of ["push", "pull_request", "workflow_dispatch"]) {
+    for (const enabled of [undefined, false, true]) {
+      assert.equal(Boolean(evaluateWorkflow(condition, event, { skip_manual_h3_import_smoke: enabled })),
+        event === "workflow_dispatch" && enabled !== true);
+    }
+  }
+  for (const name of names.filter((name) => types[name] === "boolean" && name !== "skip_manual_h3_import_smoke")) {
+    const inputs = { [name]: true, skip_manual_h3_import_smoke: false };
+    assert.equal(Boolean(evaluateWorkflow(condition, "workflow_dispatch", inputs)),
+      Boolean(evaluateWorkflow(prior, "workflow_dispatch", inputs)), `${name} retains its original smoke policy`);
+  }
+  assert.match(smoke, /convrot_import_native_cuda_projection_smoke -- --exact --ignored --nocapture --test-threads=1/,
+    "the existing selected smoke remains intact; only its explicit opt-out is added");
+});
+
+test("Windows H3 opt-out with every model selector false runs the existing ordinary contract lane", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults, types } = dispatchInputs(workflow);
+  const inputs = Object.fromEntries(names.filter((name) => types[name] === "boolean")
+    .map((name) => [name, name === "skip_manual_h3_import_smoke"]));
+  for (const [name, enabled] of Object.entries(inputs)) {
+    if (name === "skip_manual_h3_import_smoke") continue;
+    assert.equal(defaults[name], "false", `${name}'s existing default is preserved`);
+    assert.equal(enabled, false, `${name} must be explicitly false in the no-model invocation`);
+  }
+  const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([A-Za-z0-9_-]+):$/gm)]
+    .map((match) => match[1]);
+  assert.ok(jobs.includes("candle-worker"));
+  for (const name of jobs) {
+    assert.equal(Boolean(evaluateWorkflow(workflowExpression(workflowJob(workflow, name)), "workflow_dispatch", inputs)),
+      name === "candle-worker", `${name} follows the actual no-model invocation`);
+  }
+  const worker = workflowJob(workflow, "candle-worker");
+  const outcomes = { verify_candle_capabilities: { outcome: "success" } };
+  for (const name of COMPILE_CHAIN_STEPS) {
+    assert.equal(Boolean(evaluateWorkflow(workflowExpression(stepBody(worker, name)), "workflow_dispatch", inputs, outcomes)), true,
+      `${name} remains enabled rather than duplicating or narrowing the ordinary lane`);
+  }
+  assert.match(stepBody(worker, "Test the candle GPU worker (backend-candle)"),
+    /^ +node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --features backend-candle$/m);
+  assert.match(stepBody(worker, "Check the candle sidecar builds (rust-api, backend-candle)"),
+    /cargo check -p sceneworks-rust-api --features backend-candle --tests/);
+  assert.match(stepBody(worker, "Clippy (candle worker)"),
+    /cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings/);
+  for (const step of jobSteps(worker)) {
+    if (COMPILE_CHAIN_STEPS.includes(step.name)) continue;
+    const expression = step.body.match(/^ +if: \$\{\{ (.+) \}\}$/m)?.[1];
+    if (!expression || !/inputs\.(run_|provision_snapshot|yue2_|quant_kernel_only)/.test(expression)) continue;
+    assert.equal(Boolean(evaluateWorkflow(expression, "workflow_dispatch", inputs, outcomes)), false,
+      `${step.name} must not execute a model, capture or provisioning profile in this invocation`);
+  }
+  assert.equal(Boolean(evaluateWorkflow(workflowExpression(stepBody(worker,
+    "Run the synthetic MiniMax-H3 ConvRot CUDA import projection")), "workflow_dispatch", inputs)), false);
+});
+
 
 test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
@@ -1496,13 +1571,17 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
   );
   const pure = {provision_snapshot:true};
   assert.equal(evaluateGroup(group,"workflow_dispatch",pure),"windows-candle-cpu-provision");
-  // Every declared boolean besides provisioning can select runtime/model work or a
-  // different profile. New flags fail this exhaustive contract until classified.
+  // Runtime/model selectors leave the pure-provision group. The H3 skip-only flag changes
+  // no routing: the dedicated opt-out contract above pins its only use to that smoke step.
+  // New flags still fail this exhaustive contract until explicitly classified.
   const dispatch = candle.slice(candle.indexOf("  workflow_dispatch:"),candle.indexOf("\njobs:"));
   const flags = [...dispatch.matchAll(/^      ([a-z_0-9]+):\n((?:        .*\n|\n)*)/gm)]
-    .filter(match=>match[2].includes("type: boolean") && match[1]!=="provision_snapshot")
+    .filter(match=>match[2].includes("type: boolean")
+      && !["provision_snapshot", "skip_manual_h3_import_smoke"].includes(match[1]))
     .map(match=>match[1]);
   assert.equal(flags.length,12);
+  assert.equal(evaluateGroup(group,"workflow_dispatch",{...pure,skip_manual_h3_import_smoke:true}),
+    evaluateGroup(group,"workflow_dispatch",pure),"the smoke opt-out cannot turn pure provisioning into runtime work");
   for(const flag of flags) {
     assert.equal(evaluateGroup(group,"workflow_dispatch",{...pure,[flag]:true}),
       evaluateGroup(prior,"workflow_dispatch",{...pure,[flag]:true}),`mixed ${flag} retains GPU routing`);
@@ -1844,7 +1923,7 @@ test("imported NVFP4 model proof is explicitly manual at both reachable endpoint
 
 test("ordinary scaffold CI explicitly runs the CPU-only imported NVFP4 proof policy suite", async () => {
   const scripts = JSON.parse(await source("package.json")).scripts;
-  assert.equal(scripts.check.split(" ").filter((arg) => arg === "scripts/ci/imported-nvfp4-proof.test.mjs").length, 1);
+  assert.equal(rootTestGroups().flat().filter((arg) => arg === "scripts/ci/imported-nvfp4-proof.test.mjs").length, 1);
   assert.doesNotMatch(scripts.check, /node scripts\/ci\/imported-nvfp4-proof\.mjs|imported-nvfp4-cuda-guard\.py/);
   assert.match(await source(".github/workflows/check.yml"), /npm run check/);
 });
@@ -2835,7 +2914,10 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     workflow,
     /"\$RUNNER_TEMP\/qwen-provision-venv\/bin\/python" -m pip install/,
   );
-  assert.match(workflow, /huggingface_hub==0\.36\.0/);
+  assert.match(await source(".github/requirements-hf.txt"), /^huggingface_hub==0\.36\.0$/m);
+  assert.equal((workflow.match(/-r \.github\/requirements-hf\.txt/g) ?? []).length, 2);
+  const windows = await source(".github/workflows/windows-candle.yml");
+  assert.equal((windows.match(/-r \.github\/requirements-hf\.txt/g) ?? []).length, 3);
   assert.match(workflow, /from huggingface_hub import snapshot_download/);
   assert.match(workflow, /repo_id="SceneWorks\/qwen-image-mlx"/);
   assert.match(workflow, /revision=os\.environ\["QWEN_REVISION"\]/);
@@ -6280,4 +6362,55 @@ test("hosted macOS aligns dev/test and proc-macro debug settings", async () => {
   for (const profile of ["DEV", "TEST", "DEV_BUILD_OVERRIDE", "TEST_BUILD_OVERRIDE"]) {
     assert.ok(hosted.includes(`CARGO_PROFILE_${profile}_DEBUG: line-tables-only`), profile);
   }
+});
+
+
+test("hosted parity Rust keeps lean profiles and cache restores compatible without weakening checks", async () => {
+  const job = workflowJob(await source(".github/workflows/check.yml"), "parity-rust");
+  const expected = {
+    CARGO_PROFILE_DEV_DEBUG: "line-tables-only", CARGO_PROFILE_TEST_DEBUG: "line-tables-only",
+    CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "line-tables-only", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "line-tables-only",
+    CARGO_INCREMENTAL: "0", CARGO_BUILD_JOBS: "2", CARGO_NET_OFFLINE: "true", SCENEWORKS_REQUIRE_FFMPEG: "1",
+  };
+  function validate(candidate) {
+    const settings = Object.fromEntries([...candidate.slice(0, candidate.indexOf("\n    steps:")).matchAll(/^      ([A-Z_]+): (.+)$/gm)]
+      .map(([, key, value]) => [key, value.replace(/^"|"$/g, "")]));
+    for (const [key, value] of Object.entries(expected)) assert.equal(settings[key], value, key);
+    const cache = candidate.match(/      - uses: Swatinem\/rust-cache@[^\n]+[\s\S]*?(?=\n      - )/)?.[0];
+    assert.ok(cache, "existing Rust cache remains selected");
+    assert.match(cache, /prefix-key: v1-rust-parity-lean/);
+    assert.match(cache, /add-rust-environment-hash-key: true/);
+    assert.match(cache, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
+    assert.doesNotMatch(cache, /v0-rust/);
+    assert.match(candidate, /run: cargo fetch --locked/);
+    assert.match(candidate, /run: bash scripts\/ensure-ci-ffmpeg\.sh/);
+    assert.match(candidate, /run: node scripts\/unit-hf-sandbox\.mjs -- npm run rust:check/);
+    assert.match(candidate, /run: python -m pytest -q -m e2e --strict-markers/);
+    assert.match(candidate, /run: python -m pytest -q -m parity --strict-markers/);
+    return settings;
+  }
+  const settings = validate(job);
+  for (const [before, after] of [
+    ["CARGO_PROFILE_DEV_DEBUG: line-tables-only", 'CARGO_PROFILE_DEV_DEBUG: "2"'],
+    ["CARGO_PROFILE_TEST_DEBUG: line-tables-only", 'CARGO_PROFILE_TEST_DEBUG: "2"'],
+    ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only", 'CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "2"'],
+    ["CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only", 'CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "2"'],
+    ['CARGO_INCREMENTAL: "0"', 'CARGO_INCREMENTAL: "1"'],
+    ["prefix-key: v1-rust-parity-lean", "prefix-key: v0-rust"],
+    ["add-rust-environment-hash-key: true", "add-rust-environment-hash-key: false"],
+  ]) assert.throws(() => validate(job.replace(before, after)), before);
+
+  // Execute only the assembled environment wrapper with a metadata-only Node child.
+  // This checks inheritance into the actual command boundary, never invoking Cargo/models.
+  const temporary = await mkdtemp(path.join(await realpath(tmpdir()), "parity-rust-profile-"));
+  try {
+    const executable = fileURLToPath(new URL("./unit-hf-sandbox.mjs", import.meta.url));
+    const program = `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(expected))}.map(key => [key, process.env[key]]))))`;
+    const { stdout } = await promisify(execFile)(process.execPath, [executable, "--", process.execPath, "-e", program], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      env: { ...process.env, ...settings, RUNNER_TEMP: temporary, GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", GITHUB_JOB: "parity-rust" },
+      timeout: 5000,
+    });
+    assert.deepEqual(JSON.parse(stdout), expected);
+  } finally { await rm(temporary, { recursive: true, force: true }); }
 });

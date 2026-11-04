@@ -19029,7 +19029,10 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
     // Load a repo pose skeleton (already an OpenPose render) as the pose Control map.
     let pose_png = PathBuf::from(env_or(
         "KREA_CTRL_POSE",
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../poses/dance_01.png"),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/web/public/poses/dance_01.png"
+        ),
     ));
     let skel = image::open(&pose_png)
         .unwrap_or_else(|e| panic!("open pose {}: {e}", pose_png.display()))

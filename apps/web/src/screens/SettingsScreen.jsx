@@ -1,10 +1,10 @@
+import { systemApi } from "../api/systemResources.js";
 import { AppearanceTab } from "./settings/AppearanceTab.jsx";
 import { SettingsTab } from "./settings/SettingsTab.jsx";
 import { DeviceTab } from "./settings/DeviceTab.jsx";
 import { ServerTab } from "./settings/ServerTab.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { loadCredentials, removeCredentialRequest, saveCredential, serverToken } from "../credentials.js";
-import { apiFetch } from "../api.js";
+import { loadCredentials, removeCredentialRequest, saveCredential } from "../credentials.js";
 import { putUiPreferences } from "../uiPreferences.js";
 import { isDesktop, tauriInvoke as invoke } from "../runtime.js";
 import { generationQualityLabel, readDefaultGenerationQuality, writeDefaultGenerationQuality } from "../generationQuality.js";
@@ -189,7 +189,7 @@ export function SettingsScreen({
   // theme/changeTheme and the worker registry come from the app context (the same values the
   // topbar toggle and Simple Settings read); accent + the Simple-mode default are drilled from
   // App.jsx, which owns them alongside the sidebar's mode switch.
-  const { theme, changeTheme, visibleWorkers = [], macCapabilities } = useAppContext();
+  const { token = "", theme, changeTheme, visibleWorkers = [], macCapabilities } = useAppContext();
   const [settings, setSettings] = useState(null);
   // The first-run storage snapshot, read only for `hfHomeDefault`: the model library row shows the
   // folder the app is ACTUALLY reading from when no override is set, not "Default location" — the
@@ -479,7 +479,7 @@ export function SettingsScreen({
       if (isDesktop) {
         await invoke("restart_worker");
       } else {
-        await apiFetch("/api/v1/worker/restart", serverToken(), { method: "POST" });
+        await systemApi.workerRestart(token, { method: "POST" });
       }
       setStatus("Restarting the inference worker…");
     } catch (error) {
