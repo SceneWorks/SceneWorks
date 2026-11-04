@@ -946,6 +946,12 @@ mod tests {
 
     #[test]
     fn image_ingestion_normalizes_non_storage_native_formats() {
+        if (!cfg!(target_os = "macos")
+            || std::env::var("SCENEWORKS_REQUIRE_FFMPEG").as_deref() == Ok("1"))
+            && reachable_test_ffmpeg().is_none()
+        {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         for (format, extension) in [
             (image::ImageFormat::Bmp, "bmp"),
