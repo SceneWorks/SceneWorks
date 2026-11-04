@@ -1,5 +1,10 @@
 # sc-3496 — SceneWorks SDXL contract → Candle provider mapping
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 Epic 3494 (Candle SDXL Windows feasibility spike). This is the paper-mapping
 deliverable: it maps the current SceneWorks SDXL/RealVisXL txt2img behavior onto
 the smallest Candle implementation surface needed for a useful prototype, and

@@ -22848,7 +22848,7 @@
         "requiresDimensionsMultipleOf": 64,
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
-      "loraCompatibility": { "families": ["ltx-video"], "types": ["style", "motion", "character", "enhance"] },
+      "loraCompatibility": { "generation": "2.5", "families": ["ltx-video"], "types": ["style", "motion", "character", "enhance"] },
       "mlx": {
         "minMemoryGb": 31,
         "repo": "SceneWorks/ltx-2.5-mlx",
@@ -23062,7 +23062,7 @@
         // curated set (candle also keeps the legacy `rectified-flow` alias). No scheduler axis.
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "generation": "2.3",
         "families": ["ltx-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -23203,7 +23203,7 @@
         // Eros has no Candle route after SC-18902 acceptance. No scheduler axis.
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "generation": "2.3",
         "families": ["ltx-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -23507,7 +23507,7 @@
         "samplers": ["default", "uni_pc", "euler", "euler_ancestral", "heun", "dpmpp_sde", "ddim"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "5b", "imageConditionedBackbone": true,
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -23780,7 +23780,7 @@
         "samplers": ["default", "uni_pc", "euler"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "14b", "imageConditionedBackbone": false,
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -24064,7 +24064,7 @@
         "samplers": ["default", "uni_pc", "euler"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "14b", "imageConditionedBackbone": true,
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -24245,7 +24245,7 @@
         "samplers": ["default", "uni_pc", "euler", "dpmpp_2m"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "14b", "imageConditionedBackbone": false,
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -24822,7 +24822,7 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "14b", "imageConditionedBackbone": true,
         // SCAIL-2 LoRA is wired (sc-5451, mlx-gen #462): the engine descriptor reports
         // supports_lora/supports_lokr and installs a standard lora_down/up adapter as a
         // forward-time residual over the Q4 base; the worker routes request.loras via
@@ -25100,7 +25100,7 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "14b", "imageConditionedBackbone": false,
         // Krea Realtime gets its OWN family token. The DiT is Wan 2.1 T2V 14B weight-for-weight,
         // so Wan-family style/motion LoRAs do install on it (sc-15015 wired the dense
         // forward-time residual path, tier-agnostic over the packed Q4/Q8 bases) — but declaring
@@ -26538,7 +26538,8 @@
           // Reclaiming them is tracked on sc-17636 (S11), which owns delete/size coverage.
           //
           // `resources.imageUpscalers.real-esrgan.x{2,4}` still records the `.pth` provenance —
-          // `scripts/spikes/sc3489_export_reference.py` reproduces these ONNX files from it —
+          // Restore `scripts/spikes/sc3489_export_reference.py` from
+          // docs/archive/historical-artifacts.md to reproduce these ONNX files from it —
           // but provenance is metadata, not something every user needs on disk.
           //
           // The revision is byte-for-byte the worker's own `ONNX_REVISION`

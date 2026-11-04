@@ -14,6 +14,9 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) const MAX_CONCURRENT_REQUESTS: usize = 256;
 const MAX_CONNECTIONS: usize = 256;
+// Enforced from the socket peer before headers/authentication, including keep-alive
+// connections. One peer cannot occupy the global listener budget.
+const MAX_CONNECTIONS_PER_PEER: usize = 64;
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -103,6 +106,64 @@ async fn body_idle_timeout(request: AxumRequest, next: Next, idle: Duration) -> 
     }
 }
 
+struct ConnectionAdmission {
+    capacity: Arc<Semaphore>,
+    peers: Mutex<HashMap<std::net::IpAddr, usize>>,
+    per_peer: usize,
+}
+
+impl ConnectionAdmission {
+    fn new(global: usize, per_peer: usize) -> Arc<Self> {
+        Arc::new(Self {
+            capacity: Arc::new(Semaphore::new(global)),
+            peers: Mutex::new(HashMap::new()),
+            per_peer,
+        })
+    }
+
+    fn try_acquire(self: &Arc<Self>, peer: std::net::IpAddr) -> Option<ConnectionPermit> {
+        // A dual-stack listener must not give one IPv4 peer a second bucket via
+        // the IPv4-mapped IPv6 spelling. Forwarded headers are never trusted here.
+        let peer = match peer {
+            std::net::IpAddr::V6(ip) => ip
+                .to_ipv4_mapped()
+                .map(std::net::IpAddr::V4)
+                .unwrap_or(peer),
+            _ => peer,
+        };
+        let mut peers = self.peers.lock();
+        if peers.get(&peer).copied().unwrap_or(0) >= self.per_peer {
+            return None;
+        }
+        let global = self.capacity.clone().try_acquire_owned().ok()?;
+        *peers.entry(peer).or_default() += 1;
+        Some(ConnectionPermit {
+            _global: global,
+            peer,
+            owner: self.clone(),
+        })
+    }
+}
+
+struct ConnectionPermit {
+    _global: tokio::sync::OwnedSemaphorePermit,
+    peer: std::net::IpAddr,
+    owner: Arc<ConnectionAdmission>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        let mut peers = self.owner.peers.lock();
+        let count = peers
+            .get_mut(&self.peer)
+            .expect("admitted peer has a live permit");
+        *count -= 1;
+        if *count == 0 {
+            peers.remove(&self.peer);
+        }
+    }
+}
+
 pub(crate) async fn serve(
     listener: TcpListener,
     app: Router,
@@ -114,6 +175,7 @@ pub(crate) async fn serve(
         shutdown,
         HEADER_READ_TIMEOUT,
         MAX_CONNECTIONS,
+        MAX_CONNECTIONS_PER_PEER,
     )
     .await
 }
@@ -124,23 +186,41 @@ async fn serve_with_limits(
     shutdown: impl std::future::Future<Output = ()>,
     header_timeout: Duration,
     max_connections: usize,
+    max_connections_per_peer: usize,
 ) -> std::io::Result<()> {
-    let capacity = Arc::new(Semaphore::new(max_connections));
+    let incoming = futures_util::stream::unfold(listener, |listener| async move {
+        let accepted = listener.accept().await;
+        Some((accepted, listener))
+    });
+    tokio::pin!(incoming);
+    serve_with_incoming(
+        incoming,
+        app,
+        shutdown,
+        header_timeout,
+        ConnectionAdmission::new(max_connections, max_connections_per_peer),
+    )
+    .await
+}
+
+async fn serve_with_incoming(
+    mut incoming: impl futures_util::Stream<Item = std::io::Result<(tokio::net::TcpStream, SocketAddr)>>
+        + Unpin,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()>,
+    header_timeout: Duration,
+    admission: Arc<ConnectionAdmission>,
+) -> std::io::Result<()> {
     let app = app.layer(middleware::from_fn(no_referrer));
     let stopping = CancellationToken::new();
     let mut connections = JoinSet::new();
     tokio::pin!(shutdown);
     loop {
         while connections.try_join_next().is_some() {}
-        let permit = tokio::select! {
-            biased;
-            _ = &mut shutdown => break,
-            permit = capacity.clone().acquire_owned() => permit.expect("listener semaphore stays open"),
-        };
         let accepted = tokio::select! {
             biased;
             _ = &mut shutdown => break,
-            accepted = listener.accept() => accepted,
+            accepted = incoming.next() => match accepted { Some(accepted) => accepted, None => break },
         };
         let (stream, peer) = match accepted {
             Ok(accepted) => accepted,
@@ -152,6 +232,12 @@ async fn serve_with_limits(
                     _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
                 }
             }
+        };
+        let Some(permit) = admission.try_acquire(peer.ip()) else {
+            // Never wait before accept(): overflow sockets must not put other peers
+            // behind an unauthenticated peer's incomplete headers.
+            drop(stream);
+            continue;
         };
         // Wrap the router service once per connection; Router::layer here would
         // rebuild every registered route for each accepted socket.
@@ -227,6 +313,7 @@ mod tests {
             app,
             async move { stop.cancelled().await },
             Duration::from_millis(40),
+            2,
             2,
         ));
         let mut slow = tokio::net::TcpStream::connect(address).await.unwrap();
@@ -477,8 +564,129 @@ mod tests {
             "no abandoned upload file"
         );
     }
+    async fn mock_peer_socket(
+        incoming: &tokio::sync::mpsc::Sender<std::io::Result<(tokio::net::TcpStream, SocketAddr)>>,
+        peer: &str,
+    ) -> tokio::net::TcpStream {
+        let pair = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(pair.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (stream, _) = pair.accept().await.unwrap();
+        incoming
+            .send(Ok((stream, peer.parse().unwrap())))
+            .await
+            .unwrap();
+        client
+    }
+
+    async fn assert_overflow_closed(mut stream: tokio::net::TcpStream) {
+        let mut byte = [0];
+        match tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+            .await
+            .expect("overflow is closed without waiting for the header deadline")
+        {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ) => {}
+            other => panic!("overflow socket was not closed: {other:?}"),
+        }
+    }
+
+    async fn raw_control_request(
+        incoming: &tokio::sync::mpsc::Sender<std::io::Result<(tokio::net::TcpStream, SocketAddr)>>,
+        path: &str,
+        token: &str,
+    ) -> String {
+        let mut client = mock_peer_socket(incoming, "198.51.100.2:50000").await;
+        client.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nx-sceneworks-token: {token}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut response))
+            .await
+            .expect("another peer remains live while attack headers are incomplete")
+            .unwrap();
+        String::from_utf8(response).unwrap()
+    }
+
     #[tokio::test]
-    async fn listener_connection_cap_queues_peers_until_header_timeout_releases_capacity() {
+    async fn one_unauthenticated_peer_cannot_fill_the_listener_or_block_other_peer_auth() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut settings = crate::tests::support::test_settings(&temporary);
+        settings.access_token = "valid-token".into();
+        let app = create_app(settings).unwrap();
+        let admission = ConnectionAdmission::new(6, 2);
+        let observed = admission.clone();
+        let (send, receive) = tokio::sync::mpsc::channel(16);
+        let stop = CancellationToken::new();
+        let shutdown = stop.clone();
+        let server = tokio::spawn(serve_with_incoming(
+            tokio_stream::wrappers::ReceiverStream::new(receive),
+            app,
+            async move { shutdown.cancelled().await },
+            HEADER_READ_TIMEOUT,
+            admission,
+        ));
+        let mut held = Vec::new();
+        for index in 0..6 {
+            let mut socket = mock_peer_socket(&send, "198.51.100.1:40000").await;
+            if index < 2 {
+                socket
+                    .write_all(b"GET /api/v1/workers HTTP/1.1\r\nHost: localhost\r\n")
+                    .await
+                    .unwrap();
+                held.push(socket);
+            } else {
+                assert_overflow_closed(socket).await;
+            }
+        }
+        assert_eq!(observed.capacity.available_permits(), 4);
+        assert!(raw_control_request(&send, "/api/v1/health", "")
+            .await
+            .starts_with("HTTP/1.1 200"));
+        assert!(raw_control_request(&send, "/api/v1/workers", "wrong-token")
+            .await
+            .starts_with("HTTP/1.1 401"));
+        assert!(raw_control_request(&send, "/api/v1/workers", "valid-token")
+            .await
+            .starts_with("HTTP/1.1 200"));
+        drop(held);
+        drop(send);
+        stop.cancel();
+        server.await.unwrap().unwrap();
+        assert_eq!(observed.capacity.available_permits(), 6);
+        assert!(observed.peers.lock().is_empty());
+    }
+
+    #[test]
+    fn admission_keeps_global_bound_and_releases_peer_slots_on_drop() {
+        let admission = ConnectionAdmission::new(2, 1);
+        let a = admission.try_acquire("192.0.2.1".parse().unwrap()).unwrap();
+        assert!(admission
+            .try_acquire("::ffff:192.0.2.1".parse().unwrap())
+            .is_none());
+        let b = admission.try_acquire("192.0.2.2".parse().unwrap()).unwrap();
+        assert!(admission
+            .try_acquire("192.0.2.3".parse().unwrap())
+            .is_none());
+        assert_eq!(
+            admission.peers.lock().len(),
+            2,
+            "failed overflow retains no peer bucket"
+        );
+        drop(a);
+        let c = admission.try_acquire("192.0.2.3".parse().unwrap()).unwrap();
+        drop(b);
+        drop(c);
+        assert_eq!(admission.capacity.available_permits(), 2);
+        assert!(admission.peers.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn global_overflow_is_closed_without_stopping_accept_and_header_timeout_still_reclaims_slots(
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new().route("/", get(|| async { "admitted" }));
@@ -490,26 +698,23 @@ mod tests {
             async move { stop.cancelled().await },
             Duration::from_millis(150),
             1,
+            2,
         ));
         let mut silent = tokio::net::TcpStream::connect(address).await.unwrap();
-        // The first accepted peer sends no headers at all.
-        let mut queued = tokio::net::TcpStream::connect(address).await.unwrap();
-        queued
-            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
+        let overflow = tokio::net::TcpStream::connect(address).await.unwrap();
+        assert_overflow_closed(overflow).await;
         let mut bytes = [0; 512];
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), queued.read(&mut bytes))
-                .await
-                .is_err(),
-            "the second connection cannot enter the service while capacity is held"
-        );
-        tokio::time::timeout(Duration::from_secs(2), silent.read(&mut bytes))
+        let count = tokio::time::timeout(Duration::from_secs(2), silent.read(&mut bytes))
             .await
             .unwrap()
             .unwrap();
-        let count = tokio::time::timeout(Duration::from_secs(2), queued.read(&mut bytes))
+        assert!(count == 0 || String::from_utf8_lossy(&bytes[..count]).contains("408"));
+        let mut ready = tokio::net::TcpStream::connect(address).await.unwrap();
+        ready
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let count = tokio::time::timeout(Duration::from_secs(1), ready.read(&mut bytes))
             .await
             .unwrap()
             .unwrap();

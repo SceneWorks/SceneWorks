@@ -155,7 +155,7 @@ pub fn acceptance_utility_future_sizes() -> (usize, usize) {
 
 /// Header-only forecast through the same selected spec, component/adapter pins
 /// and native structural demand routines used by the production image handler.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub fn moss_generation_preload(
     settings: &Settings,
     job: &JobSnapshot,
@@ -164,7 +164,7 @@ pub fn moss_generation_preload(
 }
 
 /// Same production forecast with synchronous owned cancellation/deadline checks.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub fn moss_generation_preload_with_check(
     settings: &Settings,
     job: &JobSnapshot,
@@ -232,7 +232,7 @@ pub async fn run_training_execution_observing_request(
 /// Device/cap observation without trainer construction or a training memory plan.
 /// Cross-load consumes ordinary generation only; its demand is checked separately
 /// through the production-selected generation headers, including the actual adapter.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub fn moss_generation_acceptance_device(settings: &Settings) -> WorkerResult<serde_json::Value> {
     let (bytes, fraction) = match settings.requested_gpu_memory_limit()? {
         sceneworks_core::app_paths::GpuMemoryLimitRequest::Bytes(bytes) => {
@@ -434,7 +434,7 @@ pub fn real_moss_trainer_with_probe(
         metadata["observationSchema"] = moss_acceptance_observation_schema();
         Ok((Box::new(trainer), metadata))
     }
-    #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+    #[cfg(not(native_lane))]
     {
         let _ = (variant, spec, request, probe, unsupported);
         Err(gen_core::Error::Unsupported(

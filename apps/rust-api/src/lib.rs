@@ -4184,10 +4184,32 @@ async fn create_generation_job_with_status(
     job_type: JobType,
     project_id: Option<String>,
     project_name: Option<String>,
-    mut payload: JsonObject,
+    payload: JsonObject,
     requested_gpu: String,
     initial_status: Option<JobStatus>,
 ) -> Result<JobSnapshot, ApiError> {
+    create_generation_job_with_binding(
+        state,
+        job_type,
+        project_id,
+        project_name,
+        payload,
+        requested_gpu,
+        (initial_status, None),
+    )
+    .await
+}
+
+async fn create_generation_job_with_binding(
+    state: AppState,
+    job_type: JobType,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    mut payload: JsonObject,
+    requested_gpu: String,
+    admission: (Option<JobStatus>, Option<Value>),
+) -> Result<JobSnapshot, ApiError> {
+    let (initial_status, mut download_binding) = admission;
     model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
     // sc-26687 / sc-26690: freeze the server-trusted provenance of the checkpoint this job
     // admitted, in the SAME transaction that enqueues it, so a later re-import or rescan cannot
@@ -4230,8 +4252,11 @@ async fn create_generation_job_with_status(
     if let Some(reference) = imported_reference_from_provenance(entry, model_provenance.as_ref()) {
         payload.insert("expectedImportedModelRef".to_owned(), reference);
     }
+    if let Some(binding) = download_binding.as_mut().and_then(Value::as_object_mut) {
+        binding.insert("payload".to_owned(), json!(payload));
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job_with_model_provenance(
+        store.create_job_with_download_binding(
             CreateJob {
                 job_type,
                 project_id,
@@ -4244,6 +4269,7 @@ async fn create_generation_job_with_status(
                 initial_status,
             },
             model_provenance.as_ref(),
+            download_binding.as_ref(),
         )
     })
     .await?;
@@ -4322,11 +4348,10 @@ async fn resolve_project_confined_asset_path(
 }
 
 fn model_lora_families(model: &Value) -> Vec<String> {
-    families_from_value_chain(
-        model,
-        &["families", "compatibleFamilies", "modelFamilies"],
-        Some("loraCompatibility"),
-    )
+    model
+        .as_object()
+        .map(sceneworks_core::lora_family::declared_model_lora_families)
+        .unwrap_or_default()
 }
 
 /// Every LoRA family this model can load: the families it DECLARES plus each one's
@@ -4348,16 +4373,10 @@ fn model_lora_families(model: &Value) -> Vec<String> {
 /// `validate_lora_specs_for_model` are in the canonical form, so skipping this re-normalization
 /// silently un-does sc-8185 and falsely rejects a Krea 2 LoRA.
 fn accepted_model_lora_families(model: &Value) -> Vec<String> {
-    let mut accepted: Vec<String> = Vec::new();
-    for declared in model_lora_families(model) {
-        for family in sceneworks_core::lora_family::accepted_lora_families(&declared) {
-            let family = normalize_lora_family(&family);
-            if !accepted.contains(&family) {
-                accepted.push(family);
-            }
-        }
-    }
-    accepted
+    model
+        .as_object()
+        .map(sceneworks_core::lora_family::accepted_model_lora_families)
+        .unwrap_or_default()
 }
 
 fn families_from_value_chain(
@@ -4635,25 +4654,7 @@ fn string_array_field(payload: &Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn safe_download_dir(repo: &str) -> String {
-    let mut output = String::new();
-    let mut in_replacement = false;
-    for character in repo.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
-            output.push(character);
-            in_replacement = false;
-        } else if !in_replacement {
-            output.push_str("__");
-            in_replacement = true;
-        }
-    }
-    let output = output.trim_matches('_').to_owned();
-    if output.is_empty() {
-        "download".to_owned()
-    } else {
-        output
-    }
-}
+use sceneworks_core::model_artifacts::artifact_selection::safe_download_dir;
 
 fn sanitized_upload_filename(filename: &str) -> String {
     let filename = filename

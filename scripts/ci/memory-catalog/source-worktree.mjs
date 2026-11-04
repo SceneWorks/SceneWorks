@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 // Persistent object cache, private capture HEAD. Never checkout/reset/clean the cache or use FETCH_HEAD.
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 const git = (root, args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const revision = (value) => { if (!/^[0-9a-f]{40}$/.test(value)) throw new Error("exact 40-hex source pin required"); return value; };
+// Git derives its common-directory worktree ID from the checkout's basename.
+// Derive a different basename for each owned directory, even across temp roots.
+const ownedLeaf = (owner) => `source-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}`;
 export async function prepareSourceWorktree(cache, pin, temporaryRoot) {
   revision(pin);
   cache = await realpath(cache);
@@ -16,12 +20,12 @@ export async function prepareSourceWorktree(cache, pin, temporaryRoot) {
   catch (error) { if (git(cache, ["rev-parse", "--verify", ref]) !== pin) throw error; }
   await mkdir(temporaryRoot, { recursive: true });
   const owner = await mkdtemp(path.join(await realpath(temporaryRoot), "memory-catalog-source-"));
-  const source = path.join(owner, "source");
+  const source = path.join(owner, ownedLeaf(owner));
   try {
     git(cache, ["worktree", "add", "--detach", source, pin]);
     const head = git(source, ["rev-parse", "HEAD"]), tree = git(source, ["rev-parse", "HEAD^{tree}"]);
     if (head !== pin || git(source, ["status", "--porcelain"])) throw new Error("private capture source is not clean at the exact pin");
-    await writeFile(path.join(owner, "owner.json"), JSON.stringify({ version: 1, cache, source, pin, tree }) + "\n", { flag: "wx" });
+    await writeFile(path.join(owner, "owner.json"), JSON.stringify({ version: 2, cache, source, pin, tree }) + "\n", { flag: "wx" });
     return source;
   } catch (error) {
     // No force/recursive deletion. If Git registered a partial worktree, preserve it for diagnosis.
@@ -32,7 +36,8 @@ export async function prepareSourceWorktree(cache, pin, temporaryRoot) {
 export async function cleanupSourceWorktree(source) {
   source = await realpath(source);
   const owner = path.dirname(source), record = JSON.parse(await readFile(path.join(owner, "owner.json"), "utf8"));
-  if (record.version !== 1 || record.source !== source || path.basename(source) !== "source"
+  const ownedName = record.version === 1 ? "source" : record.version === 2 ? ownedLeaf(owner) : null;
+  if (!ownedName || record.source !== source || path.basename(source) !== ownedName
       || !path.basename(owner).startsWith("memory-catalog-source-")) throw new Error("not an owned campaign source worktree");
   revision(record.pin);
   const common = await realpath(git(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));

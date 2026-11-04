@@ -30,7 +30,7 @@ const bundleBudgets = JSON.parse(
 const licensesDir = fileURLToPath(new URL("../desktop/licenses", import.meta.url));
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
   plugins: [
@@ -44,7 +44,7 @@ export default defineConfig({
   // the specific key keeps it lint-safe (no bare global) under no-undef.
   define: {
     "import.meta.env.VITE_APP_VERSION": JSON.stringify(pkg.version),
-    "import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS": JSON.stringify(JSON.stringify(loadSdxlCudaMemoryProjection())),
+    "import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS": JSON.stringify(JSON.stringify(loadSdxlCudaMemoryProjection(undefined, { required: command === "build" }))),
   },
   // react-konva pulls its own react-reconciler; without deduping, Vite's dep
   // optimizer can hand it a second React copy, tripping "Invalid hook call /
@@ -78,4 +78,4 @@ export default defineConfig({
       ],
     },
   },
-});
+}));

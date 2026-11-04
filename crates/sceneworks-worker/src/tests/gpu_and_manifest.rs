@@ -3466,7 +3466,7 @@ fn qwen_image_2_1_declares_the_admission_envelope_the_gate_needs() {
 ///
 /// *Mutation that reds this:* editing `maxReferenceAssets` or any `admissionGeometry` value in the
 /// manifest (or an engine bump that moves the provider's constant without a catalog edit).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_reference_cap_and_envelope_come_from_the_linked_provider() {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -3603,7 +3603,7 @@ fn qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source() {
 /// both pipelines honour.
 ///
 /// *Mutation that reds this:* restoring `"samplers": ["default"]` (or dropping any curated name).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_sampler_menu_is_the_providers_curated_menu() {
     use std::collections::BTreeSet;
@@ -3742,7 +3742,7 @@ fn qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source() {
 ///
 /// *Mutation that reds this:* editing Turbo's `maxReferenceAssets`, any `admissionGeometry`
 /// value, a scheduler name, or the bf16 row's revision.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider() {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

@@ -77,11 +77,7 @@ pub(crate) const OUTPUT_CHANNELS_RGBA: &str = "rgba";
 /// Sending such a reference flattened to RGB is a DIFFERENT request, not a lossy version of the
 /// same one, because the VAE encodes all four channels.
 // Read only by `reference_conditioning_kind`, whose callers are backend lanes.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) const CONDITIONING_REFERENCE_RGBA: &str = "ReferenceRgba";
 
 /// The `advanced` key the Studio/Editor set when the user turns the transparency toggle on.
@@ -114,18 +110,12 @@ pub(crate) const CHANNELS_RGBA: u8 = 4;
 /// linked engine (an unregistered id, or a build with no engine backend at all) cannot emit alpha,
 /// so it answers `false` and a transparency request against it is refused by name.
 pub(crate) fn engine_advertises_alpha_output(model_id: &str) -> bool {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         crate::engines::mlx_model(model_id)
             .is_some_and(|model| model.descriptor.capabilities.supports_alpha_output)
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         let _ = model_id;
         false
@@ -210,10 +200,7 @@ pub(crate) fn output_channels_variant(channels: u8) -> &'static str {
 ///
 /// [`CHANNELS_RGB`] is `OutputChannels::Rgb`, the contract's `Default`, so an opaque render puts
 /// nothing new on the wire and every existing lane stays byte-identical.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn request_output_channels(channels: u8) -> gen_core::OutputChannels {
     if channels == CHANNELS_RGBA {
         gen_core::OutputChannels::Rgba
@@ -237,11 +224,7 @@ pub(crate) fn request_output_channels(channels: u8) -> gen_core::OutputChannels 
 /// CHANNELS rather than by content keeps the choice total and cheap.
 // `image_jobs::build_qwen_image_2_1_conditioning` classifies every resolved reference through this
 // function, so the two halves of the epic cannot drift on what an alpha-carrying reference becomes.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn reference_conditioning_kind(has_alpha: bool) -> &'static str {
     if has_alpha {
         CONDITIONING_REFERENCE_RGBA
@@ -293,10 +276,7 @@ mod tests {
     }
 
     // Read from the REGISTERED descriptor, so it needs a linked engine backend.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn transparency_on_an_alpha_capable_engine_resolves_to_four_channels() {
         let advanced = advanced(json!({ "transparentBackground": true }));
@@ -318,10 +298,7 @@ mod tests {
         assert!(message.contains(DESCRIPTOR_ALPHA_CAPABILITY), "{message}");
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn an_opaque_render_puts_nothing_new_on_the_wire() {
         // `Rgb` is the contract's Default, so the request an opaque render builds is unchanged.
@@ -331,10 +308,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn a_transparent_render_carries_the_rgba_variant_not_a_channel_count() {
         // `output_channels` is an ENUM (`OutputChannels { Rgb, Rgba }`), not a number.
@@ -366,10 +340,7 @@ mod tests {
         assert!(raw_settings.is_empty());
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn a_transparency_request_round_trips_through_the_recipe() {
         // This is what makes a re-run reproduce a cut-out instead of quietly re-rendering it
@@ -396,10 +367,7 @@ mod tests {
     /// The capability is the DESCRIPTOR's answer on every registered engine, not a hand-list:
     /// exactly the engines whose descriptor sets `supports_alpha_output` resolve to four channels,
     /// and `qwen_image_2_1` is among them at the pinned inference revision.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn alpha_capability_is_read_from_every_registered_descriptor() {
         let mut capable = Vec::new();

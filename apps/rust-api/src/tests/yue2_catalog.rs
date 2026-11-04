@@ -814,3 +814,491 @@ async fn accepting_a_license_can_bind_the_exact_terms_the_browser_reviewed() {
     let (_, view) = request(changed_app, "GET", route, Value::Null).await;
     assert_eq!(view["acknowledged"], false);
 }
+
+fn app_with_licensed_models(
+    temp: &tempfile::TempDir,
+    models: Vec<Value>,
+) -> (axum::Router, AppState) {
+    let config = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({"schemaVersion":1,"models":models})).unwrap(),
+    )
+    .unwrap();
+    write_empty_sibling_manifests(&config);
+    let (app, state) = create_app_with_state(test_settings(temp)).unwrap();
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    (app, state)
+}
+
+#[tokio::test]
+async fn selected_h3_model_uses_its_own_current_terms_for_shared_repositories() {
+    let _env = isolate_hf_cache();
+    for (selected, sibling) in [
+        ("minimax_h3_ref", "minimax_h3"),
+        ("minimax_h3", "minimax_h3_ref"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let models = vec![builtin_model("minimax_h3"), builtin_model("minimax_h3_ref")];
+        let (app, _) = app_with_licensed_models(&temp, models.clone());
+        let ack = format!("/api/v1/models/{selected}/license-acknowledgment");
+        let download = format!("/api/v1/models/{selected}/download");
+        let (status, accepted) = request(app.clone(), "PUT", &ack, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{selected}: {accepted}");
+        let (_, other) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/models/{sibling}/license-acknowledgment"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(other["acknowledged"], false);
+        let (status, body) = request(app.clone(), "POST", &download, json!({"variant":"q4"})).await;
+        assert_eq!(status, StatusCode::CREATED, "{selected}: {body}");
+        assert_eq!(body["payload"]["modelId"], selected);
+        assert!(
+            body["payload"].get("licenseAcknowledged").is_none(),
+            "{body}"
+        );
+        let (_, unchanged) = request(app.clone(), "GET", &ack, Value::Null).await;
+        assert_eq!(unchanged["acknowledgment"], accepted["acknowledgment"]);
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/models/{sibling}/download"),
+            json!({"variant":"q4"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{sibling}: {body}");
+        assert_eq!(body["code"], "license_acknowledgment_required");
+        let (status, _) = request(app.clone(), "DELETE", &ack, Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = request(app.clone(), "POST", &download, json!({"variant":"q4"})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{selected}: {body}");
+        assert_eq!(body["code"], "license_acknowledgment_required");
+        request(app, "PUT", &ack, Value::Null).await;
+        let mut changed = models;
+        changed.iter_mut().find(|m| m["id"] == selected).unwrap()["licenseNotice"] =
+            json!("Changed terms require fresh acceptance");
+        let (app, _) = app_with_licensed_models(&temp, changed);
+        let (_, view) = request(app.clone(), "GET", &ack, Value::Null).await;
+        assert_eq!(view["acknowledged"], false);
+        let (status, body) = request(app.clone(), "POST", &download, json!({"variant":"q4"})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "license_acknowledgment_required");
+        let (status, body) = request(app.clone(), "PUT", &ack, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = request(app, "POST", &download, json!({"variant":"q4"})).await;
+        assert_eq!(status, StatusCode::CREATED, "{selected}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn h3_ref_acceptance_does_not_grant_an_unselected_raw_repository_request() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state) = app_with_licensed_models(
+        &temp,
+        vec![builtin_model("minimax_h3"), builtin_model("minimax_h3_ref")],
+    );
+    let (status, _) = request(
+        app,
+        "PUT",
+        "/api/v1/models/minimax_h3_ref/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let error = crate::models::ensure_license_acknowledged_for_source(
+        &state,
+        &[Some("SceneWorks/minimax-h3-mlx")],
+        None,
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, Some("license_acknowledgment_required"));
+    assert!(error.detail.contains("'minimax_h3'"), "{}", error.detail);
+}
+
+#[tokio::test]
+async fn selected_h3_terms_never_unblock_a_shared_blocked_component() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let mut base = builtin_model("minimax_h3");
+    base["conditionalComponents"] = json!([{"componentId":"blocked_fixture","repo":"SceneWorks/minimax-h3-mlx","purpose":"fixture","blocked":{"reason":"not licensed","unblock":"explicit upstream release"}}]);
+    let (app, _) = app_with_licensed_models(&temp, vec![base, builtin_model("minimax_h3_ref")]);
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/models/minimax_h3_ref/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for body in [
+        json!({"variant":"q4"}),
+        json!({"variant":"q4","licenseAcknowledged":true}),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/minimax_h3_ref/download",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "component_blocked");
+    }
+}
+
+#[tokio::test]
+async fn selected_conditional_components_use_the_selected_current_terms() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let base = builtin_yue2();
+    let mut selected = base.clone();
+    selected["id"] = json!("selected_yue2");
+    let (app, _) = app_with_licensed_models(&temp, vec![base, selected]);
+    let ack = "/api/v1/models/selected_yue2/license-acknowledgment";
+    let route = "/api/v1/models/selected_yue2/conditional-components/cover/download";
+    let (status, body) = request(app.clone(), "PUT", ack, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = request(app.clone(), "POST", route, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/yue2/conditional-components/cover/download",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+    request(app.clone(), "DELETE", ack, Value::Null).await;
+    let (status, body) = request(app, "POST", route, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+}
+
+#[tokio::test]
+async fn selected_download_replays_revalidate_receipts_and_preserve_private_binding() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let models = vec![builtin_model("minimax_h3"), builtin_model("minimax_h3_ref")];
+    let (app, state) = app_with_licensed_models(&temp, models.clone());
+    let ack = "/api/v1/models/minimax_h3_ref/license-acknowledgment";
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3_ref/download",
+        json!({"variant":"q4", "licenseAcknowledged":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    assert!(created.get("downloadBinding").is_none());
+    assert!(state.jobs_store.download_binding(id).unwrap().is_some());
+    for op in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/{op}"),
+            json!({"payloadChanges":{}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{op}: {replay}");
+        let next_id = replay["id"].as_str().unwrap();
+        assert!(state
+            .jobs_store
+            .download_binding(next_id)
+            .unwrap()
+            .is_some());
+        let (status, second) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{next_id}/duplicate"),
+            json!({"payloadChanges":{}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "second replay: {second}");
+        for action in ["fresh", "resume"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{op}"),
+                json!({"payloadChanges":{"downloadAction":action}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{action} {op}: {replay}");
+        }
+        for changes in [
+            json!({"repo":"untrusted/repo"}),
+            json!({"revision":"other"}),
+            json!({"files":["other"]}),
+            json!({"modelId":"minimax_h3"}),
+            json!({"sourceRepo":"another/repo"}),
+        ] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{op}"),
+                json!({"payloadChanges":changes}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{op}: {body}");
+        }
+    }
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    for job in jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|j| j["type"] == "model_download")
+    {
+        let jid = job["id"].as_str().unwrap();
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{jid}/duplicate"),
+            json!({"payloadChanges":{}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "co-requisite {jid}: {replay}");
+    }
+    let (status, _) = request(app.clone(), "DELETE", ack, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    for op in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/{op}"),
+            json!({"payloadChanges":{}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "license_acknowledgment_required");
+    }
+    request(app.clone(), "PUT", ack, Value::Null).await;
+    let mut changed = models;
+    changed[1]["licenseNotice"] = json!("Changed terms");
+    let (updated, _) = app_with_licensed_models(&temp, changed);
+    let (status, body) = request(
+        updated,
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+}
+
+#[tokio::test]
+async fn raw_download_cannot_forge_selected_owner_or_replay_old_assertion() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state) = app_with_licensed_models(
+        &temp,
+        vec![builtin_model("minimax_h3"), builtin_model("minimax_h3_ref")],
+    );
+    request(
+        app.clone(),
+        "PUT",
+        "/api/v1/models/minimax_h3_ref/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    let payload = json!({"repo":"SceneWorks/minimax-h3-mlx", "files":["model.safetensors"],
+        "modelId":"minimax_h3_ref", "selectedModelId":"minimax_h3_ref"});
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({"type":"model_download", "requestedGpu":"auto", "payload":payload}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let mut asserted = payload;
+    asserted["licenseAcknowledged"] = json!(true);
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({"type":"model_download", "requestedGpu":"auto", "payload":asserted}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap();
+    assert!(state.jobs_store.download_binding(id).unwrap().is_none());
+    for op in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/{op}"),
+            json!({"payloadChanges":{}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{op}: {replay}");
+    }
+}
+
+#[tokio::test]
+async fn conditional_component_replay_rechecks_purpose_and_current_terms() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let base = builtin_yue2();
+    let mut selected = base.clone();
+    selected["id"] = json!("selected_yue2");
+    let (app, _) = app_with_licensed_models(&temp, vec![base, selected]);
+    let ack = "/api/v1/models/selected_yue2/license-acknowledgment";
+    request(app.clone(), "PUT", ack, Value::Null).await;
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/selected_yue2/conditional-components/cover/download",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let jobs = created["jobs"].as_array().unwrap();
+    assert!(!jobs.is_empty());
+    for job in jobs {
+        let id = job["id"].as_str().unwrap();
+        for op in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{op}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{replay}");
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{op}"),
+                json!({"payloadChanges":{"repo":"untrusted/repo"}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{replay}");
+        }
+    }
+    let id = jobs[0]["id"].as_str().unwrap();
+    let mut changed = builtin_yue2();
+    changed["id"] = json!("selected_yue2");
+    for component in changed["conditionalComponents"].as_array_mut().unwrap() {
+        component["requiredFor"] = json!(["another-purpose"]);
+    }
+    let (updated, _) = app_with_licensed_models(&temp, vec![builtin_yue2(), changed]);
+    let (status, body) = request(
+        updated,
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "changed purpose: {body}");
+    request(app.clone(), "DELETE", ack, Value::Null).await;
+    let (status, body) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+}
+
+#[tokio::test]
+async fn selected_h3_ref_receipt_authorizes_persisted_replay() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let (app, _) = app_with_licensed_models(
+        &temp,
+        vec![builtin_model("minimax_h3"), builtin_model("minimax_h3_ref")],
+    );
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/models/minimax_h3_ref/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3_ref/download",
+        json!({"variant":"q4"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    for op in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{}/{op}", job["id"].as_str().unwrap()),
+            json!({"payloadChanges":{}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{op}: {replay}");
+    }
+}
+
+#[tokio::test]
+async fn completed_install_state_change_does_not_invalidate_download_replay() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let yue2 = builtin_yue2();
+    let (app, state) = app_with_licensed_models(&temp, vec![yue2.clone()]);
+    let (_, accepted) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/models/yue2/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(accepted["acknowledged"], true);
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/yue2/download",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let id = job["id"].as_str().unwrap();
+    for repo in ["m-a-p/YuE2-3B", "m-a-p/YuE2-Vae"] {
+        let row = yue2["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| {
+                row["repo"] == repo
+                    && (repo != "m-a-p/YuE2-3B"
+                        || row.get("coRequisite").is_none_or(|value| value != true))
+            })
+            .unwrap();
+        seed_snapshot(&temp, row);
+    }
+    state.model_catalog_cache.invalidate();
+    let (_, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    let model = models
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "yue2")
+        .unwrap();
+    assert_eq!(model["installState"], "installed", "{model}");
+    for op in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/{op}"),
+            json!({"payloadChanges":{}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{op}: {replay}");
+    }
+}

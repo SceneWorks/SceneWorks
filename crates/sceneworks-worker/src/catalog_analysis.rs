@@ -7,8 +7,8 @@
 //! from each record so a crash cannot make incomplete rows look current.
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read};
+#[cfg(test)]
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use sceneworks_core::catalog_store::{
@@ -195,34 +195,22 @@ impl Default for CatalogAnalysisConfig {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn default_person_model_version() -> String {
     crate::person_jobs::DET_REVISION.to_owned()
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn default_person_model_version() -> String {
     "3cffbaccca4f239ae6301d8b66ba721401ecfa8d".to_owned()
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn default_face_model_version() -> String {
     crate::image_jobs::INSTANTID_MLX_REVISION.to_owned()
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn default_face_model_version() -> String {
     "bca0cacf8e5e04529bb2b326a521361b02be84fd".to_owned()
 }
@@ -237,18 +225,12 @@ fn default_face_model_version() -> String {
 /// re-analysis costs compute and produces the same keypoints. It is accepted rather than papered
 /// over: freezing the old digest pair as a magic string would keep a value naming archives nothing
 /// fetches, and would then fail to invalidate if the re-host revision ever genuinely moved.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn default_pose_model_version() -> String {
     crate::pose_jobs::DWPOSE_REVISION.to_owned()
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn default_pose_model_version() -> String {
     "c330a9609201343576b8b69d222e38c1486d2854".to_owned()
 }
@@ -485,12 +467,7 @@ impl CatalogAnalysisLease {
         let mut files = Vec::new();
         for name in [FETCH_LOCK_FILE, ANALYSIS_LOCK_FILE] {
             let path = catalog.root().join(name);
-            let file = OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .open(&path)?;
+            let file = sceneworks_core::file_lock::open_regular_lock_file(&path)?;
             let contended = fs2::lock_contended_error().raw_os_error();
             match FileLock::try_exclusive(file) {
                 Ok(lock) => files.push(lock),
@@ -1278,29 +1255,14 @@ fn persist_structured_analysis(
 }
 
 fn resolve_catalog_image(catalog: &Catalog, record: &CatalogRecord) -> std::io::Result<PathBuf> {
-    let root = std::fs::canonicalize(catalog.root())?;
-    let path = std::fs::canonicalize(catalog.root().join(&record.image_path))?;
-    if !path.starts_with(&root) || !path.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "catalog image path escapes the catalog root or is not a file",
-        ));
-    }
-    Ok(path)
+    catalog.resolve_local_image(record)
 }
 
 fn image_fingerprint(path: &Path) -> std::io::Result<String> {
-    let mut input = BufReader::new(File::open(path)?);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = input.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!(
+        "sha256:{}",
+        sceneworks_core::hashing::sha256_file(path)?
+    ))
 }
 
 /// 64-bit difference hash over a normalized 9x8 luminance image. This is
@@ -1422,10 +1384,7 @@ fn increment_run(report: &mut CatalogAnalysisReport, analyzer: &str) {
     *count = count.saturating_add(1);
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub struct ModelBackedCatalogAnalyzerPaths {
     pub person_detector: PathBuf,
     pub face_weights_directory: PathBuf,
@@ -1433,20 +1392,14 @@ pub struct ModelBackedCatalogAnalyzerPaths {
     pub pose_model: PathBuf,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub struct ModelBackedCatalogAnalyzers {
     paths: ModelBackedCatalogAnalyzerPaths,
     face_detector: Option<crate::face_analysis_jobs::CatalogFaceDetector>,
     face_load_error: Option<String>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl ModelBackedCatalogAnalyzers {
     pub fn new(paths: ModelBackedCatalogAnalyzerPaths) -> Self {
         Self {
@@ -1474,10 +1427,7 @@ impl ModelBackedCatalogAnalyzers {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl CatalogAnalyzers for ModelBackedCatalogAnalyzers {
     fn analyze_people(
         &mut self,
@@ -1628,6 +1578,20 @@ mod tests {
                 .into_iter()
                 .find(|record| record.id == id)
                 .expect("record exists")
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn analysis_lease_rejects_symlink_lock_files() {
+        for name in [FETCH_LOCK_FILE, ANALYSIS_LOCK_FILE] {
+            let fixture = Fixture::new("symlink-lock", &[]);
+            let catalog = fixture.registry.open_attached(&fixture.catalog_id).unwrap();
+            let outside = fixture._temporary.path().join("outside.lock");
+            std::fs::write(&outside, b"untouched").unwrap();
+            std::os::unix::fs::symlink(&outside, fixture.root.join(name)).unwrap();
+            assert!(CatalogAnalysisLease::acquire_with_processing(&catalog, None).is_err());
+            assert_eq!(std::fs::read(outside).unwrap(), b"untouched");
         }
     }
 

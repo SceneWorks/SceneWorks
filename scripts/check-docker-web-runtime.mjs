@@ -31,6 +31,10 @@ try {
     docker(["logs", container]);
     throw new Error("web dev server did not become healthy within 10 seconds");
   }
+  for (const module of ["/src/components/editor/EditorGuides.jsx", "/src/data/bundledLicenses.js", "/@id/__x00__virtual:editor-guides"]) {
+    docker(["exec", container, "node", "-e",
+      "fetch('http://127.0.0.1:5173'+process.argv[1]).then(async r=>{const body=await r.text(); if(!r.ok || body.includes('Internal Server Error')) throw Error(body);}).catch(e=>{console.error(e);process.exit(1)})", module]);
+  }
   console.log("Web image nonroot identity, bind mount, cache writes, and HTTP health passed.");
 } finally {
   try { docker(["rm", "-f", "-v", container], { stdio: "ignore" }); } catch { /* container may not exist */ }

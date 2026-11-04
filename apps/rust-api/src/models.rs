@@ -232,23 +232,8 @@ impl ModelSizeEstimateTestHook {
     }
 }
 
-fn validate_huggingface_repo(repo: &str) -> Result<(), ApiError> {
-    let parts: Vec<_> = repo.trim().split('/').collect();
-    if parts.len() != 2
-        || parts.iter().any(|part| {
-            part.is_empty()
-                || part.starts_with('.')
-                || part.ends_with('.')
-                || !part.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-                })
-        })
-    {
-        return Err(ApiError::bad_request(
-            "Hugging Face repo must be in owner/name form",
-        ));
-    }
-    Ok(())
+fn validate_huggingface_repo(repo: &str) -> Result<&str, ApiError> {
+    sceneworks_core::hf_repo_id::namespaced(repo).map_err(ApiError::bad_request)
 }
 
 #[derive(Debug, Default)]
@@ -618,9 +603,26 @@ async fn license_acknowledgment_repo_index(
 fn license_acknowledgment_index_for(
     models: &[Value],
 ) -> std::collections::BTreeMap<String, LicenseAcknowledgmentSource> {
+    license_acknowledgment_index_for_selected(models, None)
+}
+
+fn license_acknowledgment_index_for_selected(
+    models: &[Value],
+    selected_model_id: Option<&str>,
+) -> std::collections::BTreeMap<String, LicenseAcknowledgmentSource> {
     let mut index: std::collections::BTreeMap<String, LicenseAcknowledgmentSource> =
         std::collections::BTreeMap::new();
-    for model in models {
+    // A catalog-validated selection owns its declared shared repositories. Raw
+    // repository requests retain canonical manifest order; an arbitrary accepted
+    // model must never grant access. Blocked components from ANY entry still win.
+    let selected = |model: &&Value| {
+        selected_model_id.is_some_and(|id| model.get("id").and_then(Value::as_str) == Some(id))
+    };
+    for model in models
+        .iter()
+        .filter(selected)
+        .chain(models.iter().filter(|model| !selected(model)))
+    {
         let Some(model_id) = model.get("id").and_then(Value::as_str) else {
             continue;
         };
@@ -808,6 +810,18 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
     source_url: Option<&str>,
     acknowledged: bool,
 ) -> Result<(), ApiError> {
+    ensure_license_acknowledged_for_source_inner(state, repos, source_url, acknowledged, None).await
+}
+
+// Only catalog-resolved model/component download routes supply a selected ID.
+// Other repository-bearing doors deliberately use the public canonical wrapper.
+async fn ensure_license_acknowledged_for_source_inner(
+    state: &AppState,
+    repos: &[Option<&str>],
+    source_url: Option<&str>,
+    acknowledged: bool,
+    selected_model_id: Option<&str>,
+) -> Result<(), ApiError> {
     // Each candidate keeps the caller's own spelling next to the lookup key, so the refusal echoes
     // what was actually requested rather than the lowercased index key.
     let candidates: Vec<(String, String)> = repos
@@ -821,7 +835,12 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
     if candidates.is_empty() {
         return Ok(());
     }
-    let index = license_acknowledgment_repo_index(state).await?;
+    let index = if selected_model_id.is_some() {
+        let (models, _) = merged_model_manifest_entries(state).await?;
+        license_acknowledgment_index_for_selected(&models, selected_model_id)
+    } else {
+        license_acknowledgment_repo_index(state).await?
+    };
     // A blocked conditional component is refused before anything else, and an acknowledgment does
     // not clear it (sc-22998).
     if let Some((requested, source, blocked)) = candidates.iter().find_map(|(named, key)| {
@@ -1025,22 +1044,152 @@ pub(crate) async fn ensure_job_payload_license_acknowledged(
     .await
 }
 
+async fn queue_catalog_download(
+    state: AppState,
+    payload: JsonObject,
+    requested_gpu: String,
+    binding: Value,
+) -> Result<JobSnapshot, ApiError> {
+    create_generation_job_with_binding(
+        state,
+        JobType::ModelDownload,
+        None,
+        None,
+        payload,
+        requested_gpu,
+        (None, Some(binding)),
+    )
+    .await
+}
+
+fn catalog_download_binding(
+    model_id: &str,
+    owner_id: &str,
+    kind: &str,
+    row: &Value,
+    payload: &JsonObject,
+    purpose: Option<&str>,
+    component: Option<&str>,
+) -> Value {
+    json!({"modelId": model_id, "ownerId": owner_id, "kind": kind, "row": row,
+        "payload": payload, "purpose": purpose, "component": component})
+}
+
+pub(crate) async fn validate_catalog_download_replay(
+    state: &AppState,
+    binding: &Value,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let invalid = || {
+        ApiError::bad_request(
+            "The saved catalog download no longer matches its authorized selection",
+        )
+    };
+    // A patch cannot turn an accepted selection into a different worker operation.
+    if !sceneworks_core::jobs_store::download_binding_matches_payload(binding, payload) {
+        return Err(invalid());
+    }
+    let model_id = binding
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let owner_id = binding
+        .get("ownerId")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let row = binding.get("row").ok_or_else(invalid)?;
+    let catalog = model_catalog(state).await?;
+    let model = catalog
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(model_id))
+        .ok_or_else(invalid)?;
+    let owner = catalog
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(owner_id))
+        .ok_or_else(invalid)?;
+    let valid = match binding.get("kind").and_then(Value::as_str) {
+        Some("download") if model_id == owner_id => model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                rows.contains(row)
+                    && binding
+                        .get("selectedDownload")
+                        .is_none_or(|selected| rows.contains(selected))
+            }),
+        Some("conditional") if model_id == owner_id => {
+            let purpose = binding
+                .get("purpose")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            sceneworks_core::model_usage_policy::conditional_component_downloads(model, purpose)
+                .map_err(|_| invalid())?
+                .contains(row)
+        }
+        Some("importComponent") => {
+            if model.get("baseModel").and_then(Value::as_str) != Some(owner_id) {
+                return Err(invalid());
+            }
+            let component = binding
+                .get("component")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            let current = bound_import_component_download(
+                model,
+                owner,
+                component,
+                None,
+                &state.settings.data_dir,
+                true,
+            )
+            .map_err(|_| invalid())?;
+            ensure_inherited_component_licenses_acknowledged(
+                state,
+                model.as_object().ok_or_else(invalid)?,
+                false,
+            )
+            .await?;
+            &current == row
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(invalid());
+    }
+    for entry in [model, owner] {
+        if model_requires_license_acknowledgment(entry)
+            && crate::yue2_jobs::current_license_acknowledgment(state, entry)
+                .await?
+                .is_none()
+        {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                detail: "Current model license acknowledgment is required".to_owned(),
+                code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+                context: None,
+            });
+        }
+    }
+    let repos = LICENSE_GATED_REPO_PAYLOAD_KEYS
+        .iter()
+        .map(|key| payload.get(*key).and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    ensure_license_acknowledged_for_source_inner(
+        state,
+        &repos,
+        payload.get("sourceUrl").and_then(Value::as_str),
+        false,
+        Some(owner_id),
+    )
+    .await
+}
+
 pub(crate) async fn create_model_download_job(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
     ApiJson(payload): ApiJson<ModelDownloadRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let catalog = model_catalog(&state).await?;
-    let model = catalog
-        .iter()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
-        .cloned()
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Model not found".to_owned(),
-            context: None,
-            code: None,
-        })?;
+    let model = require_model_by_id(&state, &model_id).await?;
     // License-acknowledgment gate (sc-17227), enforced HERE and not only in the web client.
     //
     // The web client refuses an unacknowledged download at `createModelDownloadJob`, but that code
@@ -1078,36 +1227,42 @@ pub(crate) async fn create_model_download_job(
                 "Imported component repair takes no co-requisite choices",
             ));
         }
-        let base = model
+        let base_id = model
             .get("baseModel")
             .and_then(Value::as_str)
-            .and_then(|id| {
-                catalog
-                    .iter()
-                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
-            })
-            .ok_or_else(|| {
-                ApiError::bad_request("Imported component repair requires its compatible base")
-            })?;
+            .unwrap_or_default();
+        let base = find_model_by_id(&state, base_id).await?.ok_or_else(|| {
+            ApiError::bad_request("Imported component repair requires its compatible base")
+        })?;
         let download = bound_import_component_download(
             &model,
-            base,
+            &base,
             component_id,
             payload.variant.as_deref(),
             &state.settings.data_dir,
+            false,
         )
         .map_err(ApiError::bad_request)?;
+        if payload.license_acknowledged {
+            for entry in [&model, &base] {
+                if model_requires_license_acknowledgment(entry) {
+                    crate::yue2_jobs::record_license_acknowledgment(&state, entry, "download")
+                        .await?;
+                }
+            }
+        }
         ensure_inherited_component_licenses_acknowledged(
             &state,
             model.as_object().expect("validated import"),
             payload.license_acknowledged,
         )
         .await?;
-        ensure_license_acknowledged_for_source(
+        ensure_license_acknowledged_for_source_inner(
             &state,
             &[download.get("repo").and_then(Value::as_str)],
             None,
             payload.license_acknowledged,
+            base.get("id").and_then(Value::as_str),
         )
         .await?;
         let mut job_payload = build_model_download_job_payload(
@@ -1124,13 +1279,20 @@ pub(crate) async fn create_model_download_job(
             "importComponentTier".to_owned(),
             model["importComponentTier"].clone(),
         );
-        let job = create_generation_job(
+        let binding = catalog_download_binding(
+            &model_id,
+            base["id"].as_str().expect("validated base"),
+            "importComponent",
+            &download,
+            &job_payload,
+            None,
+            Some(component_id),
+        );
+        let job = queue_catalog_download(
             state,
-            JobType::ModelDownload,
-            None,
-            None,
             job_payload,
             requested_gpu_or_auto(payload.requested_gpu),
+            binding,
         )
         .await?;
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
@@ -1159,6 +1321,7 @@ pub(crate) async fn create_model_download_job(
             ApiError::bad_request("Model does not define a Hugging Face download")
         })?,
     };
+    let selected_download = download.clone();
     // sc-24112: a DECLARED-but-unpublished tier is refused HERE, at the one place a download job is
     // created, rather than by hiding the row — the catalog must keep enumerating it so the tier
     // axis, the memory ladder and the picker are all real before the bytes exist. Its revision is
@@ -1296,11 +1459,12 @@ pub(crate) async fn create_model_download_job(
         .iter()
         .map(|repo| Some(repo.as_str()))
         .collect();
-    ensure_license_acknowledged_for_source(
+    ensure_license_acknowledged_for_source_inner(
         &state,
         &queued_repos,
         None,
         payload.license_acknowledged,
+        Some(&model_id),
     )
     .await?;
 
@@ -1350,27 +1514,30 @@ pub(crate) async fn create_model_download_job(
             payload.license_acknowledged,
             &state.settings.data_dir,
         )?;
-        create_generation_job(
-            state.clone(),
-            JobType::ModelDownload,
+        let binding = catalog_download_binding(
+            &model_id,
+            &model_id,
+            "download",
+            co_requisite,
+            &co_payload,
             None,
             None,
-            co_payload,
-            requested_gpu.clone(),
-        )
-        .await?;
+        );
+        queue_catalog_download(state.clone(), co_payload, requested_gpu.clone(), binding).await?;
     }
 
     // The primary job is the one returned to the caller (its id is what the download UI tracks).
-    let job = create_generation_job(
-        state,
-        JobType::ModelDownload,
+    let mut binding = catalog_download_binding(
+        &model_id,
+        &model_id,
+        "download",
+        &download,
+        &job_payload,
         None,
         None,
-        job_payload,
-        requested_gpu,
-    )
-    .await?;
+    );
+    binding["selectedDownload"] = selected_download;
+    let job = queue_catalog_download(state, job_payload, requested_gpu, binding).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -1401,16 +1568,7 @@ pub(crate) async fn create_conditional_components_download_jobs(
     use sceneworks_core::model_usage_policy::{
         conditional_component_downloads, ConditionalComponentsError,
     };
-    let model = model_catalog(&state)
-        .await?
-        .into_iter()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Model not found".to_owned(),
-            context: None,
-            code: None,
-        })?;
+    let model = require_model_by_id(&state, &model_id).await?;
     let rows = conditional_component_downloads(&model, &purpose).map_err(|error| match error {
         ConditionalComponentsError::NotDeclared { .. } => ApiError::typed(
             StatusCode::NOT_FOUND,
@@ -1457,8 +1615,14 @@ pub(crate) async fn create_conditional_components_download_jobs(
         .map(str::to_owned)
         .collect();
     let repo_refs: Vec<Option<&str>> = repos.iter().map(|repo| Some(repo.as_str())).collect();
-    ensure_license_acknowledged_for_source(&state, &repo_refs, None, payload.license_acknowledged)
-        .await?;
+    ensure_license_acknowledged_for_source_inner(
+        &state,
+        &repo_refs,
+        None,
+        payload.license_acknowledged,
+        Some(&model_id),
+    )
+    .await?;
     let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
     let mut jobs = Vec::new();
     let mut components = Vec::new();
@@ -1487,15 +1651,18 @@ pub(crate) async fn create_conditional_components_download_jobs(
             payload.license_acknowledged,
             &state.settings.data_dir,
         )?;
-        let job = create_generation_job(
-            state.clone(),
-            JobType::ModelDownload,
+        let binding = catalog_download_binding(
+            &model_id,
+            &model_id,
+            "conditional",
+            row,
+            &job_payload,
+            Some(&purpose),
             None,
-            None,
-            job_payload,
-            requested_gpu.clone(),
-        )
-        .await?;
+        );
+        let job =
+            queue_catalog_download(state.clone(), job_payload, requested_gpu.clone(), binding)
+                .await?;
         components.push(json!({
             "componentId": component_id,
             "repo": row.get("repo"),
@@ -1641,6 +1808,7 @@ fn bound_import_component_download(
     component_id: &str,
     requested_variant: Option<&str>,
     data_dir: &FsPath,
+    allow_installed: bool,
 ) -> Result<Value, String> {
     use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
     let entry = model
@@ -1682,7 +1850,9 @@ fn bound_import_component_download(
                 .into(),
         );
     }
-    if imported_component_presence(data_dir, row) == CoRequisitePresence::Installed {
+    if !allow_installed
+        && imported_component_presence(data_dir, row) == CoRequisitePresence::Installed
+    {
         return Err("This imported resident component is already installed".into());
     }
     Ok(row.clone())
@@ -2106,16 +2276,7 @@ pub(crate) async fn create_model_convert_job(
     )
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
-    let model = model_catalog(&state)
-        .await?
-        .into_iter()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Model not found".to_owned(),
-            context: None,
-            code: None,
-        })?;
+    let model = require_model_by_id(&state, &model_id).await?;
     ensure_model_not_cleanup_only(&model)?;
     let mlx = model
         .get("mlx")
@@ -2385,12 +2546,7 @@ pub(crate) async fn delete_model(
         .iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
         .cloned()
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Model not found".to_owned(),
-            context: None,
-            code: None,
-        })?;
+        .ok_or_else(|| model_not_found("Model not found"))?;
     let manifest_path = state
         .settings
         .config_dir
@@ -2919,16 +3075,7 @@ pub(crate) async fn delete_model_variant(
     Path((model_id, variant)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let variant = variant.trim().to_ascii_lowercase();
-    let catalog = model_catalog(&state).await?;
-    let model = catalog
-        .into_iter()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Model not found".to_owned(),
-            context: None,
-            code: None,
-        })?;
+    let model = require_model_by_id(&state, &model_id).await?;
     let data_dir = &state.settings.data_dir;
     let allowed_roots = vec![
         data_dir.join("models"),
@@ -3684,6 +3831,16 @@ fn reconcile_expected_sha256(
     }
 }
 
+fn normalize_import_repo_ids(payload: &mut ModelImportRequest) -> Result<(), ApiError> {
+    if let Some(repo) = payload.repo.as_mut() {
+        *repo = validate_huggingface_repo(repo)?.to_owned();
+    }
+    if let Some(ModelImportSourceV1::HuggingFace { repo, .. }) = payload.source.as_mut() {
+        *repo = validate_huggingface_repo(repo)?.to_owned();
+    }
+    Ok(())
+}
+
 /// Collapse the discriminated `source` (when present) onto the flat `repo`/`sourceUrl`/`sourcePath`
 /// fields the rest of the import path already speaks, and describe what was chosen as provenance.
 ///
@@ -3698,6 +3855,7 @@ fn reconcile_expected_sha256(
 pub(crate) fn normalize_model_import_source(
     payload: &mut ModelImportRequest,
 ) -> Result<(ModelImportProvenance, Option<String>), ApiError> {
+    normalize_import_repo_ids(payload)?;
     let Some(source) = payload.source.take() else {
         // Legacy flat request. `uploadedSourcePath` is set only by the multipart handler, so it is
         // what distinguishes an upload from a copy of a file the user already had.
@@ -4011,6 +4169,7 @@ pub(crate) async fn queue_model_import_job(
     mut payload: ModelImportRequest,
     repair_model_id: Option<String>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    normalize_import_repo_ids(&mut payload)?;
     let repair = if let Some(model_id) = repair_model_id {
         if payload.model_id.as_deref().is_some_and(|id| id != model_id) {
             return Err(ApiError::bad_request(
@@ -4022,16 +4181,9 @@ pub(crate) async fn queue_model_import_job(
                 "Linked originals use relink/rescan, not managed repair",
             ));
         }
-        let model = model_catalog(&state)
+        let model = find_model_by_id(&state, &model_id)
             .await?
-            .into_iter()
-            .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
-            .ok_or_else(|| ApiError {
-                status: StatusCode::NOT_FOUND,
-                detail: "The imported model to repair no longer exists".into(),
-                code: None,
-                context: None,
-            })?;
+            .ok_or_else(|| model_not_found("The imported model to repair no longer exists"))?;
         let binding = sceneworks_core::model_artifacts::provenance::managed_repair_binding(
             &state.settings.data_dir,
             model
@@ -4113,7 +4265,7 @@ pub(crate) async fn queue_model_import_job(
         validate_source_url(source_url)?;
     }
     if let Some(repo) = payload.repo.as_deref() {
-        validate_huggingface_repo(repo)?;
+        payload.repo = Some(validate_huggingface_repo(repo)?.to_owned());
     }
     // Licence acknowledgment, keyed on the repo the import will FETCH (sc-17227). This route had no
     // licence logic at all — `model_import_enabled()` hard-returns `true` and nothing below reads
@@ -4142,7 +4294,7 @@ pub(crate) async fn queue_model_import_job(
     };
     payload.model_type = Some(model_type.clone());
     if let Some(family) = payload.family.take() {
-        let models = model_catalog(&state).await?;
+        let models = model_catalog_snapshot(&state).await?;
         let normalized = normalize_lora_family(&family);
         payload.family = Some(
             if models.iter().any(|model| {
@@ -4198,9 +4350,9 @@ pub(crate) async fn queue_model_import_job(
         .model_id
         .clone()
         .unwrap_or_else(|| slugify_lora_id(&name));
-    let existing_ids = model_catalog(&state)
+    let existing_ids = model_catalog_snapshot(&state)
         .await?
-        .into_iter()
+        .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
     if existing_ids.contains(&model_id) && repair.is_none() {
@@ -4284,10 +4436,8 @@ pub(crate) async fn queue_model_import_job(
     // are provisioned, identically for managed transfers and approved linked sources.
     let import_components = if payload.family.as_deref() == Some("minimax-h3") {
         let base_id = payload.base_model.as_deref().expect("validated H3 base");
-        let base = model_catalog(&state)
+        let base = find_model_by_id(&state, base_id)
             .await?
-            .into_iter()
-            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(base_id))
             .ok_or_else(|| ApiError::bad_request("The selected compatible base is unavailable"))?;
         let default = sceneworks_core::model_artifacts::artifact_selection::model_download(&base)
             .ok_or_else(|| {
@@ -4719,6 +4869,50 @@ pub(crate) fn max_model_upload_bytes() -> usize {
         }
     }
     MAX_MODEL_UPLOAD_BYTES
+}
+
+/// Select from the current shared catalog before cloning. Linked-source availability is probed
+/// for the selected row on every call, just as it is for the full catalog response.
+pub(crate) async fn find_model_catalog_entry(
+    state: &AppState,
+    predicate: impl Fn(&Value) -> bool,
+) -> Result<Option<Value>, ApiError> {
+    let snapshot = model_catalog_snapshot(state).await?;
+    let Some(model) = snapshot.iter().find(|entry| predicate(entry)) else {
+        return Ok(None);
+    };
+    let mut selected = vec![model.clone()];
+    crate::model_sources::refresh_live_external_availability(
+        &state.settings.data_dir,
+        &mut selected,
+    )
+    .await?;
+    Ok(selected.pop())
+}
+
+pub(crate) async fn find_model_by_id(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<Value>, ApiError> {
+    find_model_catalog_entry(state, |entry| {
+        entry.get("id").and_then(Value::as_str) == Some(id)
+    })
+    .await
+}
+
+pub(crate) fn model_not_found(detail: impl Into<String>) -> ApiError {
+    ApiError {
+        status: StatusCode::NOT_FOUND,
+        detail: detail.into(),
+        context: None,
+        code: None,
+    }
+}
+
+pub(crate) async fn require_model_by_id(state: &AppState, id: &str) -> Result<Value, ApiError> {
+    find_model_by_id(state, id)
+        .await?
+        .ok_or_else(|| model_not_found("Model not found"))
 }
 
 /// Catalog without live Hugging Face size estimation: download sizes fall back to
@@ -18386,7 +18580,7 @@ mod minimax_h3_import_declaration_tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
         }
-        let (status, jobs) = request(router, "GET", "/api/v1/jobs", Value::Null).await;
+        let (status, jobs) = request(router.clone(), "GET", "/api/v1/jobs", Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{jobs}");
         assert_eq!(
             jobs.as_array().unwrap().len(),
@@ -18394,6 +18588,44 @@ mod minimax_h3_import_declaration_tests {
             "repair must not queue a stock DiT or unrelated component: {jobs}"
         );
         assert!(store.resolve(&compiled.checkpoint_id).is_ok());
+        let repair_job_id = job["id"].as_str().unwrap();
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                router.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{repair_job_id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+            let (status, replay) = request(
+                router.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{repair_job_id}/{operation}"),
+                json!({"payloadChanges":{"componentId":"text_encoder"}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {replay}");
+        }
+        assert!(
+            sceneworks_core::license_acknowledgments::revoke_acknowledgment(
+                &sceneworks_core::license_acknowledgments::acknowledgments_file(
+                    &settings.config_dir
+                ),
+                inherited_id
+            )
+            .unwrap()
+        );
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                router.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{repair_job_id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{operation}: {replay}");
+        }
     }
 
     #[tokio::test]
@@ -18940,5 +19172,100 @@ mod imported_checkpoint_product_surface_tests {
         ] {
             assert!(entry.get(key).is_none(), "builtin entry gained {key}");
         }
+    }
+}
+
+#[cfg(test)]
+mod model_contract_metadata_tests {
+    use super::*;
+    use sceneworks_core::model_artifacts::external_library::{
+        ExternalArtifactRequirement, ExternalLibraryBindingStore, ModelResolution,
+    };
+
+    #[test]
+    fn import_sources_store_normalized_repo_and_provenance_for_both_wire_shapes() {
+        for (body, expected_reference) in [
+            (json!({"repo":" Owner/_Model.git "}), "Owner/_Model.git"),
+            (
+                json!({"source":{"kind":"huggingFace", "repo":" Owner/_Model.git ", "revision":"main"}}),
+                "Owner/_Model.git@main",
+            ),
+        ] {
+            let mut payload: ModelImportRequest = serde_json::from_value(body).unwrap();
+            let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+            assert_eq!(payload.repo.as_deref(), Some("Owner/_Model.git"));
+            assert_eq!(provenance.reference.as_deref(), Some(expected_reference));
+        }
+        for repo in [
+            "a/b/c",
+            "../name",
+            "owner/model--bad",
+            "owner/bad..name",
+            "owner/model \n name",
+        ] {
+            assert!(validate_huggingface_repo(repo).is_err(), "{repo:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_lookup_refreshes_only_the_selected_current_row_and_keeps_snapshot_immutable()
+    {
+        let _env = crate::tests::support::isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let (_, state) =
+            crate::create_app_with_state(crate::tests::support::test_settings(&temp)).unwrap();
+        let library = temp.path().join("external-library");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let source = library
+            .join("models--owner--model")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("model.safetensors"), b"metadata fixture").unwrap();
+        let requirement = ExternalArtifactRequirement {
+            repository: "owner/model".to_owned(),
+            revision: Some(revision.to_owned()),
+            variant: "default".to_owned(),
+            files: vec![PathBuf::from("model.safetensors")],
+            is_primary: true,
+        };
+        let store = ExternalLibraryBindingStore::new(&state.settings.data_dir).unwrap();
+        let (binding, _) = store
+            .bind_or_probe_validated(&library, std::slice::from_ref(&requirement))
+            .unwrap();
+        let resolution =
+            ModelResolution::external_ready(library.clone(), binding, vec![requirement]).unwrap();
+        let selected = json!({"id":"selected", "modelResolution":resolution});
+        // A corrupt unselected carrier must neither be refreshed nor fail the selected lookup.
+        let snapshot = Arc::new(vec![
+            json!({"id":"other", "modelResolution":{"invalid":true}}),
+            selected.clone(),
+        ]);
+        {
+            let mut cache = state.model_catalog_cache.state.lock();
+            cache.snapshot = Some((
+                cache.generation,
+                crate::generation::enqueue_backend(&state),
+                snapshot.clone(),
+            ));
+        }
+        let detached = temp.path().join("detached");
+        std::fs::rename(&library, &detached).unwrap();
+        let offline = require_model_by_id(&state, "selected").await.unwrap();
+        assert_eq!(
+            offline["modelAvailability"],
+            "installed_external_unavailable"
+        );
+        std::fs::rename(detached, library).unwrap();
+        let mut online = find_model_by_id(&state, "selected").await.unwrap().unwrap();
+        assert_eq!(online["modelAvailability"], "external_ready");
+        online["callerMutation"] = json!(true);
+        assert_eq!(snapshot[1], selected);
+        let current = model_catalog_snapshot(&state).await.unwrap();
+        assert!(Arc::ptr_eq(&snapshot, &current));
+        assert!(find_model_by_id(&state, "missing").await.unwrap().is_none());
+        let missing = require_model_by_id(&state, "missing").await.unwrap_err();
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        assert_eq!(missing.detail, "Model not found");
     }
 }

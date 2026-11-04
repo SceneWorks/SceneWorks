@@ -10,20 +10,14 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::LoadSpec;
 use gen_core::WeightsSource;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::{Settings, WorkerError, WorkerResult};
 
 const DEFAULT_SELECTION_ID: &str = "default";
@@ -116,7 +110,8 @@ fn display_name(source: &WeightsSource) -> String {
 fn source_key(source: &WeightsSource) -> Result<(SourceKind, PathBuf), std::io::Error> {
     Ok((
         source_kind(source),
-        std::path::absolute(source_path(source))?,
+        crate::paths::normalize_absolute_path(source_path(source))
+            .map_err(std::io::Error::other)?,
     ))
 }
 
@@ -241,7 +236,7 @@ fn allowed_roots(data_dir: &Path, external_roots: &[PathBuf]) -> Vec<PathBuf> {
     roots.extend(external_roots.iter().cloned());
     let mut expanded = Vec::new();
     for root in roots {
-        if let Ok(absolute) = std::path::absolute(&root) {
+        if let Ok(absolute) = crate::paths::normalize_absolute_path(&root) {
             expanded.push(absolute);
         }
         if let Ok(canonical) = std::fs::canonicalize(&root) {
@@ -279,10 +274,7 @@ struct EncoderRoute {
     contract: gen_core::EncoderContract,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn encoder_route_for_model(model: &Value) -> Option<EncoderRoute> {
     if let Some(id) = model.get("id").and_then(Value::as_str) {
         if let Some(engine_id) = crate::engines::engine_id_for_model(id) {
@@ -316,10 +308,7 @@ fn encoder_route_for_model(model: &Value) -> Option<EncoderRoute> {
     })
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn encoder_route_for_model(_model: &Value) -> Option<EncoderRoute> {
     None
 }
@@ -420,10 +409,7 @@ pub fn resolve_image_text_encoder_selection(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn selected_id(advanced: &serde_json::Map<String, Value>) -> WorkerResult<Option<&str>> {
     match advanced.get("textEncoderModel") {
         None => Ok(None),
@@ -436,10 +422,7 @@ fn selected_id(advanced: &serde_json::Map<String, Value>) -> WorkerResult<Option
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn base_snapshot_root(spec: &LoadSpec) -> WorkerResult<&Path> {
     if let WeightsSource::Dir(path) = &spec.weights {
         return Ok(path);
@@ -455,10 +438,7 @@ fn base_snapshot_root(spec: &LoadSpec) -> WorkerResult<&Path> {
 
 /// Validate and prepare the selected encoder before any memory fit/planner/provider load sees the
 /// spec. The same returned spec must be reused for the eventual load.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn prepare_selected_text_encoder(
     mut spec: LoadSpec,
     engine_id: &str,
@@ -542,7 +522,20 @@ mod tests {
             SourceKind::File => 0,
             SourceKind::Directory => 1,
         };
-        sources.get(&(kind, std::path::absolute(path).unwrap()))
+        sources.get(&(kind, crate::paths::normalize_absolute_path(path).unwrap()))
+    }
+
+    #[test]
+    fn allowed_roots_and_source_keys_share_lexical_normalization() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("child/../models");
+        let normalized = crate::paths::normalize_absolute_path(&root).unwrap();
+        assert!(allowed_roots(&root, &[]).contains(&normalized));
+        let source = WeightsSource::File(root.join("encoder.safetensors"));
+        assert_eq!(
+            source_key(&source).unwrap().1,
+            normalized.join("encoder.safetensors")
+        );
     }
 
     #[test]
@@ -668,10 +661,7 @@ mod tests {
     /// The paired inference suite continues through `QwenFunControl::load_with_spec`; keeping this
     /// half here prevents SceneWorks from accidentally stripping or rebuilding that receipt before
     /// the provider sees it.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn worker_preparation_and_cache_reject_file_dir_snapshot_mutations_for_bespoke_qwen_control() {
         use std::cell::Cell;

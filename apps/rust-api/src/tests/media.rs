@@ -2048,3 +2048,83 @@ async fn an_rgb_asset_is_unchanged_by_the_alpha_aware_thumbnail_route() {
     );
     assert_eq!(decoded.to_rgb8().as_raw(), source.as_raw());
 }
+
+#[tokio::test]
+async fn expired_media_ticket_route_returns_401_and_new_ticket_restores_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(&temp);
+    settings.access_token = "secret-token".to_owned();
+    let (app, state) = create_app_with_state(settings).unwrap();
+    let auth = [("x-sceneworks-token", "secret-token")];
+    let (status, project) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Ticket expiry"}),
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let root = std::path::PathBuf::from(project["path"].as_str().unwrap());
+    std::fs::create_dir_all(root.join("assets/documents")).unwrap();
+    std::fs::write(
+        root.join("assets/documents/document.json"),
+        b"{\"segments\":[]}",
+    )
+    .unwrap();
+    let url = format!(
+        "/api/v1/projects/{}/files/assets/documents/document.json",
+        project["id"].as_str().unwrap()
+    );
+    let (status, ticket) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/files/ticket",
+        Value::Null,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ticket}");
+    let old = ticket["ticket"].as_str().unwrap();
+    let (status, _, body) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("{url}?ticket={old}"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"{\"segments\":[]}");
+    state.media_tickets.expire_for_test(old);
+    let (status, _, _) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("{url}?ticket={old}"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, fresh) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/files/ticket",
+        Value::Null,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{fresh}");
+    let fresh = fresh["ticket"].as_str().unwrap();
+    assert_ne!(fresh, old);
+    let (status, _, body) = request_raw(
+        app,
+        "GET",
+        &format!("{url}?ticket={fresh}"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"{\"segments\":[]}");
+}

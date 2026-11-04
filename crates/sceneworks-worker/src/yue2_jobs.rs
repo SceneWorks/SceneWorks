@@ -544,11 +544,7 @@ fn primary_rows(entry: &Value) -> Vec<&Value> {
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
+    crate::payload::trimmed_string(value.get(key))
 }
 
 fn tier_of(name: &str) -> Option<Tier> {
@@ -739,7 +735,7 @@ pub(crate) struct Inputs {
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 /// Verify a source run against the identity its producing job recorded, before anything reads it.
@@ -1525,9 +1521,7 @@ pub(crate) fn wav_licence_info(usage_policy: &Value) -> Vec<([u8; 4], String)> {
     // a guess parsed out of the notice prose.
     let license = usage_policy
         .pointer("/license/license")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .unwrap_or("see the model licence");
     let mut copyright = format!("Generated with YuE2 (weights: {license})");
     if flag("nonCommercial") {

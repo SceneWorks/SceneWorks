@@ -1,10 +1,10 @@
+import { fileSha256 } from "./lib/file-sha256.mjs";
 // sc-26235: admitted Windows ordinary API job -> native Candle worker -> saved asset.
 // No downloads or model-library mutations. Reuses the shared lifecycle assertions unchanged.
 import assert from 'node:assert/strict';
 import { spawn, execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import { mkdir, cp, readFile, writeFile, copyFile, open, realpath, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import path from 'node:path';
@@ -48,7 +48,7 @@ const identity = attemptIdentity(output), { state, workerId } = identity;
 const receipt = { schema_version: 1, kind: 'flux3_image_klein_candle_app_lifecycle', status: 'running', phase: 'lifecycle', started_at: new Date().toISOString(), identity: { source_sha: source, inference_sha: inference, model_repo: MODEL_REPO, model_revision: MODEL_REVISION, worker_id: workerId, visibility: '1', physical_gpu_id: '1', logical_cuda_ordinal: 0 }, cache_policy: 'existing cache read-only; no relocate/download/install/reverify endpoints', events: [], timings_seconds: {}, cleanup: [] };
 const secrets = Object.entries(process.env).filter(([k,v]) => /TOKEN|SECRET|PASSWORD|API_KEY/i.test(k) && v?.length >= 8).map(([,v])=>v);
 const save = () => writeFile(path.join(evidence, 'receipt.json'), redactSensitiveText(JSON.stringify(receipt, null, 2)+'\n', secrets));
-const hash = async file => { const h=createHash('sha256'); for await (const chunk of createReadStream(file)) { alive(); h.update(chunk); } return h.digest('hex'); };
+const hash = file => fileSha256(file, { onChunk: alive });
 const children=[], handles=[];
 const controller=new AbortController(); let monitor, endpoint;
 const deadline=setTimeout(()=>controller.abort(new Error('admitted runtime hard deadline (25 minutes)')),25*60_000);
@@ -192,7 +192,7 @@ export async function readbackCandleAppLifecycle(receiptFile, env = process.env)
   console.log(JSON.stringify({ status:receipt.status, receipt:path.join(evidence,'receipt.final.json'), asset:receipt.saved_asset, error:receipt.error }));
   return receipt;
 }
-async function hashReadbackFile(file) { const h=createHash('sha256'); for await(const chunk of createReadStream(file)) h.update(chunk); return h.digest('hex'); }
+const hashReadbackFile = fileSha256;
 async function onceReadbackExit(child) { if(child.exitCode!==null||child.signalCode!==null)return; await new Promise(resolve => child.once('exit',resolve)); }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
