@@ -92,12 +92,23 @@ describe("Model Manager with Qwen Image 2.1 Turbo (sc-25908)", () => {
     delete window.__TAURI__;
     createModelDownloadJob = vi.fn(async () => ({ id: "job", payload: {} }));
     vi.resetModules();
+    let acknowledged = false;
     vi.doMock("./api.js", () => ({
-      apiFetch: vi.fn(async (path) =>
-        path === "/api/v1/host-capabilities"
-          ? { platform: "macos", memoryKind: "unified", memoryGb: 64 }
-          : [],
-      ),
+      apiFetch: vi.fn(async (path, _token, options = {}) => {
+        if (path.endsWith("/license-acknowledgment")) {
+          if (options.method === "PUT") {
+            expect(options.headers).toEqual({ "If-Match": '"turbo-terms"' });
+            acknowledged = true;
+          }
+          if (options.method === "DELETE") acknowledged = false;
+          return { modelId: TURBO_ENTRY.id, acknowledged, termsSha256: "turbo-terms", terms: {
+            license: TURBO_ENTRY.license ?? null, licenseUrl: TURBO_ENTRY.licenseUrl ?? null,
+            licenseNotice: TURBO_ENTRY.licenseNotice ?? null,
+          } };
+        }
+        return path === "/api/v1/host-capabilities"
+          ? { platform: "macos", memoryKind: "unified", memoryGb: 64 } : [];
+      }),
       isAbortError: () => false,
       API_BASE_URL: "",
       eventUrl: () => "",

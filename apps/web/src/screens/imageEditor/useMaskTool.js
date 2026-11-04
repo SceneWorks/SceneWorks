@@ -1,3 +1,4 @@
+import { JOB_PATHS } from "../../api/jobs.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   maskAlphaFromRgba,
@@ -379,7 +380,7 @@ export function useMaskTool({
     const box = rectToSegmentBox(rect);
     const started = await runAiOp({
       label: "smart select",
-      endpoint: "/api/v1/jobs",
+      endpoint: JOB_PATHS.generic,
       layerSource: initiatingTool === "cutout" ? "activeLayer" : "composite",
       buildBody: (scratch) =>
         buildSegmentJobBody({

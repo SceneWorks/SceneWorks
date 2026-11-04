@@ -1,7 +1,6 @@
 import { useCallback, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
+import { useProjectScopedList } from "./useProjectScopedList.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
-import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 
 // Shared global/project-scoped catalog mutations. Recipe presets and prompt
 // batches intentionally expose different domain names, but their request,
@@ -11,7 +10,7 @@ export function useScopedCrudList({
   activeProject,
   activeProjectRef,
   setError,
-  resourcePath,
+  request,
   projectRequiredMessage,
 }) {
   const [items, setItems] = useState([]);
@@ -23,41 +22,16 @@ export function useScopedCrudList({
     [activeProjectRef],
   );
 
-  const refresh = useCallback(
-    async (projectId = activeProject?.id, { signal } = {}) => {
-      if (
-        projectId &&
-        !isCurrentProjectRequest(activeProject?.id ?? null, projectId)
-      ) return refreshFailure("stale");
-      try {
-        const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-        const next = await apiFetch(`${resourcePath}${query}`, token, { signal });
-        if (!isCurrentRequest(projectId)) return refreshFailure("stale");
-        setItems(next);
-        setError("");
-        return refreshSuccess(next);
-      } catch (error) {
-        if (!isCurrentRequest(projectId)) return refreshFailure("stale", error);
-        if (isAbortError(error)) return refreshFailure("aborted", error);
-        setError(error.message);
-        return refreshFailure("error", error);
-      }
-    },
-    [activeProject, isCurrentRequest, resourcePath, setError, token],
-  );
+  const refresh = useProjectScopedList({
+    token, activeProject, activeProjectRef, setError, optionalProject: true,
+    load: (projectId, token, options) => request(null, token, options, { projectId }),
+    setItems,
+  });
 
-  const scopeQuery = useCallback(
-    (scope = null) => {
-      const params = new URLSearchParams();
-      if (scope) params.set("scope", scope);
-      if (scope === "project" && activeProject?.id) {
-        params.set("projectId", activeProject.id);
-      }
-      const value = params.toString();
-      return value ? `?${value}` : "";
-    },
-    [activeProject],
-  );
+  const scopeOptions = useCallback((scope = null) => ({
+    scope,
+    projectId: scope === "project" ? activeProject?.id : undefined,
+  }), [activeProject]);
 
   const refreshCurrent = useCallback(async () => {
     const projectId = activeProject?.id ?? null;
@@ -69,53 +43,53 @@ export function useScopedCrudList({
       if (payload.scope === "project" && !activeProject) {
         throw new Error(projectRequiredMessage);
       }
-      const created = await apiFetch(`${resourcePath}${scopeQuery(payload.scope)}`, token, {
+      const created = await request(null, token, {
         method: "POST",
         body: JSON.stringify(payload),
-      });
+      }, scopeOptions(payload.scope));
       await refreshCurrent();
       return created;
     },
-    [activeProject, projectRequiredMessage, refreshCurrent, resourcePath, scopeQuery, token],
+    [activeProject, projectRequiredMessage, refreshCurrent, request, scopeOptions, token],
   );
 
   const update = useCallback(
     async (id, payload, scope = payload.scope) => {
-      const updated = await apiFetch(
-        `${resourcePath}/${encodeURIComponent(id)}${scopeQuery(scope)}`,
+      const updated = await request(
+        id,
         token,
-        { method: "PATCH", body: JSON.stringify(payload) },
+        { method: "PATCH", body: JSON.stringify(payload) }, scopeOptions(scope),
       );
       await refreshCurrent();
       return updated;
     },
-    [refreshCurrent, resourcePath, scopeQuery, token],
+    [refreshCurrent, request, scopeOptions, token],
   );
 
   const duplicate = useCallback(
     async (id, scope = null) => {
-      const duplicated = await apiFetch(
-        `${resourcePath}/${encodeURIComponent(id)}/duplicate${scopeQuery(scope)}`,
+      const duplicated = await request(
+        id,
         token,
-        { method: "POST", body: JSON.stringify({}) },
+        { method: "POST", body: JSON.stringify({}) }, { ...scopeOptions(scope), duplicate: true },
       );
       await refreshCurrent();
       return duplicated;
     },
-    [refreshCurrent, resourcePath, scopeQuery, token],
+    [refreshCurrent, request, scopeOptions, token],
   );
 
   const remove = useCallback(
     async (id, scope = null) => {
-      const removed = await apiFetch(
-        `${resourcePath}/${encodeURIComponent(id)}${scopeQuery(scope)}`,
+      const removed = await request(
+        id,
         token,
-        { method: "DELETE" },
+        { method: "DELETE" }, scopeOptions(scope),
       );
       await refreshCurrent();
       return removed;
     },
-    [refreshCurrent, resourcePath, scopeQuery, token],
+    [refreshCurrent, request, scopeOptions, token],
   );
 
   return { items, setItems, refresh, create, update, duplicate, remove };
