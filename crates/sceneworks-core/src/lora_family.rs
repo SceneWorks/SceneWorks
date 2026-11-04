@@ -3313,7 +3313,7 @@ fn extra_compatible_lora_families(normalized_family: &str) -> &'static [&'static
 /// model's own family plus its extra-compatible families). Empty when the family
 /// is unknown — callers treat that as "skip validation".
 pub fn accepted_lora_families(model_family: &str) -> Vec<String> {
-    let normalized = normalize_model_family(model_family);
+    let normalized = canonical_lora_family(model_family);
     if normalized.is_empty() {
         return Vec::new();
     }
@@ -3391,7 +3391,7 @@ pub fn lora_declared_families(lora: &Value) -> Vec<String> {
     let mut families: Vec<String> = raw
         .iter()
         .filter_map(Value::as_str)
-        .map(normalize_model_family)
+        .map(canonical_lora_family)
         .filter(|family| !family.is_empty())
         .collect();
     families.sort();
@@ -3608,7 +3608,7 @@ pub fn validate_lora_compatibility_with_manifest(
     model_id: Option<&str>,
     model: Option<&Map<String, Value>>,
 ) -> Result<(), String> {
-    let normalized_model_family = model_family.map(normalize_model_family).unwrap_or_default();
+    let normalized_model_family = model_family.map(canonical_lora_family).unwrap_or_default();
     let accepted = model_family.map(accepted_lora_families).unwrap_or_default();
     if loras.is_empty() {
         return Ok(());
