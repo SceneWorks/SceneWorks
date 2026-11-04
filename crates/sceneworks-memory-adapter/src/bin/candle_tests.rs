@@ -407,6 +407,11 @@ fn qwen_edit_source(
     fixtures.qwen_edit_source(arm.lightning, tier, QWEN_EDIT_TEST_REVISION)
 }
 
+const QWEN_EDIT_MEMBERS: [(QwenEditArm, &str); 2] = [
+    (QWEN_EDIT_ARM, "qwen_image_edit_2511"),
+    (QWEN_EDIT_LIGHTNING_ARM, "qwen_image_edit_2511_lightning"),
+];
+
 /// sc-22728: the ONE thing that makes the Lightning member Lightning at load time. Every
 /// downstream claim — the record's `builtInAdapters` count, the gated fragment's overlay
 /// selection, and the run context's `overlay` (which `validate_edit_route` pins against the
