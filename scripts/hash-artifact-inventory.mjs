@@ -1,23 +1,15 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { fileSha256 as hashFileSha256 } from "./lib/file-sha256.mjs";
 import { appendFile, lstat, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-async function fileSha256(file, signal) {
-  // Read every byte even when a Hugging Face snapshot symlink points at a 64-hex blob name. The
-  // name is useful cache metadata, but trusting it would let a corrupted or replaced same-size blob
-  // retain the old inventory receipt.
-  const hash = createHash("sha256");
-  signal?.throwIfAborted();
-  for await (const chunk of createReadStream(file, { signal })) {
-    hash.update(chunk);
-    signal?.throwIfAborted();
-  }
-  return hash.digest("hex");
+// Hash actual content even when a snapshot symlink names a 64-hex Hugging Face blob.
+function fileSha256(file, signal) {
+  return hashFileSha256(file, { signal });
 }
 
 function assertInsideTrustedRoot(resolvedTrustedRoot, resolved, label) {

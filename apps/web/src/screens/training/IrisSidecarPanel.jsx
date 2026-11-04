@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useLayoutEffect, useRef, useState } from "react";
 
 import { errorMessage } from "../../errorMessage.js";
 import { IRIS_SIDECAR_KINDS, itemSidecarState, matchSidecarFiles } from "../../training/irisTaskOptions.js";
@@ -21,9 +21,18 @@ export function IrisSidecarPanel({ items = [], onSidecar }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState({ message: "", error: "" });
   const [depthFields, setDepthFields] = useState({});
+  const batchOwner = useRef(null);
+  useLayoutEffect(() => {
+    const owner = {};
+    batchOwner.current = owner;
+    setBusy(false);
+    setStatus({ message: "", error: "" });
+    return () => { batchOwner.current = null; };
+  }, [onSidecar]);
   const saved = items.filter((item) => item?.id);
 
   async function apply(jobs, unmatched = []) {
+    const owner = batchOwner.current;
     setBusy(true);
     setStatus({ message: "", error: "" });
     const errors = [];
@@ -35,6 +44,7 @@ export function IrisSidecarPanel({ items = [], onSidecar }) {
       } catch (error) {
         errors.push(`${item.displayName ?? item.id}: ${errorMessage(error, "failed")}`);
       }
+      if (batchOwner.current !== owner) return;
     }
     setBusy(false);
     setStatus({
