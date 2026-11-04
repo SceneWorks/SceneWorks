@@ -4953,4 +4953,5 @@ impl MemoryAnchorStore {
 }
 
 #[cfg(test)]
+#[path = "memory_anchor/tests.rs"]
 mod tests;
