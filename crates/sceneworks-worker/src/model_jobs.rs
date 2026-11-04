@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) mod receipt_verification;
 
 use sceneworks_core::base_weights::{
@@ -89,6 +89,7 @@ pub(crate) async fn run_model_download_job(
     // Hugging Face path before it reaches `HuggingFaceSnapshot::resolve`'s URL builder or the
     // `download_snapshot_into_cache` refs/snapshot joins below — the on-demand tier fetches already
     // gate this in `ensure_hf_files_cached`, but this user-facing entry point did not (sc-13583).
+    let repo = validate_hf_repo_id(repo)?;
     validate_hf_download_inputs(repo, revision, &files)?;
     // The worker is the trust boundary (jobs API is unauthenticated for local use), so a
     // client-supplied targetDir must be constrained to app-managed data/models the same way
@@ -388,6 +389,7 @@ pub(crate) async fn run_lora_download_job(
     // Trust-boundary validation for the LAN-exposed jobs API (epic 4484), mirroring
     // `run_model_download_job`: reject a path-escaping repo/revision/pattern before the URL builder
     // and the `download_snapshot_into_cache` refs/snapshot joins downstream (sc-13583).
+    let repo = validate_hf_repo_id(repo)?;
     validate_hf_download_inputs(repo, revision, &files)?;
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -750,7 +752,7 @@ fn convert_flux2_klein_diffusers(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 fn convert_flux2_klein_diffusers(
     _source_file: &Path,
     _base_dir: &Path,
@@ -1337,9 +1339,7 @@ async fn resolve_convert_plan(
             // VAE/text-encoder/tokenizer are dense and identical across tiers, so the manifest's
             // `convertBaseSubdir` names the preferred tier and any installed tier serves. A base with a
             // plain root diffusers layout (no `baseSubdir`) borrows from the snapshot root (sc-14978).
-            let base_subdir = optional_payload_string(&job.payload, "baseSubdir")
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
+            let base_subdir = optional_payload_string(&job.payload, "baseSubdir");
             let Some(base_dir) = resolve_flux2_klein_base_dir(&base_snapshot, base_subdir) else {
                 return Ok(Err(ConvertPlanError {
                     message: "Base FLUX.2-klein model is installed but incomplete.",
@@ -1365,7 +1365,6 @@ async fn resolve_convert_plan(
             }
             let upscaler_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
             let upscaler_file = optional_payload_string(&job.payload, "upscalerFile")
-                .filter(|value| !value.trim().is_empty())
                 .unwrap_or(LTX_SPATIAL_UPSCALER_FILE)
                 .to_owned();
             let Some(upscaler_dir) =
@@ -2240,10 +2239,7 @@ fn confined_renamed_hf_single_file(
 /// NOTICE) would otherwise strand every install made at the previous commit — the Model Manager
 /// still sees the tier on disk while a render fails "not installed". Rows without a declaration
 /// resolve exactly as [`huggingface_pinned_snapshot_dir`] always has.
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn huggingface_pinned_tier_snapshot_dir(
     data_dir: &Path,
     repo: &str,
@@ -2727,12 +2723,7 @@ pub(crate) fn resolve_co_requisites_for_tier(
 /// the same reason `files` and `revision` are (sc-13583 / sc-13842): a `..`/absolute entry would
 /// otherwise stage an arbitrary host directory as this component's weights.
 fn component_dir(snapshot: &Path, download: &Value, model_id: &str) -> WorkerResult<PathBuf> {
-    let Some(subdir) = download
-        .get("subdir")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(subdir) = crate::payload::trimmed_string(download.get("subdir")) else {
         return Ok(snapshot.to_path_buf());
     };
     let dir = safe_join(snapshot, subdir)?;
@@ -3028,8 +3019,6 @@ pub(crate) fn resolved_files_tree_stamp(
 }
 
 fn artifact_content_fingerprint(root: &Path) -> WorkerResult<String> {
-    use std::io::Read;
-
     let mut digest = Sha256::new();
     for path in artifact_files(root)? {
         let relative = path.strip_prefix(root).map_err(|_| {
@@ -3045,26 +3034,10 @@ fn artifact_content_fingerprint(root: &Path) -> WorkerResult<String> {
         if metadata.file_type().is_symlink() {
             digest.update(std::fs::read_link(&path)?.to_string_lossy().as_bytes());
             if std::fs::metadata(&path)?.is_file() {
-                let mut file = std::fs::File::open(&path)?;
-                let mut buffer = [0_u8; 64 * 1024];
-                loop {
-                    let read = file.read(&mut buffer)?;
-                    if read == 0 {
-                        break;
-                    }
-                    digest.update(&buffer[..read]);
-                }
+                sceneworks_core::hashing::update_sha256(std::fs::File::open(&path)?, &mut digest)?;
             }
         } else if metadata.is_file() {
-            let mut file = std::fs::File::open(&path)?;
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let read = file.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                digest.update(&buffer[..read]);
-            }
+            sceneworks_core::hashing::update_sha256(std::fs::File::open(&path)?, &mut digest)?;
         }
         digest.update([0xff]);
     }
@@ -3106,9 +3079,7 @@ pub(crate) fn write_app_managed_artifact_receipt(
         tree_stamp,
     };
     let marker = root.join(ARTIFACT_PROVENANCE_MARKER);
-    let temporary = root.join(format!("{ARTIFACT_PROVENANCE_MARKER}.tmp"));
-    std::fs::write(&temporary, serde_json::to_vec_pretty(&receipt)?)?;
-    std::fs::rename(temporary, marker)?;
+    sceneworks_core::fsutil::write_atomic(&marker, &serde_json::to_vec_pretty(&receipt)?)?;
     Ok(ResolvedArtifactProvenance {
         identity: ResolvedArtifactIdentity {
             repository: repository.to_owned(),
@@ -3937,7 +3908,7 @@ mod artifact_provenance_tests {
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn huggingface_receipt_weights_dir(
     data_dir: &Path,
     repo: &str,
@@ -4004,7 +3975,7 @@ pub(crate) fn huggingface_receipt_weights_dir_at_revision(
 /// Exact PUP package handoff: every file the native package can consume must belong to the
 /// verified download inventory, including an optional shipped system-prompt override. A compatible
 /// Qwen directory or an extra unreceipted sidecar is not an installation receipt.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn flux3_prompt_upsampler_snapshot(data_dir: &Path) -> Option<PathBuf> {
     use gen_core_flux3::pup::{
         SYSTEM_PROMPTS_FILE, UPSAMPLER_REPO, UPSAMPLER_REQUIRED_FILES, UPSAMPLER_REVISION,
@@ -4091,7 +4062,7 @@ pub(crate) fn flux3_prompt_upsampler_snapshot(data_dir: &Path) -> Option<PathBuf
     inventory.is_empty().then(|| root.clone())
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn huggingface_receipt_weights(
     data_dir: &Path,
     repo: &str,
@@ -4179,7 +4150,7 @@ fn huggingface_receipt_weights_with_revision(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProvenanceRepair {
     Allow,
-    #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+    #[cfg(any(test, native_lane))]
     Skip,
 }
 
@@ -4359,11 +4330,7 @@ fn receipt_weights_dir_from_marker(
         let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
         let snapshots = repo_dir.join("snapshots");
         let snapshot_entries = std::fs::read_dir(&snapshots).ok()?;
-        let recorded_revision = receipt
-            .get("snapshotRevision")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|revision| !revision.is_empty());
+        let recorded_revision = crate::payload::trimmed_string(receipt.get("snapshotRevision"));
         let matching = snapshot_entries
             .flatten()
             .map(|entry| entry.path())
@@ -5131,6 +5098,7 @@ pub(crate) async fn ensure_hf_files_cached(
     revision: &str,
     files: &[String],
 ) -> WorkerResult<Option<PathBuf>> {
+    let repo = validate_hf_repo_id(repo)?;
     validate_hf_download_inputs(repo, revision, files)?;
     let repo_dir = huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -5186,37 +5154,9 @@ pub(crate) fn validate_hf_download_inputs(
     Ok(())
 }
 
-fn validate_hf_repo_id(repo: &str) -> WorkerResult<()> {
-    let parts = safe_hf_path_parts(repo, "Hugging Face repo")?;
-    if parts.len() > 2 {
-        return Err(WorkerError::InvalidPayload(
-            "Hugging Face repo must be `name` or `namespace/name`.".to_owned(),
-        ));
-    }
-    for part in parts {
-        if !part.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        }) {
-            return Err(WorkerError::InvalidPayload(format!(
-                "Invalid Hugging Face repo `{repo}`: only letters, numbers, `.`, `_`, `-`, and one `/` separator are allowed."
-            )));
-        }
-        if part.starts_with('-')
-            || part.starts_with('.')
-            || part.ends_with('-')
-            || part.ends_with('.')
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "Invalid Hugging Face repo `{repo}`: path components cannot start or end with `-` or `.`."
-            )));
-        }
-        if part.contains("--") || part.contains("..") {
-            return Err(WorkerError::InvalidPayload(format!(
-                "Invalid Hugging Face repo `{repo}`: path components cannot contain `--` or `..`."
-            )));
-        }
-    }
-    Ok(())
+fn validate_hf_repo_id(repo: &str) -> WorkerResult<&str> {
+    sceneworks_core::hf_repo_id::parse(repo)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_owned()))
 }
 
 fn validate_hf_revision(revision: &str) -> WorkerResult<()> {
@@ -5331,7 +5271,9 @@ pub(crate) async fn run_lora_import_job(
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     validate_lora_import_digest_contract(&job.payload)?;
-    let repo = optional_payload_string(&job.payload, "repo");
+    let repo = optional_payload_string(&job.payload, "repo")
+        .map(validate_hf_repo_id)
+        .transpose()?;
     let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
     let target_name = optional_payload_string(&job.payload, "loraId")
@@ -5384,6 +5326,7 @@ pub(crate) async fn run_lora_import_job(
         // Trust-boundary validation for the LAN-exposed jobs API (epic 4484): a LoRA HF import takes a
         // caller-supplied repo/revision/files and resolves them into download URLs and on-disk paths,
         // so reject anything that could escape the intended Hugging Face path (sc-13583).
+        let repo = validate_hf_repo_id(repo)?;
         validate_hf_download_inputs(repo, revision, &files)?;
         let snapshot =
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
@@ -5628,9 +5571,7 @@ fn ltx_import_base_model_error(
             .get("manifestEntry")
             .and_then(Value::as_object)
             .and_then(|entry| entry.get("baseModel"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|base| !base.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
     });
     match recorded {
         None => Some(
@@ -6512,14 +6453,7 @@ fn managed_provenance_from_payload(payload: &JsonObject) -> WorkerResult<Managed
     let Some(object) = payload.get("importProvenance").and_then(Value::as_object) else {
         return Ok(ManagedProvenanceV1::of_source("legacy-import"));
     };
-    let field = |key: &str| {
-        object
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-    };
+    let field = |key: &str| crate::payload::trimmed_string(object.get(key)).map(str::to_owned);
     let provenance = ManagedProvenanceV1 {
         source: field("source").unwrap_or_else(|| "legacy-import".to_owned()),
         reference: field("reference"),
@@ -6671,11 +6605,7 @@ async fn authenticate_import_recovery(
             return Ok(false);
         };
         // IDs are server-generated, but do not interpolate an arbitrary persisted path.
-        if parent.is_empty()
-            || !parent
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
+        if !sceneworks_core::ids::is_safe_id(parent) {
             return Ok(false);
         }
         let previous: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{parent}")).await?;
@@ -6855,7 +6785,9 @@ pub(crate) async fn run_model_import_job(
         return run_linked_checkpoint_import_job(api, settings, job, &root_id, &relative_path)
             .await;
     }
-    let repo = optional_payload_string(&job.payload, "repo");
+    let repo = optional_payload_string(&job.payload, "repo")
+        .map(validate_hf_repo_id)
+        .transpose()?;
     let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
     let target_name = optional_payload_string(&job.payload, "modelId")
@@ -6927,6 +6859,7 @@ pub(crate) async fn run_model_import_job(
         // Trust-boundary validation for the LAN-exposed jobs API (epic 4484): a model HF import takes a
         // caller-supplied repo/revision/files and resolves them into download URLs and on-disk paths,
         // so reject anything that could escape the intended Hugging Face path (sc-13583).
+        let repo = validate_hf_repo_id(repo)?;
         validate_hf_download_inputs(repo, revision, &files)?;
         let snapshot =
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;

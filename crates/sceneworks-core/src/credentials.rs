@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::store_util::{lock_store_path, random_hex};
+use crate::store_util::lock_store_path;
 
 /// Filename of the credential store. Shared so the rust-api (writer) and the worker
 /// (reader) never drift.
@@ -287,72 +287,17 @@ impl CredentialFileStore {
     }
 
     fn save(&self, map: &BTreeMap<String, CredentialEntry>) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let body = serde_json::to_string_pretty(map)?;
-        // Stage into a sibling temp file then atomically rename into place, so a
-        // crash never leaves a half-written or default-mode secrets file. On Unix
-        // the temp is created 0600 up front, closing the window where the token
-        // was briefly world/group-readable between a plain write and the chmod
-        // (sc-4268 / F-CORE-8).
-        let extension = self
-            .path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("json");
-        let token = random_hex(8).map_err(io::Error::other)?;
-        let tmp_path = self.path.with_extension(format!("{extension}.{token}.tmp"));
-        write_secret_file(&tmp_path, body.as_bytes())?;
-        std::fs::rename(&tmp_path, &self.path)?;
-        // Persist the rename itself so the new name survives a crash too (the temp
-        // fsync in `write_secret_file` only covered the bytes) (sc-8949 / F-147).
-        sync_parent_dir(&self.path);
-        // Backstop: re-assert 0600 on the final path in case it already existed
-        // with looser permissions on a platform without atomic-mode creation.
-        restrict_permissions(&self.path)?;
-        Ok(())
-    }
-}
-
-/// Write `contents` to `path`, creating the file with `0600` from the start on
-/// Unix so a secret is never momentarily readable by other local users. On other
-/// platforms this is a plain write (the desktop build keeps secrets in the OS
-/// keychain, not this file).
-///
-/// The `sync_all` flushes the bytes to disk before the caller renames the temp
-/// into place, so a crash can't leave a zero-length or partial credentials file
-/// where the atomic rename promised all-or-nothing (sc-8949 / F-147).
-#[cfg(unix)]
-fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()
-}
-
-#[cfg(not(unix))]
-fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    let mut file = std::fs::File::create(path)?;
-    file.write_all(contents)?;
-    file.sync_all()
-}
-
-/// fsync the directory holding `path` so a just-completed rename is durable. Best
-/// effort: the temp fsync already makes the credential bytes durable, so a platform
-/// that refuses to fsync a directory handle doesn't fail the write (sc-8949).
-fn sync_parent_dir(path: &Path) {
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        let body = serde_json::to_vec_pretty(map)?;
+        crate::fsutil::write_atomic_with(
+            &self.path,
+            &body,
+            crate::fsutil::AtomicWriteOptions {
+                secret: true,
+                ..Default::default()
+            },
+            || Ok::<(), io::Error>(()),
+        )?;
+        restrict_permissions(&self.path)
     }
 }
 
@@ -632,13 +577,23 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "final file must be 0600");
-        let tmp = store.path().with_extension("json.tmp");
-        assert!(
-            !tmp.exists(),
-            "staging temp must be renamed away, not left behind"
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("entries").count(),
+            1,
+            "only the published credential file may remain"
         );
         // Content round-trips through the atomic write.
         assert_eq!(store.load().expect("load")["example.com"].token, "tok");
+    }
+
+    #[test]
+    fn failed_secret_publication_cleans_up_temporary_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialFileStore::new(dir.path());
+        std::fs::create_dir(store.path()).expect("destination directory");
+        assert!(store.save(&BTreeMap::new()).is_err());
+        assert!(store.path().is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).expect("entries").count(), 1);
     }
 
     #[cfg(unix)]

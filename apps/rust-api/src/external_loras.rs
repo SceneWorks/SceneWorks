@@ -18,11 +18,11 @@
 //!   worker's `normalize_app_managed_lora_path` admits it because the same root
 //!   list is configured there.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use sceneworks_core::external_roots::comfyui_lora_dirs;
+use sceneworks_core::external_roots::{walk_confined, ExternalScanCache};
 use sceneworks_core::lora_family::{
     detect_lora_family, is_safetensors_file, read_safetensors_header,
 };
@@ -45,63 +45,8 @@ const MAX_SCAN_DEPTH: usize = 8;
 /// should get a truncated list rather than a stalled API.
 const MAX_ADAPTERS_PER_ROOT: usize = 4096;
 
-/// Memo of the family detected for each adapter, keyed by its identity on disk.
-///
-/// `lora_catalog` is rebuilt on **every job-create**, and family detection means
-/// parsing a safetensors header — for a real Wan adapter that is a ~1200-entry JSON
-/// blob. A user with a large ComfyUI collection (the very user this feature targets)
-/// would otherwise re-parse every header before every generation. The walk and the
-/// `stat` stay cheap and always run, so added, removed, or *modified* files are
-/// picked up immediately; only the header read is skipped, and only when size and
-/// mtime both match what was parsed last time.
-#[derive(Default)]
-pub(crate) struct ExternalLoraCache {
-    entries: HashMap<PathBuf, CachedAdapter>,
-}
-
-#[derive(Clone)]
-struct CachedAdapter {
-    modified: Option<SystemTime>,
-    size: u64,
-    /// `None` = header parsed fine but no family could be identified. Cached too,
-    /// so an unidentifiable adapter is not re-parsed on every catalog build.
-    family: Option<String>,
-}
-
-impl ExternalLoraCache {
-    /// The cached family for `path` when the file is byte-identical (same size and
-    /// mtime) to the one we parsed. Outer `None` = cache miss, parse the header.
-    fn get(&self, path: &Path, modified: Option<SystemTime>, size: u64) -> Option<Option<String>> {
-        let entry = self.entries.get(path)?;
-        // A file whose mtime is unavailable can never be proven unchanged.
-        let modified = modified?;
-        let cached_modified = entry.modified?;
-        (entry.size == size && cached_modified == modified).then(|| entry.family.clone())
-    }
-
-    fn insert(
-        &mut self,
-        path: PathBuf,
-        modified: Option<SystemTime>,
-        size: u64,
-        family: Option<String>,
-    ) {
-        self.entries.insert(
-            path,
-            CachedAdapter {
-                modified,
-                size,
-                family,
-            },
-        );
-    }
-
-    /// Drop memos for adapters that are no longer on disk, so a long-lived process
-    /// that watches a churning directory does not grow without bound.
-    fn retain_seen(&mut self, seen: &HashSet<PathBuf>) {
-        self.entries.retain(|path, _| seen.contains(path));
-    }
-}
+/// Cached header detections for external files.
+pub(crate) type ExternalLoraCache = ExternalScanCache<Option<String>>;
 
 /// Scan each configured root's `loras/` subdirectory and return synthesized catalog
 /// rows, one per `.safetensors` adapter found. Returns empty when no roots are
@@ -165,40 +110,12 @@ pub(crate) fn scan_external_loras(roots: &[PathBuf], cache: &mut ExternalLoraCac
 /// a path would be rejected at generation time anyway. Surfacing a row the worker
 /// will later refuse to load would be worse than not surfacing it.
 fn collect_adapters(root: &Path) -> Vec<PathBuf> {
-    let mut adapters = Vec::new();
-    let mut stack = vec![(root.to_path_buf(), 0_usize)];
-    while let Some((dir, depth)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if adapters.len() >= MAX_ADAPTERS_PER_ROOT {
-                tracing::warn!(
-                    root = %root.display(),
-                    limit = MAX_ADAPTERS_PER_ROOT,
-                    "external LoRA scan hit its per-root cap; remaining files ignored"
-                );
-                return adapters;
-            }
-            let path = entry.path();
-            // `canonicalize` resolves any symlink and proves existence; anything that
-            // lands outside the declared root is not ours to read.
-            let Ok(canonical) = std::fs::canonicalize(&path) else {
-                continue;
-            };
-            if !canonical.starts_with(root) {
-                continue;
-            }
-            if canonical.is_dir() {
-                if depth < MAX_SCAN_DEPTH {
-                    stack.push((canonical, depth + 1));
-                }
-            } else if is_safetensors_file(&canonical) {
-                adapters.push(canonical);
-            }
-        }
-    }
-    adapters
+    walk_confined(
+        root,
+        MAX_SCAN_DEPTH,
+        MAX_ADAPTERS_PER_ROOT,
+        is_safetensors_file,
+    )
 }
 
 /// Build one catalog row for `adapter`. `None` when the file has no readable
@@ -292,6 +209,7 @@ fn unique_id(display_name: &str, used_ids: &mut HashSet<String>) -> String {
 mod tests {
     use super::*;
     use serde_json::Map;
+    use std::time::SystemTime;
 
     /// Write a syntactically valid safetensors file whose header declares `keys`.
     /// Only the header is ever read, but the declared tensor data must actually be
@@ -570,17 +488,17 @@ mod tests {
         let mut cache = ExternalLoraCache::default();
         let rows = scan_external_loras(std::slice::from_ref(&root), &mut cache);
         assert_eq!(rows.len(), 1);
-        assert_eq!(cache.entries.len(), 1, "the adapter is memoized");
+        assert_eq!(cache.len(), 1, "the adapter is memoized");
 
         // A second scan of the unchanged tree yields the same rows, now from cache.
         let again = scan_external_loras(std::slice::from_ref(&root), &mut cache);
         assert_eq!(again, rows);
-        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.len(), 1);
 
         std::fs::remove_file(&adapter).expect("remove adapter");
         let empty = scan_external_loras(&[root], &mut cache);
         assert!(empty.is_empty());
-        assert!(cache.entries.is_empty(), "vanished adapters are pruned");
+        assert!(cache.is_empty(), "vanished adapters are pruned");
     }
 
     /// Manual smoke against a real ComfyUI tree — the only test that exercises the

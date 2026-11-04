@@ -13,10 +13,7 @@ fn moss_live_budget(settings: &Settings) -> WorkerResult<gen_core::MemoryBudget>
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
-        let budget = crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&settings.gpu_id),
-            crate::vram_gate::cuda_vram_cap_gb(),
-        )
+        let budget = crate::vram_gate::live_capped_budget_fresh_blocking(&settings.gpu_id)
         .ok_or_else(|| {
             WorkerError::InvalidPayload(
                 "MOSS-Image device memory budget unavailable; refusing an unbounded load".into(),
@@ -131,11 +128,7 @@ fn moss_pin_spec_with_adapters(
             } else {
                 gen_core::moss_image_edit::EDIT_WEIGHTS_SHA256
             };
-            if pin
-                .content_sha256()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+            if sceneworks_core::hashing::hex(pin.content_sha256())
                 != expected
             {
                 return Err(WorkerError::InvalidPayload(format!(
@@ -467,7 +460,7 @@ fn write_moss_tensor_companion(
         "assets/tensors/{}/{index:04}.sceneworks-workflow.json",
         plan.genset_id
     );
-    let path = safe_join(project, &relative)?;
+    let path = safe_project_path(project, &relative)?;
     std::fs::write(path, &bytes)?;
     Ok(
         json!({"path":relative,"mimeType":"application/json","sha256":format!("{:x}",Sha256::digest(&bytes))}),
@@ -531,7 +524,7 @@ fn emit_moss_advanced_outputs(
                 )
                 .map_err(WorkerError::InvalidPayload)?;
                 let relative = format!("assets/tensors/{}/{index:04}.npy", plan.genset_id);
-                let path = safe_join(project, &relative)?;
+                let path = safe_project_path(project, &relative)?;
                 std::fs::create_dir_all(path.parent().expect("tensor directory"))?;
                 std::fs::write(&path, &bytes)?;
                 let metadata = sceneworks_core::tensor_artifact::inspect(&path)
@@ -675,7 +668,7 @@ pub(crate) fn moss_generation_preload_for_test_with_check(
         let tensor_bytes = headers.iter().try_fold(0_u64, |sum, header| sum.checked_add(header.data_bytes)
             .ok_or_else(|| WorkerError::InvalidPayload("MOSS adapter header bytes overflow".into())))?;
         let pin=gen_core::PinnedWeightsFile::pin_with_check(&adapter.path, &mut *check).map_err(|e|crate::classify_engine_error("MOSS adapter preload canceled", e))?;
-        let sha256=pin.content_sha256().iter().map(|byte|format!("{byte:02x}")).collect::<String>();
+        let sha256=sceneworks_core::hashing::hex(pin.content_sha256());
         pin.ensure_unchanged().map_err(|e|WorkerError::InvalidPayload(e.to_string()))?;
         Ok(json!({"path":adapter.path,"scale":adapter.scale,"tensorBytes":tensor_bytes,"sha256":sha256}))
     }).collect::<WorkerResult<Vec<Value>>>()?;

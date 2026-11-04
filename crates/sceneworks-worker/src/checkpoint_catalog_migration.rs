@@ -221,12 +221,7 @@ fn migration_candidate(
     }
     // The manifest upsert is keyed on `id`; an entry without one cannot be written back, so it is
     // not a candidate rather than a failure.
-    let model_id = entry
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())?
-        .to_owned();
+    let model_id = crate::payload::trimmed_string(entry.get("id"))?.to_owned();
     // The path a bespoke lane would LOAD from — deliberately not the wider installed-path reading,
     // which accepts a provenance-only breadcrumb naming bytes this entry does not own.
     let declared = imported_entry_loadable_path(entry)?;

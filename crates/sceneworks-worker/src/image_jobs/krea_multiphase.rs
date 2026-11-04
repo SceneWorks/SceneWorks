@@ -596,10 +596,7 @@ async fn generate_krea_multiphase_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (generation_memory, memory_strategy_context) = {
         let tier = candle_resolved_tier_key(request, &weights_dir, false);
-        let raw_budget = crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-            crate::vram_gate::cuda_vram_cap_gb(),
-        );
+        let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
         let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
         let budget = raw_budget
             .map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));

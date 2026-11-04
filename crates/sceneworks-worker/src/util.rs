@@ -103,10 +103,7 @@ pub(crate) async fn with_hf_auth(
 /// all of which compile only on macOS OR the off-Mac candle lane. On the Linux `parity`
 /// lane (non-macOS, default features) none of those callers compile, so leaving this
 /// helper ungated makes it dead code under `-D warnings` (sc-11175, Linux parity fix).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn resolve_env_file_pin(
     key: &str,
     value: Option<std::ffi::OsString>,
@@ -125,10 +122,7 @@ pub(crate) fn resolve_env_file_pin(
     )))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn resolved_cache_paths_match<const N: usize>(
     cached: [&Path; N],
     requested: [&Path; N],
@@ -136,13 +130,7 @@ pub(crate) fn resolved_cache_paths_match<const N: usize>(
     cached == requested
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod cache_path_tests {
     use super::*;
 
