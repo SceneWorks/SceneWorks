@@ -156,3 +156,6 @@ mod tests {
         assert_eq!(contract.service(), "sceneworks-api");
     }
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_env;

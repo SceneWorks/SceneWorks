@@ -1,3 +1,5 @@
+#[path = "test_api_stub.rs"]
+pub(crate) mod test_api_stub;
 
 #[tokio::test]
 async fn huggingface_snapshot_resolve_accepts_tree_and_sibling_shapes_with_auth() {
@@ -116,13 +118,7 @@ async fn spawn_binary_stub_with_options(
         status,
         cancel_requested,
     };
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job_stub))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_stub))
-        .route(
-            "/api/v1/workers/:worker_id/heartbeat",
-            post(heartbeat_stub),
-        )
+    let app = crate::test_api_stub::job_progress_heartbeat_routes(job_stub, progress_stub, heartbeat_stub)
         .route("/*path", get(binary_stub).head(binary_head_stub))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -224,9 +220,7 @@ async fn progress_stub(
     Json(job_snapshot_json(&job_id, state.cancel_requested)).into_response()
 }
 
-async fn heartbeat_stub(
-    axum::extract::Path(worker_id): axum::extract::Path<String>,
-) -> Response {
+async fn heartbeat_stub(axum::extract::Path(worker_id): axum::extract::Path<String>) -> Response {
     Json(worker_snapshot_json(&worker_id)).into_response()
 }
 
@@ -261,7 +255,7 @@ pub(crate) fn job_snapshot_json(job_id: &str, cancel_requested: bool) -> Value {
     })
 }
 
-fn worker_snapshot_json(worker_id: &str) -> Value {
+pub(crate) fn worker_snapshot_json(worker_id: &str) -> Value {
     json!({
         "id": worker_id,
         "gpuId": "cpu",
@@ -290,27 +284,6 @@ struct CancelTickStubState {
 
 async fn spawn_cancel_tick_stub(state: CancelTickStubState) -> String {
     use futures_util::StreamExt;
-
-    async fn job_route(
-        State(state): State<CancelTickStubState>,
-        axum::extract::Path(job_id): axum::extract::Path<String>,
-    ) -> Response {
-        state.job_gets.fetch_add(1, Ordering::SeqCst);
-        // Deliberately NOT canceled: only the progress POST snapshot says
-        // canceled, so a cancel can only come from reusing that snapshot.
-        Json(job_snapshot_json(&job_id, false)).into_response()
-    }
-    async fn progress_route(
-        State(state): State<CancelTickStubState>,
-        axum::extract::Path(job_id): axum::extract::Path<String>,
-    ) -> Response {
-        Json(job_snapshot_json(&job_id, state.progress_cancel_requested)).into_response()
-    }
-    async fn heartbeat_route(
-        axum::extract::Path(worker_id): axum::extract::Path<String>,
-    ) -> Response {
-        Json(worker_snapshot_json(&worker_id)).into_response()
-    }
     async fn binary_route(State(state): State<CancelTickStubState>) -> Response {
         let chunks = futures_util::stream::iter(vec![
             Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(b"url-")),
@@ -322,49 +295,38 @@ async fn spawn_cancel_tick_stub(state: CancelTickStubState) -> String {
             Body::from_stream(chunks).into_response()
         }
     }
-
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-        .route(
-            "/api/v1/workers/:worker_id/heartbeat",
-            post(heartbeat_route),
-        )
-        .route("/*path", get(binary_route))
-        .with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("listener binds");
-    let address = listener.local_addr().expect("listener has address");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("stub serves");
-    });
-    format!("http://{address}")
+    let app = crate::test_api_stub::routes(
+        |state: &CancelTickStubState, id, posted| {
+            if !posted {
+                state.job_gets.fetch_add(1, Ordering::SeqCst);
+            }
+            job_snapshot_json(id, posted && state.progress_cancel_requested)
+        },
+        |_, _, _| {},
+        |_, id| worker_snapshot_json(id),
+    )
+    .route("/*path", get(binary_route))
+    .with_state(state);
+    crate::test_api_stub::serve(app).await
 }
 
-pub(crate) fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) -> Settings {
+pub(crate) fn test_settings(
+    huggingface_base_url: String,
+    huggingface_token: Option<&str>,
+) -> Settings {
     Settings {
         api_url: "http://127.0.0.1:8000".to_owned(),
-        access_token: None,
-        data_dir: PathBuf::from("data"),
         config_dir: PathBuf::from("config"),
         worker_id: "test-worker".to_owned(),
-        gpu_id: "cpu".to_owned(),
         is_child_worker: true,
-        poll_seconds: 1,
         heartbeat_seconds: 5,
-        shutdown_timeout_seconds: 1,
         huggingface_base_url,
         huggingface_token: huggingface_token.map(str::to_owned),
-        credentials: Vec::new(),
         max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
         max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
         allow_private_lora_urls: true,
-        utility_workers: 1,
         backend_mlx_enabled: true,
-        backend_candle_enabled: false,
-        gpu_memory_limit_bytes: 0,
-        external_model_roots: Vec::new(),
+        ..crate::Settings::for_test(PathBuf::from("data"))
     }
 }
 
@@ -450,9 +412,7 @@ async fn spawn_cancel_poll_stub(state: CancelPollStubState) -> String {
         }
         Json(job_snapshot_json(&job_id, state.cancel_requested)).into_response()
     }
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+    let app = crate::test_api_stub::job_progress_routes(job_route, progress_route)
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -525,9 +485,7 @@ async fn spawn_progress_capture_stub() -> (String, std::sync::Arc<std::sync::Mut
         Json(job_snapshot_json(&job_id, true)).into_response()
     }
     let posts: Posts = Arc::new(Mutex::new(Vec::new()));
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+    let app = crate::test_api_stub::job_progress_routes(job_route, progress_route)
         .with_state(posts.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -564,13 +522,7 @@ pub(crate) async fn spawn_no_user_cancel_capture_stub(
         Json(worker_snapshot_json(&worker_id)).into_response()
     }
     let posts: Posts = Arc::new(Mutex::new(Vec::new()));
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-        .route(
-            "/api/v1/workers/:worker_id/heartbeat",
-            post(heartbeat_route),
-        )
+    let app = crate::test_api_stub::job_progress_heartbeat_routes(job_route, progress_route, heartbeat_route)
         .with_state(posts.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

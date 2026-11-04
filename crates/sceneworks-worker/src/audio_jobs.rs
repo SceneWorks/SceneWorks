@@ -3077,7 +3077,7 @@ mod tests {
         assert!(audio_preflight(&defaulted).is_ok());
         assert!(matches!(
             resolve_voice_clone_plan(
-                &Settings::from_env(),
+                &crate::test_env::offline_settings(),
                 &defaulted,
                 Path::new("/unused-project"),
             ),
@@ -3209,13 +3209,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
-
-    use axum::{
-        extract::{Path as AxumPath, State},
-        response::{IntoResponse, Response},
-        routing::{get, post},
-        Json, Router,
-    };
 
     fn stub_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
@@ -3486,50 +3479,22 @@ mod tests {
     /// tick when `true`), records every progress body (so the terminal `Canceled` write is
     /// observable), and answers worker heartbeats.
     async fn spawn_audio_cancel_stub(cancel_requested: bool) -> (String, Arc<Mutex<Vec<Value>>>) {
-        async fn job_route(
-            State(state): State<CancelStubState>,
-            AxumPath(job_id): AxumPath<String>,
-        ) -> Response {
-            Json(cancel_job_json(&job_id, state.cancel_requested)).into_response()
-        }
-        async fn progress_route(
-            State(state): State<CancelStubState>,
-            AxumPath(job_id): AxumPath<String>,
-            Json(body): Json<Value>,
-        ) -> Response {
-            state.progress.lock().expect("progress lock").push(body);
-            Json(cancel_job_json(&job_id, state.cancel_requested)).into_response()
-        }
-        async fn heartbeat_route() -> Response {
-            // The body does not parse as a WorkerSnapshot; heartbeat() tolerates the decode failure as
-            // a transport error, so the keepalive ping still succeeds without modeling the snapshot.
-            Json(json!({})).into_response()
-        }
         let progress = Arc::new(Mutex::new(Vec::new()));
         let state = CancelStubState {
             cancel_requested,
             progress: progress.clone(),
         };
-        let app = Router::new()
-            .route("/api/v1/jobs/:job_id", get(job_route))
-            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-            .route(
-                "/api/v1/workers/:worker_id/heartbeat",
-                post(heartbeat_route),
-            )
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener binds");
-        let address = listener.local_addr().expect("listener has address");
-        crate::load_progress::spawn(async move {
-            axum::serve(listener, app).await.expect("stub serves");
-        });
-        (format!("http://{address}"), progress)
+        let app = crate::test_api_stub::routes(
+            |state: &CancelStubState, id, _| cancel_job_json(id, state.cancel_requested),
+            |state, _, value| state.progress.lock().expect("progress lock").push(value),
+            |_, _| json!({}),
+        )
+        .with_state(state);
+        (crate::test_api_stub::serve(app).await, progress)
     }
 
     fn cancel_test_settings(base_url: String) -> Settings {
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.api_url = base_url;
         settings.worker_id = "test-worker".to_owned();
         // Shortest interval the clamp allows so the watcher polls promptly (the first interval tick is
@@ -3551,7 +3516,7 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let settings = Settings {
             data_dir: data.path().to_path_buf(),
-            ..Settings::from_env()
+            ..crate::test_env::offline_settings()
         };
         let tiny = {
             let header = br#"{"w":{"dtype":"F32","shape":[0],"data_offsets":[0,0]}}"#;
@@ -5350,13 +5315,6 @@ mod yue_job_surface_tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use axum::{
-        extract::{Path as AxumPath, State},
-        response::{IntoResponse, Response},
-        routing::{get, post},
-        Json, Router,
-    };
-
     /// A model id no audio registry knows, so `audio_descriptor` is `None` and the test stages no
     /// co-requisites — the loaded generator is the stub whatever inference pin is linked.
     const STUB_MODEL: &str = "yue_stub_song";
@@ -5445,43 +5403,17 @@ mod yue_job_surface_tests {
     /// An API stub answering the job GET (cancel state), progress POST (recorded) and worker
     /// heartbeat routes the audio job path calls.
     async fn spawn_stub_api() -> (String, StubApi) {
-        async fn job_route(
-            State(state): State<StubApi>,
-            AxumPath(job_id): AxumPath<String>,
-        ) -> Response {
-            Json(job_json(&job_id, state.cancel.load(Ordering::SeqCst))).into_response()
-        }
-        async fn progress_route(
-            State(state): State<StubApi>,
-            AxumPath(job_id): AxumPath<String>,
-            Json(body): Json<Value>,
-        ) -> Response {
-            state.progress.lock().expect("progress lock").push(body);
-            Json(job_json(&job_id, state.cancel.load(Ordering::SeqCst))).into_response()
-        }
-        async fn heartbeat_route() -> Response {
-            Json(json!({})).into_response()
-        }
         let state = StubApi {
             cancel: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(Vec::new())),
         };
-        let app = Router::new()
-            .route("/api/v1/jobs/:job_id", get(job_route))
-            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-            .route(
-                "/api/v1/workers/:worker_id/heartbeat",
-                post(heartbeat_route),
-            )
-            .with_state(state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener binds");
-        let address = listener.local_addr().expect("listener has address");
-        crate::load_progress::spawn(async move {
-            axum::serve(listener, app).await.expect("stub serves");
-        });
-        (format!("http://{address}"), state)
+        let app = crate::test_api_stub::routes(
+            |state: &StubApi, id, _| job_json(id, state.cancel.load(Ordering::SeqCst)),
+            |state, _, value| state.progress.lock().expect("progress lock").push(value),
+            |_, _| json!({}),
+        )
+        .with_state(state.clone());
+        (crate::test_api_stub::serve(app).await, state)
     }
 
     /// Settings over an isolated data dir holding a project and the stub model's staged snapshot
@@ -5519,7 +5451,7 @@ mod yue_job_surface_tests {
             std::fs::write(snapshot.join(tier).join("model.safetensors"), b"weights")
                 .expect("tier weights");
         }
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.api_url = base_url;
         settings.worker_id = "test-worker".to_owned();
         settings.heartbeat_seconds = 5;
@@ -6019,7 +5951,7 @@ mod yue_job_surface_tests {
     #[tokio::test]
     async fn synthesis_carries_every_yue_knob_to_the_engine() {
         let (base_url, _api_state) = spawn_stub_api().await;
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.api_url = base_url;
         settings.worker_id = "test-worker".to_owned();
         settings.heartbeat_seconds = 5;
@@ -6550,7 +6482,7 @@ mod yue_job_surface_tests {
             return;
         }
         let (base_url, _api_state) = spawn_stub_api().await;
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.api_url = base_url;
         settings.worker_id = "test-worker".to_owned();
         settings.heartbeat_seconds = 5;
@@ -6643,7 +6575,7 @@ mod yue_job_surface_tests {
     #[tokio::test]
     async fn icl_decode_scratch_is_removed_on_every_exit() {
         let (base_url, api_state) = spawn_stub_api().await;
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.api_url = base_url;
         settings.worker_id = "test-worker".to_owned();
         settings.heartbeat_seconds = 5;
@@ -6746,7 +6678,7 @@ mod yue_job_surface_tests {
     }
 
     fn pump_test_settings(base_url: String) -> Settings {
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.api_url = base_url;
         settings.worker_id = "test-worker".to_owned();
         settings.heartbeat_seconds = 5;
