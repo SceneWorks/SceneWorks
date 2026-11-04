@@ -1,7 +1,4 @@
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::ltx::resolve_keyframe_conditioning;
 #[allow(unused_imports)]
 use super::prelude::*;
@@ -262,6 +259,23 @@ pub(super) fn resolve_wan_model_dir(
     )))
 }
 
+/// Shared family-root lookup. Delegates to existing local and HF resolvers so installed symlinks,
+/// snapshot revision selection, legacy roots and tier-specific pinned downloads remain intact.
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_mlx_family_dir(
+    settings: &Settings,
+    env_key: &str,
+    name: &str,
+    repo: &str,
+) -> WorkerResult<PathBuf> {
+    local_mlx_dir(settings, env_key, name)
+        .or_else(|| huggingface_snapshot_dir(&settings.data_dir, repo))
+        .ok_or_else(|| WorkerError::InvalidPayload(format!(
+            "{name}: no MLX weights found. Download the turnkey {repo} snapshot via the Model Manager, set ${env_key}, or place a converted snapshot at {}.",
+            settings.data_dir.join("models").join("mlx").join(name).display()
+        )))
+}
+
 /// A locally-converted MLX dir for the model (env override, then
 /// `<data>/models/mlx/<id>`), counted only when it holds a `config.json` — mirrors the
 /// Python `_local_mlx_dir`, so a locally-quantized conversion supersedes a turnkey download.
@@ -339,20 +353,14 @@ pub(super) const WAN_TI2V_5B_REVISION: &str = "bb1b055249614cf9d7cf4373fbdbc184b
 /// Pin the exact commit for defense-in-depth (the native downloader still verifies each file's own hash on
 /// download). Shared by BOTH lanes so the twins agree. Gated to the lanes that actually fetch it (macOS
 /// MLX or the candle build) so a Linux-non-candle build doesn't flag it dead.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const WAN_LIGHTNING_REVISION: &str = "18bccf8884ec0a078eed79785eb4ef13ea16ce1e";
 
 /// The Wan Lightning product decisions: which engines bake the distill (default-on), its
 /// per-architecture LoRA subdir, and its forced recipe. On macOS these come straight from the MLX Wan
 /// provider crate (`product_load`), the single source the SC-20686 Metal campaign also loads through;
 /// the candle lane links no MLX crate and keeps the same facts here.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod lightning_policy {
     #[cfg(target_os = "macos")]
     pub(super) use runtime_macos::providers::wan::product_load::{
@@ -383,10 +391,7 @@ mod lightning_policy {
 ///
 /// This mapping is shared by both backends and by both the cache-healing and resolution paths so a
 /// new architecture cannot silently fetch one pair and load another.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn wan_lightning_subdir(engine_id: &str) -> Option<&'static str> {
     lightning_policy::lightning_subdir(engine_id)
 }
@@ -576,10 +581,7 @@ pub(super) async fn ensure_wan_tier_present(
 /// non-A14B engine, or when the pair is already cached. A pair still missing after the fetch makes
 /// resolve surface the clear "fetch it via the model manager" error. Fails loud on a real download error —
 /// fast, before any compute.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn ensure_wan_lightning_present(
     api: &ApiClient,
     settings: &Settings,
@@ -627,10 +629,7 @@ pub(super) async fn ensure_wan_lightning_present(
 /// (`lightx2v/Wan2.2-Lightning`, the rank-64 Seko distill). The subdir is architecture-specific:
 /// T2V-A14B (V1.1) and I2V-A14B (V1) ship distinct LoRAs that are NOT cross-compatible (sc-4997).
 /// Errors if not downloaded / the per-architecture subdir is missing.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_lightning_loras(
     settings: &Settings,
     engine_id: &str,
@@ -672,10 +671,7 @@ pub(super) fn resolve_lightning_loras(
 /// The `.low_noise.safetensors` sibling of a Wan A14B MoE high-noise LoRA file, or
 /// `None` when the file is not the high-noise half of a pair (port of the Python
 /// `wan_moe_low_noise_sibling`; case-insensitive `.high_noise.safetensors` suffix).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn wan_moe_low_noise_sibling(primary: &Path) -> Option<PathBuf> {
     const HIGH: &str = ".high_noise.safetensors";
     let name = primary.file_name()?.to_str()?;
@@ -694,10 +690,7 @@ pub(super) fn wan_moe_low_noise_sibling(primary: &Path) -> Option<PathBuf> {
 /// single-file LoRA is shared (both experts on MoE, the single model on the 5B). peft LoKr AND
 /// third-party LyCORIS (LoHa / non-peft LoKr) both apply on the MLX Wan/LTX paths now (epic 3641,
 /// sc-3671) — `classify_adapter` returns `Lora` for third-party and the engine detects + merges it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_wan_adapters(
     settings: &Settings,
     request: &VideoRequest,
@@ -773,10 +766,7 @@ pub(super) fn resolve_wan_adapters(
     Ok(specs)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn moe_adapter(
     path: PathBuf,
     scale: f32,
@@ -817,10 +807,7 @@ pub(super) fn resolve_wan_vace_adapters(
 /// "lightning" LoRA installs via the engine's in-place diff-patch merge (sc-5684); selecting it makes
 /// the worker apply the step-distill recipe (`scail2_sampling`, sc-5700). Delegates to the shared
 /// [`resolve_dense_adapters`] (sc-8830) — the MLX Wan-VACE / SCAIL-2 twin.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_scail2_adapters(
     settings: &Settings,
     request: &VideoRequest,
@@ -831,10 +818,7 @@ pub(super) fn resolve_scail2_adapters(
 /// The first-frame conditioning for a Wan generation: required for I2V-14B, optional for
 /// the TI2V-5B (present → image-conditioned mask-blend, absent → pure T2V), and ignored
 /// by the T2V-14B (text-only). Loads `source_asset_id` to an in-memory RGB8 image.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_wan_conditioning(
     settings: &Settings,
     request: &VideoRequest,
@@ -908,10 +892,7 @@ pub(super) fn resolve_wan_conditioning(
 }
 
 /// Which boundary frame of a source clip to extract for Wan-native clip conditioning (sc-3357).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum ClipFramePosition {
     /// The clip's first decoded frame (the right-side clip's head for `video_bridge`).
@@ -1130,18 +1111,12 @@ pub(super) fn resolve_wan_quant(request: &VideoRequest) -> Option<Quant> {
 /// (no 5B distill exists, so dropping it would hurt prompt adherence); the user can still dial
 /// `steps`/`guidanceScale` lower from VideoStudio, and the engine pre-flight guard (sc-4986) is
 /// the memory backstop. The full few-step / no-CFG preset lands once the 5B distill LoRA exists.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const WAN5B_INTERIM_STEPS: u32 = 20;
 
 /// An optional positive-integer `advanced` knob (`steps`); accepts a number or a numeric string.
 /// Shared by the MLX path and the candle video lane (sc-5097).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn advanced_opt_u32(request: &VideoRequest, key: &str) -> Option<u32> {
     request.advanced.get(key).and_then(|value| {
         value
@@ -1153,10 +1128,7 @@ pub(super) fn advanced_opt_u32(request: &VideoRequest, key: &str) -> Option<u32>
 
 /// An optional float `advanced` knob (`guidanceScale`); accepts a number or a numeric string.
 /// Shared by the MLX path and the candle video lane (sc-5097).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn advanced_opt_f32(request: &VideoRequest, key: &str) -> Option<f32> {
     request.advanced.get(key).and_then(|value| {
         value
@@ -1173,10 +1145,7 @@ pub(super) fn advanced_opt_f32(request: &VideoRequest, key: &str) -> Option<f32>
 /// bake Lightning — for every other engine (the dense 5B, non-Wan) this is irrelevant and returns
 /// `false`. Backward compatible: an absent flag on an A14B job defaults to `true` (the prior
 /// always-on behavior). A strict-bool `false` opts out; `true` (or absent) opts in.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn wan_lightning_on(engine_id: &str, request: &VideoRequest) -> bool {
     if !lightning_policy::lightning_default(engine_id) {
         return false;
@@ -1200,10 +1169,7 @@ pub(super) fn wan_lightning_on(engine_id: &str, request: &VideoRequest) -> bool 
 /// The dense TI2V-5B has no distill LoRA yet (sc-4999) and no toggle: honor an explicit user
 /// `steps`/`guidanceScale`, else apply the interim default ([`WAN5B_INTERIM_STEPS`], CFG retained).
 /// `None` ⇒ the engine config default.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u32>, Option<f32>) {
     if engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b" {
         if wan_lightning_on(engine_id, request) {
@@ -1228,20 +1194,11 @@ pub(super) fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u
 }
 
 /// The lightx2v lightning step-distill recipe (sc-5684 / sc-5700): 8 steps, CFG off, scheduler shift 1.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const SCAIL2_LIGHTNING_STEPS: u32 = 8;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const SCAIL2_LIGHTNING_GUIDANCE: f32 = 1.0;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const SCAIL2_LIGHTNING_SHIFT: f32 = 1.0;
 
 /// SCAIL-2 sampling recipe `(steps, guidance, scheduler_shift)`. When a lightx2v diff-patch
@@ -1252,10 +1209,7 @@ const SCAIL2_LIGHTNING_SHIFT: f32 = 1.0;
 /// all-`None` so the engine's quality defaults (40 steps, guide 5.0, shift 5.0) stand exactly as before
 /// — this path is unchanged. The chosen knobs are recorded as `effective*` in [`scail2_raw_settings`]
 /// so what actually ran is inspectable on the asset (mirrors [`wan_raw_settings`]).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn scail2_sampling(
     request: &VideoRequest,
     lightning: bool,
@@ -1287,10 +1241,7 @@ pub(super) fn scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
 /// instead of the registry snapshot. The UMT5 TE + VAE are read in place too when `te_file` / `vae_file`
 /// are set (sc-10909), else they come from `model_dir` (a resident Wan snapshot tier); the tiny
 /// tokenizer always comes from `model_dir`. Read in place, never copied.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone)]
 #[cfg_attr(
     not(all(not(target_os = "macos"), feature = "backend-candle")),
@@ -1334,10 +1285,7 @@ impl ComfyuiWanExperts {
 /// Wan (sc-3034) and LTX (sc-3035) — split out so the engine call is unit-testable on real
 /// weights without the API/job plumbing. The LTX-only knobs (`video_mode` no_audio,
 /// prompt-enhance) default off for Wan; the Wan-only `moe_expert` rides on `adapters`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) struct VideoGenInput {
     pub(super) engine_id: &'static str,
     /// H3 optional predictor is resolved offline only for an explicitly enabled request.
@@ -1477,10 +1425,7 @@ pub(super) struct VideoGenInput {
     pub(super) cold_load_admission: Option<crate::generator_cache::GeneratorColdLoadAdmission>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl Default for VideoGenInput {
     fn default() -> Self {
         Self {
@@ -1539,10 +1484,7 @@ impl Default for VideoGenInput {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(input.model_dir.clone()));
     spec.quantize = input.quant;
@@ -1636,10 +1578,7 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
 /// A catalog `text_to_video` request can still select a different provider workload (LTX's
 /// `no_audio` is the live case), so the resolved provider mode must not borrow the ordinary
 /// no-overlay curve until a receipt names this exact carrier.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn video_admission_overlay(
     input: &VideoGenInput,
     mode: &str,
@@ -1963,10 +1902,7 @@ pub(super) fn video_admission_overlay(
 /// Bernini v2v carries one normalized [`Conditioning::VideoClip`]. A count-only identity would
 /// let another temporal carrier borrow the same evidence, so admission records the resolved
 /// carrier shape explicitly.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn video_admission_reference_shape(
     model_id: &str,
     mode: &str,
@@ -2084,10 +2020,7 @@ pub(super) fn video_admission_reference_shape(
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn video_admission_reference_count(
     model_id: &str,
     mode: &str,
@@ -2160,17 +2093,11 @@ pub(super) fn video_admission_reference_count(
 /// This check runs before the live-budget probe and before contract selection, so unsupported
 /// I2V/keyframe/clip, overlay, enhancer, no-audio, and out-of-envelope FPS requests keep the
 /// historical direct-generate path instead of reaching provider safety with invented coverage.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 /// Apply the admission result at the single loaded-video handoff. Keeping the provider knobs and
 /// lifecycle context in one operation makes it impossible for the generation request to carry an
 /// optimized rung while silently bypassing its safety/begin/configure/finish contract.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn apply_video_admission_outcome(
     input: &mut VideoGenInput,
     outcome: crate::video_admission::VideoAdmissionOutcome,
@@ -2186,10 +2113,7 @@ pub(super) fn apply_video_admission_outcome(
 /// Run one generation to a [`DecodedVideo`] (RGB8 frames + fps + optional audio) against an already
 /// loaded video generator, streaming denoise progress via `on_progress` and honoring `cancel`.
 /// The engine fills the audio track (LTX) or leaves it `None` (Wan).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn run_loaded_video_generation(
     generator: &dyn Generator,
     input: VideoGenInput,
@@ -2312,10 +2236,7 @@ pub(super) fn run_video_generation(
 /// [`video_stall_timeout_policy`] and, for H3's packed-sequence model,
 /// [`super::minimax_h3_sequence`]. `SCENEWORKS_VIDEO_STALL_SECS` remains an absolute operator
 /// override for every engine.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The silent window allowed before an engine's FIRST denoise step: request preparation plus a
@@ -2328,20 +2249,14 @@ pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// operator override stays absolute. MiniMax-H3 adds its reference-encode allowance and one full
 /// step on top of this (its first `Step` event arrives only after the first step completes); see
 /// [`super::minimax_h3_sequence`].
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const VIDEO_PRE_STEP_STALL_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 
 /// The stall window in force: the request's per-step budget once a denoise step has arrived, the
 /// policy's pre-step window (cold load, reference preparation and, for MiniMax-H3, the first
 /// step itself) before then. Every progress event the engine reports resets the watchdog clock, so
 /// an engine that reports its load phases (MLX H3's `Loading`) gets this window per phase.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn video_stall_window(
     policy: VideoStallTimeoutPolicy,
     first_step_seen: bool,
@@ -2356,10 +2271,7 @@ pub(super) fn video_stall_window(
 /// The timeout policy and its receipt-facing basis. Keeping the basis next to the duration makes a
 /// request-aware watchdog observable instead of leaving an unexplained, model-specific number in a
 /// later stall event.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct VideoStallTimeoutPolicy {
     /// The silent window allowed between denoise-step events.
@@ -2369,10 +2281,7 @@ pub(super) struct VideoStallTimeoutPolicy {
     pub(super) basis: &'static str,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl VideoStallTimeoutPolicy {
     /// A per-step budget whose pre-step window is the generic cold-load window (or the larger
     /// per-step budget): every engine except MiniMax-H3 and an operator override.
@@ -2390,17 +2299,11 @@ impl VideoStallTimeoutPolicy {
 /// within this window (the manual-cancel path proves it honors the flag); the abandon escape
 /// only matters for a hard Metal wedge that never re-checks cancel, and keeps the watchdog from
 /// itself re-hanging on the join.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const VIDEO_STALL_GRACE: Duration = Duration::from_secs(60);
 
 /// The effective forward-progress stall timeout for one resolved engine input.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn video_stall_timeout(input: &VideoGenInput) -> VideoStallTimeoutPolicy {
     video_stall_timeout_policy(
         std::env::var("SCENEWORKS_VIDEO_STALL_SECS").ok().as_deref(),
@@ -2430,10 +2333,7 @@ fn video_stall_timeout(input: &VideoGenInput) -> VideoStallTimeoutPolicy {
 ///
 /// The Wan A14B dual-expert engines scale too (sc-10299); see [`wan_a14b_stall_timeout`].
 /// `guidance` is the resolved engine guidance (`None` ⇒ the engine's CFG-on default).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn video_stall_timeout_policy(
     raw_override: Option<&str>,
     engine_id: &str,
@@ -2474,47 +2374,29 @@ pub(super) fn video_stall_timeout_policy(
 /// one RTX PRO 6000 Blackwell, ~453 s per step. The MLX lane is not separately measured; it is
 /// covered by the headroom below and by never dropping under the global default. The engine emits one `Progress::Step` per denoise step
 /// and nothing between, so a single step is the shortest silent window the watchdog can see.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const WAN_A14B_REFERENCE_STEP_SECS: u64 = 453;
 
 /// DiT tokens at that reference geometry: `latent_frames x (h/16) x (w/16)` = `20 x 45 x 80`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const WAN_A14B_REFERENCE_TOKENS: u64 = 72_000;
 
 /// Headroom over the measured step for slower supported cards (sequential expert offload, per-block
 /// synchronisation, smaller GPUs, the MLX lane).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const WAN_A14B_STEP_HEADROOM: u64 = 3;
 
 /// Silence allowed before the first step event: the cold two-expert load (+ text encode) measured
 /// ~527 s on the reference card, doubled-and-rounded for slower disks, cards and cold page caches.
 /// It does not scale with geometry, so it gets its own allowance instead of the step headroom.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const WAN_A14B_LOAD_ALLOWANCE: Duration = Duration::from_secs(1200);
 
 /// Engine bounds for an A14B request: the `maxPixels` area cap and 81 frames (21 latent frames).
 /// The shipped 5 s @ 16 fps limit snaps to 77 frames; 81 is the engine's own bound.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const WAN_A14B_MAX_PIXELS: u64 = 1280 * 720;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const WAN_A14B_MAX_FRAMES: u32 = 81;
 
 /// Forward-progress budget for the Wan A14B dual-expert engines (T2V, I2V, VACE-Fun).
@@ -2528,10 +2410,7 @@ const WAN_A14B_MAX_FRAMES: u32 = 81;
 /// classifier-free guidance runs a second forward (`guidance > 1.0`, or `None` = the engine's
 /// CFG-on default; the engines short-circuit to one forward at `guidance <= 1.0`). Dimensions and frames clamp to the
 /// largest legal request, so an out-of-contract input cannot inflate the budget without bound.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn wan_a14b_stall_timeout(
     width: u32,
     height: u32,
@@ -2566,10 +2445,7 @@ fn wan_a14b_stall_timeout(
 /// idle, and the UI honestly shows "Cancelling…" until completion. Best-effort: a failed status
 /// update here is non-fatal because the post-run terminal write is what ultimately frees the
 /// worker. Mirrors the image path's `begin_image_cancel` (sc-5515).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn begin_video_cancel(
     api: &ApiClient,
     job_id: &str,
@@ -2597,10 +2473,7 @@ pub(crate) async fn begin_video_cancel(
 /// the N3 guard in [`generate_video`] mirrors the image lane's `model.descriptor.capabilities` read.
 /// Empty (so every name N3-falls back to the engine default) when the id isn't registered on this
 /// backend — e.g. a candle video engine before it adopts the unified framework.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn video_engine_sampling_surface(engine_id: &str) -> (Vec<&'static str>, Vec<&'static str>) {
     crate::inference_runtime::generators()
         .map(|reg| (reg.descriptor)())
@@ -2621,10 +2494,7 @@ fn video_engine_sampling_surface(engine_id: &str) -> (Vec<&'static str>, Vec<&'s
 /// steps/guidance — rather than re-deriving them from the sparse `advanced` payload
 /// (the video engines' quant/guidance rules are engine-specific and would drift from
 /// what actually ran). Captured like `log_engine_id`, before the move at the spawn.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) struct VideoSettingsSnapshot {
     pub(super) quant: Option<Quant>,
     pub(super) sampler: Option<String>,
@@ -2636,10 +2506,7 @@ pub(super) struct VideoSettingsSnapshot {
     pub(super) seed: u64,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl VideoSettingsSnapshot {
     fn from_input(input: &VideoGenInput) -> Self {
         Self {
@@ -2674,10 +2541,7 @@ impl VideoSettingsSnapshot {
 /// `quant_bits` column that the label fix removes. `None` is the honest "no integer width applies" —
 /// the same signal the dense/bf16 arm uses, and the same reason `flux2_comfyui_raw_settings` writes
 /// `mlxQuantize: null` for this tier.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn video_quant_label(quant: Option<Quant>) -> (Option<String>, Option<u32>) {
     match quant {
         Some(Quant::Q4) => (Some("q4".to_owned()), Some(4)),
@@ -2689,10 +2553,7 @@ pub(super) fn video_quant_label(quant: Option<Quant>) -> (Option<String>, Option
 }
 
 /// Copy only provider observations from this successful generation into the persisted metrics.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn record_video_veda_metrics(metrics: &mut GenerationMetrics, outcome: Option<&Value>) {
     metrics.veda_execution = outcome.cloned();
 }
@@ -2704,10 +2565,7 @@ pub(super) fn record_video_veda_metrics(metrics: &mut GenerationMetrics, outcome
 /// mirroring the image lane. Guidance / scheduler-shift stay `None` when the engine's
 /// own config default was used (not overridden) — an honest "not captured" rather
 /// than a fabricated value the worker can't know without loading the engine config.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn build_video_metrics(
     mut metrics: GenerationMetrics,
     settings: &VideoSettingsSnapshot,
@@ -2749,10 +2607,7 @@ pub(super) fn build_video_metrics(
 /// progress to the async worker (Generating stage ~0.25..0.58) + polling cancel ~every 2s.
 /// The shared blocking + mpsc + cancel plumbing for Wan and LTX. A forward-progress watchdog
 /// ([`video_stall_timeout`]) fails a wedged job loudly rather than letting it look alive forever.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn generate_video(
     api: &ApiClient,
     settings: &Settings,
@@ -2785,10 +2640,7 @@ pub(super) async fn generate_video(
 /// SCOPE: the injected loader covers the registry **cached** path only. The in-place ComfyUI Wan MoE
 /// branch builds its generator from per-file expert weights through `with_uncached_generator`, which has
 /// no `(engine_id, spec)` key to load from, so it ignores `load_generator` and stays uncovered here.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn generate_video_using(
     api: &ApiClient,
     settings: &Settings,

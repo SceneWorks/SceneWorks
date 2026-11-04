@@ -40,7 +40,7 @@ function workflowExpression(block, field = "if") {
 }
 function evaluateWorkflow(expression, event, inputs = {}, steps = {}) {
   const github = { event_name: event, repository: "SceneWorks/SceneWorks", event: { pull_request: { head: { repo: { full_name: "SceneWorks/SceneWorks" } } } } };
-  return Function("github", "inputs", "steps", "always", `return (${expression});`)(github, inputs, steps, () => true);
+  return Function("github", "inputs", "steps", "always", "success", `return (${expression});`)(github, inputs, steps, () => true, () => true);
 }
 
 function workflowJob(workflow, name) {
@@ -888,6 +888,7 @@ function dispatchInputs(workflow) {
   assert.ok(end > start, "could not find the end of the workflow_dispatch block");
   const names = [];
   const defaults = {};
+  const types = {};
   let current = null;
   for (const line of workflow.slice(start, end).split("\n")) {
     // Deliberately permissive: GitHub allows digits, case and hyphens in an input name, and this
@@ -898,13 +899,86 @@ function dispatchInputs(workflow) {
       current = header[1];
       names.push(current);
       defaults[current] = undefined;
+      types[current] = undefined;
       continue;
     }
+    const type = current && line.match(/^ {8}type: (.*)$/);
+    if (type) types[current] = type[1].trim();
     const def = current && line.match(/^ {8}default: (.*)$/);
     if (def) defaults[current] = def[1].trim().replace(/^"|"$/g, "");
   }
-  return { names, defaults };
+  return { names, defaults, types };
 }
+
+test("Windows manual H3 opt-out defaults off and changes only that smoke condition", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults, types } = dispatchInputs(workflow);
+  assert.equal(names.length, 23, "the single H3 opt-out keeps the dispatch surface below GitHub's 25-input cap");
+  assert.equal(names.filter((name) => name === "skip_manual_h3_import_smoke").length, 1);
+  assert.equal(types.skip_manual_h3_import_smoke, "boolean");
+  assert.equal(defaults.skip_manual_h3_import_smoke, "false");
+  assert.match(workflow, /description: "Skip only the implicit manual MiniMax-H3 ConvRot smoke; other explicit profiles and their existing admission rules are unchanged"/);
+  assert.equal([...workflow.matchAll(/inputs\.skip_manual_h3_import_smoke\b/g)].length, 1,
+    "the opt-out must have no job-routing, device, budget or other profile effect");
+  const smoke = stepBody(workflow, "Run the synthetic MiniMax-H3 ConvRot CUDA import projection");
+  const prior = "github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && !inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_ltx_eros_acceptance && !inputs.run_epic_20738_terminal_cuda && !inputs.run_iris_worker_smoke && !inputs.run_supra2_worker_smoke";
+  const condition = workflowExpression(smoke);
+  assert.equal(condition, `${prior} && !inputs.skip_manual_h3_import_smoke`);
+  for (const event of ["push", "pull_request", "workflow_dispatch"]) {
+    for (const enabled of [undefined, false, true]) {
+      assert.equal(Boolean(evaluateWorkflow(condition, event, { skip_manual_h3_import_smoke: enabled })),
+        event === "workflow_dispatch" && enabled !== true);
+    }
+  }
+  for (const name of names.filter((name) => types[name] === "boolean" && name !== "skip_manual_h3_import_smoke")) {
+    const inputs = { [name]: true, skip_manual_h3_import_smoke: false };
+    assert.equal(Boolean(evaluateWorkflow(condition, "workflow_dispatch", inputs)),
+      Boolean(evaluateWorkflow(prior, "workflow_dispatch", inputs)), `${name} retains its original smoke policy`);
+  }
+  assert.match(smoke, /convrot_import_native_cuda_projection_smoke -- --exact --ignored --nocapture --test-threads=1/,
+    "the existing selected smoke remains intact; only its explicit opt-out is added");
+});
+
+test("Windows H3 opt-out with every model selector false runs the existing ordinary contract lane", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults, types } = dispatchInputs(workflow);
+  const inputs = Object.fromEntries(names.filter((name) => types[name] === "boolean")
+    .map((name) => [name, name === "skip_manual_h3_import_smoke"]));
+  for (const [name, enabled] of Object.entries(inputs)) {
+    if (name === "skip_manual_h3_import_smoke") continue;
+    assert.equal(defaults[name], "false", `${name}'s existing default is preserved`);
+    assert.equal(enabled, false, `${name} must be explicitly false in the no-model invocation`);
+  }
+  const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([A-Za-z0-9_-]+):$/gm)]
+    .map((match) => match[1]);
+  assert.ok(jobs.includes("candle-worker"));
+  for (const name of jobs) {
+    assert.equal(Boolean(evaluateWorkflow(workflowExpression(workflowJob(workflow, name)), "workflow_dispatch", inputs)),
+      name === "candle-worker", `${name} follows the actual no-model invocation`);
+  }
+  const worker = workflowJob(workflow, "candle-worker");
+  const outcomes = { verify_candle_capabilities: { outcome: "success" } };
+  for (const name of COMPILE_CHAIN_STEPS) {
+    assert.equal(Boolean(evaluateWorkflow(workflowExpression(stepBody(worker, name)), "workflow_dispatch", inputs, outcomes)), true,
+      `${name} remains enabled rather than duplicating or narrowing the ordinary lane`);
+  }
+  assert.match(stepBody(worker, "Test the candle GPU worker (backend-candle)"),
+    /^ +node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --features backend-candle$/m);
+  assert.match(stepBody(worker, "Check the candle sidecar builds (rust-api, backend-candle)"),
+    /cargo check -p sceneworks-rust-api --features backend-candle --tests/);
+  assert.match(stepBody(worker, "Clippy (candle worker)"),
+    /cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings/);
+  for (const step of jobSteps(worker)) {
+    if (COMPILE_CHAIN_STEPS.includes(step.name)) continue;
+    const expression = step.body.match(/^ +if: \$\{\{ (.+) \}\}$/m)?.[1];
+    if (!expression || !/inputs\.(run_|provision_snapshot|yue2_|quant_kernel_only)/.test(expression)) continue;
+    assert.equal(Boolean(evaluateWorkflow(expression, "workflow_dispatch", inputs, outcomes)), false,
+      `${step.name} must not execute a model, capture or provisioning profile in this invocation`);
+  }
+  assert.equal(Boolean(evaluateWorkflow(workflowExpression(stepBody(worker,
+    "Run the synthetic MiniMax-H3 ConvRot CUDA import projection")), "workflow_dispatch", inputs)), false);
+});
+
 
 test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
@@ -1497,13 +1571,17 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
   );
   const pure = {provision_snapshot:true};
   assert.equal(evaluateGroup(group,"workflow_dispatch",pure),"windows-candle-cpu-provision");
-  // Every declared boolean besides provisioning can select runtime/model work or a
-  // different profile. New flags fail this exhaustive contract until classified.
+  // Runtime/model selectors leave the pure-provision group. The H3 skip-only flag changes
+  // no routing: the dedicated opt-out contract above pins its only use to that smoke step.
+  // New flags still fail this exhaustive contract until explicitly classified.
   const dispatch = candle.slice(candle.indexOf("  workflow_dispatch:"),candle.indexOf("\njobs:"));
   const flags = [...dispatch.matchAll(/^      ([a-z_0-9]+):\n((?:        .*\n|\n)*)/gm)]
-    .filter(match=>match[2].includes("type: boolean") && match[1]!=="provision_snapshot")
+    .filter(match=>match[2].includes("type: boolean")
+      && !["provision_snapshot", "skip_manual_h3_import_smoke"].includes(match[1]))
     .map(match=>match[1]);
   assert.equal(flags.length,12);
+  assert.equal(evaluateGroup(group,"workflow_dispatch",{...pure,skip_manual_h3_import_smoke:true}),
+    evaluateGroup(group,"workflow_dispatch",pure),"the smoke opt-out cannot turn pure provisioning into runtime work");
   for(const flag of flags) {
     assert.equal(evaluateGroup(group,"workflow_dispatch",{...pure,[flag]:true}),
       evaluateGroup(prior,"workflow_dispatch",{...pure,[flag]:true}),`mixed ${flag} retains GPU routing`);

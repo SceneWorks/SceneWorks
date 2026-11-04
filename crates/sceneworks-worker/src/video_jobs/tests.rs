@@ -53,10 +53,7 @@ fn video_admission_preflights_packaged_evidence_before_live_memory_probe() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
     let mut input = VideoGenInput::default();
@@ -282,10 +279,7 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
 /// therefore shared one admission identity and could borrow each other's admitted peak. These are
 /// the sealed replacements, asserted as SHAPE — distinct payloads differ, equal payloads are
 /// stable, unpriceable shapes refuse — never as digest literals.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn sealed_video_carriers_separate_payloads_that_used_to_share_one_identity() {
     let image = |width: u32, height: u32, fill: u8| gen_core::Image {
@@ -544,10 +538,7 @@ fn sealed_video_carriers_separate_payloads_that_used_to_share_one_identity() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn bernini_adapter_overlay_records_exact_artifact_identity() {
     let root = tempfile::tempdir().unwrap();
@@ -599,10 +590,7 @@ fn bernini_adapter_overlay_records_exact_artifact_identity() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn bernini_v2v_admission_records_one_video_clip_not_a_generic_reference() {
     let clip = Conditioning::VideoClip {
@@ -642,10 +630,7 @@ fn bernini_v2v_admission_records_one_video_clip_not_a_generic_reference() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn bernini_r2v_admission_flattens_the_single_multi_reference_carrier() {
     let images = vec![
@@ -671,10 +656,7 @@ fn bernini_r2v_admission_flattens_the_single_multi_reference_carrier() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn bernini_rv2v_admission_preserves_the_clip_image_partition() {
     let image = Image {
@@ -724,10 +706,7 @@ fn bernini_rv2v_admission_preserves_the_clip_image_partition() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn bernini_mv2v_admission_has_a_typed_ordered_multiclip_carrier() {
     let clip = |pixel| Conditioning::VideoClip {
@@ -754,10 +733,7 @@ fn bernini_mv2v_admission_has_a_typed_ordered_multiclip_carrier() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn bernini_ads2v_admission_keeps_two_clip_roles_and_flattened_images() {
     let clip = |pixel| Conditioning::VideoClip {
@@ -803,10 +779,7 @@ fn bernini_ads2v_admission_keeps_two_clip_roles_and_flattened_images() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn bernini_r2v_rejects_missing_excess_and_duplicate_asset_ids_before_loading() {
     for reference_asset_ids in [
@@ -957,8 +930,11 @@ fn video_jobs_remains_split_into_real_engine_modules() {
             source.lines().count() >= 100,
             "{name}.rs is unexpectedly empty or collapsed"
         );
+        // Check the family module's root imports, not nested test modules whose parent
+        // is the family itself. This stays independent of cfg aliases on those tests.
         assert!(
-            !source.contains("use super::*"),
+            !source.lines().any(|line| line.starts_with("use super::*"))
+                && source.lines().any(|line| line == "use super::prelude::*;"),
             "{name}.rs must import its parent dependencies through the explicit prelude"
         );
         assert!(
@@ -976,10 +952,7 @@ fn video_jobs_remains_split_into_real_engine_modules() {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VideoLifecycleBehavior {
     Success,
@@ -989,10 +962,7 @@ enum VideoLifecycleBehavior {
     GenerateError,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Default, Debug)]
 struct VideoLifecycleRecord {
     safety_checks: usize,
@@ -1003,19 +973,13 @@ struct VideoLifecycleRecord {
     finishes: Vec<gen_core::MemoryRunOutcome>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct VideoLifecycleScope {
     record: std::sync::Arc<std::sync::Mutex<VideoLifecycleRecord>>,
     configure_error: bool,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl gen_core::MemoryRequestScope for VideoLifecycleScope {
     fn configure_request(&mut self, request: &mut GenerationRequest) -> gen_core::Result<()> {
         let mut record = self.record.lock().unwrap();
@@ -1065,20 +1029,14 @@ impl gen_core::MemoryRequestScope for VideoLifecycleScope {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct VideoLifecycleGenerator {
     descriptor: gen_core::ModelDescriptor,
     behavior: VideoLifecycleBehavior,
     record: std::sync::Arc<std::sync::Mutex<VideoLifecycleRecord>>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl VideoLifecycleGenerator {
     fn new(behavior: VideoLifecycleBehavior) -> Self {
         Self {
@@ -1099,10 +1057,7 @@ impl VideoLifecycleGenerator {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl Generator for VideoLifecycleGenerator {
     fn descriptor(&self) -> &gen_core::ModelDescriptor {
         &self.descriptor
@@ -1167,10 +1122,7 @@ impl Generator for VideoLifecycleGenerator {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn video_lifecycle_context(strategy: gen_core::MemoryStrategy) -> gen_core::MemoryRunContext {
     gen_core::MemoryRunContext {
         selection: gen_core::MemorySelection {
@@ -1225,10 +1177,7 @@ fn video_lifecycle_context(strategy: gen_core::MemoryStrategy) -> gen_core::Memo
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn video_lifecycle_input(strategy: gen_core::MemoryStrategy) -> VideoGenInput {
     let memory =
         (strategy != gen_core::MemoryStrategy::Resident).then(|| gen_core::GenerationMemory {
@@ -1250,10 +1199,7 @@ fn video_lifecycle_input(strategy: gen_core::MemoryStrategy) -> VideoGenInput {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_lifecycle_safety_rejection_prevents_begin_and_generate() {
     let generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::SafetyReject);
@@ -1272,10 +1218,7 @@ fn video_lifecycle_safety_rejection_prevents_begin_and_generate() {
     assert!(record.finishes.is_empty());
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn legacy_video_without_context_bypasses_memory_safety_and_generates() {
     let generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::SafetyReject);
@@ -1291,10 +1234,7 @@ fn legacy_video_without_context_bypasses_memory_safety_and_generates() {
     assert!(record.finishes.is_empty());
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_lifecycle_finishes_once_for_success_cancel_error_and_configuration_failure() {
     for (behavior, expected_finish, expected_generate) in [
@@ -1345,10 +1285,7 @@ fn video_lifecycle_finishes_once_for_success_cancel_error_and_configuration_fail
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn resident_video_context_runs_the_handshake_without_overriding_provider_defaults() {
     let generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::Success);
@@ -1368,10 +1305,7 @@ fn resident_video_context_runs_the_handshake_without_overriding_provider_default
     assert_eq!(record.finishes, vec![gen_core::MemoryRunOutcome::Complete]);
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn production_admission_handoff_drives_provider_safety_and_lifecycle() {
     let generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::Success);
@@ -1756,7 +1690,9 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
 fn scail2_cold_admission_uses_a_fresh_bounded_probe_without_blocking_the_request_runtime() {
     const CANDLE: &str = include_str!("candle.rs");
     const GPU: &str = include_str!("../gpu.rs");
-    assert!(CANDLE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
+    const VRAM: &str = include_str!("../vram_gate.rs");
+    assert!(CANDLE.contains("live_capped_budget_fresh_blocking(&gpu_id)"));
+    assert!(VRAM.contains("crate::gpu::nvidia_vram_budget_gb_fresh_blocking(gpu_id)"));
     let helper = GPU
         .split_once("pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(")
         .expect("fresh blocking NVIDIA helper")
@@ -3095,10 +3031,7 @@ fn video_preflight_refuses_a_step_count_off_the_models_declared_menu() {
 
 /// Build a Mochi model root in the A6 installed layout: tier dirs as SIBLINGS of the shared
 /// T5/tokenizer/VAE co-requisite. `tiers` lists the tier dirs to materialize.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn mochi_root(tag: &str, tiers: &[&str], shared: bool) -> tempfile::TempDir {
     let root_guard = tempfile::Builder::new()
         .prefix(&format!("mochi_root_{tag}_"))
@@ -3133,10 +3066,7 @@ fn mochi_root(tag: &str, tiers: &[&str], shared: bool) -> tempfile::TempDir {
     root_guard
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn mochi_request(advanced: Value) -> VideoRequest {
     request(json!({
         "projectId": "p",
@@ -3147,10 +3077,7 @@ fn mochi_request(advanced: Value) -> VideoRequest {
     }))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
     let data = tempfile::tempdir().unwrap();
@@ -3213,10 +3140,7 @@ fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
 /// `advanced.mlxQuantize` selects WHICH TIER DIR to load — the story's "selecting q4/q8/bf16
 /// loads the right tier" AC. A tier is a DIRECTORY, not a requant toggle (`supported_quants: &[]`
 /// on both descriptors), so this mapping is the entire quant mechanism.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn mochi_tier_order_maps_mlx_quantize_to_a_tier_dir() {
     // No explicit pick ⇒ q4-first (the video lane's sc-10859 carve-out; bf16 never a default).
@@ -3252,10 +3176,7 @@ fn mochi_tier_order_maps_mlx_quantize_to_a_tier_dir() {
 /// The resolver returns the TIER DIR (not the model root), honors the requested tier, and folds
 /// in the shared co-requisite gate. Pins the `WeightsSource::Dir` = tier-dir contract the
 /// provider's parent-resolution (`resolve_component_root`) depends on.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn resolve_mochi_model_dir_picks_the_requested_tier_dir() {
     let root_guard = mochi_root("resolve", &["q4", "q8", "bf16"], true);
@@ -3289,7 +3210,7 @@ fn resolve_mochi_model_dir_picks_the_requested_tier_dir() {
 /// The product's tier resolver must hand the bundled Mochi loaders a snapshot whose shared T5
 /// index is confined to that repository. HF blob links remain loadable; an index that selects a
 /// sibling outside the shared component and repository blobs fails before any shard is returned.
-#[cfg(all(unix, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(unix, native_lane))]
 #[test]
 fn cached_mochi_tier_preserves_shared_encoder_blob_boundary() {
     use std::os::unix::fs::symlink;
@@ -3390,10 +3311,7 @@ fn cached_mochi_tier_preserves_shared_encoder_blob_boundary() {
 /// SEPARATE download (`coRequisite`, sc-9696), so "q4 present, text_encoder absent" is a real
 /// user state — and resolving it would dead-end inside the provider on a missing-file error
 /// instead of telling the user what to re-download.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn resolve_mochi_model_dir_requires_the_shared_corequisite() {
     let root_guard = mochi_root("noshared", &["q4"], false);
@@ -3416,10 +3334,7 @@ fn resolve_mochi_model_dir_requires_the_shared_corequisite() {
 
 /// A half-downloaded tier (manifest without weights, or weights without the manifest) must fall
 /// THROUGH to the next tier in the order rather than half-loading.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn mochi_tier_subdir_skips_an_incomplete_tier() {
     let root_guard = mochi_root("partial", &["q4"], true);
@@ -3439,10 +3354,7 @@ fn mochi_tier_subdir_skips_an_incomplete_tier() {
 /// The quant marker rides the RESOLVED tier's own `split_model.json` — the same manifest the
 /// provider asserts against — so the spec can never disagree with the dir we picked (which would
 /// be a hard load error), and the asset record names the tier actually loaded.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn mochi_tier_quant_reads_the_tier_manifest() {
     let root_guard = mochi_root("quant", &["q4", "q8", "bf16"], true);
@@ -3489,10 +3401,7 @@ fn mochi_engine_id_is_the_model_id_and_matches_nothing_else() {
 /// Mochi's snap, so the substitution either agrees or errors — it never lies. (Why: if
 /// `wan(raw) = W` is `≡ 1 mod 6` then `raw − W ∈ 0..=3`, so `W` is Mochi's `lower` and
 /// `raw − W ≤ 3 ≤ 6 − (raw − W)` makes Mochi's nearest-with-ties-low pick `W` too.)
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn frames_are_the_mochi_lattice_not_wans() {
     // THE WIRING (not just the functions): the shared ladder BOTH generation lanes call must map
@@ -3855,20 +3764,11 @@ fn no_candle_raw_settings_builder_records_its_own_frame_count() {
 ///
 /// On the SUPERSET cfg (sc-12306): both lanes ingest these same hosted tiers, so both gates budget
 /// against these exact bytes.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const MOCHI_Q4_DIT_BYTES: u64 = 9_670_883_602;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const MOCHI_Q4_TE_BYTES: u64 = 9_524_669_250;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const MOCHI_Q4_VAE_BYTES: u64 = 919_551_200;
 
 /// A Mochi A6-layout root (q4 tier + shared `text_encoder`/`vae`/`tokenizer` siblings) whose
@@ -3879,10 +3779,7 @@ const MOCHI_Q4_VAE_BYTES: u64 = 919_551_200;
 /// The files are SPARSE: `set_len` sets the apparent size with zero allocated blocks on APFS/NTFS,
 /// and `sum_safetensors_bytes` reads `metadata().len()`. So this is instant and costs no disk —
 /// materializing 18.7 GiB of real zeros per test would not be viable.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn mochi_root_real_sized(tag: &str) -> tempfile::TempDir {
     let root_guard = tempfile::Builder::new()
         .prefix(&format!("mochi_preflight_{tag}_"))
@@ -4475,10 +4372,7 @@ fn candle_mochi_precheck_admits_without_a_signal() {
 // -----------------------------------------------------------------------------------------
 
 /// What `generate_mochi_using` actually handed the engine, captured from inside the load+run.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Default)]
 struct ArmProbe {
     /// The `GenerationRequest` the arm built, or `None` if generation never ran.
@@ -4495,10 +4389,7 @@ struct ArmProbe {
     audio: Option<gen_core::AudioTrack>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl ArmProbe {
     /// The loader to hand `generate_mochi_using`. Records the spec, then yields a generator that
     /// records the request — so a test can assert on both the load and the generate side of the arm
@@ -4551,20 +4442,14 @@ impl ArmProbe {
     /// lane has none". That stopped being true in sc-12306 (the candle lane grew a pre-load gate)
     /// and again in sc-12373 (a pre-download one), so it is now on the superset cfg and is live
     /// code on both.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn loaded(&self) -> bool {
         self.spec.lock().unwrap().is_some()
     }
 }
 
 /// A backend-neutral `Generator` that records the request and returns a minimal clip.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct ProbeGenerator {
     descriptor: gen_core::ModelDescriptor,
     request: std::sync::Arc<std::sync::Mutex<Option<GenerationRequest>>>,
@@ -4573,10 +4458,7 @@ struct ProbeGenerator {
     audio: Option<gen_core::AudioTrack>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl Generator for ProbeGenerator {
     fn descriptor(&self) -> &gen_core::ModelDescriptor {
         &self.descriptor
@@ -4610,10 +4492,7 @@ impl Generator for ProbeGenerator {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn shared_video_funnel_reaches_auto_duration_and_temporal_provider_fields() {
     let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -4659,10 +4538,7 @@ fn shared_video_funnel_reaches_auto_duration_and_temporal_provider_fields() {
 /// sc-23402. The reference-image short edge the job asked for reaches the engine's
 /// `GenerationRequest`, and a request that named none leaves the field absent so gen-core's own
 /// default (2048) applies — the funnel neither invents a value nor drops one.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn shared_video_funnel_carries_the_reference_image_short_edge_to_the_request() {
     let probe = |short_edge: Option<u32>| -> Option<u32> {
@@ -4748,10 +4624,7 @@ fn minimax_h3_reference_short_edge_is_parsed_from_advanced_and_refused_out_of_ra
 
 /// sc-26691. `advanced.referenceImageResizeMode` maps onto the engine's own enum one-for-one, an
 /// absent key stays absent (gen-core resolves `match`), and a misspelling is refused by name.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn minimax_h3_reference_resize_mode_maps_onto_the_engine_enum() {
     use super::minimax_h3::minimax_h3_reference_image_resize_mode as parse;
@@ -4791,10 +4664,7 @@ fn minimax_h3_reference_resize_mode_maps_onto_the_engine_enum() {
 
 /// sc-26691. The mode reaches the engine's `GenerationRequest` through the shared funnel, and an
 /// absent one stays absent so gen-core's own default resolves it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn shared_video_funnel_carries_the_reference_resize_mode_to_the_request() {
     let probe = |mode: Option<gen_core::ReferenceImageResizeMode>| {
@@ -4843,10 +4713,7 @@ fn shared_video_funnel_carries_the_reference_resize_mode_to_the_request() {
 /// sc-26691. The asset recipe records the RESOLVED resize mode: the caller's own value, or the
 /// engine's `match` when the request named none — never an absence, because an absent key is how a
 /// pre-sc-26691 (`diffusers`-rendered) asset reads.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn minimax_h3_recipe_records_the_resolved_reference_resize_mode() {
     let record = |advanced: Value| {
@@ -4887,10 +4754,7 @@ fn minimax_h3_recipe_records_the_resolved_reference_resize_mode() {
 }
 
 /// A `JobSnapshot` for a Mochi video job. `payload.model` is what the completion metrics read.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn mochi_job_snapshot() -> JobSnapshot {
     serde_json::from_value(json!({
         "id": "job-mochi-1",
@@ -5196,10 +5060,7 @@ fn generate_mochi_using_refuses_after_the_fetch_when_the_precheck_floor_admitted
 /// Goes through `safe_repo_dir_name` rather than hand-writing `models--SceneWorks--mochi-1-mlx`, so
 /// the fixture cannot drift from the slug the real resolver computes. Sparse, like
 /// [`mochi_root_real_sized`].
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn mochi_hf_cache_shared_only(tag: &str) -> tempfile::TempDir {
     let hub_guard = tempfile::Builder::new()
         .prefix(&format!("mochi_hf_hub_{tag}_"))
@@ -5451,10 +5312,7 @@ fn generate_candle_video_using_refuses_before_paying_for_the_tier_download() {
 /// but `ensure_mochi_*_present` has not run yet. Sparse, like [`mochi_root_real_sized`].
 ///
 /// Superset cfg (sc-12373): both lanes' pre-download gates measure this same disk state.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn mochi_root_shared_only(tag: &str) -> tempfile::TempDir {
     let root_guard = tempfile::Builder::new()
         .prefix(&format!("mochi_precheck_{tag}_"))
@@ -5988,8 +5846,14 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
                 panic!("expected an actionable InvalidPayload");
             };
             assert!(
-                message.contains("krea_realtime_14b") && message.contains("Model Manager"),
-                "the error must name the model and tell the user what to do: {message}"
+                message.starts_with("krea_realtime: no MLX weights found.")
+                    && message.contains("Download the turnkey SceneWorks/krea-realtime-14b-mlx")
+                    && message.contains("Model Manager")
+                    && message.contains("$SCENEWORKS_MLX_KREA_REALTIME_DIR")
+                    && message.contains(
+                        &empty.join("models/mlx/krea_realtime").display().to_string()
+                    ),
+                "the error must name the model family, published snapshot and installation routes: {message}"
             );
         },
     );
@@ -7423,10 +7287,7 @@ fn krea_realtime_tier_revision_is_a_pinned_commit_not_main() {
 /// The on-demand tier fetches are gated on the request's tier toggle — the "fetched on demand if
 /// toggled but not downloaded" AC. Pins that a default (q4) job asks for NEITHER extra tier, so
 /// no job accidentally pulls the ~13 GB q8 / ~20 GB bf16.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn mochi_on_demand_tier_fetch_is_gated_on_the_toggle() {
     // Default ⇒ neither on-demand tier is wanted.
@@ -7452,10 +7313,7 @@ fn mochi_on_demand_tier_fetch_is_gated_on_the_toggle() {
 
 /// The pinned revision must be a full 40-char commit, not a mutable branch: the repo is a
 /// hard-coded const, so `main` would let an upstream re-push swap a checkpoint we load.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn mochi_repo_revision_is_pinned_to_a_commit() {
     assert_eq!(MOCHI_REPO, "SceneWorks/mochi-1-mlx");
@@ -7498,10 +7356,7 @@ fn mochi_raw_settings_record_the_loaded_tier() {
 // `huggingface_base_url` (not `api_url`) is what a tier fetch dials. See its doc comment.
 // Its consumers include the candle Mochi twins, so it rides the same `any(macos, candle)` gate
 // as the helpers above rather than the macOS-only one below.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::test_env::{offline_settings, temp_env_var, temp_env_vars};
 
 // The macOS-gated adapter fixtures (wan Lightning + ltx distill) pin a var for a whole test body —
@@ -7511,10 +7366,7 @@ use crate::test_env::EnvVars;
 
 /// sc-10418: the resolved video quant maps to the same normalized tier labels the
 /// image lane uses, so the Stats charts group video + image runs on one axis.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_quant_label_maps_tiers() {
     assert_eq!(
@@ -7538,10 +7390,7 @@ fn video_quant_label_maps_tiers() {
 /// The `bits()`-is-4 assertion is deliberate: it documents WHY the label must be matched from the
 /// variant, and fails loudly if a future contract change makes the old bits-derived form look safe
 /// again.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_quant_label_never_aliases_nvfp4_to_q4() {
     let (label, bits) = video_quant_label(Some(Quant::Nvfp4));
@@ -7570,10 +7419,7 @@ fn video_quant_label_never_aliases_nvfp4_to_q4() {
 /// settings builder folds the resolved effective settings onto the phase-timing
 /// block WITHOUT clobbering the timings, records one output (sc-10426), and carries
 /// quant / sampler / scheduler / guidance / dims / seed through.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn build_video_metrics_folds_settings_onto_timing() {
     let timing = GenerationMetrics {
@@ -7628,10 +7474,7 @@ fn build_video_metrics_folds_settings_onto_timing() {
 /// engine-default guidance) still reports non-blank sampler/scheduler so the charts
 /// have a group, but leaves guidance / scheduler-shift `None` — an honest "engine
 /// default, not captured" rather than a fabricated value.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn build_video_metrics_defaults_when_unset() {
     let settings = VideoSettingsSnapshot {
@@ -7668,10 +7511,7 @@ fn build_video_metrics_defaults_when_unset() {
 /// What CAN still regress is someone re-introducing the duplicate (that is exactly how the two
 /// destinations appeared in the first place), so gate on that: this module must name neither the
 /// mirror nor the pinned sha, and must reach the checkpoint through the shared image-lane resolver.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn seedvr2_video_lane_has_no_private_checkpoint_pin() {
     const SOURCE: &str = include_str!("seedvr2.rs");
@@ -7697,10 +7537,7 @@ fn seedvr2_video_lane_has_no_private_checkpoint_pin() {
 /// `WAN_LIGHTNING_REVISION` const, so it must pin an exact commit rather than the mutable `main`
 /// branch — an upstream re-push would otherwise silently swap the high/low distill weights we load.
 /// Lock the pin to a real 40-hex lowercase commit id (mirrors the SeedVR2 format test above).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn wan_lightning_revision_is_pinned_commit_not_main() {
     assert_ne!(
@@ -7720,10 +7557,7 @@ fn wan_lightning_revision_is_pinned_commit_not_main() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn wan_lightning_subdir_is_canonical_for_fetch_and_resolution() {
     assert_eq!(
@@ -8067,7 +7901,7 @@ fn candle_vace_fun_attaches_fail_closed_sequential_cold_admission() {
     assert!(arm.contains("vace_fun_cold_load_admission("));
     assert!(arm.contains("cold_load_admission,"));
     assert!(SOURCE.contains("wan_vace_fun_sequential_weight_bytes("));
-    assert!(SOURCE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
+    assert!(SOURCE.contains("live_capped_budget_fresh_blocking(&gpu_id)"));
 }
 
 /// sc-10997 (epic 6562): the candle Bernini VIDEO lane routes t2v + every editing/reference/
@@ -8134,17 +7968,11 @@ fn bernini_backends_share_engine_id_and_video_mode_mapping() {
     assert_eq!(bernini_engine_video_mode(""), "t2v");
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const NO_H3: super::minimax_h3_sequence::MinimaxH3StallRequest<'static> =
     super::minimax_h3_sequence::MinimaxH3StallRequest::EMPTY;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_stall_window_covers_preparation_and_cold_load_until_the_first_step() {
     // sc-26691: a healthy imported H3 render was cancelled 600 s into a ~25 minute cold load on the
@@ -8178,10 +8006,7 @@ fn video_stall_window_covers_preparation_and_cold_load_until_the_first_step() {
     assert_eq!(video_stall_window(operator, true), Duration::from_secs(120));
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_stall_timeout_operator_override_is_absolute() {
     // A valid positive override wins even when it is below both the default and the H3 workload
@@ -8219,10 +8044,7 @@ fn video_stall_timeout_operator_override_is_absolute() {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_stall_timeout_non_h3_remains_the_global_default() {
     for raw in [None, Some(""), Some("nope"), Some("0")] {
@@ -8246,10 +8068,7 @@ fn video_stall_timeout_non_h3_remains_the_global_default() {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_stall_timeout_minimax_h3_shortest_full_canvas_preserves_the_600_second_baseline() {
     for (width, height) in [(768, 1344), (1344, 768)] {
@@ -8266,10 +8085,7 @@ fn video_stall_timeout_minimax_h3_shortest_full_canvas_preserves_the_600_second_
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_stall_timeout_minimax_h3_243_frame_full_canvas_exceeds_the_false_stall_threshold() {
     let portrait = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, 243, None, NO_H3);
@@ -8282,10 +8098,7 @@ fn video_stall_timeout_minimax_h3_243_frame_full_canvas_exceeds_the_false_stall_
     assert!(portrait.timeout > Duration::from_secs(600));
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_stall_timeout_minimax_h3_is_monotonic_and_bounded_on_the_full_legal_lattice() {
     use sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS;
@@ -8316,10 +8129,7 @@ fn video_stall_timeout_minimax_h3_is_monotonic_and_bounded_on_the_full_legal_lat
     assert_eq!(refused.basis, "minimax_h3_sequence_unknown");
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_stall_timeout_minimax_h3_reads_the_reference_geometry_from_the_engine_input() {
     // sc-26691's measured case shape: the references, not the 1088x544 canvas, set the budget.
@@ -8365,10 +8175,7 @@ fn video_stall_timeout_minimax_h3_reads_the_reference_geometry_from_the_engine_i
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_stall_timeout_wan_a14b_default_request_outlasts_the_measured_silent_window() {
     // sc-10299: the shipped default (1280x720, 5 s @ 16 fps -> 77 frames, Lightning 4-step with
@@ -8403,10 +8210,7 @@ fn video_stall_timeout_wan_a14b_default_request_outlasts_the_measured_silent_win
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_stall_timeout_wan_a14b_scales_with_tokens_and_cfg() {
     // The original sc-10299 repro: 832x480, 33 frames -> 52*30*9 = 14,040 tokens.
@@ -8436,10 +8240,7 @@ fn video_stall_timeout_wan_a14b_scales_with_tokens_and_cfg() {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_stall_timeout_wan_a14b_is_bounded_and_overridable() {
     // Largest legal request: 1280x720 area cap, 81 frames (21 latent), CFG on ->
@@ -10019,10 +9820,7 @@ async fn scail2_conditioning_guards_fire_before_io() {
 /// One shared assembler is the parity boundary for both MLX and Candle. It must retain every
 /// reference's own mask and caller order, reject the missing-pair and seven-reference cases, and
 /// never substitute the image-only generic MultiReference carrier.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn scail2_multi_reference_conditioning_is_ordered_paired_and_bounded() {
     let image = |shade| Image {
@@ -10101,10 +9899,7 @@ fn scail2_multi_reference_conditioning_is_ordered_paired_and_bounded() {
 
 /// Cancellation is checked at each reference boundary, so a user cancellation after one masked
 /// reference cannot continue into later character segmentation.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn scail2_multi_reference_segmentation_stops_between_references_on_cancel() {
     let image = |shade| Image {
@@ -10136,10 +9931,7 @@ fn scail2_multi_reference_segmentation_stops_between_references_on_cancel() {
 
 /// Loading every requested reference fails closed before segmentation if one asset has disappeared;
 /// a missing second character must not result in the first character being rendered by itself.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn scail2_missing_reference_asset_fails_before_masking() {
     let data_dir = tempfile::tempdir().expect("data dir creates");
@@ -10886,10 +10678,7 @@ fn wan_moe_sibling_pairs_high_and_low() {
 
 /// Minimal valid safetensors (8-byte LE header length + JSON header), optionally stamping
 /// `__metadata__.networkType` so `classify_adapter` can distinguish peft LoKr from plain LoRA.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn write_lora_fixture(path: &Path, network_type: Option<&str>) {
     std::fs::create_dir_all(path.parent().expect("LoRA fixture has a parent")).unwrap();
     let mut meta = serde_json::Map::new();
@@ -11274,10 +11063,7 @@ fn resolve_dense_adapters_honors_the_max_lora_cap() {
 
 /// sc-8830: [`non_empty_negative_prompt`] trims and maps empty/whitespace to `None` (so engines
 /// see "no negative", not the empty string) and passes a real negative through trimmed.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn non_empty_negative_prompt_trims_and_drops_empty() {
     let empty = request(json!({ "projectId": "p", "negativePrompt": "   " }));
@@ -12367,10 +12153,7 @@ fn ltx25_transformer_variant_defaults_and_refuses_unknown_values() {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn ltx25_generation_controls_reach_typed_provider_options_and_explicit_duration_wins() {
     let automatic = request(json!({
@@ -12462,10 +12245,7 @@ fn ltx25_generation_controls_reach_typed_provider_options_and_explicit_duration_
 ///
 /// This asserts the ONE shared derivation both arms now feed those two fields from, and that each
 /// arm's struct literal actually names them.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn ltx_memory_axes_declare_one_pipeline_shape_for_both_lanes() {
     use sceneworks_core::memory_calibration::{
@@ -12937,10 +12717,7 @@ fn ensure_ltx_tier_present_skips_fetch_for_a_sibling_revision() {
 /// Lay down a complete Gemma-3 text-encoder snapshot at `dir`: config, tokenizer, a two-shard
 /// index, and the shards it maps. Mirrors the real bundle `gemma/` so the completeness +
 /// eros-resolution tests are hermetic.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn write_tiny_safetensors(path: &Path) {
     let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
     let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
@@ -12949,10 +12726,7 @@ fn write_tiny_safetensors(path: &Path) {
     std::fs::write(path, bytes).unwrap();
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn write_complete_gemma_dir(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("config.json"), br#"{"model_type":"gemma3_text"}"#).unwrap();
@@ -13145,10 +12919,7 @@ fn generate_ltx_validates_and_stages_the_selector_before_side_effects() {
 
 /// `ltx_gemma_dir_is_complete`: needs config + tokenizer + every shard a non-empty index maps
 /// (or a lone single-file checkpoint); missing load inputs and malformed/empty maps all fail.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn ltx_gemma_completeness_requires_config_and_all_shards() {
     // The traversal case below plants a decoy at `root.parent()`, so the guard has to own the
@@ -13442,10 +13213,7 @@ fn resolve_ltx_eros_gemma_reaches_a_sibling_revision() {
 /// `VideoGenInput::text_encoder_dir`) instead of the process-global `$LTX_GEMMA_DIR`. This asserts
 /// the path flows through `video_load_spec` onto the spec — `None` maps to `None` (env/`<root>`
 /// fallback in the provider), a dir maps to `Some(WeightsSource::Dir(..))`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_load_spec_threads_text_encoder_dir() {
     let base = VideoGenInput {
@@ -14127,10 +13895,7 @@ fn seedvr2_video_upscale_real_weights() {
 
 /// A single-channel synthetic frame (1×1 RGB, all bytes = `v`) — enough to test frame identity,
 /// ordering, and the cross-fade blend byte-exactly.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn syn_frame(v: u8) -> Image {
     Image {
         width: 1,
@@ -14144,10 +13909,7 @@ fn syn_frame(v: u8) -> Image {
 /// `preprocess_chunk`), then `assemble_overlap`. Mirrors `pipeline::generate_video` exactly, minus
 /// the real tensor pass — the deterministic per-chunk structure is what worker windowing must
 /// reproduce.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn engine_whole_clip_synthetic(src: &[Image], c: i32, ov: i32) -> Vec<Image> {
     let n = src.len() as i32;
     let plan = seedvr2_video::plan_chunks(n, c, ov);
@@ -14168,10 +13930,7 @@ fn engine_whole_clip_synthetic(src: &[Image], c: i32, ov: i32) -> Vec<Image> {
 /// engine chunk `engine_c` over the LOCAL window), and cross-fade across worker windows with the
 /// `Seedvr2StreamAssembler`. Returns the streamed frame sequence + the max retained-tail length
 /// observed (the memory bound).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn worker_streamed_synthetic(
     src: &[Image],
     worker_chunk: i32,
@@ -14202,10 +13961,7 @@ fn worker_streamed_synthetic(
 /// a single whole-clip `assemble_overlap`, across a sweep of frame counts, worker-chunk sizes, and
 /// engine-chunk sizes — including where the worker chunk and engine chunk differ. Byte-exact on the
 /// synthetic frames, so both the frame ORDER and the cross-fade BLEND match the whole-clip path.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn seedvr2_stream_matches_whole_clip_assembly() {
     let ov = seedvr2_video::DEFAULT_OVERLAP;
@@ -14237,10 +13993,7 @@ fn seedvr2_stream_matches_whole_clip_assembly() {
 /// The streaming assembler holds BOUNDED memory: the retained tail never exceeds one worker window
 /// plus the overlap, regardless of clip length — the property that removes the whole-clip host-RAM
 /// footprint the sc-8829 cap existed to bound.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn seedvr2_stream_retains_bounded_tail() {
     let ov = seedvr2_video::DEFAULT_OVERLAP;
@@ -14262,10 +14015,7 @@ fn seedvr2_stream_retains_bounded_tail() {
 /// Frame ORDER is preserved end-to-end: each streamed frame carries its source ordinal through the
 /// (identity) upscale + cross-fade, so the sequence is monotonic and complete (no drops/dupes/swaps)
 /// even across worker-window boundaries with a partial trailing window.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn seedvr2_stream_preserves_frame_order() {
     let ov = seedvr2_video::DEFAULT_OVERLAP;
@@ -14289,10 +14039,7 @@ fn seedvr2_stream_preserves_frame_order() {
 /// narrowing is gone. (The removed `check_seedvr2_host_ram` / `seedvr2_estimated_host_bytes`
 /// helpers no longer exist; this test would not compile if a hard cap were reintroduced in the
 /// streaming path.)
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn seedvr2_stream_upscales_formerly_capped_clip() {
     let ov = seedvr2_video::DEFAULT_OVERLAP;
@@ -14316,10 +14063,7 @@ fn seedvr2_stream_upscales_formerly_capped_clip() {
 /// covers a create_dir_all / progress-POST / encode `?`-return or a cancel between the stream and the
 /// encode, where the old code leaked the whole 4× sequence. Disarming (the success path, after the
 /// caller already removed the dir) makes Drop a no-op so it can't fight a concurrent same-name reuse.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn scratch_dir_guard_cleans_up_on_drop_and_respects_disarm() {
     let base_guard = tempfile::Builder::new()
@@ -14776,10 +14520,7 @@ fn advanced_numeric_helpers_parse_flf_keyframe_knobs() {
     assert_eq!(advanced::i32(&bare.advanced, "imageFrameIndex", 0), 0);
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn ltx_i2v_strength_is_accepted_and_keyed_as_its_own_admission_axis() {
     let defaulted = request(json!({
@@ -14865,10 +14606,7 @@ fn keyframe_conditioning_requires_both_frame_assets() {
 
 /// FLF on a 14B Wan MoE engine is rejected at the conditioning resolver (defence-in-depth
 /// behind the routing gate, which already restricts FLF to `wan_2_2`/TI2V-5B).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn wan_flf_rejected_on_non_ti2v_engine() {
     let settings = Settings::from_env();
@@ -14885,10 +14623,7 @@ fn wan_flf_rejected_on_non_ti2v_engine() {
 
 /// A 1×1 RGB [`Image`] for clip-conditioning construction tests (the engine resizes; the
 /// content is irrelevant — only the variant / frame_idx / strength mapping is under test).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn wan5_conditioning_rejects_stale_media_before_asset_io() {
     let settings = Settings::from_env();
@@ -16444,10 +16179,7 @@ pub(crate) fn ffmpeg_is_required() -> bool {
 /// F-118: video upscale accepts only 2x and 4x. Any other factor is rejected with a clear error
 /// rather than silently coerced to 2x (which produced a quietly-different output). Compiled on
 /// both the macOS and candle lanes, matching the gate on [`resolve_video_upscale_factor`].
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn video_upscale_factor_accepts_2_and_4_rejects_others() {
     assert_eq!(resolve_video_upscale_factor(2).expect("2x"), 2);
@@ -18011,10 +17743,7 @@ async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
 // ---------------------------------------------------------------------------
 
 /// A MiniMax-H3 payload for `model`, with whatever extra keys the test needs.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn minimax_h3_request(model: &str, extra: Value) -> VideoRequest {
     let mut payload = json!({
         "projectId": "p",
@@ -19279,10 +19008,7 @@ async fn minimax_h3_reference_clip_frames_keep_source_order() {
 /// became a second FIRST anchor and the first CUDA `first_last_frame` campaign case (run
 /// 41303430895) failed with "both keyframes anchor First". Compiled on the Candle lane too — this test was macOS-only, so the one
 /// backend that misread `-1` never ran it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn minimax_h3_conditioning_anchors_and_reference_order() {
     use crate::video_jobs::minimax_h3::minimax_h3_conditioning;
@@ -19421,10 +19147,7 @@ fn minimax_h3_conditioning_anchors_and_reference_order() {
 /// `gen_core_h3::h3_keyframe::resolve_keyframe_slots` — so this checks the worker's indices against
 /// that very function (via `validate_minimax_h3_keyframes`) instead of a hand-written mirror of one
 /// engine's rule: an index it accepts is honoured identically on Candle and MLX.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn minimax_h3_first_last_anchors_resolve_to_distinct_ends_under_the_shared_contract() {
     use crate::video_jobs::minimax_h3::{
@@ -19517,10 +19240,7 @@ fn minimax_h3_first_last_anchors_resolve_to_distinct_ends_under_the_shared_contr
 }
 
 /// The recorded task follows the CONDITIONING, which is what the engine derives the partition from.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn minimax_h3_task_is_derived_from_the_conditioning() {
     use crate::video_jobs::minimax_h3::{minimax_h3_conditioning, minimax_h3_task};
@@ -21602,10 +21322,7 @@ fn a_plan_backed_video_request_of_a_family_with_no_video_lane_refuses_by_name() 
 /// reds this test instead of leaving the drift to a grep sweep.
 ///
 /// Shape, not population: it asserts the two agree and pins neither value.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn the_ltx25_weights_inventory_describes_the_shipped_bundle_revision() {
     const INVENTORY: &str = include_str!("../../../../config/ltx25-weights-file-inventory.json");
@@ -21695,10 +21412,7 @@ fn minimax_h3_veda_complete_controls_reach_native_request_without_changing_tiers
             .contains_key("veda_predictor"));
     }
 }
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn minimax_h3_veda_shared_native_conversion_matches_frozen_contract_and_refuses_before_work() {
     for model in ["minimax_h3", "minimax_h3_ref"] {
@@ -21739,10 +21453,7 @@ fn minimax_h3_veda_shared_native_conversion_matches_frozen_contract_and_refuses_
     }
 }
 // The report getter must run after generate, on the same generator, for each job.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn veda_outcome_survives_post_generation_conversion_and_never_replays_stale_facts() {
     struct OutcomeGenerator {
@@ -21962,3 +21673,76 @@ fn minimax_h3_veda_queued_request_prices_bound_before_engine_generate() {
 // it reuses this suite's harness (`ArmProbe`, `drive_minimax_h3_arm`, the tier/base fixtures).
 #[path = "minimax_h3_import_tests.rs"]
 mod minimax_h3_import_tests;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn shared_mlx_family_dirs_preserve_override_managed_and_snapshot_resolution() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        data_dir: temp.path().join("data"),
+        ..offline_settings()
+    };
+    for (env, name, repo) in [
+        (
+            "SCENEWORKS_MLX_BERNINI_DIR",
+            "bernini",
+            "SceneWorks/bernini-mlx",
+        ),
+        (
+            "SCENEWORKS_MLX_SCAIL2_DIR",
+            "scail2",
+            "SceneWorks/scail2-mlx",
+        ),
+        (
+            "SCENEWORKS_MLX_KREA_REALTIME_DIR",
+            "krea_realtime",
+            "SceneWorks/krea-realtime-14b-mlx",
+        ),
+    ] {
+        let managed = settings.data_dir.join("models/mlx").join(name);
+        let override_dir = temp.path().join(format!("override-{name}"));
+        let hub = temp.path().join("hub");
+        let repo_cache = hub.join(format!("models--{}", repo.replace('/', "--")));
+        let revision = "a".repeat(40);
+        let snapshot = repo_cache.join("snapshots").join(&revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::create_dir_all(repo_cache.join("refs")).unwrap();
+        std::fs::write(repo_cache.join("refs/main"), &revision).unwrap();
+        std::fs::write(snapshot.join("config.json"), "{}").unwrap();
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(managed.join("config.json"), "{}").unwrap();
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(override_dir.join("config.json"), "{}").unwrap();
+        temp_env_vars(
+            &[
+                (env, override_dir.to_str().unwrap()),
+                ("HF_HUB_CACHE", hub.to_str().unwrap()),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || {
+                assert_eq!(
+                    resolve_mlx_family_dir(&settings, env, name, repo).unwrap(),
+                    override_dir
+                );
+                std::fs::remove_file(override_dir.join("config.json")).unwrap();
+                assert_eq!(
+                    resolve_mlx_family_dir(&settings, env, name, repo).unwrap(),
+                    managed
+                );
+                std::fs::remove_file(managed.join("config.json")).unwrap();
+                assert_eq!(
+                    resolve_mlx_family_dir(&settings, env, name, repo).unwrap(),
+                    snapshot
+                );
+                std::fs::remove_dir_all(&repo_cache).unwrap();
+                let error = resolve_mlx_family_dir(&settings, env, name, repo)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains(env) && error.contains(repo) && error.contains("Model Manager")
+                );
+            },
+        );
+    }
+}

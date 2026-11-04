@@ -4,36 +4,24 @@
 //! bounded acquisition, objective analysis, and survivor-only semantic work.
 //! Vectors and their searchable manifest stay outside SQLite; record metadata
 //! contains only small results, pointers, digests, and exact provenance.
-#![cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#![cfg_attr(not(native_lane), allow(dead_code))]
 
 use crate::text_clean::clean_fenced_json_output as clean_json_output;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use std::sync::Arc;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::catalog_store::CatalogProcessingLease;
 use sceneworks_core::catalog_store::{
     Catalog, CatalogAnalyzerConfig, CatalogRecord, CatalogRegistry, NewCatalogRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sha2::{Digest, Sha256};
 
 use crate::{WorkerError, WorkerResult};
@@ -49,7 +37,7 @@ const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
 const CLIP_PROVIDER: &str = CLIP_EMBEDDER_ID;
 const CLIP_SPACE: &str = "clip-vit-l14";
-pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "a43724b82fbae35c9227cef4bcdabba6dd1da12c";
+use sceneworks_core::inference_provenance::INFERENCE_REVISION as INFERENCE_RUNTIME_REVISION;
 const DEFAULT_BATCH_SIZE: usize = 16;
 const MAX_BATCH_SIZE: usize = 64;
 const PAGE_SIZE: u32 = 250;
@@ -522,41 +510,7 @@ fn reconcile_semantic_records(
 }
 
 fn resolve_catalog_image(catalog: &Catalog, record: &CatalogRecord) -> WorkerResult<PathBuf> {
-    let relative = record
-        .metadata
-        .pointer("/acquisition/cachePath")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            (!record.image_path.contains("://") && !record.image_path.trim().is_empty())
-                .then_some(record.image_path.as_str())
-        })
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "catalog record {} has no available local image",
-                record.id
-            ))
-        })?;
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "catalog record {} has an unsafe image path",
-            record.id
-        )));
-    }
-    let candidate = catalog.root().join(path);
-    let resolved = candidate.canonicalize().map_err(WorkerError::Io)?;
-    let root = catalog.root().canonicalize().map_err(WorkerError::Io)?;
-    if !resolved.starts_with(&root) || !resolved.is_file() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "catalog record {} image escapes its catalog",
-            record.id
-        )));
-    }
-    Ok(resolved)
+    catalog.resolve_local_image(record).map_err(WorkerError::Io)
 }
 
 fn l2_normalize(mut vector: Vec<f32>) -> Result<Vec<f32>, String> {
@@ -637,10 +591,7 @@ fn persist_semantic_checkpoint(
 /// Decode the vision-policy JSON on the resident `model` and record the generation's
 /// `llm_kv_cache` event whichever way it ends: completed, or refused, canceled or failed by the
 /// engine (sc-20682, sc-20688).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn run_vision_generation(
     model: &dyn gen_core::core_llm::TextLlm,
     request: &gen_core::core_llm::TextLlmRequest,
@@ -670,10 +621,7 @@ fn run_vision_generation(
         .map_err(|error| WorkerError::Engine(format!("catalog vision inference failed: {error}")))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn generate_vision_json(
     api: &crate::ApiClient,
     settings: &crate::Settings,
@@ -813,10 +761,7 @@ fn apply_vision_outcome(
     Ok(())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn run_vision_pass(
     api: &crate::ApiClient,
     settings: &crate::Settings,
@@ -884,10 +829,7 @@ async fn run_vision_pass(
     Ok((examined, updated))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn fetch_catalog_images_with_heartbeat(
     api: &crate::ApiClient,
     settings: &crate::Settings,
@@ -918,10 +860,7 @@ async fn fetch_catalog_images_with_heartbeat(
     result.map_err(|error| WorkerError::Engine(format!("catalog image fetch failed: {error}")))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn run_embedding_pass_blocking(
     registry: CatalogRegistry,
     catalog_id: String,
@@ -1138,10 +1077,7 @@ fn run_embedding_pass_blocking(
     Ok((examined, updated))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn run_embedding_pass_with_index_reconciliation(
     registry: CatalogRegistry,
     catalog_id: String,
@@ -1289,10 +1225,7 @@ fn rebuild_embedding_index_streaming(
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_catalog_analysis_job(
     api: &crate::ApiClient,
     settings: &crate::Settings,
@@ -1681,7 +1614,7 @@ fn validate_pipeline_settings(config: &CatalogAnalyzerConfig) -> WorkerResult<()
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_catalog_analysis_job(
     _api: &crate::ApiClient,
     _settings: &crate::Settings,
@@ -1699,10 +1632,7 @@ mod tests {
 
     /// sc-20688: a vision decode the engine refuses still records its `llm_kv_cache` event, with
     /// the requested policy, the outcome and the refusal.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn a_refused_vision_generation_records_its_kv_cache_event() {
         use crate::llm_kv_cache::test_support::{events_for, RefusingLlm};

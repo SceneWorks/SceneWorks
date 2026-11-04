@@ -38,7 +38,7 @@ const TERMINAL_8B_FILES: &[&str] = &[
     "tokenizer_config.json",
     "vocab.json",
 ];
-const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -659,10 +659,7 @@ async fn live_device_facts(gpu_id: &str) -> Option<VectorDeviceFacts> {
     })
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 async fn live_device_facts(_gpu_id: &str) -> Option<VectorDeviceFacts> {
     None
 }
@@ -727,7 +724,7 @@ mod tests {
         })];
         json!({
             "schemaVersion": 1,
-            "inferenceRevision": crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+            "inferenceRevision": sceneworks_core::inference_provenance::INFERENCE_REVISION,
             "corpusSha256": "b".repeat(64),
             "model": {
                 "repository": TERMINAL_8B_REPOSITORY,

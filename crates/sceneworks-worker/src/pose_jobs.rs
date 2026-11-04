@@ -1121,14 +1121,12 @@ fn resolve_source(
 /// tree with `..`, an absolute root, or a drive/UNC prefix (sc-8875). Returns `None`
 /// if any component is non-`Normal` (the caller then treats the source as unresolved).
 fn join_project_relative(project_path: &Path, raw: &str) -> Option<PathBuf> {
-    let mut path = project_path.to_path_buf();
-    for component in Path::new(raw).components() {
-        match component {
-            std::path::Component::Normal(value) => path.push(value),
-            _ => return None,
-        }
-    }
-    Some(path)
+    sceneworks_core::safe_path::confine_under(
+        project_path,
+        raw,
+        sceneworks_core::safe_path::Confinement::SymlinkSafe,
+    )
+    .ok()
 }
 
 // ---------------------------------------------------------------------------

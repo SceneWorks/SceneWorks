@@ -2,7 +2,7 @@
 //!
 //! The canonical bundle is compiled into `sceneworks-core`. This keeps the same evidence bytes
 //! available to desktop and remote workers without relying on the repository-only `docs/` path at
-//! runtime. Gate wiring belongs to SC-15611; this module only parses and classifies evidence.
+//! runtime. Admission consumers own policy; this module only parses and classifies evidence.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -47,11 +47,10 @@ pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v5";
 pub const MEMORY_CALIBRATION_ABI: u32 = 3;
 /// The per-provider inference compile-closure digests, compiled in (sc-17774).
 ///
-/// ONE mechanism, applied identically to every model. Before this, each lane carried its own frozen
-/// revision constant — `KREA_CONTROL_INFERENCE_REVISION`, `KREA_TURBO_INFERENCE_REVISION`,
-/// `INFERENCE_CONTRACT_REVISION`, `INFERENCE_RUNTIME_REVISION` — and `flux2_dev` additionally had a
-/// hand-audited one-shot compatibility hatch. All of them are gone; every lane now asks this table
-/// for the provider it is actually admitting.
+/// Probe tooling uses this one currency mechanism for every provider. New runtime/estimate
+/// metadata separately records the linked inference revision from `inference_provenance`;
+/// captured evidence keeps its actual producer revision. Neither revision nor closure currency
+/// changes runtime admission (sc-22738).
 pub const PACKAGED_INFERENCE_PROVIDER_CLOSURES: &str =
     include_str!("../../../config/inference-provider-closures.json");
 

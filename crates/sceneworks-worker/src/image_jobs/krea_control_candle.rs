@@ -811,10 +811,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         && selected_text_encoder.is_none()
         && krea_control_runtime_evidence_verified(request, settings, tier, &base, &control);
 
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     // sc-13960 two-pass: walk the ladder against raw free, then — only if reclaiming the cudarc pool
     // would step it off a needless rung (a strict improvement; the reclaimed budget only grows) — evict
     // the resident generator and act on the reclaimed walk.

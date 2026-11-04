@@ -400,12 +400,7 @@ fn write_connections(
 }
 
 fn validate_id(id: &str) -> Result<(), ApiError> {
-    if id.is_empty()
-        || id.len() > 80
-        || !id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-    {
+    if !sceneworks_core::ids::is_safe_id_with_max(id, 80) {
         return Err(ApiError::bad_request("Invalid planning connection ID"));
     }
     Ok(())

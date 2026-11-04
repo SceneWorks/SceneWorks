@@ -333,10 +333,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
     let strategy_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(kolors_base.clone()))
         .with_adapters(adapters.clone())
         .with_ip_adapter(gen_core::WeightsSource::Dir(ip_adapter.clone()));
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let predicted_peak = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
     let pinned_ip = candle_certified_hf_artifact_path(
         settings,

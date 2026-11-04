@@ -44,7 +44,6 @@ const MAX_GGUF_DESCRIPTOR_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_GGUF_ITEMS: u64 = 1_000_000;
 const MAX_GGUF_STRING_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GGUF_ARRAY_DEPTH: usize = 16;
-const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_AGGREGATE_TENSOR_NAMES: usize = 65_536;
 const MAX_AGGREGATE_TENSOR_NAME_BYTES: usize = 32 * 1024 * 1024;
 const MAX_AGGREGATE_EVIDENCE_STRING_BYTES: usize = 64 * 1024 * 1024;
@@ -2707,29 +2706,18 @@ fn snapshot_file(path: &Path, prefix_limit: u64) -> std::io::Result<ArtifactSnap
     });
     let mut file = File::open(path)?;
     let before = FileStamp::from_metadata(&file.metadata()?);
-    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
-    let mut hasher = Sha256::new();
     let mut prefix = Vec::new();
-    let mut size_bytes = 0_u64;
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    let (sha256, size_bytes) = crate::hashing::sha256_reader_with(&mut file, |_, event| {
+        if let crate::hashing::ReadEvent::After(bytes) = event {
+            let remaining = prefix_limit.saturating_sub(prefix.len() as u64) as usize;
+            prefix.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
         }
-        hasher.update(&buffer[..read]);
-        size_bytes = size_bytes.checked_add(read as u64).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "artifact size overflows u64",
-            )
-        })?;
-        let remaining = prefix_limit.saturating_sub(prefix.len() as u64) as usize;
-        prefix.extend_from_slice(&buffer[..read.min(remaining)]);
-    }
+        Ok(())
+    })?;
     let after = FileStamp::from_metadata(&file.metadata()?);
     let stable = before == after && size_bytes == after.len;
     Ok(ArtifactSnapshot {
-        sha256: format!("{:x}", hasher.finalize()),
+        sha256,
         size_bytes,
         prefix,
         before,

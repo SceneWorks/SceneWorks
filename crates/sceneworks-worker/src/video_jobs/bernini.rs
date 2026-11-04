@@ -1,18 +1,12 @@
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::ltx::extract_clip_frames;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[cfg(target_os = "macos")]
-use super::wan::local_mlx_dir;
+use super::wan::resolve_mlx_family_dir;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::wan::resolve_wan_adapters;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::wan::{generate_video, VideoGenInput};
 
 // ---------------------------------------------------------------------------
@@ -32,10 +26,7 @@ use super::wan::{generate_video, VideoGenInput};
 pub(super) const BERNINI_ADAPTER: &str = "mlx_bernini";
 
 /// SceneWorks Bernini model id → mlx-gen registry id, or `None` if `model` is not the Bernini family.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn bernini_engine_id(model: &str) -> Option<&'static str> {
     (model == "bernini").then_some("bernini")
 }
@@ -51,22 +42,12 @@ pub(super) fn bernini_available(_request: &VideoRequest, settings: &Settings) ->
 /// (mirrors `resolve_wan_model_dir`). Errors clearly if none is present (no stub fallback).
 #[cfg(target_os = "macos")]
 pub(crate) fn resolve_bernini_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
-    if let Some(dir) = local_mlx_dir(settings, "SCENEWORKS_MLX_BERNINI_DIR", "bernini") {
-        return Ok(dir);
-    }
-    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, "SceneWorks/bernini-mlx") {
-        return Ok(dir);
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "bernini: no MLX weights found. Download the turnkey SceneWorks/bernini-mlx snapshot via the \
-         Model Manager, set $SCENEWORKS_MLX_BERNINI_DIR, or place a converted snapshot at {}.",
-        settings
-            .data_dir
-            .join("models")
-            .join("mlx")
-            .join("bernini")
-            .display(),
-    )))
+    resolve_mlx_family_dir(
+        settings,
+        "SCENEWORKS_MLX_BERNINI_DIR",
+        "bernini",
+        "SceneWorks/bernini-mlx",
+    )
 }
 
 /// MLX quantization for a Bernini load: Q4 default (the validated 128 GB-fitting tier, sc-4709 ~44 GB
@@ -247,10 +228,7 @@ pub(crate) async fn ensure_bernini_tier_present(
 }
 
 /// Raw-settings recorded on a real MLX Bernini asset (mirrors `wan_raw_settings`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn bernini_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -267,10 +245,7 @@ pub(super) fn bernini_raw_settings(request: &VideoRequest) -> Value {
 /// Map a SceneWorks video mode to the Bernini engine `video_mode` task string (which selects the
 /// renderer guidance mode). The engine also infers the mode from the supplied conditioning, but the
 /// explicit task keeps the mapping unambiguous. Unknown / `text_to_video` ⇒ plain `t2v`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn bernini_engine_video_mode(mode: &str) -> &'static str {
     match mode {
         "video_to_video" => "v2v",
@@ -286,10 +261,7 @@ pub(super) fn bernini_engine_video_mode(mode: &str) -> &'static str {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn validate_r2v_reference_ids(request: &VideoRequest) -> WorkerResult<()> {
     let count = request.reference_asset_ids.len();
     if !(1..=8).contains(&count) {

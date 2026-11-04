@@ -22,10 +22,7 @@
 //! [`crate::control_dataset_byo`]) are a separate source wired by a follow-up (see the module decl in
 //! `lib.rs`); B1 ships the render-from-an-existing-dataset path.
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod imp {
     use super::super::*;
 
@@ -593,19 +590,13 @@ mod imp {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) use imp::run_control_training_job;
 
 /// Stub for a build with no native control trainer (off-Mac without `backend-candle`). The routing
 /// gate (`training_job_is_candle_eligible`) keeps a `control_training` job off such a worker, so this
 /// is a loud backstop rather than a reachable path.
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_control_training_job(
     _api: &crate::ApiClient,
     _settings: &crate::Settings,

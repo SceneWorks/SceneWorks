@@ -90,8 +90,6 @@ pub fn installed_repa_teacher(data_dir: &Path) -> Option<PathBuf> {
 
 /// The integrity check of a staged teacher file: the exact pinned size, then the pinned sha256.
 pub fn verify_repa_teacher_file(path: &Path) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
     let (pinned_size, pinned_sha256) = pinned_teacher_integrity();
     let size = std::fs::metadata(path)
         .map_err(|error| format!("the REPA teacher {} is unreadable: {error}", path.display()))?
@@ -106,18 +104,9 @@ pub fn verify_repa_teacher_file(path: &Path) -> Result<(), String> {
     }
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("the REPA teacher {} is unreadable: {error}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 20];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("reading the REPA teacher failed: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = sceneworks_core::hashing::sha256_reader(&mut file)
+        .map_err(|error| format!("reading the REPA teacher failed: {error}"))?
+        .0;
     if digest != pinned_sha256 {
         return Err(format!(
             "the REPA teacher {} has sha256 {digest}, not the pinned {pinned_sha256}; reinstall \
@@ -130,10 +119,7 @@ pub fn verify_repa_teacher_file(path: &Path) -> Result<(), String> {
 
 /// The `repa_teacher` load component of an Iris run that trains with REPA: the verified pinned
 /// teacher snapshot, or a typed refusal naming the Model Manager install. `None` for any other run.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn repa_teacher_component(
     settings: &crate::settings::Settings,
     plan: &TrainingPlan,
@@ -160,10 +146,7 @@ pub(crate) fn repa_teacher_component(
 
 /// The engine `train_dtype` of an Iris run: `fp16` reaches the trainer verbatim (accelerate's
 /// dynamic loss scaling, `MixedPrecision::Fp16`); every other kernel keeps the shared mapping.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn apply_iris_train_dtype(
     mut config: gen_core::TrainingConfig,
     plan: &TrainingPlan,
@@ -200,7 +183,7 @@ impl IrisPlanRefusal {
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn training_config_refusal(error: crate::WorkerError) -> IrisPlanRefusal {
     IrisPlanRefusal {
         kind: "invalid".to_owned(),
@@ -234,10 +217,7 @@ pub fn dist_error_kind(error: &gen_core_iris::train::dist::DistError) -> &'stati
 /// Resolve a SceneWorks Iris plan with the engine (`IrisTrainPlan::resolve`) against the backbone
 /// in `backbone_dir`. Adapter targets are not resolved (that needs the weights); everything else the
 /// trainer refuses from the request alone is refused here, typed.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub fn resolve_iris_plan(
     backbone_dir: &Path,
     plan: &TrainingPlan,
@@ -272,10 +252,7 @@ pub fn resolve_iris_plan(
 
 /// [`resolve_iris_plan`] for a bare SceneWorks config (the Studio's pre-launch check, before a
 /// dataset or a plan exists): the same engine config mapping, no items.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub fn resolve_iris_config(
     backbone_dir: &Path,
     config: &sceneworks_core::training::TrainingConfig,
@@ -301,10 +278,7 @@ pub fn resolve_iris_config(
     resolve_iris_request(backbone_dir, &request)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_iris_request(
     backbone_dir: &Path,
     request: &gen_core::TrainingRequest,

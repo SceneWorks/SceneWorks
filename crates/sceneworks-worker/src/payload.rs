@@ -10,14 +10,11 @@ pub(crate) fn json_size_to_u64(value: &Value) -> Option<u64> {
 /// Parse a JSON integer from either a number or a trimmed numeric string.
 /// Booleans are deliberately rejected even though some dynamic languages treat
 /// them as integers.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) use sceneworks_core::payload_util::json_integer as quant_int;
 
 /// Common bits-to-tier ladder. The caller owns the omitted/invalid-value default.
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn tier_for_bits(bits: Option<i64>, default: &str) -> &str {
     match bits {
         Some(bits) if bits <= 0 => "bf16",
@@ -36,7 +33,7 @@ pub(crate) fn json_f64(value: &Value) -> Option<f64> {
 }
 
 /// Required normalized text with a caller-owned diagnostic (payload and dataset-item contracts differ).
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn required_trimmed_str<'a>(
     object: &'a JsonObject,
     field: &str,
@@ -205,10 +202,7 @@ mod tests {
         assert!(required_trimmed_str(&object, "absent", "missing key").is_err());
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn shared_integer_parser_accepts_numbers_and_trimmed_strings() {
         assert_eq!(quant_int(&json!(8)), Some(8));

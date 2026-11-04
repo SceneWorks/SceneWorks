@@ -416,7 +416,9 @@ pub(super) fn candle_wan_tier_subdir(
     if !engine_id.starts_with("wan2_2") {
         return None;
     }
-    // Tier preference by requested bits (mirrors the macOS `wan_tier_order`): no explicit pick → q8
+    // Candle deliberately retains its q8-first installed-tier default. macOS `wan_tier_order`
+    // is q4-first for video runtime safety (sc-10859); only explicit selections share an order.
+    // No explicit pick → q8
     // (the app-wide default, clamped to the installed tier, so q4-only installs still resolve q4);
     // explicit ≤4 → q4. `bf16` stays out of the default order (never auto-loaded on a default job).
     let order: &[&str] = match request.quant_bits() {
@@ -857,10 +859,7 @@ fn vace_fun_cold_load_admission(
                 &model_dir,
                 adapter_stage_bytes,
             )?;
-            let budget = crate::vram_gate::apply_vram_cap(
-                crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&gpu_id),
-                crate::vram_gate::cuda_vram_cap_gb(),
-            )
+            let budget = crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "Wan2.2 VACE-Fun admission could not read free GPU VRAM from nvidia-smi; refusing the uncalibrated dual-expert load."
@@ -986,10 +985,7 @@ async fn admit_candle_ltx(
 pub(crate) async fn candle_video_vram_budget(
     settings: &Settings,
 ) -> Option<crate::vram_gate::VramBudget> {
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     budget.map(|budget| {
         crate::vram_gate::with_reclaimable(
             budget,
@@ -1025,10 +1021,7 @@ pub(super) fn scail2_cold_load_plan(
         // This executes on the dedicated cache OS thread, after a different resident has been
         // dropped. The helper owns a private bounded runtime, so it cannot deadlock the async worker
         // that is awaiting this cache job, and it deliberately bypasses the heartbeat's stale cache.
-        let budget = crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&gpu_id),
-            crate::vram_gate::cuda_vram_cap_gb(),
-        );
+        let budget = crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id);
         match crate::vram_gate::scail2_video_fit_error_with_adapter_bytes(
             &manifest_entry,
             tier_key,
@@ -1568,8 +1561,8 @@ pub(super) fn comfyui_wan_vram_preflight(
     if bytes == 0 {
         return Ok(paths);
     }
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    const CUDA_HEADROOM_GB: f64 = 2.0;
+    const GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
+    const CUDA_HEADROOM_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
     let needed = bytes as f64 / GIB + CUDA_HEADROOM_GB;
     if budget.free_gb + f64::EPSILON < needed {
         return Err(WorkerError::InvalidPayload(format!(

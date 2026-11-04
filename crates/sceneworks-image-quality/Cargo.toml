@@ -20,13 +20,13 @@ sceneworks-core = { path = "../sceneworks-core" }
 # produced two green-under-`-p`, red-in-workspace tests (sc-15052).
 image = { workspace = true }
 # Convolution for the Laplacian-variance blur metric.
-imageproc = { version = "0.25", default-features = false }
+imageproc = { workspace = true }
 # Perceptual hashing for exact/near-duplicate detection (the epic's one sanctioned new dependency).
 # v3 resolves a single `image` 0.25 in the graph (verified) — no duplicate image crate.
 image_hasher = "3"
 # Temp PNG holding ground for the transcode backstop (a valid-but-unsupported AVIF/HEIC/TIFF source
 # is converted to PNG before decode — see `decode_transcoding`).
-tempfile = "3.13"
+tempfile = { workspace = true }
 tracing = { workspace = true }
 
 [lints]
