@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -144,11 +145,7 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
     await click(tab);
   }
 
-  async function settle() {
-    await act(async () => {
-      for (let i = 0; i < 8; i += 1) await Promise.resolve();
-    });
-  }
+
 
   const toggle = () =>
     container.querySelector(
@@ -170,7 +167,7 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
     await act(async () => {
       input.dispatchEvent(new window.FocusEvent("focusout", { bubbles: true }));
     });
-    await settle();
+    await settle({ microtasks: 8 });
   }
 
   // ---- storage readout -------------------------------------------------------------
@@ -196,7 +193,7 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
   it("reads status once on mount and again only after a commit", async () => {
     await render();
     expect(cacheReads).toBe(1);
-    await settle();
+    await settle({ microtasks: 8 });
     expect(cacheReads).toBe(1);
     await commitField(limitInput(), "128");
     expect(cacheReads).toBe(2);
@@ -330,7 +327,7 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
   it("explains that disabling keeps existing copies, then persists enabled:false", async () => {
     await render();
     await click(toggle());
-    await settle();
+    await settle({ microtasks: 8 });
     expect(appConfirmMock).toHaveBeenCalledTimes(1);
     const dialog = appConfirmMock.mock.calls[0][0];
     expect(dialog.message).toContain("stops making new local copies");
@@ -347,7 +344,7 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
     appConfirmMock.mockImplementation(async () => false);
     await render();
     await click(toggle());
-    await settle();
+    await settle({ microtasks: 8 });
     expect(savedPolicies).toEqual([]);
     expect(toggle().getAttribute("aria-checked")).toBe("true");
   });
@@ -359,7 +356,7 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
     await render();
     expect(toggle().getAttribute("aria-checked")).toBe("false");
     await click(toggle());
-    await settle();
+    await settle({ microtasks: 8 });
     expect(appConfirmMock).not.toHaveBeenCalled();
     expect(savedPolicies).toEqual([
       { enabled: true, maxBytes: 64 * GIB, inactivitySeconds: 14 * DAY },
@@ -461,7 +458,7 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);
       });
-      await settle();
+      await settle({ microtasks: 8 });
     }
   }
 

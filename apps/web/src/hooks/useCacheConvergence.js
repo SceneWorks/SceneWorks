@@ -34,11 +34,18 @@ export function useCacheConvergence(status, refresh) {
       return undefined;
     }
     if (polls >= MAX_CACHE_CONVERGENCE_POLLS) return undefined;
-    const timer = setTimeout(() => {
-      setPolls((spent) => spent + 1);
-      refresh();
+    let disposed = false;
+    const timer = setTimeout(async () => {
+      try {
+        await refresh();
+      } finally {
+        if (!disposed) setPolls((spent) => spent + 1);
+      }
     }, CACHE_CONVERGENCE_POLL_MS);
-    return () => clearTimeout(timer);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
   }, [converging, polls, refresh]);
 
   return {

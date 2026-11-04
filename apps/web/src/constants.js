@@ -9,8 +9,7 @@ export { terminalStatuses, actionStatuses } from "./jobTypes.js";
 // silently shows less history than the server just sent.
 export const MAX_LISTED_JOBS = 1000;
 
-// The offline model-catalog mirror (`fallbackModels`) lives in modelCatalog.js (sc-24217) so it
-// stays out of the initial bundle; import it from there, and only lazily in production code.
+// The served model catalog is the source of runtime model facts.
 
 // Asset Library hygiene (sc-2024 / sc-8339): the Main Asset Library shows ONLY media
 // produced by the Image / Video / Document studios plus manual uploads. This is a

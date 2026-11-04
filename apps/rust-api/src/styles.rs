@@ -12,32 +12,19 @@ pub(crate) async fn list_styles(State(state): State<AppState>) -> Result<Json<Va
 /// Load the built-in Style catalog object (`schemaVersion`, `source`, `promptTemplate`, `groups`)
 /// from `config_dir/manifests/builtin.styles.jsonc`. A missing manifest yields an empty catalog so
 /// the endpoint/fold degrade gracefully rather than 500 (the builtin is seeded on startup, so this
-/// is only the never-seeded edge). JSONC comments are stripped before parsing, matching the other
-/// manifest loaders.
+/// is only the never-seeded edge). The shared manifest loader parses JSONC and rejects non-object
+/// roots; the on-disk catalog is reloaded so local overrides remain fresh.
 pub(crate) async fn styles_catalog(state: &AppState) -> Result<Value, ApiError> {
     let path = state
         .settings
         .config_dir
         .join("manifests")
         .join("builtin.styles.jsonc");
-    let payload = match tokio::fs::read_to_string(&path).await {
-        Ok(payload) => payload,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(json!({ "schemaVersion": 1, "groups": [] }));
-        }
-        Err(error) => {
-            return Err(ApiError::internal(format!(
-                "Failed to load styles manifest {}: {error}",
-                path.display()
-            )));
-        }
-    };
-    serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&payload)).map_err(|error| {
-        ApiError::internal(format!(
-            "Failed to parse styles manifest {}: {error}",
-            path.display()
-        ))
-    })
+    let catalog = crate::manifest::load_manifest_root(&path).await?;
+    if catalog.is_empty() && !path.exists() {
+        return Ok(json!({ "schemaVersion": 1, "groups": [] }));
+    }
+    Ok(Value::Object(catalog))
 }
 
 /// Resolve a `styleId` to its catalog style text — the exact bridge the web's `styleTextForId`
@@ -168,6 +155,32 @@ fn apply_style_text_to_prompt(style_text: &str, prompt: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn filesystem_style_catalog_stays_fresh_and_rejects_invalid_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, state) =
+            create_app_with_state(crate::tests::support::test_settings(&temp)).unwrap();
+        let path = state
+            .settings
+            .config_dir
+            .join("manifests/builtin.styles.jsonc");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, catalog().to_string()).unwrap();
+        assert_eq!(styles_catalog(&state).await.unwrap(), catalog());
+        let changed = json!({"schemaVersion": 2, "groups": []});
+        std::fs::write(&path, format!("// local override\n{changed}")).unwrap();
+        assert_eq!(styles_catalog(&state).await.unwrap(), changed);
+        for raw in ["[]", "null", "not JSON"] {
+            std::fs::write(&path, raw).unwrap();
+            assert!(styles_catalog(&state).await.is_err());
+        }
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            styles_catalog(&state).await.unwrap(),
+            json!({"schemaVersion":1,"groups":[]})
+        );
+    }
 
     fn catalog() -> Value {
         json!({

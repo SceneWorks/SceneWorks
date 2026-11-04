@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use reqwest::header;
@@ -41,7 +40,7 @@ use sceneworks_core::slug::slugify;
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use tracing::Level;
@@ -420,6 +419,7 @@ use media_jobs::*;
 // `sceneworks_core::media_convert` routine (sips on macOS, ffmpeg elsewhere).
 mod image_decode;
 mod image_jobs;
+mod parquet_row;
 use image_jobs::*;
 
 /// Model-scoped enhancement TOKEN ceiling shared by API enqueue and worker/native parsing.

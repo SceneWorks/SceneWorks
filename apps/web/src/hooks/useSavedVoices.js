@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { voicesApi } from "../api/voicesResources.js";
 import { useCallback, useState } from "react";
@@ -84,11 +85,11 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
     [token, activeProject, isCurrentVoiceRequest, setError],
   );
 
-  return {
+  const context = useAppDomainValue({
     savedVoices,
-    setSavedVoices,
     refreshSavedVoices,
     createSavedVoice,
-    deleteSavedVoice,
-  };
+    deleteSavedVoice
+  });
+  return { ...context, setSavedVoices, context };
 }

@@ -1,3 +1,4 @@
+import { deferred } from "./testUtils/async.js";
 import { describe, it, expect, vi } from "vitest";
 import {
   createModelLibraryGate,
@@ -30,10 +31,7 @@ function unavailableError(overrides = {}) {
 // A probe whose answer the test releases by hand, so a second event can be injected while the
 // first attempt is genuinely still in flight.
 function deferredProbe() {
-  let release;
-  const gate = new Promise((resolve) => {
-    release = resolve;
-  });
+  const { promise: gate, resolve: release } = deferred();
   const probe = vi.fn(() => gate);
   return { probe, release: (value) => release(value) };
 }

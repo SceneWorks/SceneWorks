@@ -205,3 +205,26 @@ describe("FilmPlanning", () => {
     expect(declaration(finding, "overflow-wrap")).toBe("anywhere");
   });
 });
+
+function renderNative(availability, onInstall = vi.fn()) {
+  root = createRoot(container);
+  act(() => root.render(<FilmPlanning draft={{ planning: { provider: "native" }, productionPlan: { model: { id: "video" } } }} availability={availability} onInstall={onInstall} onChange={vi.fn()} />));
+  return [...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Install Qwen"));
+}
+
+it("installs the advertised native provider model without a client model-id default", () => {
+  const onInstall = vi.fn();
+  const install = renderNative({ providers: [{ provider: "native", modelId: "future-native/model", available: false }] }, onInstall);
+  expect(install.disabled).toBe(false);
+  act(() => install.click());
+  expect(onInstall).toHaveBeenCalledWith("future-native/model");
+});
+
+it("keeps native installation and provider selection disabled without model facts", () => {
+  const onInstall = vi.fn();
+  const install = renderNative({ providers: [] }, onInstall);
+  expect(install.disabled).toBe(true);
+  expect(container.querySelector('option[value="native"]').disabled).toBe(true);
+  act(() => install.click());
+  expect(onInstall).not.toHaveBeenCalled();
+});
