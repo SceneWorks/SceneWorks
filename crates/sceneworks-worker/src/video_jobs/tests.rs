@@ -15647,13 +15647,9 @@ async fn the_seedvr2_upscale_mux_keeps_every_frame_for_short_long_vfr_and_absent
 
 /// Probe `path` with the production SeedVR2 probe command and read back its frame count and timing.
 async fn seedvr2_measure(path: &Path) -> (u64, Seedvr2SourceTiming) {
-    let stderr =
-        crate::media_jobs::run_ffmpeg_capture_stderr(seedvr2_source_probe_args(path), None)
-            .await
-            .expect("the SeedVR2 probe command");
-    let probe = parse_seedvr2_source_probe(&stderr).expect("a frame count and geometry");
-    let timing =
-        parse_seedvr2_source_timing(&stderr, probe.frame_count).expect("a readable frame timing");
+    let (probe, timing) = probe_seedvr2_with_context(seedvr2_source_probe_args(path), None)
+        .await
+        .expect("the production SeedVR2 streaming probe");
     (probe.frame_count, timing)
 }
 
@@ -21967,7 +21963,10 @@ fn seedvr2_streaming_probe_preserves_all_timing_beyond_the_diagnostic_tail() {
         "the former tail-only consumer loses the initial time base and frames"
     );
     for chunk_size in [7, 8192, log.len()] {
-        let mut collector = Seedvr2ProbeCollector::default();
+        let mut collector = sceneworks_core::media_process::ParsedStderr::new(
+            Seedvr2ProbeCollector::default(),
+            Seedvr2ProbeCollector::read_line,
+        );
         for chunk in log.as_bytes().chunks(chunk_size) {
             collector.push(chunk);
             assert!(collector.buffered_log_bytes() <= 2 * limit);
@@ -21975,6 +21974,7 @@ fn seedvr2_streaming_probe_preserves_all_timing_beyond_the_diagnostic_tail() {
         let collector = collector.complete();
         assert!(collector.as_ref().len() <= limit);
         let (probe, timing) = collector
+            .data
             .result()
             .expect("complete structured timing survives every chunk split");
         assert_eq!(

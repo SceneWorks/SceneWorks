@@ -463,114 +463,74 @@ pub(super) async fn probe_seedvr2_with_context(
 ) -> WorkerResult<(Seedvr2SourceProbe, Seedvr2SourceTiming)> {
     let output =
         crate::media_jobs::run_ffmpeg_with_stderr(args, context, read_seedvr2_stderr).await?;
-    let probe = output.probe.ok_or_else(|| {
+    let probe = output.data.probe().ok_or_else(|| {
         WorkerError::InvalidPayload(
             "Could not determine the source video's frame count and dimensions before upscale."
                 .to_owned(),
         )
     })?;
-    let timing = output.timing.finish(probe.frame_count).ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "Could not determine the source video's frame timing before upscale.".to_owned(),
-        )
-    })?;
+    let timing = output
+        .data
+        .timing
+        .finish(probe.frame_count)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Could not determine the source video's frame timing before upscale.".to_owned(),
+            )
+        })?;
     Ok((probe, timing))
 }
 
-/// Only structured frame timestamps grow with the source; diagnostic and partial-line bytes stay bounded.
+/// Only per-frame timestamps grow with the source; the shared reader bounds raw log storage.
 #[cfg(any(test, native_lane))]
 #[derive(Default)]
 pub(super) struct Seedvr2ProbeCollector {
-    diagnostics: Vec<u8>,
-    line: Vec<u8>,
     frame_count: Option<u64>,
     geometry: Option<(u32, u32)>,
-    probe: Option<Seedvr2SourceProbe>,
     timing: Seedvr2TimingCollector,
 }
 
 #[cfg(any(test, native_lane))]
-impl AsRef<[u8]> for Seedvr2ProbeCollector {
-    fn as_ref(&self) -> &[u8] {
-        &self.diagnostics
-    }
-}
-
-#[cfg(any(test, native_lane))]
 impl Seedvr2ProbeCollector {
-    pub(super) fn push(&mut self, bytes: &[u8]) {
-        let limit = sceneworks_core::media_process::STDERR_LIMIT;
-        if bytes.len() >= limit {
-            self.diagnostics.clear();
-            self.diagnostics
-                .extend_from_slice(&bytes[bytes.len() - limit..]);
-        } else {
-            let drop = (self.diagnostics.len() + bytes.len()).saturating_sub(limit);
-            self.diagnostics.drain(..drop);
-            self.diagnostics.extend_from_slice(bytes);
-        }
-        for &byte in bytes {
-            if byte == b'\n' || byte == b'\r' {
-                self.complete_line();
-            } else if self.line.len() < limit {
-                self.line.push(byte);
-            }
-        }
-    }
-
-    fn complete_line(&mut self) {
-        let line = String::from_utf8_lossy(&self.line);
-        if let Some(count) = seedvr2_frame_count(&line) {
+    pub(super) fn read_line(&mut self, line: &str) {
+        if let Some(count) = seedvr2_frame_count(line) {
             self.frame_count = Some(count);
         }
         if line.contains("Video:") {
-            self.geometry = seedvr2_video_geometry(&line);
+            self.geometry = seedvr2_video_geometry(line);
         }
-        self.timing.push_line(&line);
-        self.line.clear();
+        self.timing.push_line(line);
     }
 
-    pub(super) fn complete(mut self) -> Self {
-        self.complete_line();
-        self.probe =
-            self.frame_count
-                .zip(self.geometry)
-                .and_then(|(frame_count, (width, height))| {
-                    (frame_count > 0).then_some(Seedvr2SourceProbe {
-                        frame_count,
-                        width,
-                        height,
-                    })
-                });
-        self
-    }
-
-    #[cfg(test)]
-    pub(super) fn buffered_log_bytes(&self) -> usize {
-        self.diagnostics.len() + self.line.len()
+    fn probe(&self) -> Option<Seedvr2SourceProbe> {
+        self.frame_count
+            .zip(self.geometry)
+            .and_then(|(frame_count, (width, height))| {
+                (frame_count > 0).then_some(Seedvr2SourceProbe {
+                    frame_count,
+                    width,
+                    height,
+                })
+            })
     }
 
     #[cfg(test)]
     pub(super) fn result(self) -> Option<(Seedvr2SourceProbe, Seedvr2SourceTiming)> {
-        let probe = self.probe?;
+        let probe = self.probe()?;
         Some((probe, self.timing.finish(probe.frame_count)?))
     }
 }
 
 #[cfg(native_lane)]
 async fn read_seedvr2_stderr(
-    mut pipe: tokio::process::ChildStderr,
-) -> std::io::Result<Seedvr2ProbeCollector> {
-    use tokio::io::AsyncReadExt;
-    let mut collector = Seedvr2ProbeCollector::default();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let read = pipe.read(&mut buffer).await?;
-        if read == 0 {
-            return Ok(collector.complete());
-        }
-        collector.push(&buffer[..read]);
-    }
+    pipe: tokio::process::ChildStderr,
+) -> std::io::Result<sceneworks_core::media_process::ParsedStderr<Seedvr2ProbeCollector>> {
+    sceneworks_core::media_process::read_stderr_lines(
+        pipe,
+        Seedvr2ProbeCollector::default(),
+        Seedvr2ProbeCollector::read_line,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------

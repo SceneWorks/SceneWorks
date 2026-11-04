@@ -242,9 +242,86 @@ pub async fn read_stderr_tail(mut pipe: ChildStderr) -> io::Result<Vec<u8>> {
         if count == 0 {
             return Ok(tail);
         }
-        let drop = (tail.len() + count).saturating_sub(STDERR_LIMIT);
+        retain_stderr_tail(&mut tail, &buffer[..count]);
+    }
+}
+
+/// Stream structured stderr into caller data while bounding diagnostic and partial-line storage.
+/// FFmpeg's structured fields precede optional payload text on each line; oversized line suffixes
+/// are drained without retaining them. The final unterminated line is delivered at EOF.
+pub struct ParsedStderr<T> {
+    pub data: T,
+    diagnostics: Vec<u8>,
+    line: Vec<u8>,
+    parse_line: fn(&mut T, &str),
+}
+
+impl<T> AsRef<[u8]> for ParsedStderr<T> {
+    fn as_ref(&self) -> &[u8] {
+        &self.diagnostics
+    }
+}
+
+impl<T> ParsedStderr<T> {
+    pub fn new(data: T, parse_line: fn(&mut T, &str)) -> Self {
+        Self {
+            data,
+            diagnostics: Vec::new(),
+            line: Vec::new(),
+            parse_line,
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) {
+        retain_stderr_tail(&mut self.diagnostics, bytes);
+        for &byte in bytes {
+            if byte == b'\n' || byte == b'\r' {
+                self.complete_line();
+            } else if self.line.len() < STDERR_LIMIT {
+                self.line.push(byte);
+            }
+        }
+    }
+
+    fn complete_line(&mut self) {
+        (self.parse_line)(&mut self.data, &String::from_utf8_lossy(&self.line));
+        self.line.clear();
+    }
+
+    pub fn complete(mut self) -> Self {
+        self.complete_line();
+        self
+    }
+
+    pub fn buffered_log_bytes(&self) -> usize {
+        self.diagnostics.len() + self.line.len()
+    }
+}
+
+fn retain_stderr_tail(tail: &mut Vec<u8>, bytes: &[u8]) {
+    if bytes.len() >= STDERR_LIMIT {
+        tail.clear();
+        tail.extend_from_slice(&bytes[bytes.len() - STDERR_LIMIT..]);
+    } else {
+        let drop = (tail.len() + bytes.len()).saturating_sub(STDERR_LIMIT);
         tail.drain(..drop);
-        tail.extend_from_slice(&buffer[..count]);
+        tail.extend_from_slice(bytes);
+    }
+}
+
+pub async fn read_stderr_lines<T>(
+    mut pipe: ChildStderr,
+    data: T,
+    parse_line: fn(&mut T, &str),
+) -> io::Result<ParsedStderr<T>> {
+    let mut capture = ParsedStderr::new(data, parse_line);
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = pipe.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(capture.complete());
+        }
+        capture.push(&buffer[..read]);
     }
 }
 
