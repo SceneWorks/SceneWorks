@@ -595,7 +595,7 @@ pub(crate) async fn ensure_cached_file_verified_atomically(
     // `ensure_cached_file_verified` validated the partial before returning. Sync
     // the bytes before publication so an acknowledged promotion has durable file
     // contents even if the process exits immediately after the rename.
-    tokio::fs::File::open(&partial).await?.sync_all().await?;
+    sync_completed_partial(&partial).await?;
     promote_partial_download(&partial, target).await?;
     sync_parent_directory(target).await?;
     Ok(target.to_path_buf())
@@ -627,6 +627,17 @@ async fn cached_file_matches_expected(
         return Ok(expected_size.is_some());
     };
     Ok(sha256_file(context.api, context.settings, context.job_id, path).await? == expected_sha256)
+}
+
+async fn sync_completed_partial(partial: &Path) -> WorkerResult<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    // Windows implements sync_all with FlushFileBuffers, which requires GENERIC_WRITE.
+    // Unix keeps the existing read-only access contract; never create, truncate or chmod.
+    #[cfg(windows)]
+    options.write(true);
+    options.open(partial).await?.sync_all().await?;
+    Ok(())
 }
 
 async fn promote_partial_download(partial: &Path, target: &Path) -> WorkerResult<()> {
@@ -1829,7 +1840,7 @@ pub(crate) async fn download_source_url(
         &progress,
     )
     .await?;
-    tokio::fs::File::open(&partial).await?.sync_all().await?;
+    sync_completed_partial(&partial).await?;
     promote_partial_download(&partial, &target_path).await?;
     sync_parent_directory(&target_path).await?;
     Ok(())
@@ -3829,5 +3840,78 @@ mod integrity_regression_tests {
             .unwrap(),
             vec!["1.1.1.1:443".parse::<SocketAddr>().unwrap()]
         );
+    }
+}
+
+#[cfg(test)]
+mod partial_sync_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completed_partial_sync_preserves_bytes_and_does_not_create_missing_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("verified.partial");
+        let bytes = b"verified complete bytes";
+        tokio::fs::write(&partial, bytes).await.unwrap();
+
+        sync_completed_partial(&partial).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&partial).await.unwrap(), bytes);
+        let missing = directory.path().join("missing.partial");
+        assert!(matches!(
+            sync_completed_partial(&missing).await,
+            Err(WorkerError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(
+            !missing.exists(),
+            "sync must never create a replacement partial"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completed_partial_sync_preserves_unix_read_only_access_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("verified.partial");
+        let bytes = b"read-only verified bytes";
+        std::fs::write(&partial, bytes).unwrap();
+        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        sync_completed_partial(&partial).await.unwrap();
+
+        assert_eq!(std::fs::read(&partial).unwrap(), bytes);
+        assert_eq!(
+            std::fs::metadata(&partial).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn completed_partial_sync_refuses_read_only_windows_file_without_changing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("verified.partial");
+        let bytes = b"read-only verified bytes";
+        std::fs::write(&partial, bytes).unwrap();
+        let original = std::fs::metadata(&partial).unwrap().permissions();
+        let mut read_only = original.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(&partial, read_only).unwrap();
+
+        let result = sync_completed_partial(&partial).await;
+        let permissions = std::fs::metadata(&partial).unwrap().permissions();
+        let contents = std::fs::read(&partial).unwrap();
+        // Restore only this fixture's original attributes so cleanup also works on Windows.
+        std::fs::set_permissions(&partial, original).unwrap();
+
+        assert!(matches!(result, Err(WorkerError::Io(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied));
+        assert!(
+            permissions.readonly(),
+            "sync must not clear the read-only attribute"
+        );
+        assert_eq!(contents, bytes);
     }
 }
