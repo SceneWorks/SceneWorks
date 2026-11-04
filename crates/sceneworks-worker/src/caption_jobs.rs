@@ -10,15 +10,9 @@
 
 use super::*;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const JOY_CAPTION_MODEL: &str = "fancyfeast/llama-joycaption-beta-one-hf-llava";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CANCEL_MESSAGE: &str = "Training captioning canceled by user.";
 
 // Coalesced per-step progress-post cadence (sc-11189, F-016 — the sc-8840 F-038 pattern the refine
@@ -27,34 +21,19 @@ const CANCEL_MESSAGE: &str = "Training captioning canceled by user.";
 // multi-image dataset emits a handful of `update_job` POSTs per second instead of hundreds of
 // sequential per-token POSTs (which also throttled decode to API latency). 250 ms keeps the progress
 // bar visibly smooth while bounding API load and decoupling decode speed from API latency.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
 
 // epic 3720 (sc-3724): the backend-neutral captioner contract types come from `gen_core`; the
 // selected runtime bundle explicitly includes its JoyCaption implementation.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 use gen_core::CAPTION_TRIGGER_WORD_CONFORMANCE;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{
     apply_caption_trigger_words, CancelFlag, CaptionOptions, CaptionRequest, CaptionSampling,
     Captioner, Image, LoadSpec, Progress, WeightsSource,
 };
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::training::CaptionMode;
 
 /// The JoyCaption prompt a `subjectOnly` caption job sends (epic 2123, sc-24829). It keeps the
@@ -62,20 +41,14 @@ use sceneworks_core::training::CaptionMode;
 /// accessories) and leaves out the background and the fixed identity traits, so a character LoRA
 /// binds that identity to the trigger words (still prepended after generation) instead of to
 /// caption tokens.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) const SUBJECT_ONLY_CAPTION_PROMPT: &str = "Write a short caption that describes only \
 the changeable parts of the main subject in this image: their clothing, facial expression, pose, \
 and any accessories they wear or hold. Do not describe the background, setting, location, \
 lighting, or camera. Do not describe fixed identity traits such as facial features or face \
 shape, eye color, hair (color, length, or style), skin tone, ethnicity, age, or body type. Do not \
 name the subject.";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct CaptionItem {
     item_id: String,
@@ -83,10 +56,7 @@ struct CaptionItem {
     trigger_words: Vec<String>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct CaptionJobOptions {
     options: CaptionOptions,
@@ -95,10 +65,7 @@ struct CaptionJobOptions {
 
 /// The job's caption mode (sc-24829). An absent `mode` is `default` (jobs queued before modes
 /// existed); an unrecognised one is refused rather than captioned as `default`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_job_mode(payload: &JsonObject) -> WorkerResult<CaptionMode> {
     match payload.get("mode") {
         None | Some(Value::Null) => Ok(CaptionMode::Default),
@@ -119,10 +86,7 @@ fn caption_job_mode(payload: &JsonObject) -> WorkerResult<CaptionMode> {
 /// The prompt actually sent to the captioner for `mode`: the subject-only prompt for
 /// `subjectOnly`, otherwise the caller's prompt override (empty means the provider renders its
 /// type/length template, today's behaviour). `triggerOnly` never reaches a captioner.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_prompt_for_mode(mode: &CaptionMode, options: &CaptionOptions) -> String {
     match mode {
         CaptionMode::SubjectOnly => SUBJECT_ONLY_CAPTION_PROMPT.to_owned(),
@@ -132,10 +96,7 @@ fn caption_prompt_for_mode(mode: &CaptionMode, options: &CaptionOptions) -> Stri
 
 /// One stored caption as the `/caption-sidecars` route takes it: auto-sourced, stamped with the
 /// mode that produced it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_sidecar_item(
     item_id: &str,
     text: &str,
@@ -153,10 +114,7 @@ fn caption_sidecar_item(
     })
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // The meaningful per-image result streamed on the bounded mpsc channel (sc-11189, F-016). Per-STEP
 // token progress no longer rides this channel — it is coalesced through a latest-wins watch channel
 // (see `run_training_caption_job`) — so only the finished caption for each image is sent here, one
@@ -169,10 +127,7 @@ struct CaptionedItem {
     trigger_words: Vec<String>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_destination(payload: &JsonObject) -> WorkerResult<(String, String)> {
     Ok((
         required_payload_string(payload, "projectId")?.to_owned(),
@@ -180,10 +135,7 @@ fn caption_destination(payload: &JsonObject) -> WorkerResult<(String, String)> {
     ))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_training_caption_job(
     api: &ApiClient,
     settings: &Settings,
@@ -195,10 +147,7 @@ pub(crate) async fn run_training_caption_job(
 
 /// [`run_training_caption_job`] with the captioner loader injected (sc-24829), so a test drives the
 /// REAL job path against a stub [`Captioner`] and can prove a `triggerOnly` job never calls it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn run_training_caption_job_using(
     api: &ApiClient,
     settings: &Settings,
@@ -477,10 +426,7 @@ async fn run_training_caption_job_using(
 }
 
 /// Where and how a finished caption job's captions are saved.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct CaptionSave<'a> {
     project_id: &'a str,
     dataset_id: &'a str,
@@ -491,10 +437,7 @@ struct CaptionSave<'a> {
 
 /// POST the captions to the dataset's `/caption-sidecars` route and complete the job: the shared
 /// tail of the captioner and trigger-only paths.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn save_caption_results(
     api: &ApiClient,
     job: &JobSnapshot,
@@ -554,10 +497,7 @@ async fn save_caption_results(
 
 /// A `triggerOnly` caption job (sc-24829): every image's caption is exactly its trigger words,
 /// written without resolving weights or loading a captioner.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn run_trigger_only_caption_job(
     api: &ApiClient,
     settings: &Settings,
@@ -605,10 +545,7 @@ async fn run_trigger_only_caption_job(
 /// The trigger-only sidecar items: each caption is the item's trigger words joined by the shared
 /// gen-core trigger policy over an empty caption. An item with no trigger words would get an empty
 /// caption, so it is refused (the API refuses the same job before queuing it).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn trigger_only_captions(items: &[CaptionItem], mode: &CaptionMode) -> WorkerResult<Vec<Value>> {
     items
         .iter()
@@ -630,10 +567,7 @@ fn trigger_only_captions(items: &[CaptionItem], mode: &CaptionMode) -> WorkerRes
         .collect()
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_training_caption_job(
     _api: &ApiClient,
     _settings: &Settings,
@@ -646,10 +580,7 @@ pub(crate) async fn run_training_caption_job(
     ))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_progress(
     status: JobStatus,
     stage: ProgressStage,
@@ -661,10 +592,7 @@ fn caption_progress(
     progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_result(
     model_name_or_path: &str,
     dataset_id: &str,
@@ -699,10 +627,7 @@ fn caption_result(
     result
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<CaptionItem>> {
     parse_dataset_items(
         settings,
@@ -733,10 +658,7 @@ fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<
     )
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_job_options(payload: &JsonObject) -> CaptionJobOptions {
     let options = payload
         .get("options")
@@ -786,10 +708,7 @@ fn caption_job_options(payload: &JsonObject) -> CaptionJobOptions {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn option_string(options: &JsonObject, key: &str, default: &str) -> String {
     options
         .get(key)
@@ -798,10 +717,7 @@ fn option_string(options: &JsonObject, key: &str, default: &str) -> String {
         .to_owned()
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_caption_weights_dir(
     settings: &Settings,
     model_name_or_path: &str,
@@ -809,10 +725,7 @@ fn resolve_caption_weights_dir(
     resolve_app_managed_model_dir(settings, model_name_or_path, "JoyCaption model path")
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn load_caption_image(path: &Path) -> WorkerResult<Image> {
     let decoded = crate::image_decode::decode_image_any(path)
         .map_err(|error| {
@@ -833,10 +746,7 @@ fn load_caption_image(path: &Path) -> WorkerResult<Image> {
 /// identical progress). Pure so the coalescing invariant — intermediate repeats dropped, every
 /// distinct value posted exactly once — is unit-testable without an API or real weights (the caption
 /// test module, like the whole caption path, is gated on the macOS/candle backends).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn next_caption_step_post(
     latest: (usize, u32, u32),
     last_posted: Option<(usize, u32, u32)>,
@@ -844,10 +754,7 @@ fn next_caption_step_post(
     (last_posted != Some(latest)).then_some(latest)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_step_progress(index: usize, current: u32, total: u32, item_count: usize) -> f64 {
     let item_count = item_count.max(1) as f64;
     let within = if total > 0 {
@@ -858,13 +765,7 @@ fn caption_step_progress(index: usize, current: u32, total: u32, item_count: usi
     (0.12 + 0.76 * ((index as f64 + within) / item_count)).min(0.9)
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod tests {
     use super::*;
 

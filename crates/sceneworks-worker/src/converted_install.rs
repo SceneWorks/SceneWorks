@@ -168,7 +168,7 @@ fn is_engine_load_failure(error: &WorkerError) -> bool {
 /// then the injected entry path, refused outside the data dir). `None` when the job names no
 /// `modelPath` or it does not resolve (the load refused it before any engine load), so nothing
 /// outside the data dir is ever hashed or marked.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn loaded_bundle_dir(settings: &Settings, payload: &JsonObject) -> Option<PathBuf> {
     let request = sceneworks_core::image_request::ImageRequest::from_payload(payload);
     crate::image_jobs::resolve_model_path_dir(&request, settings)
@@ -178,7 +178,7 @@ fn loaded_bundle_dir(settings: &Settings, payload: &JsonObject) -> Option<PathBu
 
 /// A build with no image engine linked loads no bundle (its image jobs stop at the stub gap, never
 /// at an engine load), so there is nothing to diagnose.
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 fn loaded_bundle_dir(_settings: &Settings, _payload: &JsonObject) -> Option<PathBuf> {
     None
 }
@@ -245,7 +245,7 @@ mod entry_point_tests {
 
 // The diagnosis resolves the bundle through the image lane's loader (`resolve_model_path_dir`),
 // which only a build with an image engine links; a build without one never reaches an engine load.
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 mod tests {
     use super::*;
     use serde_json::json;

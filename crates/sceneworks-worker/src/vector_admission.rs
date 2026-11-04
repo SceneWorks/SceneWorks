@@ -659,10 +659,7 @@ async fn live_device_facts(gpu_id: &str) -> Option<VectorDeviceFacts> {
     })
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 async fn live_device_facts(_gpu_id: &str) -> Option<VectorDeviceFacts> {
     None
 }

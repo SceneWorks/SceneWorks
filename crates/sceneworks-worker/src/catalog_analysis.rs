@@ -195,34 +195,22 @@ impl Default for CatalogAnalysisConfig {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn default_person_model_version() -> String {
     crate::person_jobs::DET_REVISION.to_owned()
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn default_person_model_version() -> String {
     "3cffbaccca4f239ae6301d8b66ba721401ecfa8d".to_owned()
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn default_face_model_version() -> String {
     crate::image_jobs::INSTANTID_MLX_REVISION.to_owned()
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn default_face_model_version() -> String {
     "bca0cacf8e5e04529bb2b326a521361b02be84fd".to_owned()
 }
@@ -237,18 +225,12 @@ fn default_face_model_version() -> String {
 /// re-analysis costs compute and produces the same keypoints. It is accepted rather than papered
 /// over: freezing the old digest pair as a magic string would keep a value naming archives nothing
 /// fetches, and would then fail to invalidate if the re-host revision ever genuinely moved.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn default_pose_model_version() -> String {
     crate::pose_jobs::DWPOSE_REVISION.to_owned()
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn default_pose_model_version() -> String {
     "c330a9609201343576b8b69d222e38c1486d2854".to_owned()
 }
@@ -1402,10 +1384,7 @@ fn increment_run(report: &mut CatalogAnalysisReport, analyzer: &str) {
     *count = count.saturating_add(1);
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub struct ModelBackedCatalogAnalyzerPaths {
     pub person_detector: PathBuf,
     pub face_weights_directory: PathBuf,
@@ -1413,20 +1392,14 @@ pub struct ModelBackedCatalogAnalyzerPaths {
     pub pose_model: PathBuf,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub struct ModelBackedCatalogAnalyzers {
     paths: ModelBackedCatalogAnalyzerPaths,
     face_detector: Option<crate::face_analysis_jobs::CatalogFaceDetector>,
     face_load_error: Option<String>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl ModelBackedCatalogAnalyzers {
     pub fn new(paths: ModelBackedCatalogAnalyzerPaths) -> Self {
         Self {
@@ -1454,10 +1427,7 @@ impl ModelBackedCatalogAnalyzers {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl CatalogAnalyzers for ModelBackedCatalogAnalyzers {
     fn analyze_people(
         &mut self,

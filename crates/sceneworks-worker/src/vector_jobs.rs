@@ -693,7 +693,7 @@ fn active_starvector_backend(settings: &Settings) -> WorkerResult<&'static str> 
         ))
     }
 
-    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+    #[cfg(not(native_lane))]
     {
         let _ = settings;
         Err(WorkerError::InvalidPayload(

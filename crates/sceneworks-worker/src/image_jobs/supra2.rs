@@ -1217,10 +1217,7 @@ mod tests {
     // the PRODUCTION job path (`run_image_generate_job`) on whichever backend this build links.
     // Driven by one `#[ignore]`d test per backend (`mlx_real_weights` / `candle_real_weights`).
     // ---------------------------------------------------------------------------------------
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     mod acceptance_matrix {
         use super::*;
         use crate::api_client::ApiClient;

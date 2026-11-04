@@ -2534,7 +2534,7 @@ mod tests {
     /// the entry provisions under the same `componentId`. Read from the registry the audio job loads
     /// through, not from a copy of its constants. Mutation that reds this: rename the entry's `vae`
     /// componentId, drop `supportsSymbolicSong`, or change `sampleRates`.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn yue2_catalog_entry_matches_the_linked_engine_descriptor() {
         let (_, contents) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
@@ -3553,7 +3553,7 @@ mod tests {
     /// together. The malformed index must win over a corrupt earlier shard: the provider validates
     /// the complete selection before reading any safetensors header. A normal HF blob link must
     /// still prepare as a same-repository cache artifact.
-    #[cfg(all(unix, any(target_os = "macos", feature = "backend-candle")))]
+    #[cfg(all(unix, native_lane))]
     #[test]
     fn staged_audio_shard_indexes_fail_closed_and_keep_hf_blob_access() {
         use std::os::unix::fs::symlink;
@@ -4335,10 +4335,7 @@ mod tests {
     /// resolve exists only on macOS or a `backend-candle` build, so this runs on the macOS + candle test
     /// lanes (windows-candle's `cargo test --features backend-candle`) and is compiled out on the
     /// no-candle Linux `parity` lane, where `audio_descriptor` returns None and there is nothing to stage.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[tokio::test]
     async fn native_voice_clone_stages_the_required_components_into_the_load_spec() {
         let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
@@ -4670,10 +4667,7 @@ mod tests {
     /// a flag it must NEVER set, proving the job fails at resolution, not inside the engine. (perth is
     /// first in `required_components`, so with only ve staged the surfaced miss is perth.) Gated to the
     /// audio lane's cfg — compiled out on the no-candle Linux `parity` lane, run on macOS + candle.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[tokio::test]
     async fn native_voice_clone_job_fails_before_load_when_a_component_is_absent() {
         let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
@@ -4757,10 +4751,7 @@ mod tests {
     /// (model_jobs::…a_missing_moss_codec_fails…) and the catalog install-state gate
     /// (models::moss_tts_install_state_gates…) with the integration link. Gated to the audio lane's cfg —
     /// compiled out on the no-candle Linux `parity` lane, run on macOS + candle.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[tokio::test]
     async fn moss_synthesis_job_fails_before_load_when_the_codec_is_absent() {
         let (base_url, _progress) = spawn_audio_cancel_stub(false).await;
@@ -5568,7 +5559,7 @@ mod yue_job_surface_tests {
         guidance: Option<f32>,
         conditioning: Vec<Conditioning>,
         /// Read only by the registry-backed stage-2 tier test (same cfg).
-        #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+        #[cfg(native_lane)]
         components: BTreeMap<String, WeightsSource>,
     }
 
@@ -5707,7 +5698,7 @@ mod yue_job_surface_tests {
                     WeightsSource::Dir(dir) | WeightsSource::File(dir) => Some(dir.clone()),
                 };
                 record.quantize = spec.quantize;
-                #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+                #[cfg(native_lane)]
                 {
                     record.components = spec.components.clone();
                 }
@@ -6893,7 +6884,7 @@ mod yue_job_surface_tests {
     /// refused ("no tier was resolved"), and would fail every real YuE job.
     // Needs a linked candle audio registry (macOS, or `backend-candle` elsewhere) — the same cfg as
     // `inference_runtime::audio()`; the backend-less Linux parity build ships no audio lane.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[tokio::test]
     async fn resolved_tier_selects_the_matching_stage2_component() {
         let descriptor = crate::inference_runtime::audio_descriptor("yue_en_cot")

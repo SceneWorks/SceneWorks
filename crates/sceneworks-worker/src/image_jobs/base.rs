@@ -243,10 +243,7 @@ const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
 /// FLUX.1-dev has independent IP-Adapter and strict-control providers, neither of which composes
 /// the other's conditioning. Keep this predicate at route selection so a combined request is
 /// refused before either provider can silently discard the other input.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn flux1_ipadapter_pose_combination(request: &ImageRequest) -> bool {
     request.model == "flux_dev"
         && request.mode != "edit_image"
@@ -424,7 +421,7 @@ fn resolve_image_route_with_imported_availability(
 /// does, and `tests/test_builtin_manifest_audit.py` treats the first line-initial `#[cfg(test)]`
 /// as the start of this file's test module — a bare one here would truncate the audited region to
 /// the first 400 lines and silently drop base.rs's `repo` / `modelPath` lanes from the inventory.
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 fn checkpoint_plan_available_or_panic(request: &ImageRequest, settings: &Settings) -> bool {
     match prepare_checkpoint_plan_sources(request, settings) {
         Ok(selection) => selection.is_available(),
@@ -1567,10 +1564,7 @@ mod candle_disabled_plan_backed_refusal_tests {
 
 /// Couples a route-owned File source bundle to the immutable generation plan without widening the
 /// uniform stream-handler signatures. The bundle is moved into the handler exactly once.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct PreparedFileDispatch<'a, Sources> {
     plan: &'a ImagePlan,
     sources: Sources,
@@ -1665,15 +1659,12 @@ fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
 
 /// The HuggingFace repo for the model: the manifest entry's `repo` wins, else the
 /// family default. Shared by the MLX path and the candle lane (sc-5096).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
     model_repo_with_default(request, model.default_repo())
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn model_repo_with_default(request: &ImageRequest, default_repo: &str) -> String {
     crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(default_repo)
@@ -1683,7 +1674,7 @@ fn model_repo_with_default(request: &ImageRequest, default_repo: &str) -> String
 /// Receipt variant selected by this request.  Prefer an explicit quant request; otherwise use the
 /// manifest's default selectable download (or its only selectable download).  Co-requisites are
 /// intentionally excluded because each repo resolves its own receipt independently.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn requested_receipt_variant(request: &ImageRequest) -> Option<String> {
     if let Some(bits) = request.quant_bits() {
         return Some(
@@ -1713,10 +1704,7 @@ fn requested_receipt_variant(request: &ImageRequest) -> Option<String> {
 /// layout the candle loader reads, and `linear_detect` takes its dense arm (no `.scales` sibling), so
 /// candle dense-loads bf16 exactly like macOS/MLX — while the packed q4/q8 tiers still come from the
 /// `-mlx` turnkey via `ideogram_model_subdir`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
 
 /// Exact snapshots used by the on-demand non-default tier fetches.  The API replaces a submitted
@@ -1724,25 +1712,13 @@ const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
 /// different from the engine default is an intentional configured override.  First-party turnkeys
 /// never follow a mutable ref; configured override repos retain `main` because SceneWorks cannot know
 /// their release commit in advance.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const BOOGU_MLX_TURNKEY_REVISION: &str = "a459e614d408bfdf57089c32cc3da706f5a017de";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const IDEOGRAM_MLX_TURNKEY_REVISION: &str = "a3095855b8819dc0d6b067cb1354aaa7da189ff8";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const ZIMAGE_MLX_TURNKEY_REPO: &str = "SceneWorks/z-image-mlx";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const ZIMAGE_MLX_TURNKEY_REVISION: &str = "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const FLUX1_SCHNELL_MLX_TURNKEY_REVISION: &str = "bba3ae01dfd94089f173c05edd4e1a4c551f2599";
@@ -1752,10 +1728,7 @@ const FLUX1_DEV_MLX_TURNKEY_REVISION: &str = "323fd12d79f78ad444e882e8d8e8719145
 const FLUX2_DEV_MLX_TURNKEY_REVISION: &str = "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION: &str = "1902693279fcfb828919370dfac2b8922d99499a";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn turnkey_tier_revision<'a>(repo: &str, default_repo: &str, default_revision: &'a str) -> &'a str {
     if repo == default_repo {
         default_revision
@@ -1764,10 +1737,7 @@ fn turnkey_tier_revision<'a>(repo: &str, default_repo: &str, default_revision: &
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn pinned_turnkey_snapshot_for_request(
     data_dir: &Path,
     request: &ImageRequest,
@@ -1832,7 +1802,7 @@ const SANA_SPRINT_CANDLE_DIFFUSERS_REPO: &str =
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SANA_SPRINT_CANDLE_DIFFUSERS_REVISION: &str = "19683c58b7ea290e55cedd8950ae1d86ada7ef96";
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 // Keep the explicit optional branch: the manifest audit recognizes this shape and proves every
 // production modelPath reader preserves the normal repo-resolution fallback.
 #[allow(clippy::question_mark)]
@@ -1853,7 +1823,7 @@ fn model_path_override(request: &ImageRequest) -> Option<String> {
 /// path outside the data dir. The ONE resolution the load ([`resolve_weights_dir`]) and the
 /// failed-load diagnosis (`converted_install::explain_failed_load`) share, so a diagnosis judges —
 /// and marks — exactly the bundle the load read. `Ok(None)` when the job names no `modelPath`.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) fn resolve_model_path_dir(
     request: &ImageRequest,
     settings: &Settings,
@@ -1892,7 +1862,7 @@ pub(crate) fn resolve_model_path_dir(
 /// points: [`resolve_weights_dir`] (which reaches the loader) and [`candle_weights_gap`] (the
 /// stub fall-through, which never resolves weights at all — see its docs for why that second seam
 /// is required).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
     // An injected `modelPath` IS the converted artifact — nothing outstanding.
     if model_path_override(request).is_some() {
@@ -1953,7 +1923,7 @@ fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
 /// engine's own load-time digests and explained by [`crate::converted_install::explain_failed_load`]
 /// — never by hashing here, so a healthy install is hashed once per load. Every other converter
 /// passes untouched.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn converted_artifact_preflight(
     request: &ImageRequest,
     dir: &std::path::Path,
@@ -2024,7 +1994,7 @@ pub(crate) fn candle_weights_gap(request: &ImageRequest) -> Option<String> {
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
 /// off-Mac SenseNova-U1 VQA / interleave handlers resolve their snapshot through it.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,
@@ -2143,10 +2113,7 @@ pub(crate) fn resolve_weights_dir(
         // the candle lane too — the candle Ideogram loader reads the same `transformer/model.safetensors`
         // layout and dense-loads bf16 via `linear_detect` (`resolve_quant` returns None for mlxQuantize<=0,
         // so no on-the-fly quant runs). The packed q4/q8 tiers still resolve from the `-mlx` turnkey below.
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
+        #[cfg(native_lane)]
         {
             let wants_bf16 = request.quant_bits()
                 .is_some_and(|bits| bits <= 0);
@@ -2259,10 +2226,7 @@ pub(crate) fn resolve_weights_dir(
     // reaches the loader by editing one place. A row still carrying the null-SHA placeholder
     // resolves to nothing, so a pending tier falls back to the installed default instead of
     // pointing the loader at a snapshot directory that cannot exist.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     // Both 2.1 ids (base and its distilled Turbo sibling, sc-25907) are split-repo tier families:
     // the upstream snapshot is bf16 and the SceneWorks re-host carries q8/q4.
     if sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
@@ -2310,10 +2274,7 @@ pub(crate) fn resolve_weights_dir(
 /// model" path owns that error; an EXPLICIT pick with nothing installed is the install error itself
 /// (sc-24114) — answering `None` there let the caller fall back to the default snapshot directory,
 /// which loads a bf16 root that may not hold a `transformer/` at all instead of saying "install".
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn qwen_image_2_1_tier_dir(
     settings: &Settings,
     request: &ImageRequest,
@@ -2385,10 +2346,7 @@ fn qwen_image_2_1_tier_dir(
 /// * a packed q8/q4 tier as the engine's `convert::prequantize_turnkey` writes it — ONE
 ///   `transformer/model.safetensors` (the sharded index is deliberately absent) beside a
 ///   `config.json` carrying the `quantization` marker the engine's packed-detect reads.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn qwen_image_2_1_has_loadable_transformer(dir: &Path) -> bool {
     let transformer = dir.join("transformer");
     let dense = transformer
@@ -2418,7 +2376,7 @@ fn qwen_image_2_1_has_loadable_transformer(dir: &Path) -> bool {
 /// Scoped to [`SPLIT_REPO_TIER_MODELS`] on purpose: other catalog rows are also tier-tagged
 /// whole-repo roots (the Candle SANA and Wan diffusers snapshots), and relabelling THEIR resolved
 /// directories would move their gate pricing and load quant, which nothing here has validated.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) fn tier_key_for_resolved_dir(
     manifest_entry: &JsonObject,
     dir: &Path,
@@ -2427,10 +2385,10 @@ pub(crate) fn tier_key_for_resolved_dir(
 }
 
 /// Catalog ids whose tiers span repositories with a tier that is a whole snapshot root.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 const SPLIT_REPO_TIER_MODELS: &[&str] = sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS;
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn split_repo_root_tier_key(manifest_entry: &JsonObject, dir: &Path) -> Option<&'static str> {
     use sceneworks_core::model_artifacts::artifact_selection::{
         is_pending_artifact_download, model_download_for_variant,
@@ -2471,10 +2429,7 @@ fn split_repo_root_tier_key(manifest_entry: &JsonObject, dir: &Path) -> Option<&
 /// that pinned snapshot is not in the cache. The `files` glob's leading path component is what
 /// names the subdir — `["q8/*"]` ⇒ `q8/` — and an empty `files` (the whole-repo upstream bf16 row)
 /// means the snapshot ROOT, which is exactly the distinction that makes this family split-repo.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn qwen_image_2_1_declared_tier_dir(
     settings: &Settings,
     request: &ImageRequest,
@@ -2586,10 +2541,7 @@ fn resolve_candle_flux1_packed_weights_dir(
 /// not: macOS must keep using its ordinary MLX resolver and default-tier semantics. Keeping that
 /// distinction in a pure cfg-sensitive predicate makes the build boundary testable without making
 /// [`resolve_candle_flux1_packed_weights_dir`] (or any Candle production route) available on macOS.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn completed_image_metrics_use_candle_flux1_exact_resolution(model: &str) -> bool {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let exact = matches!(model, "flux_schnell" | "flux_dev");
@@ -2605,10 +2557,7 @@ fn completed_image_metrics_use_candle_flux1_exact_resolution(model: &str) -> boo
 /// replays its exact q4/q8 resolver; macOS and all other families replay the ordinary resolver that
 /// selected their production weights. The cfg around the Candle call is intentional: a shared
 /// metrics helper must never make the off-Mac Candle route part of a macOS build.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_completed_image_metrics_tier_dir(
     request: &ImageRequest,
     settings: &Settings,
@@ -3085,7 +3034,7 @@ const STANDARD_TIER_MODELS: &[&str] = &[
 /// A flat snapshot roots its backbone dir — `unet/` for the SDXL family, `transformer/` for the DiTs
 /// — and is returned untouched, so the existing two models keep resolving exactly as before. Same
 /// backbone split the `apps/rust-api` training-readiness gate keys on (sc-10613).
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 fn dense_tier_subdir(root: PathBuf) -> PathBuf {
     let roots_a_component_tree = root.join("unet").is_dir() || root.join("transformer").is_dir();
     if !roots_a_component_tree && root.join("bf16").is_dir() {
@@ -3096,7 +3045,7 @@ fn dense_tier_subdir(root: PathBuf) -> PathBuf {
 
 /// Whether `model` is one of the three Anima catalog ids (epic 10512). Anima is convert-at-install with
 /// a bespoke tier resolver, so — like Ideogram/Boogu/Krea — it is NOT in [`STANDARD_TIER_MODELS`].
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn is_anima_model(model: &str) -> bool {
     matches!(model, "anima_base" | "anima_aesthetic" | "anima_turbo")
 }
@@ -3109,7 +3058,7 @@ fn is_anima_model(model: &str) -> bool {
 /// onto the low-fidelity q4. A tier is "present" when its `diffusion_models/` holds a `.safetensors` DiT
 /// (packed OR dense bf16). Mirrors [`standard_tier_subdir`], but keyed on Anima's `split_files` layout
 /// rather than `transformer/`, and — unlike the standard q4-first convention — defaults to q8 (below).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request.quant_bits();
     let present = |name: &str| -> Option<PathBuf> {
@@ -3516,10 +3465,7 @@ async fn fetch_krea_convrot_base(
 /// Base, Turbo and Edit share a repository but have separate component directories. Even Q8
 /// may need fetching when only a sibling variant has been installed. Reuse the native cache
 /// downloader for missing or partial tiers, then check tokenizer and component-weight presence.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn ensure_boogu_tier_present(
     api: &ApiClient,
     settings: &Settings,
@@ -3604,10 +3550,7 @@ async fn ensure_boogu_tier_present(
 /// flagged as a follow-up; it runs on BOTH the MLX (`generate_stream`) and candle
 /// (`generate_candle_stream`) lanes, so off-Mac gets the same q4/q8 picker as macOS. Fails loud on a
 /// real download error; a `q8/` tier that isn't published yet stays absent so the request falls back to q4.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn ensure_ideogram_tier_present(
     api: &ApiClient,
     settings: &Settings,
@@ -3658,10 +3601,7 @@ async fn ensure_ideogram_tier_present(
         .map(|_| ())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 /// Resolve quantization: the explicit `advanced.quantTier: "nvfp4"` label → `advanced.mlxQuantize` →
 /// `manifest.mlx.quantize` → Q8 default. The engine supports Q4/Q8/NVFP4; map (<=0 → dense, <=4 → Q4,
 /// else Q8). Returns the engine quant + the effective bit count for the recipe (None = dense bf16).
@@ -3684,10 +3624,7 @@ async fn ensure_ideogram_tier_present(
 /// `tier_dir` is the RESOLVED tier subdir this job will load (`standard_tier_subdir`'s output), or
 /// `None` on a lane with no standard-tier layout in scope — see [`tier_dir_is_nvfp4`] for why `None`
 /// conservatively means "not NVFP4".
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn resolve_quant(
     request: &ImageRequest,
     tier_dir: Option<&Path>,
@@ -3699,10 +3636,7 @@ pub(crate) fn resolve_quant(
 /// for testability, exactly like [`standard_tier_subdir_gated`] — and necessarily so: the candle CI
 /// lane runs ON the sm_120 rig, so a test that let this probe the live cap would assert different
 /// things on the rig and on a developer box. Production has one caller.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_quant_gated(
     request: &ImageRequest,
     nvfp4_host: bool,
@@ -3830,7 +3764,7 @@ fn gate_tier_key(
         .unwrap_or_else(|| crate::vram_gate::requested_tier_key(advanced, manifest_entry, nvfp4))
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn tier_key_from_resolved_dir(dir: &Path) -> Option<&'static str> {
     let name = dir.file_name()?.to_str()?;
     // Match the trailing tier token: the whole basename (standard/ideogram/krea) or the suffix of a
@@ -3872,7 +3806,7 @@ fn tier_quant_from_resolved_dir(
 ///
 /// The forced `mlxQuantize` is an explicit tier probe, so it bypasses the per-model quality floor
 /// (explicit picks are always honored) — the caller filters candidates to `>= floor` before probing.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn resolve_tier_dir(request: &ImageRequest, settings: &Settings, tier: &str) -> Option<PathBuf> {
     let bits: i64 = match tier {
         "bf16" => 0,
@@ -5139,11 +5073,10 @@ enum DowntierPick {
 /// `installed`), so the quality floor always wins over the downtier — a floor-q8 model's candidates
 /// never include q4, so it rejects rather than silently rendering q4 (acceptance #5). An explicit user
 /// pick never reaches here (the caller skips the downtier for it, honoring the pick — acceptance #7).
-#[cfg(any(all(target_os = "macos", test), feature = "backend-candle"))]
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 // Scoring a candle tier is a manifest arithmetic lookup, so that lane keeps the eager form and its
 // straight-line read. On macOS the only callers left are the ordering tests — the MLX gate scores
 // lazily now, because there scoring a tier hashes an encoder.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn choose_downtier(default_tier: &str, candidates: &[(&'static str, TierFit)]) -> DowntierPick {
     let tiers: Vec<&'static str> = candidates.iter().map(|(tier, _)| *tier).collect();
     let mut fits = candidates.iter().map(|(_, fit)| *fit);
@@ -5221,7 +5154,7 @@ where
 /// the disk-clamped resolved tier (the downtier ceiling — the clamp only ever lowers fidelity); `floor`
 /// is the per-model quality floor ([`min_quality_floor`], defaulting to `q4`). Excludes tiers not on
 /// disk so the downtier never lands on an uninstalled tier.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn downtier_candidate_tiers(
     request: &ImageRequest,
     settings: &Settings,
@@ -5312,10 +5245,7 @@ fn reconcile_resolved_tier_quant(
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=max(80, family default)) else the family
 /// default.
 /// Shared by the MLX path and the candle lane (sc-5096).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
     request
         .advanced
@@ -5341,10 +5271,7 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
 
 /// The largest `advanced.steps` the generic image lane forwards: the historical 80, or the model's
 /// own default when that is higher. Mirrored by Image Studio's Steps input (`maxStepsForModel`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn max_requested_steps(default_steps: u32) -> u32 {
     default_steps.max(sceneworks_core::image_request::BASE_MAX_IMAGE_STEPS)
 }
@@ -5355,10 +5282,7 @@ fn max_requested_steps(default_steps: u32) -> u32 {
 /// Shared by the MLX path and the candle lane (sc-5096); the descriptor's `supports_guidance` is the
 /// candle descriptor on the Windows lane, so a distilled candle family (z-image, flux schnell) still
 /// gets `None` and a guided one (flux dev, flux2, qwen, sdxl) gets the scale.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
     if !model.supports_guidance() {
         return None;
@@ -5385,10 +5309,7 @@ fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32
 /// whose default sits outside its own historical range). Each caller passes its OWN `range`/`default`,
 /// so the drifting steps bounds (1..=80 / 1..=50 / 1..=100) are preserved byte-for-byte — this is a
 /// dedup-of-mechanism refactor, not a policy change.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_advanced_or_manifest_u32(
     request: &ImageRequest,
     key: &str,
@@ -5404,10 +5325,7 @@ fn resolve_advanced_or_manifest_u32(
 /// `advanced[key]` — falling back to that manifest default — and clamps the result to `range`. Unlike
 /// the u32 twin, the resolved value here is always clamped (matching the historical `f32_clamped`
 /// call, which clamps the manifest/default fallback too). Each caller passes its OWN `range`/`default`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_advanced_or_manifest_f32(
     request: &ImageRequest,
     key: &str,
@@ -5425,8 +5343,7 @@ fn resolve_advanced_or_manifest_f32(
 /// bare constant. Every caller passes its OWN `range`/`default_fn`, so per-lane bounds stay byte-for-byte.
 ///
 #[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
+    native_lane,
     test
 ))]
 fn resolve_advanced_or_manifest_u32_with(
@@ -5455,8 +5372,7 @@ fn resolve_advanced_or_manifest_u32_with(
 /// back to that default) and clamps to `range`. Covers `flux_ipadapter`, whose guidance fallback is a
 /// per-variant fn. Each caller passes its OWN `range`/`default_fn`.
 #[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
+    native_lane,
     test
 ))]
 fn resolve_advanced_or_manifest_f32_with(
@@ -5484,20 +5400,14 @@ fn resolve_advanced_or_manifest_f32_with(
 /// guidance-distilled families (`z_image_turbo`, `flux_schnell`) are `false`/`false` (no CFG at
 /// all), and the `guidance`-scalar families (qwen / sdxl / flux2 …) are `true`/*. For a true-CFG
 /// family the worker forwards `advanced.guidanceScale` as `true_cfg`, not `guidance`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn uses_true_cfg(model: &ResolvedModel) -> bool {
     !model.supports_guidance() && model.supports_negative_prompt()
 }
 
 /// Apply the Ideogram placeholder recovery policy to one completed render. The renderer is injected
 /// so the MLX and candle lanes share cancellation, reseeding, retry exhaustion, and error behavior.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn recover_ideogram_placeholder<R>(
     enabled: bool,
     seed: i64,
@@ -5521,10 +5431,7 @@ where
     )
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn recover_ideogram_placeholder_with<R, P>(
     enabled: bool,
     retries: u32,
@@ -5567,10 +5474,7 @@ where
 /// (their CFG, if any, flows through [`resolve_guidance`]). The scale is `advanced.guidanceScale`
 /// (the same user knob) else the family default — forwarded to the engine as `GenerationRequest.true_cfg`.
 /// Shared by the MLX path and the candle lane (sc-5096).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_true_cfg(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
     if !uses_true_cfg(model) {
         return None;
@@ -5593,10 +5497,7 @@ fn resolve_true_cfg(request: &ImageRequest, model: &ResolvedModel) -> Option<f32
 /// prompt (the true-CFG engines fall back to their own neutral negative).
 /// Shared by the MLX path and the candle lane (sc-5096); on the Windows lane `supports_negative_prompt`
 /// is the candle descriptor, so distilled candle families (z-image, flux schnell) get `None`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Option<String> {
     if !model.supports_negative_prompt() {
         return None;
@@ -5620,10 +5521,7 @@ fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Opt
 ///
 /// Shared by MLX and Candle: every Candle family validates this declared kind against the selected
 /// file before application, so the same `networkType: lokr` classification feeds both backends.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     let header = read_safetensors_header(file)
         .map_err(|error| WorkerError::InvalidPayload(format!("LoRA header: {error}")))?;
@@ -5639,8 +5537,7 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
 }
 
 #[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
+    native_lane,
     test
 ))]
 fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<AdapterKind> {
@@ -5664,8 +5561,7 @@ fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<
 
 #[derive(Debug)]
 #[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
+    native_lane,
     test
 ))]
 struct PreparedAdapters {
@@ -5674,8 +5570,7 @@ struct PreparedAdapters {
 }
 
 #[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
+    native_lane,
     test
 ))]
 impl PreparedAdapters {
@@ -5683,10 +5578,7 @@ impl PreparedAdapters {
     // cross-platform when the Kontext edit surface started being served on both native backends, so
     // a macOS-only helper left the candle test build without it.
     #[cfg(all(
-        any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ),
+        native_lane,
         test
     ))]
     fn is_empty(&self) -> bool {
@@ -5698,8 +5590,7 @@ impl PreparedAdapters {
 /// is later installed on the `LoadSpec`; repeated references to the same lexical entry share one
 /// token, while preserving every requested adapter spec and its scale/order.
 #[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
+    native_lane,
     test
 ))]
 fn resolve_prepared_adapters(
@@ -5732,10 +5623,7 @@ fn resolve_prepared_adapters(
 
 /// Resolve up to [`MAX_JOB_LORAS`] request adapters into engine specs (path + scale + kind).
 /// Shared by the MLX and Candle paths so both backends enforce the same stack ceiling.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult<Vec<AdapterSpec>> {
     if request.loras.len() > MAX_JOB_LORAS {
         return Err(WorkerError::InvalidPayload(format!(
@@ -7667,10 +7555,7 @@ mod metrics_settings_tests {
         ImageRequest::from_payload(value.as_object().unwrap())
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn completed_metrics_replay_exact_flux1_tiers_only_on_the_candle_build() {
         let candle_build = cfg!(all(not(target_os = "macos"), feature = "backend-candle"));
@@ -7686,10 +7571,7 @@ mod metrics_settings_tests {
         ));
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn moss_edit_completion_metrics_do_not_invent_q8_for_the_r15_request_shape() {
         // Actual R15 MLX edit shape: no quant field, BF16 native components, 30 steps/CFG4,
@@ -7717,10 +7599,7 @@ mod metrics_settings_tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn ordinary_moss_dmd_completion_keeps_generic_quant_metrics_semantics() {
         use gen_core::moss_image::{MossDmdPrecision, MossImageAcceleration, MossImageOptions};
@@ -8764,10 +8643,7 @@ fn step_fraction(index: usize, current: u32, total: u32, count: u32) -> f64 {
 /// it). Uses the indexed `ProjectStore::get_asset` → `file.path`. Shared by the MLX image/video
 /// conditioning paths and the candle video i2v conditioning (sc-5175), so it lives here (both lanes)
 /// rather than in a macOS-only include.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn load_reference_image(
     data_dir: &Path,
     project_id: &str,
@@ -8807,10 +8683,7 @@ pub(crate) fn load_reference_image(
 /// Qwen-Image 2.1 does not flatten here at all: an alpha-carrying 2.1 reference travels UN-FLATTENED
 /// as `Conditioning::ReferenceRgba` (its RGB via `Truncate`, which is the straight colour, plus its
 /// own alpha plane), and the engine composites the vision tower's copy itself.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum FlattenPolicy {
     /// Drop the alpha byte — upstream `convert("RGB")` semantics. Every pre-2.1 lane.
@@ -8827,10 +8700,7 @@ pub(crate) enum FlattenPolicy {
 }
 
 /// [`load_reference_image`] with an explicit [`FlattenPolicy`].
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn load_reference_image_with(
     data_dir: &Path,
     project_id: &str,
@@ -8907,10 +8777,7 @@ pub(crate) fn load_reference_image_with(
 ///
 /// Reads the same path through the same `safe_project_path` confinement, so a poisoned sidecar
 /// cannot reach a different file here than it does there.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn load_reference_alpha(
     data_dir: &Path,
     project_id: &str,
@@ -9020,10 +8887,7 @@ fn resolve_identity_init(
 /// `candle_reserves_reference_only_modes` hands its whole reference surface to the bespoke
 /// `Flux2Edit` route, and `generate_candle_stream` fails closed on a Klein reference-bearing mode
 /// before reaching this resolver — so Klein never takes the generic init.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_img2img_init_generic(
     request: &ImageRequest,
     settings: &Settings,
@@ -9064,10 +8928,7 @@ fn resolve_img2img_init_generic(
 /// it an img2img lane (the wired id list is stated at the `generate_candle_stream` call site). FLUX.2
 /// Klein declares `ui.img2img` yet has no such lane: its reference surface is reserved for the bespoke
 /// `Flux2Edit` route, so it never reaches [`resolve_img2img_init_generic`] off-Mac.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn model_supports_img2img(request: &ImageRequest) -> bool {
     request
         .model_manifest_entry
@@ -9081,10 +8942,7 @@ fn model_supports_img2img(request: &ImageRequest) -> bool {
 /// routing rejects unsupported plural/edit/control shapes before dispatch; this keeps the worker
 /// defensive about the fields it consumes so neither backend silently treats an edit or a missing
 /// reference as img2img.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn uses_generic_img2img(request: &ImageRequest, has_reference: bool) -> bool {
     model_supports_img2img(request) && has_reference && request.mode != "edit_image"
 }
@@ -9100,10 +8958,7 @@ fn uses_generic_img2img(request: &ImageRequest, has_reference: bool) -> bool {
 /// directly is always `None` and silently disables the feature — the original end-to-end bug. This is
 /// the single seam for both the MLX (`generate_stream`) and candle (`generate_candle_stream`) lanes so
 /// the two can't drift apart again.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_text_style_gain(request: &ImageRequest) -> Option<f32> {
     request
         .model_manifest_entry
@@ -9148,10 +9003,7 @@ fn zimage_uses_generic_img2img(request: &ImageRequest, has_reference: bool) -> b
 /// Lives in `base.rs` (compiled under BOTH the macOS pose lanes and the off-Mac candle-control lanes)
 /// rather than the macOS-only `strict_control.rs` include, so the not-macOS candle strict-pose siblings
 /// (`zimage_control` / `qwen_control` / `kolors_control` / `flux2_control_candle`) can resolve it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn resolve_control_identity_source(
     request: &ImageRequest,
     settings: &Settings,
@@ -9203,10 +9055,7 @@ pub(crate) fn resolve_control_identity_source(
 ///
 /// Lives in `base.rs` (compiled under BOTH the macOS routes and the off-Mac candle-control lanes) so the
 /// candle siblings can resolve it identically.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn resolve_character_image_likeness_source(
     request: &ImageRequest,
     settings: &Settings,
@@ -9218,10 +9067,7 @@ pub(crate) fn resolve_character_image_likeness_source(
     resolve_control_identity_source(request, settings, project_path)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn character_image_likeness_requested(request: &ImageRequest) -> bool {
     request.mode == "character_image"
         && request
@@ -9236,27 +9082,18 @@ fn character_image_likeness_requested(request: &ImageRequest) -> bool {
 /// img2img (Remix) strength for a plain Ideogram 4 edit with no mask — mirrors the sdxl/z-image 0.6
 /// edit default and the engine's `DEFAULT_IMG2IMG_STRENGTH`. Shared by the macOS MLX edit path and the
 /// candle in-lane edit (sc-6598), so it compiles off-Mac under `backend-candle` too.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const IDEOGRAM_EDIT_STRENGTH: f32 = 0.6;
 /// Heavier img2img strength for masked inpaint / outpaint (regenerate the painted region) — mirrors
 /// the sdxl 0.85 inpaint default and the engine's `DEFAULT_INPAINT_STRENGTH`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const IDEOGRAM_INPAINT_STRENGTH: f32 = 0.85;
 
 /// Upper bound on reference images for a Boogu instruction edit (sc-7645). The DiT's
 /// `image_index_embedding` carries 5 per-image index slots (OmniGen2 lineage), so `N ∈ [1, 5]`
 /// references can be packed into one edit (e.g. subject-from-A composed into scene-from-B); a plural
 /// picker beyond that is capped here. Matches the `mlx-gen-boogu` / `candle-gen-boogu` `MAX_EDIT_REFS`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const BOOGU_MAX_EDIT_REFERENCES: usize = 5;
 
 /// One `Conditioning::Reference` (a single reference) or one `Conditioning::MultiReference` (2–5) from
@@ -9366,10 +9203,7 @@ fn split_rgba_reference(image: &gen_core::RgbaImage) -> WorkerResult<(Image, ima
 /// `referenceAssetIds` — take all of them, capped at [`BOOGU_MAX_EDIT_REFERENCES`]; with no plural list
 /// it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors
 /// `edit_reference_ids`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn boogu_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
     if !request.reference_asset_ids.is_empty() {
         // The parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
@@ -9393,10 +9227,7 @@ fn boogu_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
 
 /// Mage Edit always conditions on the required primary source first, followed by the optional
 /// `referenceAssetIds` exactly in client order.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn mage_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
     if request.mode != "edit_image" {
         return Vec::new();
@@ -9415,10 +9246,7 @@ fn mage_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
     ids
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn is_mage_edit_model(model: &str) -> bool {
     matches!(
         model,
@@ -9432,10 +9260,7 @@ fn is_mage_edit_model(model: &str) -> bool {
 /// flat 3-channel buffer — the same reason sc-24111 carries it beside the render on the way out.
 /// Which of the two conditioning kinds an entry becomes is decided from `alpha` alone, so the
 /// classification is a property of the ASSET, never of its ordinal position.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct QwenImage21Reference {
     pub(crate) image: Image,
     /// `Some` iff the source asset carried an alpha channel. An RGBA reference is a DIFFERENT
@@ -9450,10 +9275,7 @@ pub(crate) struct QwenImage21Reference {
 /// than a family predicate: the 2512-weights `qwen_image_edit*` ids are a different engine, a
 /// different latent space and a different edit contract, and they keep the `ImageRoute::QwenEdit`
 /// / `CandleImageRoute::QwenEdit` lanes they have always had.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
     sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model)
         && !qwen_image_2_1_reference_ids(request).is_empty()
@@ -9485,10 +9307,7 @@ fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
 /// **No `.take(N)`.** Every other edit lane silently truncates an over-long set; here the API
 /// refuses it with a 400 that names the cap, so a list that reaches the worker is already inside
 /// the cap and truncating would only hide a routing defect.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String> {
     if !sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return Vec::new();
@@ -9519,10 +9338,7 @@ fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String> {
 /// the vision tower and the VAE. A worker-side `fit_engine_image` to the OUTPUT aspect ran first
 /// and so centre-cropped (default `fitMode: "crop"`) or black-letterboxed every portrait reference
 /// in a landscape request before the engine ever saw it — a different request from upstream's.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_qwen_image_2_1_edit(
     request: &ImageRequest,
     settings: &Settings,
@@ -9593,10 +9409,7 @@ fn resolve_qwen_image_2_1_edit(
 /// * An alpha-carrying reference → `Conditioning::ReferenceRgba`, UN-flattened (S4 contract): the
 ///   VAE encodes all four channels, so flattening it would send a DIFFERENT request. A list with
 ///   any such entry is emitted per entry, in order ([`build_ordered_reference_conditioning`]).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn build_qwen_image_2_1_conditioning(
     references: &[QwenImage21Reference],
 ) -> WorkerResult<Vec<Conditioning>> {
@@ -9639,10 +9452,7 @@ fn build_qwen_image_2_1_conditioning(
 /// ever emitted anything else — a `Mask` above all — is refused here rather than silently dropped.
 /// Running it here also means a refusal happens before any weights are loaded, next to the asset
 /// reads that produced it, rather than as a render failure.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_qwen_image_2_1_edit_images(
     request: &ImageRequest,
     settings: &Settings,
@@ -9751,10 +9561,7 @@ fn resolve_generic_lane_inputs(
 /// over quietly clearing the slots: a populated slot means some caller believes this model has an
 /// img2img or inpaint surface, and it does not — upstream's pipeline takes only an ordered list of
 /// condition images (S3 contract).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn guard_qwen_image_2_1_lane_slots(
     request: &ImageRequest,
     identity_init: Option<&(Image, f32)>,
@@ -9798,10 +9605,7 @@ fn guard_qwen_image_2_1_lane_slots(
 /// resolves the source `Reference`(s) in-lane, like Ideogram), so both lanes resolve the edit sources the
 /// same way. Its deps (`load_reference_image`, `fit_engine_image`) already compile off-Mac under
 /// `backend-candle` (the Ideogram edit path uses them too).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_boogu_edit(
     request: &ImageRequest,
     settings: &Settings,
@@ -9821,10 +9625,7 @@ fn resolve_boogu_edit(
     Ok(references)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_mage_edit(
     request: &ImageRequest,
     settings: &Settings,
@@ -9862,10 +9663,7 @@ fn resolve_mage_edit(
 /// (sc-6598): Ideogram is the same engine for T2I and edit on both backends, so both lanes resolve the
 /// edit conditioning the same way. Its deps (`load_reference_image`, `fit_engine_image`, `non_empty`,
 /// the `gen_core::imageops` mask helpers) are all already compiled off-Mac under `backend-candle`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_ideogram_edit(
     request: &ImageRequest,
     settings: &Settings,
@@ -9959,19 +9757,13 @@ fn resolve_ideogram_edit(
 /// True for a present, non-blank optional asset id (the conditioning-asset presence test shared by
 /// the SDXL advanced sub-mode, PuLID, and InstantID gates). Moved here from the macOS-only `sdxl.rs`
 /// so the candle InstantID lane (sc-5491) can use it off-Mac.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn non_empty(value: &Option<String>) -> bool {
     value.as_deref().is_some_and(|id| !id.trim().is_empty())
 }
 
 /// The object-shaped `advanced.poses` entries (the strict-pose tier; empty otherwise).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
     request
         .advanced
@@ -9982,23 +9774,15 @@ fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
 }
 
 /// A pose's parsed keypoints, ready for [`crate::openpose_skeleton::draw_wholebody`].
-// The candle InstantID pose lane reads only `keypoints` (→ OpenPose body skeleton); `hands`/`face` are
-// the Z-Image whole-body strict-pose path's (macOS), so allow them dead off-Mac.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// Shared strict-control preprocessing reads the whole body on both native backends.
+#[cfg(native_lane)]
 struct PoseInput {
     keypoints: Vec<crate::openpose_skeleton::Keypoint>,
     hands: Option<Vec<crate::openpose_skeleton::Hand>>,
     face: Option<Vec<crate::openpose_skeleton::Keypoint>>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
     use crate::openpose_skeleton::{normalize_face, normalize_hands, normalize_keypoints};
     pose_entries(request)
@@ -10022,10 +9806,7 @@ fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
 /// generation still renders (no scores). `warn_message` is the per-lane phrasing (e.g. the
 /// `character_image` edit streams vs. the `pose-set` control lanes) so the log line is unchanged from
 /// the hand-written blocks this replaces.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn stage_likeness(
     api: &ApiClient,
     settings: &Settings,
@@ -10047,10 +9828,7 @@ async fn stage_likeness(
 
 /// The per-angle continuation clause appended to the user's prompt (parity with
 /// `character_studio_angles.ANGLE_PROMPT_AUGMENTS`). Unknown angle → empty.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn angle_prompt_augment(angle: &str) -> &'static str {
     match angle {
         "front" => {
@@ -10089,20 +9867,14 @@ fn angle_prompt_augment(angle: &str) -> &'static str {
 /// Strip the user's base prompt for augmentation: trim whitespace, then trailing
 /// `,`/`.`/`;` — exactly Python's `(base or "").strip().rstrip(",.;")` (which can
 /// leave a trailing space, e.g. `"a . "` → `"a "`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn strip_base_prompt(base: &str) -> &str {
     base.trim().trim_end_matches([',', '.', ';'])
 }
 
 /// Append the per-angle clause to the user's base prompt (parity with
 /// `augment_prompt_for_angle`). Empty base + unknown angle → empty string.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn augment_prompt_for_angle(base: &str, angle: &str) -> String {
     let augment = angle_prompt_augment(angle);
     let base = strip_base_prompt(base);
@@ -15834,10 +15606,7 @@ fn image_settings_metrics(
 /// recorded `"nvfp4"` on a render whose weights were **q8**. Same SC#5 creative-choice aliasing this
 /// tier exists to eliminate, merely displaced out of selection and into telemetry. Reading the label
 /// off the resolver's own output is what makes the two agree by construction.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn effective_quant_label(
     request: &ImageRequest,
     tier_dir: Option<&Path>,
@@ -15848,10 +15617,7 @@ fn effective_quant_label(
 /// [`effective_quant_label`] with the NVFP4 **host** gate passed in rather than probed (sc-11042).
 /// Split out for testability, exactly like [`resolve_quant_gated`], which it delegates to. Production
 /// has one caller.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn effective_quant_label_gated(
     request: &ImageRequest,
     nvfp4_host: bool,
@@ -15941,10 +15707,7 @@ fn effective_quant_label_gated(
 /// Resolve quant + guidance with the generation's own rules and assemble the
 /// effective-settings metrics for an image job (epic 10402, sc-10406). A build
 /// with neither the MLX nor candle backend reports quant/guidance as none.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn build_image_metrics(
     request: &ImageRequest,
     effective_steps: Option<u32>,
@@ -15962,10 +15725,7 @@ fn build_image_metrics(
         image_count,
     )
 }
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn build_image_metrics(
     request: &ImageRequest,
     effective_steps: Option<u32>,
@@ -16159,7 +15919,10 @@ async fn consume_gen_events_with_disclosure(
     // The measured three-fact set of this job's load, once the producing lane sends one
     // (sc-11045). `None` for every lane that holds no runtime handle — those assets keep whatever
     // the route stamped pre-load (including the honest `no-runtime-receipt` materialization).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let mut measured_checkpoint_facts: Option<Value> = None;
+    #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+    let measured_checkpoint_facts: Option<Value> = None;
     // Per-image provenance facts (sc-25681), keyed by image index until that image is written.
     let mut pending_image_facts: std::collections::HashMap<usize, JsonObject> =
         std::collections::HashMap::new();
@@ -16303,6 +16066,7 @@ async fn consume_gen_events_with_disclosure(
                     latest_preview = Some(slot);
                 }
             }
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             GenEvent::CheckpointWeightFacts { facts } => {
                 // Measured checkpoint facts from the loaded handle (sc-11045). Latest-wins on
                 // purpose: the engine's own sink is last-write-wins per materialization, so the
@@ -17144,7 +16908,7 @@ mod standard_tier_tests {
     /// A4 (sc-10189): the generic img2img arm keys off the `ui.img2img` manifest flag the catalog
     /// forwards as `modelManifestEntry`, NOT a hardcoded model string — so Krea + SD3.5 + any future
     /// `ui.img2img` model route uniformly, and a model without the flag stays plain txt2img.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn model_supports_img2img_reads_the_ui_manifest_flag() {
         let entry = |manifest: serde_json::Value| {
@@ -17169,7 +16933,7 @@ mod standard_tier_tests {
     /// sc-18475: both SANA variants use the generic non-edit singular-reference gate on Candle as
     /// MLX. The scheduler rejects plural/control carriers before dispatch; this covers the worker
     /// fields after dispatch and prevents an edit or missing reference from becoming img2img.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn sana_variants_use_the_generic_img2img_worker_gate() {
         let request = |model: &str, mode: &str, manifest_flag: bool| {
@@ -17375,7 +17139,7 @@ mod standard_tier_tests {
 
         // The Anima resolver shares the same default (sc-10714 → sc-10731): its no-pick default is q8 too,
         // so a revert to q4 also washes Anima — the exact quality bug epic 10721 fixed.
-        #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+        #[cfg(native_lane)]
         {
             let anima_root = tempfile::tempdir().unwrap();
             for tier in ["bf16", "q8", "q4"] {
@@ -17838,10 +17602,7 @@ mod standard_tier_tests {
     /// sc-11042: [`resolve_quant`] returns the distinct `Quant::Nvfp4` for an explicit, host-eligible
     /// pick — with **no** bit count (NVFP4 is ~4.5 EFFECTIVE bits/weight; `Some(4)` would alias the
     /// recipe onto q4) — and is otherwise completely unchanged.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn resolve_quant_returns_the_distinct_nvfp4_tier_only_on_an_explicit_blackwell_pick() {
         let picked = request(json!({ "quantTier": "nvfp4" }));
@@ -17915,10 +17676,7 @@ mod standard_tier_tests {
     /// of the carve-out, a crafted `quantTier: "nvfp4"` returned `Some(Nvfp4)` and skipped it — which
     /// would re-quantize the bf16 text encoder those stories deliberately kept dense. The carve-out is
     /// the wider invariant (the TE must never be quantized by ANY tier), so it wins outright.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn the_nvfp4_arm_never_short_circuits_the_dense_te_carve_out() {
         let nvfp4_dir = PathBuf::from("/models/klein").join(NVFP4_TIER);
@@ -17973,10 +17731,7 @@ mod standard_tier_tests {
     /// deliberately `None`, so a bits-only match drops it into the `_ => bf16` arm — stamping a 4-bit
     /// NVFP4 render as full-precision `"bf16"`. The inverse of the video lane's `q4` mislabel, the same
     /// violation. Matching the variant is what pins it.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn effective_quant_label_never_aliases_nvfp4_to_bf16_or_q4() {
         let picked = request(json!({ "quantTier": "nvfp4" }));
@@ -18035,10 +17790,7 @@ mod standard_tier_tests {
 
     /// sc-16025: provider-local floors are part of the effective numeric identity. The label stored
     /// on the asset/effective-settings record must not collapse Mage's mixed q4/q8 load to plain q4.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn mage_q4_label_includes_every_descriptor_declared_component_floor() {
         let request = ImageRequest::from_payload(
@@ -18070,10 +17822,7 @@ mod standard_tier_tests {
     /// picked, true) == q8` and `effective_quant_label_gated(picked, true) == "nvfp4"` — and never
     /// connected them. This test connects them: it drives the SAME request through the resolver and the
     /// label and asserts they agree, so the two can never drift apart again.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn effective_quant_label_reports_the_resolved_tier_not_the_requested_one() {
         let picked = request(json!({ "quantTier": "nvfp4" }));
@@ -18509,7 +18258,7 @@ mod standard_tier_tests {
 
     /// A model built with a manifest entry so `uses_standard_tier_layout` / `is_dense_te_tier`
     /// can be exercised without touching the hardcoded registries.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     fn manifest_request(model: &str, mlx: serde_json::Value) -> ImageRequest {
         ImageRequest::from_payload(
             json!({ "model": model, "modelManifestEntry": { "mlx": mlx } })
@@ -18521,7 +18270,7 @@ mod standard_tier_tests {
     /// sc-8508: the standard-tier routing is manifest-driven — a model NOT in
     /// [`STANDARD_TIER_MODELS`] opts in via `mlx.standardTierLayout: true`, while a registry model
     /// stays true without the flag and an ordinary model stays false. Back-compat guard.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn standard_tier_layout_is_manifest_driven_with_registry_backcompat() {
         // Registry member, no manifest flag → still true.
@@ -18545,7 +18294,7 @@ mod standard_tier_tests {
     /// see is the defect that story removes, so the id alone must no longer grant the carve-out —
     /// `flux2_klein_9b` gets it from the catalog (pinned against the shipped manifest by
     /// `tests/gpu_and_manifest.rs`) or not at all.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn dense_te_tier_is_declared_only_in_the_manifest() {
         assert!(
@@ -19008,7 +18757,7 @@ mod standard_tier_tests {
 
     /// Seed an Anima tier (`bf16/ q8/ q4/`, `split_files` shape): the DiT + (when `complete`) the dense
     /// text encoder and the VAE. Tokenizers are vendored into the binary, so none is on disk. No index.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     fn seed_anima_tier(root: &Path, tier: &str, complete: bool) {
         let dir = root.join(tier);
         std::fs::create_dir_all(dir.join("diffusion_models")).unwrap();
@@ -19027,7 +18776,7 @@ mod standard_tier_tests {
 
     /// A torn Anima tier (DiT present, text-encoder/VAE absent) must fall through to a complete sibling
     /// rather than reaching the loader, which would die on the missing `text_encoders/…` (mlx-gen-anima).
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn anima_torn_tier_falls_through_to_a_complete_sibling() {
         let request = ImageRequest::from_payload(
@@ -19647,7 +19396,7 @@ mod quant_tier_reconcile_tests {
 /// sc-10733: the shared capability-downtier chooser — walk installed tiers from the resolved default
 /// down to the quality floor, pick the highest that fits, reject only when nothing fits. Pure decision,
 /// compiled on both lanes (the candle vram gate + the MLX fit gate both feed it their own [`TierFit`]).
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 mod capability_downtier_tests {
     use super::*;
 
@@ -20045,10 +19794,7 @@ mod candle_downtier_emulation_tests {
 // `resolve_text_style_gain` seam — the coverage the engine-only A/B (sc-11878/sc-11884) never had.
 #[cfg(all(
     test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
+    native_lane
 ))]
 mod text_style_gain_gate_tests {
     use super::*;

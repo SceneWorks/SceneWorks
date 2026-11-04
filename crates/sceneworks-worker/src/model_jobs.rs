@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) mod receipt_verification;
 
 use sceneworks_core::base_weights::{
@@ -750,7 +750,7 @@ fn convert_flux2_klein_diffusers(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 fn convert_flux2_klein_diffusers(
     _source_file: &Path,
     _base_dir: &Path,
@@ -2237,10 +2237,7 @@ fn confined_renamed_hf_single_file(
 /// NOTICE) would otherwise strand every install made at the previous commit — the Model Manager
 /// still sees the tier on disk while a render fails "not installed". Rows without a declaration
 /// resolve exactly as [`huggingface_pinned_snapshot_dir`] always has.
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn huggingface_pinned_tier_snapshot_dir(
     data_dir: &Path,
     repo: &str,
@@ -3911,7 +3908,7 @@ mod artifact_provenance_tests {
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn huggingface_receipt_weights_dir(
     data_dir: &Path,
     repo: &str,
@@ -3978,7 +3975,7 @@ pub(crate) fn huggingface_receipt_weights_dir_at_revision(
 /// Exact PUP package handoff: every file the native package can consume must belong to the
 /// verified download inventory, including an optional shipped system-prompt override. A compatible
 /// Qwen directory or an extra unreceipted sidecar is not an installation receipt.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn flux3_prompt_upsampler_snapshot(data_dir: &Path) -> Option<PathBuf> {
     use gen_core_flux3::pup::{
         SYSTEM_PROMPTS_FILE, UPSAMPLER_REPO, UPSAMPLER_REQUIRED_FILES, UPSAMPLER_REVISION,
@@ -4065,7 +4062,7 @@ pub(crate) fn flux3_prompt_upsampler_snapshot(data_dir: &Path) -> Option<PathBuf
     inventory.is_empty().then(|| root.clone())
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn huggingface_receipt_weights(
     data_dir: &Path,
     repo: &str,
@@ -4153,7 +4150,7 @@ fn huggingface_receipt_weights_with_revision(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProvenanceRepair {
     Allow,
-    #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+    #[cfg(any(test, native_lane))]
     Skip,
 }
 

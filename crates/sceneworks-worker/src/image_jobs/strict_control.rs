@@ -133,7 +133,6 @@ fn strict_control_engine(engine_id: &str) -> Option<&'static StrictControlEngine
 /// engine id (a programming error: only registered strict-control streams call this with their
 /// own engine id). Existing bespoke off-Mac lanes keep their own per-lane default-repo constants; the
 /// backend-neutral SDXL route consumes this shared row on both platforms.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn strict_control_default_repo(engine_id: &str) -> &'static str {
     let catalog_repo = strict_control_engine(engine_id)
         .unwrap_or_else(|| panic!("{engine_id} is not a registered strict-control engine"))
@@ -433,10 +432,6 @@ async fn ensure_depth_estimator_dir(
 ///
 /// Used by the MLX registry strict-control paths (macOS) and the candle strict-control trio (off-Mac,
 /// sc-8304) alike; dead only on a candle-disabled box off Mac (no strict-control caller there).
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
 #[allow(clippy::too_many_arguments)]
 fn preprocess_control_entry(
     kind: &ControlKind,
@@ -501,7 +496,6 @@ fn preprocess_control_entry(
 /// identity img2img-init `Reference` (flux2 / z-image opt-in tier). [`ControlKind::Depth`] uses the
 /// dedicated `Conditioning::Depth` variant; every other kind uses `Conditioning::Control { kind, scale }`.
 /// Byte-identical to the old per-engine construction for the pose tier.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn build_control_conditioning(
     control: Image,
     kind: ControlKind,

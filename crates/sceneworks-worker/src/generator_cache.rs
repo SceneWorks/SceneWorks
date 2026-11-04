@@ -9,11 +9,7 @@ use gen_core::{
     OffloadPolicy, PinnedWeightsFile, Precision, Quant, WeightsSource,
 };
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 use crate::cache_thread::CacheThread;
 use crate::cache_thread::{self, CacheAccess, CacheJob, Fingerprint, SeamMessages};
 use crate::WorkerResult;
@@ -44,11 +40,7 @@ struct CachedGenerator {
     provider_resident_bytes: u64,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 type GeneratorCache = CacheThread<LoadIdentity, CachedGenerator>;
 type GeneratorJob = CacheJob<LoadIdentity, CachedGenerator>;
 
@@ -87,7 +79,7 @@ fn capture_backend_committed_bytes() -> WorkerResult<u64> {
     Ok(0)
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle"), not(test)))]
+#[cfg(not(any(test, native_lane)))]
 fn capture_backend_committed_bytes() -> WorkerResult<u64> {
     Ok(0)
 }
@@ -607,7 +599,7 @@ impl GeneratorCacheHandle {
             evict_transform: true,
         }
     }
-    #[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+    #[cfg(all(test, native_lane))]
     pub(crate) fn isolated() -> (Self, thread::JoinHandle<()>) {
         let (worker, rx) = mpsc::channel();
         let join = thread::spawn(move || run_generator_cache_worker(rx, None));
@@ -1797,10 +1789,7 @@ where
 /// On macOS it is YuE2's admission lever too (sc-23001): YuE2 runs on candle-Metal beside the MLX
 /// generator the cache keeps warm for 300 s after an image job, in the same unified working set, so a
 /// render that fits only without that generator evicts it first (the release clears the MLX cache).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn evict_cached_generator() -> WorkerResult<bool> {
     evict_cached_generator_on(generator_worker()).await
 }
@@ -1809,10 +1798,7 @@ pub(crate) async fn evict_cached_generator() -> WorkerResult<bool> {
 /// enqueues the same eviction job and waits for the generator thread's reply synchronously. Never
 /// call it from the generator cache thread itself (it would wait on its own queue) or from inside a
 /// Tokio runtime worker (it blocks).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn evict_cached_generator_blocking() -> WorkerResult<bool> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
     let progress_context = crate::load_progress::Context::capture();
@@ -1864,10 +1850,7 @@ async fn cached_generator_resident_bytes_on(
 /// [`evict_cached_generator`] against a caller-supplied cache-worker sender — the seam a unit test drives
 /// its own seeded [`GeneratorCache`] worker through (the production entry point uses the process-global
 /// [`generator_worker`]).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn evict_cached_generator_on(worker: &mpsc::Sender<GeneratorJob>) -> WorkerResult<bool> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
     let progress_context = crate::load_progress::Context::capture();
@@ -4996,10 +4979,7 @@ mod tests {
         worker.join().expect("cache worker exits");
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[tokio::test]
     async fn evict_cached_generator_frees_the_resident_slot_and_no_ops_when_empty() {
         let (tx, rx) = mpsc::channel::<GeneratorJob>();

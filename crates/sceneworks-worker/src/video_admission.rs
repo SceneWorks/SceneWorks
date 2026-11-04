@@ -760,6 +760,7 @@ enum VideoEncodeProfile {
     /// The request VAE-encodes nothing before denoise.
     Nothing,
     /// The provider's calibrated conservative encode working set.
+    #[cfg(any(test, target_os = "macos"))]
     Calibrated(VideoDecodeMemoryProfile),
     /// The request encodes conditioning the provider publishes no calibrated encode cost for
     /// (LTX on MLX, every CUDA provider): priced at the provider's conservative single-pass VAE
@@ -805,12 +806,13 @@ fn no_video_encode_profile(
 /// What the provider's own encode calibration says about a request. Only the MLX bundle
 /// calibrates encoders, so other builds construct `Uncalibrated` alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum ProviderEncodeAnswer {
     /// The provider calibrates its encoder, and this request's encode costs this much.
+    #[cfg(any(test, target_os = "macos"))]
     Profile(VideoDecodeMemoryProfile),
     /// The provider calibrates its encoder, and this request encodes nothing. A calibrated
     /// provider's own "nothing" is never second-guessed.
+    #[cfg(any(test, target_os = "macos"))]
     EncodesNothing,
     /// The provider publishes no encode calibration at all (LTX on MLX, every CUDA provider).
     Uncalibrated,
@@ -818,10 +820,7 @@ enum ProviderEncodeAnswer {
 
 /// Whether a request VAE-encodes conditioning before denoise: any reference input, or any mode
 /// other than plain text-to-video. Consulted only for a provider without encode calibration.
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 fn request_encodes_conditioning(request: VideoEncodeRequest<'_>) -> bool {
     request.reference_count > 0 || request.mode != "text_to_video"
 }
@@ -829,10 +828,7 @@ fn request_encodes_conditioning(request: VideoEncodeRequest<'_>) -> bool {
 /// What one VAE-encode pass of a provider's conditioning covers: a single still, or a clip as long
 /// as the output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 enum EncodePass {
     /// Every conditioning input is a still, VAE-encoded one at a time: one frame.
     Still,
@@ -860,10 +856,7 @@ enum EncodePass {
 ///
 /// A `(provider, mode)` this table does not name is priced as the full clip: an unknown encode is
 /// never assumed to be a still.
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 fn uncalibrated_encode_pass(provider_id: &str, mode: &str) -> EncodePass {
     use EncodePass::{Clip, Still};
     match (provider_id, mode) {
@@ -896,10 +889,7 @@ fn uncalibrated_encode_pass(provider_id: &str, mode: &str) -> EncodePass {
 }
 
 /// The frames the largest uncalibrated encode pass VAE-encodes ([`uncalibrated_encode_pass`]).
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 fn uncalibrated_encode_frames(provider_id: &str, mode: &str, frames: u32) -> u32 {
     match uncalibrated_encode_pass(provider_id, mode) {
         EncodePass::Still => 1,
@@ -915,10 +905,7 @@ fn uncalibrated_encode_frames(provider_id: &str, mode: &str, frames: u32) -> u32
 ///   the frames its largest encode pass covers ([`uncalibrated_encode_frames`]), or refused
 ///   without one. This holds on every rung: bounded decode tiles the decode, never the
 ///   conditioning encode, so a bounded-decode candidate runs the same full encode.
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 fn classify_video_encode_profile(
     provider_id: &str,
     request: VideoEncodeRequest<'_>,
@@ -926,13 +913,18 @@ fn classify_video_encode_profile(
     answer: ProviderEncodeAnswer,
     conservative: impl FnOnce(u32) -> Option<VideoDecodeMemoryProfile>,
 ) -> Result<VideoEncodeProfile, String> {
+    #[cfg(any(test, target_os = "macos"))]
     match answer {
+        #[cfg(any(test, target_os = "macos"))]
         ProviderEncodeAnswer::Profile(profile) => {
             return Ok(VideoEncodeProfile::Calibrated(profile))
         }
+        #[cfg(any(test, target_os = "macos"))]
         ProviderEncodeAnswer::EncodesNothing => return Ok(VideoEncodeProfile::Nothing),
         ProviderEncodeAnswer::Uncalibrated => {}
     }
+    #[cfg(not(any(test, target_os = "macos")))]
+    let _ = answer;
     if !request_encodes_conditioning(request) {
         return Ok(VideoEncodeProfile::Nothing);
     }
@@ -1030,6 +1022,7 @@ fn packaged_video_encode_profile(
 }
 
 /// Evidence revision a candidate carries when the conditioning encode is its binding phase.
+#[cfg(any(test, target_os = "macos"))]
 const ENCODE_PROFILE_EVIDENCE_REVISION: &str = "video-provider-conservative-encode-profile-v1";
 /// Evidence revision a candidate carries when an uncalibrated conditioning encode, priced at the
 /// provider's conservative single-pass VAE profile, is its binding phase (sc-20688).
@@ -1204,7 +1197,7 @@ fn video_decode_profile_at_mlx_limit(
             evidence_revision: "video-provider-conservative-decode-profile-v1",
         }));
     }
-    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+    #[cfg(not(native_lane))]
     let _ = (lane, provider_id, selection, frames);
     let _ = mlx_limit_bytes;
     Ok(None)
@@ -1741,6 +1734,7 @@ fn profiled_floor_phase_peaks(
             // below. This classification is not "encodes nothing" and grants no free encode.
             None
         }
+        #[cfg(any(test, target_os = "macos"))]
         Ok(VideoEncodeProfile::Calibrated(profile)) => {
             Some((profile, ENCODE_PROFILE_EVIDENCE_REVISION))
         }
@@ -3667,7 +3661,7 @@ pub(crate) fn live_video_runtime_state(
     )
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) fn live_video_runtime_state(
     _engine_id: &str,
     _cache_state: MemoryCacheState,

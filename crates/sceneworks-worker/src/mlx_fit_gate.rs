@@ -834,17 +834,14 @@ impl MlxRequestPlan {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn declared_component_floors(engine_id: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
     crate::inference_runtime::media_descriptor(engine_id)
         .map(|descriptor| descriptor.capabilities.component_precision_floors)
         .unwrap_or(&[])
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 fn declared_component_floors(_: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
     // The platform-neutral worker build has no active media registry. Its fit-gate decision remains
     // usable for pure contract tests, but there is no provider declaration to attach to the tier.
@@ -22833,10 +22830,7 @@ mod tests {
         /// The fixture figures above are the PINNED engine's own constants, not transcriptions that
         /// can drift from it. Gated to the lanes that have a provider bundle in scope, exactly like
         /// `pinned_engine_geometry`.
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
+        #[cfg(native_lane)]
         #[test]
         fn the_h3_eviction_figures_are_the_pinned_engines_own() {
             use platform_runtime::providers::minimax_h3::memory_strategy as h3;

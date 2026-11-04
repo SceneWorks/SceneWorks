@@ -551,7 +551,7 @@ pub(crate) async fn live_total_gb(settings: &Settings) -> Option<f64> {
     crate::fit_gate::lane_total_gb(&settings.gpu_id).await
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn live_total_gb(_settings: &Settings) -> Option<f64> {
     None
 }

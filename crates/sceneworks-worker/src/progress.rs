@@ -42,10 +42,7 @@ pub(crate) const CANCEL_JOIN_ABANDON: std::time::Duration = std::time::Duration:
 /// worker threads through its blocking tasks — `gen_core::CancelFlag` (image/video/training/analysis)
 /// and `gen_core::core_llm::CancelFlag` (prompt-refine LLM), which are distinct types with the same
 /// `cancel()` surface — so one guard covers every streaming consumer regardless of which flag it holds.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) trait CancelHandle {
     fn cancel(&self);
 }
@@ -60,31 +57,22 @@ impl CancelHandle for gen_core::CancelFlag {
 // own flag, re-exported through core_llm); it exposes the same `cancel()`. Implemented separately so
 // the prompt-refine consumer can use the same guard. On the plain-Linux parity build core_llm may
 // not link, but the guard is unused there anyway; guard the impl behind the same gate as the callers.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl CancelHandle for gen_core::core_llm::CancelFlag {
     fn cancel(&self) {
         gen_core::core_llm::CancelFlag::cancel(self)
     }
 }
 
-/// Gated to the job handlers that use it (`any(target_os = "macos", feature = "backend-candle")`);
+/// Gated to the job handlers that use it (`native_lane`);
 /// on the plain-Linux parity build it is unused, so allow dead_code only there.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) struct CancelJoinGuard<C: CancelHandle, R> {
     cancel: Option<C>,
     handle: Option<tokio::task::JoinHandle<R>>,
 }
 
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 impl<C: CancelHandle, R> CancelJoinGuard<C, R> {
     /// Bind a spawned blocking task to its engine cancel flag. On an error path the consumer calls
     /// [`Self::cancel_and_join`] to trip the flag and awaited-bounded-join the task before the job
@@ -296,10 +284,7 @@ pub(crate) async fn mark_job_canceled(
 /// the task is still running trips its flag; if the task then returns `Ok` anyway (it had passed
 /// its last cancel checkpoint) the finished work is discarded and the job posts `Canceled`. A task
 /// whose `Ok` is a committed side effect uses [`run_blocking_with_heartbeat_keeping_ok`] instead.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_blocking_with_heartbeat<R, F, Fut>(
     api: &ApiClient,
@@ -460,10 +445,7 @@ where
 /// A well-typed `None` for [`run_blocking_with_heartbeat`]'s `on_cancel_acknowledged` param, for the
 /// callers with no intermediate "Canceling…" update to post. Naming a concrete future type lets the
 /// compiler infer `F`/`Fut` at the `None` call sites without a turbofish (sc-8928).
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn no_cancel_ack() -> Option<fn() -> std::future::Ready<WorkerResult<()>>> {
     None
 }
@@ -642,10 +624,7 @@ tokio::task_local! {
 /// Run `future` with the process-shutdown [`SHUTDOWN_FLAG`] task-local bound to `shutdown`, so every
 /// consumer loop awaited within it can consult [`shutdown_requested`] at its cancel checkpoints
 /// (sc-9618). Scoped once around `run_utility_job`'s dispatch.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) async fn with_shutdown_flag<F>(shutdown: gen_core::CancelFlag, future: F) -> F::Output
 where
     F: std::future::Future,
@@ -678,7 +657,7 @@ pub(crate) async fn update_job(
 
 /// Post a nonterminal cancellation acknowledgement with precedence over later phase reports.
 /// The explicit control channel avoids inferring cancellation from a UI message or shared stage.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) async fn update_job_cancelling(
     api: &ApiClient,
     job_id: &str,

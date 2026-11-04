@@ -966,13 +966,7 @@ mod tests {
 /// consumer and the completion/cancel result — with only the trainer injected. A plan built by the
 /// real `sceneworks_core` target registry is what the job executes, so these pin that every
 /// offered option reaches `Trainer::train`, and what the job API sees, per backend.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod job_tests {
     use crate::api_client::ApiClient;
     use crate::error::{WorkerError, WorkerResult};
