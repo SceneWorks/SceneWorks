@@ -16,7 +16,7 @@ use super::{ImageRequest, Path, PathBuf, Value, STANDARD_TIER_MODELS};
 /// `mlx.standardTierLayout: true`. The manifest flag is the first-class, catalog-driven form of the
 /// hardcoded registry (epic 8506) — a new quant-matrix model can opt in from the manifest alone,
 /// while the registry keeps every already-wired model working with zero manifest change.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(super) fn uses_standard_tier_layout(request: &ImageRequest) -> bool {
     STANDARD_TIER_MODELS.contains(&request.model.as_str())
         || request
@@ -35,10 +35,7 @@ pub(super) fn uses_standard_tier_layout(request: &ImageRequest) -> bool {
 /// where the shared decision, the audit table, and the parity lane can all see it. The hardcoded id list
 /// this used to fall back to is gone (see the note at the top of this file); a model that needs the
 /// carve-out declares the flag and carries a measured exception row in `config/tier-integrity.jsonc`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn is_dense_te_tier(request: &ImageRequest) -> bool {
     request
         .model_manifest_entry
@@ -146,10 +143,7 @@ pub(super) fn nvfp4_requested(request: &ImageRequest) -> bool {
 ///
 /// Gated to the lanes that HAVE a quant resolver ([`resolve_quant`]'s cfg): the neither-MLX-nor-candle
 /// build resolves no load quant at all, so this would be dead code there (`-D warnings`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn tier_dir_is_nvfp4(tier_dir: Option<&Path>) -> bool {
     tier_dir
         .and_then(Path::file_name)
@@ -178,10 +172,7 @@ fn tier_dir_is_nvfp4(tier_dir: Option<&Path>) -> bool {
 /// Gated to [`resolve_quant`]'s cfg, like [`tier_dir_is_nvfp4`]: every caller (the quant resolver, the
 /// label, and the candle fit gate) lives on the MLX or candle lane, so compiling it on the
 /// neither-backend build would be dead code under `-D warnings`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn nvfp4_selected(
     request: &ImageRequest,
     nvfp4_host: bool,
@@ -250,15 +241,13 @@ pub(super) fn preferred_tier(bits: Option<i64>, floor: Option<&str>, nvfp4: bool
     if nvfp4 {
         return NVFP4_TIER;
     }
-    match bits {
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b > 4 => "q8",
-        Some(_) => "q4",
-        None => match floor {
+    crate::payload::tier_for_bits(
+        bits,
+        match floor {
             Some(f) if tier_quality_rank(f) > tier_quality_rank("q8") => tier_static_name(f),
             _ => "q8",
         },
-    }
+    )
 }
 
 /// The model's per-model quality FLOOR (`mlx.minQualityTier`, sc-10731): the MINIMUM-fidelity tier a
@@ -439,10 +428,7 @@ pub(super) fn standard_tier_subdir_gated(
     request: &ImageRequest,
     nvfp4_host: bool,
 ) -> PathBuf {
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let bits = request.quant_bits();
     // A component dir "has weights" when it holds a packed/dense safetensors or a shard index.
     // Hidden entries don't count: a dir holding only a `._model.safetensors` AppleDouble sidecar has
     // no weights, and reporting otherwise routes the loader at a tier it cannot load

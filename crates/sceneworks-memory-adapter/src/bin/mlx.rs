@@ -28460,7 +28460,8 @@ mod ltx_tests {
     /// would silently widen or narrow what this arm accepts.
     ///
     /// This is a TRANSCRIPTION check, not a call into `sceneworks_core::video_request::ltx_frame_count`
-    /// — this crate deliberately does not depend on `sceneworks-core` (see `ltx_snapped_frame_count`).
+    /// — this crate depends on core, but the shipped helper is not `const fn`, while this port
+    /// computes compile-time bucket constants (see `ltx_snapped_frame_count`).
     /// The other half of the binding is `ltx_frame_count_matches_the_sc_18808_calibration_ladder` in
     /// `crates/sceneworks-core/src/video_request.rs`, which pins the same 18 pairs against the shipped
     /// function in a default member. Keep the two tables identical; changing one alone is the drift

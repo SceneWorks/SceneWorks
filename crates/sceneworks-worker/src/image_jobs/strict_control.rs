@@ -133,7 +133,6 @@ fn strict_control_engine(engine_id: &str) -> Option<&'static StrictControlEngine
 /// engine id (a programming error: only registered strict-control streams call this with their
 /// own engine id). Existing bespoke off-Mac lanes keep their own per-lane default-repo constants; the
 /// backend-neutral SDXL route consumes this shared row on both platforms.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn strict_control_default_repo(engine_id: &str) -> &'static str {
     let catalog_repo = strict_control_engine(engine_id)
         .unwrap_or_else(|| panic!("{engine_id} is not a registered strict-control engine"))
@@ -175,9 +174,7 @@ fn trusted_control_weight_revision(
         .unwrap_or(false);
     let overlay_id = control
         .and_then(|weights| weights.get("overlayId"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .and_then(crate::payload::trimmed_value_str);
     let revision = control
         .and_then(|weights| weights.get("revision"))
         .and_then(Value::as_str)
@@ -234,12 +231,7 @@ fn control_kind_label(kind: &ControlKind) -> String {
 /// — when a future per-model exposure story sets it — selects `canny` / `depth` / `pose`. An unknown value
 /// is rejected loudly rather than silently falling back.
 fn requested_control_kind(request: &ImageRequest) -> WorkerResult<ControlKind> {
-    let Some(mode) = request
-        .advanced
-        .get("controlMode")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let Some(mode) = crate::payload::trimmed_string(request.advanced.get("controlMode"))
     else {
         return Ok(ControlKind::Pose);
     };
@@ -260,12 +252,7 @@ fn resolve_user_control_map(
     settings: &Settings,
     project_path: &Path,
 ) -> WorkerResult<Option<Image>> {
-    let Some(asset_id) = request
-        .advanced
-        .get("controlImage")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
+    let Some(asset_id) = crate::payload::trimmed_string(request.advanced.get("controlImage"))
     else {
         return Ok(None);
     };
@@ -445,10 +432,6 @@ async fn ensure_depth_estimator_dir(
 ///
 /// Used by the MLX registry strict-control paths (macOS) and the candle strict-control trio (off-Mac,
 /// sc-8304) alike; dead only on a candle-disabled box off Mac (no strict-control caller there).
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
 #[allow(clippy::too_many_arguments)]
 fn preprocess_control_entry(
     kind: &ControlKind,
@@ -513,7 +496,6 @@ fn preprocess_control_entry(
 /// identity img2img-init `Reference` (flux2 / z-image opt-in tier). [`ControlKind::Depth`] uses the
 /// dedicated `Conditioning::Depth` variant; every other kind uses `Conditioning::Control { kind, scale }`.
 /// Byte-identical to the old per-engine construction for the pose tier.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn build_control_conditioning(
     control: Image,
     kind: ControlKind,

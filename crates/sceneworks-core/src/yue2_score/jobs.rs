@@ -652,11 +652,7 @@ fn check_text(field: &str, value: &str, max: usize) -> Result<(), Yue2JobError> 
 }
 
 fn check_id(field: &str, value: &str) -> Result<(), Yue2JobError> {
-    let safe = !value.trim().is_empty()
-        && value.len() <= 200
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    let safe = crate::ids::is_safe_id_with_max(value, 200);
     if !safe {
         return Err(error(INVALID_VALUE, field, "is not a valid id"));
     }
@@ -898,12 +894,7 @@ fn is_lower_hex(value: &str) -> bool {
 pub fn is_run_dir(rel: &str) -> bool {
     rel.strip_prefix(RUNS_DIR)
         .and_then(|rest| rest.strip_prefix('/'))
-        .is_some_and(|id| {
-            id.starts_with(RUN_ID_PREFIX)
-                && id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-        })
+        .is_some_and(|id| id.starts_with(RUN_ID_PREFIX) && crate::ids::is_safe_id(id))
 }
 
 /// The project-relative run directory of `run_id`.
@@ -929,12 +920,7 @@ pub fn transcription_id(run_id: &str) -> Option<String> {
 pub fn is_transcription_dir(rel: &str) -> bool {
     rel.strip_prefix(TRANSCRIPTIONS_DIR)
         .and_then(|rest| rest.strip_prefix('/'))
-        .is_some_and(|id| {
-            id.starts_with(RUN_ID_PREFIX)
-                && id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-        })
+        .is_some_and(|id| id.starts_with(RUN_ID_PREFIX) && crate::ids::is_safe_id(id))
 }
 
 fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
@@ -1231,18 +1217,20 @@ pub fn refresh_block_for_duplicate(payload: &mut serde_json::Map<String, serde_j
 }
 
 fn fresh_hex_id() -> String {
-    let mut bytes = [0u8; 16];
+    if let Ok(value) = crate::hashing::random_hex(16) {
+        return value;
+    }
+    let bytes = [0u8; 16];
     // A failed OS RNG must not hand two duplicates the same run: fall back to a time-and-address
     // mix, which is unique per call in one process.
-    if getrandom::fill(&mut bytes).is_err() {
+    {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default();
         let marker = &bytes as *const _ as usize as u128;
-        bytes = (nanos ^ marker.rotate_left(64)).to_le_bytes();
+        crate::hashing::hex(&(nanos ^ marker.rotate_left(64)).to_le_bytes())
     }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The engine's window-plan rule (`sliding_window_plan`) over the resolved values —

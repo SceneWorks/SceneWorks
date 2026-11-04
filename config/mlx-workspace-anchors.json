@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Existing MLX workspace estimate coefficients; historical observations, not new calibration records or a currency gate.",
+  "layerwiseDecode": {
+    "provenance": {
+      "repository": "SceneWorks/inference",
+      "actionsRun": 31918926833,
+      "actionsJob": 95095446324,
+      "capturedOn": "2026-08-16",
+      "configuration": "1024x1024 f32 decoder, staged q4 ZImage; edges 256 and 512; three-decimal printed peaks; rounded upper endpoint",
+      "source": "docs/audits/sc-23584-mlx-memory-estimates.md",
+      "sourceUrl": "https://github.com/SceneWorks/inference/actions/runs/31918926833/job/95095446324"
+    },
+    "lowerPeakGib": 4.457,
+    "upperPeakGib": 6.129,
+    "lowerPeakUpperBoundGib": 4.4575,
+    "lowerEdge": 256,
+    "upperEdge": 512,
+    "referenceEdge": 1024,
+    "referenceDecoderBytes": 97583622
+  },
+  "sana": {
+    "provenance": {
+      "source": "docs/calibration/sc-23648/sana-sprint-phases.json",
+      "inferenceRevision": "fe5b55139bffe3714db680e727b8bcfc303dcdce",
+      "sceneWorksBaseRevision": "5e5787d447efcc5a2e479f9df3c13c9c786b686e",
+      "hardware": "Apple M5 Max (Mac17,6), 137438953472 bytes",
+      "configuration": "cold q4, staged residency, 1024x1024, decode edge 192 overlap 48; reset peaks at phase boundaries",
+      "sourceSha256": "74e96f31e6ff3539c042331fc807b28eac2f45a244e084804373a25ac867b84f"
+    },
+    "conditioningPeakBytes": 3864237044,
+    "conditioningWeightBytes": 2318787072,
+    "denoisePeakBytes": 4118238400,
+    "transformerWeightBytes": 1992341184,
+    "decodePeakBytes": 3140425096,
+    "referenceEdge": 1024,
+    "referenceTileEdge": 192
+  }
+}

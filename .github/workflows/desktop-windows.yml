@@ -172,6 +172,14 @@ jobs:
         run: cargo test -p sceneworks-core windows_registry_cache_detects_between_window_rewrite_with_restored_mtime
       - name: Run Windows resolved-cache and materialization safety regressions
         run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"
+      # Shared syntax/confinement and LoRA-copy probes are filesystem fixtures only. Junction
+      # setup is asserted, so Windows must execute the reparse checks rather than silently skip.
+      - name: Run Windows shared path confinement regressions
+        run: cargo test -p sceneworks-core --lib safe_path::tests
+      - name: Run Windows regular-file lock regressions
+        run: cargo test -p sceneworks-core --lib file_lock::tests
+      - name: Run Windows LoRA copy confinement regressions
+        run: cargo test -p sceneworks-core --lib character_store::tests::lora_copy
       # The checkpoint plan store's Windows-only confinement probe (sc-20635): a junction out of
       # an approved library must fail closed. It lives in an INTEGRATION test, so neither name
       # filter above reaches it and it needs its own `--test` target.

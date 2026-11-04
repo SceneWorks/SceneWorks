@@ -160,13 +160,7 @@ pub(super) fn candle_video_default_repo(engine_id: &str) -> &'static str {
 /// fetches — so a candle Wan-14B job errored "snapshot not found" even with the q4 tier present (sc-10539).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
-    if let Some(repo) = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(repo) = crate::payload::trimmed_string(request.model_manifest_entry.get("repo")) {
         return repo.to_owned();
     }
     if let Some(repo) = candle_wan_tier_repo_from_downloads(request, engine_id) {
@@ -194,7 +188,7 @@ fn candle_wan_tier_repo_from_downloads(request: &VideoRequest, engine_id: &str) 
     } else {
         "linux"
     };
-    let order: &[&str] = match candle_wan_quant_bits(request) {
+    let order: &[&str] = match request.quant_bits() {
         None => &["q8", "q4"],
         Some(bits) if bits <= 0 => &["bf16", "q8", "q4"],
         Some(bits) if bits >= 8 => &["q8", "q4"],
@@ -214,12 +208,7 @@ fn candle_wan_tier_repo_from_downloads(request: &VideoRequest, engine_id: &str) 
             if !on_platform {
                 return None;
             }
-            download
-                .get("repo")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
+            crate::payload::trimmed_string(download.get("repo")).map(str::to_owned)
         })
     })
 }
@@ -233,16 +222,6 @@ fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<Pa
             "candle video weights snapshot not found for {repo}"
         ))
     })
-}
-
-/// (sc-10027) The `advanced.mlxQuantize` bits for a candle wan tier-select — a number or numeric string;
-/// `None` when unset.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_wan_quant_bits(request: &VideoRequest) -> Option<i64> {
-    request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
 }
 
 /// (sc-10027) Whether `dir` is a complete candle wan tier — a diffusers-layout snapshot with the DiT
@@ -313,9 +292,7 @@ fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
     let Some(value) = request.advanced.get("mlxQuantize") else {
         return Some(CandleLtxTier::Q4);
     };
-    let bits = value
-        .as_i64()
-        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?;
+    let bits = crate::payload::quant_int(value)?;
     match bits {
         i64::MIN..=0 => Some(CandleLtxTier::Bf16),
         4 => Some(CandleLtxTier::Q4),
@@ -439,10 +416,12 @@ pub(super) fn candle_wan_tier_subdir(
     if !engine_id.starts_with("wan2_2") {
         return None;
     }
-    // Tier preference by requested bits (mirrors the macOS `wan_tier_order`): no explicit pick → q8
+    // Candle deliberately retains its q8-first installed-tier default. macOS `wan_tier_order`
+    // is q4-first for video runtime safety (sc-10859); only explicit selections share an order.
+    // No explicit pick → q8
     // (the app-wide default, clamped to the installed tier, so q4-only installs still resolve q4);
     // explicit ≤4 → q4. `bf16` stays out of the default order (never auto-loaded on a default job).
-    let order: &[&str] = match candle_wan_quant_bits(request) {
+    let order: &[&str] = match request.quant_bits() {
         None => &["q8", "q4"],
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
@@ -880,10 +859,7 @@ fn vace_fun_cold_load_admission(
                 &model_dir,
                 adapter_stage_bytes,
             )?;
-            let budget = crate::vram_gate::apply_vram_cap(
-                crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&gpu_id),
-                crate::vram_gate::cuda_vram_cap_gb(),
-            )
+            let budget = crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "Wan2.2 VACE-Fun admission could not read free GPU VRAM from nvidia-smi; refusing the uncalibrated dual-expert load."
@@ -1009,10 +985,7 @@ async fn admit_candle_ltx(
 pub(crate) async fn candle_video_vram_budget(
     settings: &Settings,
 ) -> Option<crate::vram_gate::VramBudget> {
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     budget.map(|budget| {
         crate::vram_gate::with_reclaimable(
             budget,
@@ -1048,10 +1021,7 @@ pub(super) fn scail2_cold_load_plan(
         // This executes on the dedicated cache OS thread, after a different resident has been
         // dropped. The helper owns a private bounded runtime, so it cannot deadlock the async worker
         // that is awaiting this cache job, and it deliberately bypasses the heartbeat's stale cache.
-        let budget = crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&gpu_id),
-            crate::vram_gate::cuda_vram_cap_gb(),
-        );
+        let budget = crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id);
         match crate::vram_gate::scail2_video_fit_error_with_adapter_bytes(
             &manifest_entry,
             tier_key,
@@ -1591,8 +1561,8 @@ pub(super) fn comfyui_wan_vram_preflight(
     if bytes == 0 {
         return Ok(paths);
     }
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    const CUDA_HEADROOM_GB: f64 = 2.0;
+    const GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
+    const CUDA_HEADROOM_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
     let needed = bytes as f64 / GIB + CUDA_HEADROOM_GB;
     if budget.free_gb + f64::EPSILON < needed {
         return Err(WorkerError::InvalidPayload(format!(
@@ -2019,15 +1989,12 @@ pub(super) fn resolve_candle_scail2_tier(
         // packed weights merely because they happen to be installed.
         None | Some(Value::Null) => Scail2CandleTier::Bf16,
         Some(value) => {
-            let bits = value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
-                            .to_owned(),
-                    )
-                })?;
+            let bits = crate::payload::quant_int(value).ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
+                        .to_owned(),
+                )
+            })?;
             match bits {
                 ..=0 => Scail2CandleTier::Bf16,
                 4 => Scail2CandleTier::Q4,

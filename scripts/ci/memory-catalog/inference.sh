@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Put a private CLEAN inference worktree at the pin, backed by the persistent object cache.
 #
-# PIN RESOLUTION IS DERIVED, NEVER TYPED. `measure-memory-catalog.mjs` reads the pin out of
-# `crates/sceneworks-memory-adapter/src/lib.rs` (`compiledInferencePin()` -> `pub const
-# INFERENCE_PIN`) and refuses the walk when the inference checkout's HEAD does not equal it. That
-# constant is the one this script reads too, with the identical regex, so the two can never
-# disagree: bumping the pin with `npm run bump:inference` moves both at once and this workflow needs
-# no edit. Nothing here writes to any pin site.
+# PIN RESOLUTION IS DERIVED, NEVER TYPED. Core's build script and the shared tooling reader
+# resolve the contract dependency in `crates/sceneworks-core/Cargo.toml`. The adapter compiles
+# that provenance; this script and `compiledInferencePin()` call the same JavaScript reader.
+# `npm run bump:inference` moves the dependency declaration, with no separate stamps to rewrite.
+# Nothing here writes to any pin site.
 #
 # WHY THIS RUNS BEFORE `cargo fetch`, AND WHY THE CLONE OUTLIVES THE JOB.
 # ---------------------------------------------------------------------------------------------
@@ -46,10 +45,9 @@ source "$(dirname "$0")/common.sh"
 
 INFERENCE_URL="https://github.com/SceneWorks/inference"
 
-PIN="$(sed -n 's/^pub const INFERENCE_PIN: &str = "\([0-9a-f]\{40\}\)";.*/\1/p' \
-  crates/sceneworks-memory-adapter/src/lib.rs | head -n 1)"
+PIN="$(node scripts/lib/inference-provenance.mjs)"
 if [[ ! "$PIN" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "::error title=No INFERENCE_PIN::crates/sceneworks-memory-adapter/src/lib.rs declares no 40-hex INFERENCE_PIN"
+  echo "::error title=No INFERENCE_PIN::crates/sceneworks-core/Cargo.toml declares no 40-hex inference contract pin"
   exit 1
 fi
 echo "pinned inference revision: $PIN"
@@ -185,7 +183,7 @@ CLONE_URL="$(file_url "$REPO_U")"
 } >> "$GITHUB_ENV"
 
 {
-  echo "Pinned inference revision \`$PIN\`, derived from \`crates/sceneworks-memory-adapter/src/lib.rs\`."
+  echo "Pinned inference revision \`$PIN\`, derived from \`crates/sceneworks-core/Cargo.toml\`."
   echo
   echo "Persistent object cache \`$REPO_U\`, private capture checkout \`$WORKTREE_U\`; ${MISSING_COUNT} of ${#WANTED[@]} needed revision(s) fetched this run."
   echo

@@ -904,19 +904,13 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
 /// backend-neutral (`MODEL_TABLE` row + whichever provider crate registered the engine id), so the
 /// candle `generate_candle_stream` reuses it exactly like the MLX `generate_stream` — `cfg(target_os)`
 /// only decides which provider crate registered the descriptor, not how it is resolved.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct ResolvedModel {
     pub row: &'static ModelRow,
     pub descriptor: gen_core::ModelDescriptor,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl ResolvedModel {
     pub fn engine_id(&self) -> &'static str {
         self.row.engine_id
@@ -956,10 +950,7 @@ impl ResolvedModel {
     /// too as of sc-8489 so SANA (the lone generic-MLX family with `supported_quants: &[]`, whose
     /// `load` rejects any quant) loads dense, while every pre-existing family (all Q4/Q8) is
     /// unaffected.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     pub fn supports_quant(&self) -> bool {
         !self.descriptor.capabilities.supported_quants.is_empty()
     }
@@ -983,10 +974,7 @@ impl ResolvedModel {
 /// Backend-neutral despite the `mlx_` name (sc-5096): on the Windows candle lane the registry holds
 /// the candle descriptors, so this resolves the candle engine for `request.model` the same way it
 /// resolves the MLX engine on macOS — the candle `generate_candle_stream` calls it directly.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
     let row = MODEL_TABLE
         .iter()
@@ -1472,10 +1460,7 @@ mod tests {
 
     // The effective `limits[key]` list for `backend`: the per-backend `<backend>.limits[key]` override
     // if present, else the base `limits[key]`. `None` => the model advertises no list for that axis.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn effective_list(model: &serde_json::Value, backend: &str, key: &str) -> Option<Vec<String>> {
         let pick = |scope: &serde_json::Value| {
             scope
@@ -1498,10 +1483,7 @@ mod tests {
     /// undistilled Candle route failed exact-head CUDA acceptance (sc-18902), so it resolves only the
     /// MLX id. The resolver lists the valid backend ids and picks whichever the active registry holds.
     /// VACE-Fun uses the same dedicated `wan2_2_vace_fun_14b` provider id on both native backends.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn video_engine_ids(sceneworks_id: &str) -> &'static [&'static str] {
         match sceneworks_id {
             "wan_2_2" => &["wan2_2_ti2v_5b"],
@@ -1522,10 +1504,7 @@ mod tests {
     /// The linked gen-core descriptor for a video manifest model on the ACTIVE backend, or `None`
     /// when no provider crate registered its engine id here. Mirrors [`mlx_model`]'s registry join
     /// for the video ids that live outside [`MODEL_TABLE`] (the image path).
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn video_descriptor(sceneworks_id: &str) -> Option<gen_core::ModelDescriptor> {
         let ids = video_engine_ids(sceneworks_id);
         if ids.is_empty() {
@@ -1550,10 +1529,7 @@ mod tests {
     ///     way a superset of the manifest's `default`+curated menu.
     /// Kolors-conditioned is NOT here: `kolors` IS a `MODEL_TABLE` row, so the loop already resolves it
     /// via `mlx_model` and the existing descriptor check covers its (shared) menu.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn bespoke_advertised(sceneworks_id: &str) -> Option<(Vec<String>, Vec<String>)> {
         let curated = || {
             let (samplers, schedulers) = crate::image_jobs::curated_image_menu();
@@ -1591,10 +1567,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn manifest_component_precision_floors_match_active_provider_descriptors() {
         let manifest = parse_builtin_models();
@@ -1647,10 +1620,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn mage_split_tiers_stage_every_provider_required_component() {
         let manifest = parse_builtin_models();
@@ -1694,10 +1664,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn manifest_menu_is_subset_of_descriptor() {
         // The active backend's registry: MLX on macOS, candle on the `backend-candle` build.
@@ -1824,10 +1791,7 @@ mod tests {
     // `bespoke_advertised` resolves a menu for them — a `None` would silently skip them and leave the
     // guard vacuously green. Pin that down: both bespoke ids must resolve a non-empty menu that includes
     // the solvers their manifest entries advertise (euler/heun), on whichever backend is active.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn bespoke_models_resolve_a_curated_menu() {
         for id in ["instantid_realvisxl", "pulid_flux_dev"] {
@@ -1854,10 +1818,7 @@ mod tests {
     /// silently ship with its advertised geometry unchecked against its engine (sc-12384 — the image
     /// twin of [`pinned_engine_geometry`]'s `EXPECTED_VIDEO_IDS`). Backend-independent: this is the
     /// full catalog set, and each id is size-checked on whichever backend(s) resolve its engine.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     const EXPECTED_IMAGE_IDS: &[&str] = &[
         "flux3_klein",
         "flux3_klein_base",
@@ -1925,10 +1886,7 @@ mod tests {
     /// The backend-effective default resolution (`<backend>.defaults.resolution` overriding the base
     /// `defaults.resolution`) — the scalar companion to [`effective_list`], which handles the
     /// per-backend list axes. `None` when the model declares no default at all.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn effective_default_resolution(model: &serde_json::Value, backend: &str) -> Option<String> {
         let pick = |scope: &serde_json::Value| {
             scope
@@ -2099,10 +2057,7 @@ mod tests {
     /// to a pinned const (as sc-12409 did for the wan-14B family, and sc-12587 tracks for the
     /// remaining VIDEO strides) is a coverage extension tracked in sc-12612 — the image twin — not a
     /// live miss.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn shipped_image_geometry_is_within_the_pinned_engine_envelope() {
         let backend = if cfg!(target_os = "macos") {
@@ -2290,10 +2245,7 @@ mod tests {
     /// or a `runtime-*` pin bump that changes an engine const is RED even while every current bucket
     /// stays on-stride. Values are backend-agnostic except for SDXL and Kolors, whose MLX runtimes
     /// enforce ÷32 while Candle retains ÷8.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn pinned_image_stride_pins_each_engines_lattice() {
         // One representative engine id per family × the exact request-dimension multiple its PINNED
@@ -2379,10 +2331,7 @@ mod tests {
     ///
     /// It further pins the descriptor facts the manifest entry is derived from, so a runtime bump
     /// that changes them fails HERE rather than silently making the manifest lie.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn mochi_resolves_one_engine_id_to_the_gen_core_descriptor() {
         assert!(
@@ -2664,10 +2613,7 @@ mod tests {
     // ~50 steps) — proving it is selectable and routes to the base path distinct from `z_image_turbo`
     // (which stays 8-step, CFG-free). Repos are the SceneWorks pre-built quant-matrix turnkeys
     // (sc-8670): base = `SceneWorks/z-image-mlx`, turbo = `SceneWorks/z-image-turbo-mlx`.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn z_image_base_row_is_distinct_from_turbo() {
         let base = MODEL_TABLE
@@ -2722,10 +2668,7 @@ mod tests {
     // sc-8746 (epic 8506, Group-B): the SDXL-family rows point at the SceneWorks pre-built
     // quant-matrix turnkey repos (standard q4/q8/bf16 subdirs), NOT the original dense sources.
     // Each engine still shares the `sdxl` engine id; only the default_repo swings to the turnkey.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn sdxl_family_rows_point_at_sceneworks_turnkeys() {
         for (id, repo) in [
