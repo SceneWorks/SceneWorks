@@ -41,6 +41,7 @@ const manifestModels = (() => {
 const MINIMAX = {
   ...manifestModels.find((model) => model.id === "minimax_h3"),
   installState: "installed",
+  supportsLastOnlyImageToVideo: true,
   usable: true,
 };
 

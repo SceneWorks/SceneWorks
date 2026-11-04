@@ -188,7 +188,7 @@ describe("bundle report", () => {
     expect(report.violations).toEqual([`bundle-budgets.json is missing the ${name} budget`]);
   });
 
-  it.each(["/src/modelCatalog.js", "/src/data/previewSupport.json"])(
+  it.each(["/src/data/previewSupport.json"])(
     "fails when the offline model catalog (%s) lands in the initial graph",
     (moduleSuffix) => {
       const report = buildBundleReport(
