@@ -1,5 +1,6 @@
+import { submitJobRequest } from "../../api/jobs.js";
 import React, { useMemo, useState } from "react";
-import { apiFetch } from "../../api.js";
+
 import { terminalStatuses } from "../../constants.js";
 import { useAppContext } from "../../context/AppContext.js";
 import { AssetThumbnail } from "../../components/assetMedia.jsx";
@@ -81,7 +82,7 @@ export function EditorDepthPanel({ working, dirty }) {
         displayName: working?.source?.name ?? undefined,
         irisModel,
       });
-      const created = await apiFetch(DEPTH_ENDPOINT, token, { method: "POST", body: JSON.stringify(body) });
+      const created = await submitJobRequest(DEPTH_ENDPOINT, token, { method: "POST", body: JSON.stringify(body) });
       if (!created?.id) throw new Error("The job response did not include an id.");
       setJobId(created.id);
     } catch (error) {

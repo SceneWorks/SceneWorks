@@ -201,17 +201,21 @@ impl PlannerLlm for OpenAiPlannerLlm {
                         _ => "http_error",
                     }
                 });
-                let mut pending_body = Box::pin(response.json::<Value>());
+                let mut pending_body = Box::pin(read_planner_json(response));
                 let value = loop {
                     tokio::select! {
                         result = &mut pending_body => break result.map_err(|error| {
-                            if error.is_timeout() {
-                                ("transport_timeout", classify_transport_error(error))
-                            } else if let Some(code) = http_failure {
-                                (code, classify_status(status))
-                            } else {
-                                ("malformed_protocol_json", HarnessError::Transport(
-                                    "The external planner returned a malformed JSON protocol response".to_owned()))
+                            match error {
+                                PlannerBodyError::Transport(error) if error.is_timeout() =>
+                                    ("transport_timeout", classify_transport_error(error)),
+                                PlannerBodyError::TooLarge => ("response_too_large", HarnessError::Transport(
+                                    "The external planner response exceeded the response size limit".to_owned())),
+                                _ => if let Some(code) = http_failure {
+                                    (code, classify_status(status))
+                                } else {
+                                    ("malformed_protocol_json", HarnessError::Transport(
+                                        "The external planner returned a malformed JSON protocol response".to_owned()))
+                                },
                             }
                         })?,
                         _ = tokio::time::sleep(Duration::from_millis(25)) => {
@@ -269,6 +273,37 @@ impl PlannerLlm for OpenAiPlannerLlm {
     }
 }
 
+// Generous enough for complete plans with provider reasoning and large catalogs,
+// but finite even for chunked responses without a Content-Length header.
+const MAX_PLANNER_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+enum PlannerBodyError {
+    Transport(reqwest::Error),
+    TooLarge,
+    Malformed,
+}
+
+async fn read_planner_json(mut response: reqwest::Response) -> Result<Value, PlannerBodyError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PLANNER_RESPONSE_BYTES as u64)
+    {
+        return Err(PlannerBodyError::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(PlannerBodyError::Transport)?
+    {
+        if chunk.len() > MAX_PLANNER_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+            return Err(PlannerBodyError::TooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| PlannerBodyError::Malformed)
+}
+
 pub(crate) async fn list_models(
     client: &reqwest::Client,
     connection: &FilmPlannerConnection,
@@ -292,7 +327,7 @@ pub(crate) async fn list_models(
     if !response.status().is_success() {
         return Err(ApiError::bad_request(status_detail(response.status())));
     }
-    let value: Value = response.json().await.map_err(|_| {
+    let value: Value = read_planner_json(response).await.map_err(|_| {
         ApiError::bad_request("The planning endpoint returned a malformed model-list response")
     })?;
     let data = value.get("data").and_then(Value::as_array).ok_or_else(|| {
@@ -1526,5 +1561,75 @@ mod tests {
             .to_string()
             .contains("canceled by user"));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod response_boundary_tests {
+    use super::*;
+    use axum::{body::Body, http::StatusCode, response::Response, routing::get, Json, Router};
+
+    #[tokio::test]
+    async fn planner_json_bounds_announced_and_chunked_bodies_and_accepts_valid_plans() {
+        let app = Router::new()
+            .route(
+                "/announced",
+                get(|| async {
+                    Response::builder()
+                        .header(
+                            "content-length",
+                            (MAX_PLANNER_RESPONSE_BYTES + 1).to_string(),
+                        )
+                        .body(Body::from_stream(futures_util::stream::pending::<
+                            Result<axum::body::Bytes, std::io::Error>,
+                        >()))
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/chunked",
+                get(|| async {
+                    let body = futures_util::stream::iter(
+                        (0..33).map(|_| Ok::<_, std::io::Error>(vec![b'x'; 1024 * 1024])),
+                    );
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from_stream(body))
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/valid",
+                get(|| async {
+                    Json(json!({"choices": [{"message": {"content": "complete plan"}}]}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = crate::http_boundary::planner_client().unwrap();
+        for path in ["announced", "chunked"] {
+            let response = client
+                .get(format!("http://{address}/{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    read_planner_json(response).await,
+                    Err(PlannerBodyError::TooLarge)
+                ),
+                "{path}"
+            );
+        }
+        let response = client
+            .get(format!("http://{address}/valid"))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            matches!(read_planner_json(response).await, Ok(value) if value["choices"][0]["message"]["content"] == "complete plan")
+        );
+        server.abort();
     }
 }

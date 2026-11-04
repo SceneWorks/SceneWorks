@@ -1,4 +1,5 @@
-import { apiFetch } from "./api.js";
+import { credentialsApi } from "./api/credentialsResources.js";
+
 import { readAccessToken } from "./accessToken.js";
 import { isDesktop, tauriInvoke } from "./runtime.js";
 
@@ -18,6 +19,8 @@ export const SCHEME_LABELS = {
   query: "Query token",
 };
 
+// React screens read token from App context; non-React transports read this live
+// store at call time. Both originate in useAccessGate/accessToken.js; no second cache.
 // Server mode authenticates with the same access token the rest of the app uses.
 // The storage key + threat-model note live in accessToken.js (sc-8880).
 export function serverToken() {
@@ -28,7 +31,7 @@ export async function loadCredentials() {
   if (credentialsIsDesktop) {
     return (await invoke("list_credentials")) ?? [];
   }
-  return (await apiFetch("/api/v1/credentials", serverToken())) ?? [];
+  return (await credentialsApi.credentials(serverToken())) ?? [];
 }
 
 // Returns the updated, redacted credential list (both transports yield it).
@@ -36,7 +39,7 @@ export async function saveCredential({ host, label, scheme, token }) {
   if (credentialsIsDesktop) {
     return (await invoke("set_credential", { host, label, scheme, token })) ?? loadCredentials();
   }
-  return apiFetch("/api/v1/credentials", serverToken(), {
+  return credentialsApi.credentials(serverToken(), {
     method: "PUT",
     body: JSON.stringify({ host, label, scheme, token }),
   });
@@ -46,7 +49,7 @@ export async function removeCredentialRequest(host) {
   if (credentialsIsDesktop) {
     return (await invoke("delete_credential", { host })) ?? loadCredentials();
   }
-  return apiFetch(`/api/v1/credentials/${encodeURIComponent(host)}`, serverToken(), {
+  return credentialsApi.credentialsItem (host, serverToken(), {
     method: "DELETE",
   });
 }

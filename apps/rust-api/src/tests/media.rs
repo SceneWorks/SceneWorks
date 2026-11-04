@@ -1349,9 +1349,21 @@ async fn media_tickets_authenticate_project_file_urls() {
     assert!(ticket_value.len() == 32 && ticket_value.chars().all(|c| c.is_ascii_hexdigit()));
     assert_eq!(ticket["expiresInSeconds"], 300);
 
-    // Re-minting while the ticket is alive returns the SAME sliding ticket, so
-    // already-rendered media URLs stay stable across client refreshes.
+    // Authenticated renewal keeps THIS client's URLs stable; another client
+    // minting independently receives its own credential.
     let (_, reissued) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/files/ticket",
+        Value::Null,
+        &[
+            ("x-sceneworks-token", "secret-token"),
+            ("x-sceneworks-media-ticket", &ticket_value),
+        ],
+    )
+    .await;
+    assert_eq!(reissued["ticket"], ticket_value.as_str());
+    let (_, independent) = request_with_headers(
         app.clone(),
         "POST",
         "/api/v1/files/ticket",
@@ -1359,7 +1371,23 @@ async fn media_tickets_authenticate_project_file_urls() {
         &auth,
     )
     .await;
-    assert_eq!(reissued["ticket"], ticket_value.as_str());
+    assert_ne!(independent["ticket"], ticket_value.as_str());
+    for denied in [
+        "project.db",
+        "project.json",
+        "assets/images/image.sceneworks.json",
+    ] {
+        let (status, headers, _) = request_raw(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/files/{denied}?ticket={ticket_value}"),
+            Body::empty(),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied}");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+    }
 
     // Bare media URL (what an <img src> sends): still 401 without a ticket.
     let (status, _) = request(app.clone(), "GET", &file_uri, Value::Null).await;
@@ -1368,7 +1396,7 @@ async fn media_tickets_authenticate_project_file_urls() {
     // With the ticket: authorized, and multi-use (a page renders many thumbnails
     // and <video> issues multiple Range requests against one URL).
     for _ in 0..2 {
-        let (status, _, bytes) = request_raw(
+        let (status, headers, bytes) = request_raw(
             app.clone(),
             "GET",
             &format!("{file_uri}?ticket={ticket_value}"),
@@ -1378,6 +1406,7 @@ async fn media_tickets_authenticate_project_file_urls() {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(bytes, b"image-bytes");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
     }
     let thumbnail_uri = format!(
         "/api/v1/projects/{project_id}/files/assets/images/thumbnail-source.png?thumbnail=384&ticket={ticket_value}"
@@ -1552,9 +1581,9 @@ fn media_ticket_paths_cover_exactly_the_media_routes() {
 fn ticket_store_sliding_reuse_and_expiry() {
     use crate::tickets::{EventTicketContext, TicketStore};
     // Sliding (media) tickets: reusable, stable across re-issue, non-consuming.
-    let store = TicketStore::new(300);
-    let first = store.issue_sliding();
-    let second = store.issue_sliding();
+    let store = TicketStore::media(300, 3600);
+    let first = store.issue_sliding(None);
+    let second = store.issue_sliding(Some(&first.ticket));
     assert_eq!(first.ticket, second.ticket, "live sliding ticket is reused");
     assert!(store.validate(&first.ticket));
     assert!(store.validate(&first.ticket), "validate must not consume");
@@ -1597,7 +1626,7 @@ fn ticket_store_sliding_reuse_and_expiry() {
     // TTL 0: expired as soon as any time passes (the sleep guards against two
     // Instant::now() calls landing on the same tick).
     let expired = TicketStore::new(0);
-    let sliding = expired.issue_sliding();
+    let sliding = expired.issue_sliding(None);
     let single = expired.issue();
     std::thread::sleep(Duration::from_millis(5));
     assert!(!expired.validate(&sliding.ticket));
@@ -2018,4 +2047,84 @@ async fn an_rgb_asset_is_unchanged_by_the_alpha_aware_thumbnail_route() {
         "an opaque RGB asset grew an alpha channel"
     );
     assert_eq!(decoded.to_rgb8().as_raw(), source.as_raw());
+}
+
+#[tokio::test]
+async fn expired_media_ticket_route_returns_401_and_new_ticket_restores_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(&temp);
+    settings.access_token = "secret-token".to_owned();
+    let (app, state) = create_app_with_state(settings).unwrap();
+    let auth = [("x-sceneworks-token", "secret-token")];
+    let (status, project) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Ticket expiry"}),
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let root = std::path::PathBuf::from(project["path"].as_str().unwrap());
+    std::fs::create_dir_all(root.join("assets/documents")).unwrap();
+    std::fs::write(
+        root.join("assets/documents/document.json"),
+        b"{\"segments\":[]}",
+    )
+    .unwrap();
+    let url = format!(
+        "/api/v1/projects/{}/files/assets/documents/document.json",
+        project["id"].as_str().unwrap()
+    );
+    let (status, ticket) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/files/ticket",
+        Value::Null,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ticket}");
+    let old = ticket["ticket"].as_str().unwrap();
+    let (status, _, body) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("{url}?ticket={old}"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"{\"segments\":[]}");
+    state.media_tickets.expire_for_test(old);
+    let (status, _, _) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("{url}?ticket={old}"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, fresh) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/files/ticket",
+        Value::Null,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{fresh}");
+    let fresh = fresh["ticket"].as_str().unwrap();
+    assert_ne!(fresh, old);
+    let (status, _, body) = request_raw(
+        app,
+        "GET",
+        &format!("{url}?ticket={fresh}"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"{\"segments\":[]}");
 }

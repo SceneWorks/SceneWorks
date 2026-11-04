@@ -5,6 +5,15 @@ import { SimpleModelManager } from "./SimpleModelManager.jsx";
 import { SimpleUiContext } from "./SimpleUiContext.js";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
 import { MEMORY_HEADROOM_FRACTION, tierFits } from "../tierSuggestion.js";
+const { serverAcknowledgments, getLicenseAcknowledgment } = vi.hoisted(() => ({
+  serverAcknowledgments: new Set(), getLicenseAcknowledgment: vi.fn(),
+}));
+vi.mock("../api/yue2.js", async (original) => ({ ...(await original()), getLicenseAcknowledgment }));
+beforeEach(() => {
+  serverAcknowledgments.clear();
+  getLicenseAcknowledgment.mockImplementation(async (modelId) => ({ modelId, acknowledged: serverAcknowledgments.has(modelId) }));
+});
+
 
 // sc-15400: the Simple Model Manager row showed `needs ${mlx.minMemoryGb} GB` unconditionally. That
 // blanket integer OVER-states for a user who only installed a lighter tier — z_image declares 48 while
@@ -749,6 +758,7 @@ describe("SimpleModelManager license gate (sc-17227)", () => {
   it("downloads once the license is acknowledged, and leaves unlicensed models alone", async () => {
     const createModelDownloadJob = vi.fn(async () => ({ id: "job-1" }));
     window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    serverAcknowledgments.add("minimax_h3");
     await render(root, { models: [ACK_MODEL], createModelDownloadJob });
     const videoTab = [...container.querySelectorAll(".su-tab")].find(
       (node) => node.textContent === "Video",
@@ -817,6 +827,7 @@ describe("SimpleModelManager license gate (sc-17227)", () => {
     const createLoraDownloadJob = vi.fn(async () => ({ id: "job-2" }));
     // Accepting on the MODEL's card is what clears the LoRA — the same store, one acceptance.
     window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    serverAcknowledgments.add("minimax_h3");
     await render(root, { loras: [ACK_LORA], createLoraDownloadJob });
     await openLorasTab();
     await clickDownload();

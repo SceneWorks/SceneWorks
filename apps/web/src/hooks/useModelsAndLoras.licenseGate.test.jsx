@@ -60,12 +60,13 @@ let root;
 let hookApi;
 let errors;
 let loraErrors;
+const serverAcks = new Set();
 
-function Harness({ children }) {
+function Harness({ children, token = "tok", projectId = "proj-1" }) {
   hookApi = useModelsAndLoras({
-    token: "tok",
-    activeProject: { id: "proj-1" },
-    activeProjectRef: { current: { id: "proj-1" } },
+    token,
+    activeProject: { id: projectId },
+    activeProjectRef: { current: { id: projectId } },
     setError: (value) => errors.push(value),
     setLoraError: (value) => loraErrors.push(value),
     setJobs: () => {},
@@ -82,13 +83,20 @@ function downloadPosts() {
 }
 
 function acknowledge(modelId) {
-  window.localStorage.setItem(`sceneworks-license-ack:${modelId}`, "true");
+  serverAcks.add(modelId);
 }
 
 beforeEach(async () => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
   apiFetchMock.mockReset();
-  apiFetchMock.mockResolvedValue({ id: "job-1", type: "model_download" });
+  serverAcks.clear();
+  apiFetchMock.mockImplementation(async (path) => {
+    if (path.endsWith("/license-acknowledgment")) {
+      const id = path.split("/")[4];
+      return { modelId: id, acknowledged: serverAcks.has(id), termsSha256: "current" };
+    }
+    return { id: "job-1", type: "model_download" };
+  });
   window.localStorage.clear();
   errors = [];
   loraErrors = [];
@@ -98,7 +106,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await act(async () => root.unmount());
+  await act(async () => root?.unmount());
   container.remove();
   window.localStorage.clear();
 });
@@ -126,7 +134,24 @@ describe("createModelDownloadJob license-acknowledgment choke point (sc-17227)",
     ]);
   });
 
-  it("allows it once accepted, and asserts the acknowledgment to the API", async () => {
+  it("ignores an old browser acceptance after server withdrawal or changed terms", async () => {
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    await mount();
+    expect(await hookApi.createModelDownloadJob(ACK_MODEL)).toBeNull();
+    expect(downloadPosts()).toHaveLength(0);
+    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/models/minimax_h3/license-acknowledgment", "tok");
+  });
+
+  it("fails closed when the authoritative server check is unavailable", async () => {
+    acknowledge("minimax_h3");
+    apiFetchMock.mockRejectedValueOnce(new Error("license store unavailable"));
+    await mount();
+    expect(await hookApi.createModelDownloadJob(ACK_MODEL)).toBeNull();
+    expect(downloadPosts()).toHaveLength(0);
+    expect(errors).toContain("license store unavailable");
+  });
+
+  it("allows a server acceptance without asserting a new acceptance", async () => {
     acknowledge("minimax_h3");
     await mount();
     await act(async () => {
@@ -135,12 +160,10 @@ describe("createModelDownloadJob license-acknowledgment choke point (sc-17227)",
     const posts = downloadPosts();
     expect(posts).toHaveLength(1);
     expect(posts[0][0]).toBe("/api/v1/models/minimax_h3/download");
-    // The API refuses this same request without the flag, so the client must send it. Assert the
-    // BODY, not just that a POST happened — omitting the field would 403 server-side.
+    // The API uses its server record; this request must not renew acceptance.
     expect(JSON.parse(posts[0][2].body)).toEqual({
       requestedGpu: "auto",
       variant: "q4",
-      licenseAcknowledged: true,
     });
     expect(errors).toEqual([""]);
   });
@@ -208,7 +231,7 @@ describe("createModelDownloadJob license-acknowledgment choke point (sc-17227)",
       button.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
     expect(downloadPosts()).toHaveLength(1);
-    expect(JSON.parse(downloadPosts()[0][2].body).licenseAcknowledged).toBe(true);
+    expect(JSON.parse(downloadPosts()[0][2].body).licenseAcknowledged).toBeUndefined();
   });
 });
 
@@ -267,7 +290,6 @@ describe("createLoraDownloadJob license-acknowledgment choke point (sc-17227)", 
     // merely happened would still be a 403 the user cannot clear.
     expect(JSON.parse(posts[0][2].body)).toEqual({
       requestedGpu: "auto",
-      licenseAcknowledged: true,
     });
   });
 
@@ -294,4 +316,35 @@ describe("createLoraDownloadJob license-acknowledgment choke point (sc-17227)", 
     expect(downloadPosts()).toHaveLength(0);
     expect(loraErrors.at(-1)).toContain("requires accepting its license first");
   });
+});
+
+
+// Each new await is a session boundary, not authorization for a future caller.
+it.each([
+  ["token replacement", "model", async () => root.render(<Harness token="new-token" />)],
+  ["project switch", "lora", async () => root.render(<Harness projectId="other-project" />)],
+  ["selected-base terms replacement", "import", async () => hookApi.setModels([{ ...ACK_MODEL, licenseNotice: "New terms" }])],
+  ["unmount", "conditional", async () => { root.unmount(); root = null; }],
+])("does not submit after %s while consent is pending", async (_label, kind, invalidate) => {
+  await mount();
+  await act(async () => { hookApi.setModels([ACK_MODEL]); });
+  let resolveConsent;
+  const consent = new Promise((resolve) => { resolveConsent = resolve; });
+  apiFetchMock.mockImplementation((path) => path.endsWith("/license-acknowledgment")
+    ? consent : Promise.resolve({ id: "must-not-submit" }));
+  let pending;
+  await act(async () => {
+    pending = kind === "model" ? hookApi.createModelDownloadJob(ACK_MODEL)
+      : kind === "lora" ? hookApi.createLoraDownloadJob(GATED_LORA)
+        : kind === "conditional" ? hookApi.downloadConditionalComponents(ACK_MODEL.id, "purpose")
+          : hookApi.createModelImportJob({ baseModel: ACK_MODEL.id, sourceUrl: "https://example.test/base" });
+    await Promise.resolve();
+  });
+  await vi.waitFor(() => expect(apiFetchMock.mock.calls.some(([path]) => path.endsWith("/license-acknowledgment"))).toBe(true));
+  await act(invalidate);
+  await act(async () => { resolveConsent({ modelId: ACK_MODEL.id, acknowledged: true }); });
+  await expect(pending).resolves.toBeNull();
+  expect(apiFetchMock.mock.calls.some(([, , options]) => options?.method === "POST")).toBe(false);
+  expect(errors).toEqual([]);
+  expect(loraErrors).toEqual([]);
 });

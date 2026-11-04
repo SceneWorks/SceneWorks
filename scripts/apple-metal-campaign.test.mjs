@@ -31,8 +31,12 @@ test("two concurrent exact-pin source preparations preserve cache and both captu
   const cachedHead = git(cache, "rev-parse", "HEAD"), cachedTree = git(cache, "rev-parse", "HEAD^{tree}");
   const captures = await Promise.all(pins.map(async (pin) => (await run(process.execPath, [helper, "prepare", cache, pin, directory])).stdout.trim()));
   assert.notEqual(...captures);
+  assert.notEqual(path.basename(captures[0]), path.basename(captures[1]), "concurrent checkouts must request distinct Git metadata IDs");
   for (const [index, source] of captures.entries()) {
     assert.equal(git(source, "rev-parse", "HEAD"), pins[index]);
+    const record = JSON.parse(await readFile(path.join(path.dirname(source), "owner.json"), "utf8"));
+    assert.equal(record.version, 2);
+    assert.equal(path.basename(git(source, "rev-parse", "--absolute-git-dir")), path.basename(source));
     assert.equal(await readFile(path.join(source, "metadata.txt"), "utf8"), index === 0 ? "first" : "second");
     assert.equal(git(cache, "rev-parse", `refs/sceneworks/source-pins/${pins[index]}`), pins[index]);
   }
@@ -46,7 +50,69 @@ test("two concurrent exact-pin source preparations preserve cache and both captu
   assert.equal(git(captures[1], "rev-parse", "HEAD"), pins[1]);
   await cleanupSourceWorktree(captures[1]);
   assert.equal(git(cache, "rev-parse", "HEAD"), cachedHead);
+  const registered = git(cache, "worktree", "list", "--porcelain");
+  for (const source of captures) {
+    assert.ok(!registered.includes(`worktree ${source}\n`));
+    await assert.rejects(access(path.dirname(source)));
+  }
   await assert.rejects(cleanupSourceWorktree(cache));
+});
+test("concurrent captures of the same pin retain independent owned metadata", async (t) => {
+  const directory = await temporary(t), cache = path.join(directory, "objects");
+  await mkdir(cache); git(cache, "init", "--quiet");
+  git(cache, "config", "user.name", "CPU fixture"); git(cache, "config", "user.email", "fixture@example.invalid");
+  await writeFile(path.join(cache, "metadata.txt"), "fixture");
+  git(cache, "add", "metadata.txt"); git(cache, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture");
+  const pin = git(cache, "rev-parse", "HEAD");
+  const captures = await Promise.all(Array.from({ length: 2 }, async () =>
+    (await run(process.execPath, [helper, "prepare", cache, pin, directory])).stdout.trim()));
+  assert.notEqual(path.basename(captures[0]), path.basename(captures[1]));
+  for (const source of captures) assert.equal(git(source, "rev-parse", "HEAD"), pin);
+  await cleanupSourceWorktree(captures[0]);
+  assert.equal(git(captures[1], "rev-parse", "HEAD"), pin);
+  await cleanupSourceWorktree(captures[1]);
+  assert.equal(git(cache, "rev-parse", "HEAD"), pin);
+});
+test("a worktree registration in progress cannot collide with a new source", async (t) => {
+  const directory = await temporary(t), cache = path.join(directory, "objects");
+  await mkdir(cache); git(cache, "init", "--quiet");
+  git(cache, "config", "user.name", "CPU fixture"); git(cache, "config", "user.email", "fixture@example.invalid");
+  await writeFile(path.join(cache, "metadata.txt"), "fixture");
+  git(cache, "add", "metadata.txt"); git(cache, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture");
+  const pin = git(cache, "rev-parse", "HEAD");
+  // Git has allocated this legacy basename but has not yet written its commondir.
+  // Model the observable midpoint deterministically without racing or delaying processes.
+  const inProgress = path.join(cache, ".git", "worktrees", "source");
+  await mkdir(inProgress, { recursive: true });
+  await writeFile(path.join(inProgress, "gitdir"), `${path.join(directory, "in-progress", ".git")}\n`);
+  const source = (await run(process.execPath, [helper, "prepare", cache, pin, directory])).stdout.trim();
+  assert.equal(git(source, "rev-parse", "HEAD"), pin);
+  await access(inProgress);
+  await rm(inProgress, { recursive: true }); // Only this test's simulated in-progress metadata.
+  await cleanupSourceWorktree(source);
+  assert.equal(git(cache, "rev-parse", "HEAD"), pin);
+});
+test("legacy version-1 owned source remains cleanable and tampered version-2 identity is refused", async (t) => {
+  const directory = await temporary(t), cache = path.join(directory, "objects");
+  await mkdir(cache); git(cache, "init", "--quiet");
+  git(cache, "config", "user.name", "CPU fixture"); git(cache, "config", "user.email", "fixture@example.invalid");
+  await writeFile(path.join(cache, "metadata.txt"), "fixture");
+  git(cache, "add", "metadata.txt"); git(cache, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture");
+  const pin = git(cache, "rev-parse", "HEAD"), tree = git(cache, "rev-parse", "HEAD^{tree}");
+  const owner = await mkdtemp(path.join(directory, "memory-catalog-source-")), legacy = path.join(owner, "source");
+  git(cache, "worktree", "add", "--detach", legacy, pin);
+  await writeFile(path.join(owner, "owner.json"), JSON.stringify({ version: 1, cache, source: legacy, pin, tree }));
+  const current = (await run(process.execPath, [helper, "prepare", cache, pin, directory])).stdout.trim();
+  const currentOwner = path.join(path.dirname(current), "owner.json");
+  const original = await readFile(currentOwner, "utf8"), record = JSON.parse(original);
+  await writeFile(currentOwner, JSON.stringify({ ...record, version: 1 }));
+  await assert.rejects(cleanupSourceWorktree(current), /not an owned/);
+  await access(path.join(current, "metadata.txt"));
+  await writeFile(currentOwner, original);
+  await cleanupSourceWorktree(legacy);
+  assert.equal(git(current, "rev-parse", "HEAD"), pin);
+  await cleanupSourceWorktree(current);
+  assert.equal(git(cache, "rev-parse", "HEAD"), pin);
 });
 async function nativeFixture(t, prebuilt = false, profile = "release", consumer) {
   const artifactName = consumer === "app" ? "sceneworks-rust-api" : ["iris", "supra2"].includes(consumer) ? "sceneworks_worker" : profile === "release" ? "memory-mlx-adapter" : "dump-engine-capabilities";
