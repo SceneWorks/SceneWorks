@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…6 were approved by Michael on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-7…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
+| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…7 were approved by Michael on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-8…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
 | **Date** | 2026-11-03 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
 | **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
@@ -874,12 +874,12 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 ### 7.3 AP13 expected classes per feature (initial; refined at planning)
 
-**DEC-7 revision following Michael's direction:** prefer bit-exact results without an open-ended GPU repair loop for small differences. Before numerical validation, declare the component metric, bound and output checks, the finite proof set and investigation budget. Reuse applicable evidence and the feature's already planned Tier 1/2 runs; this adds no campaign or dispatch cadence. “Less than 1%” is not a universal tensor/image tolerance.
+**Approved DEC-7 policy (2026-11-03):** prefer bit-exact results without an open-ended GPU repair loop for small differences. Before numerical validation, declare the component metric, bound and output checks, the finite proof set and investigation budget. Reuse applicable evidence and the feature's already planned Tier 1/2 runs; this adds no campaign or dispatch cadence. “Less than 1%” is not a universal tensor/image tolerance.
 
 - Diagnose a mismatch with source/operation-order, dtype, seed and state inspection first. A valid comparison inside the declared bound with acceptable output evidence supports class (b), without more GPU runs solely to chase zero error.
 - Repeat learned checks only for a concrete unresolved correctness/measurement question or a numerical change affecting that evidence. Unchanged evidence is reused; no post-hoc widening of a limit to pass a result.
 - At the planned investigation limit, report the measured difference, confidence and accept/fix/retain-existing-path choice. Material output/replay/capability changes remain explicit; class (c) still needs route approval. Pilot exceptions to BACK-5 remain explicit rather than silently becoming tolerance-based.
-- Full DEC-7 class-policy approval remains open. Component-specific limits and the run budget are specified at feature planning; learned execution remains separately dispatched under DEC-14/15, never ordinary CI.
+- Component-specific limits and the run budget are specified at feature planning; policy approval grants no blanket route re-baseline or pilot-gate waiver. Learned execution remains separately dispatched under DEC-14/15, never ordinary CI. This decision authorizes no execution during design review.
 
 | Feature | Expected class | Notes |
 |---|---|---|
