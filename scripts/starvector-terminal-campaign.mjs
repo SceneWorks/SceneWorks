@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 import { readFile } from "node:fs/promises";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 
-const sha = (value) => createHash("sha256").update(value).digest("hex");
+
 export const TUPLES = ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"];
 export const COUNTS = { image_quality: 120, deterministic_parity: 20, hostile_sanitizer: 200, prompt_composition: 60 };
 // The versioned plan is the single authority for the final pin and preflight artifact.

@@ -3023,7 +3023,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
       schedulers: ["default"],
     },
     quantization: {},
-    loraCompatibility: { families: ["krea-realtime"], types: ["style", "motion", "character", "enhance"] },
+    loraCompatibility: { sizeClass: "14b", imageConditionedBackbone: false, families: ["krea-realtime"], types: ["style", "motion", "character", "enhance"] },
     ui: {},
     macSupport: {
       supported: true,

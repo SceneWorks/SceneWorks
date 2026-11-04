@@ -159,7 +159,8 @@ pub(crate) async fn test_film_planner_connection(
     }
     let credential = resolve_connection_credential(&state, &connection).await?;
     let models =
-        crate::openai_planner::list_models(&state.http_client, &connection, credential).await?;
+        crate::openai_planner::list_models(&state.planner_http_client, &connection, credential)
+            .await?;
     Ok(Json(ConnectionTestResult {
         ok: true,
         capability: "model_listing",

@@ -81,8 +81,10 @@ pub enum Confinement {
 
 /// Join an untrusted native relative path (including Windows native separators).
 /// Portable document strings must first use `portable_relative_path_parts` or
-/// `relative_normal_components`. SymlinkSafe resolves existing ancestors, so missing output
-/// files are supported without allowing a symlinked parent to redirect them outside the root.
+/// `relative_normal_components`. SymlinkSafe requires an existing root and resolves existing
+/// ancestors, so missing output files are supported without allowing a symlinked parent to
+/// redirect them outside the root. Its result uses the canonical root spelling (including a
+/// Windows verbatim prefix), not necessarily the caller's lexical spelling.
 pub fn confine_under(root: &Path, relative: &str, policy: Confinement) -> io::Result<PathBuf> {
     let parts = path_normal_components(Path::new(relative))
         .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
@@ -175,6 +177,26 @@ mod tests {
         assert!(resolve_local_file(temp.path(), "inside").is_ok());
         assert!(resolve_local_file(temp.path(), "missing").is_err());
         assert!(confine_under(temp.path(), "new/file", Confinement::SymlinkSafe).is_ok());
+    }
+    #[test]
+    fn canonical_root_supports_missing_output_descendants_but_must_exist() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let relative = "training/datasets/ds-1/upscaled/item_1.png";
+        let error = confine_under(&root, relative, Confinement::SymlinkSafe).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        fs::create_dir(&root).unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let resolved = confine_under(&root, relative, Confinement::SymlinkSafe).unwrap();
+        assert_eq!(resolved, canonical.join(relative));
+        assert_eq!(
+            resolved.strip_prefix(canonical).unwrap(),
+            Path::new(relative)
+        );
+        assert!(
+            !resolved.exists(),
+            "confinement must not create output paths"
+        );
     }
     #[cfg(windows)]
     #[test]

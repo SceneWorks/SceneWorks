@@ -1,9 +1,10 @@
+import { fileSha256 as hash } from "./lib/file-sha256.mjs";
+import { sha256 } from "./lib/file-sha256.mjs";
 // sc-26234: ONE ordinary installed-model/API/worker/library smoke, not a provider probe
 // or memory campaign. The API alone creates jobs and publishes worker assetWrites.
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { copyFile, cp, lstat, mkdir, open, readdir, readFile, realpath, rename, stat, statfs, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,8 +16,7 @@ const fact = (value, message) => assert.ok(value, message);
 export const MODEL_REVISION = "8454017f9ebaada30c998fccd9f67a80c7580f68";
 export const MODEL_REPO = "black-forest-labs/flux-3-image-klein";
 const REQUIRED_FILES = ["config.json", "manifest.json", "model.safetensors", "ae.safetensors", "LICENSE.md", "NOTICE.md", "text_encoder/config.json", "text_encoder/tokenizer.json", "text_encoder/tokenizer_config.json", "text_encoder/model.safetensors.index.json", "text_encoder/model-00001-of-00002.safetensors", "text_encoder/model-00002-of-00002.safetensors"];
-const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
-async function hash(file) { const h = createHash("sha256"); for await (const chunk of createReadStream(file)) h.update(chunk); return h.digest("hex"); }
+
 
 export function assertCheckoutIdentity({ source, inference, dispatch, head, dirty }) {
   fact(/^[a-f0-9]{40}$/.test(source ?? "") && /^[a-f0-9]{40}$/.test(inference ?? ""), "exact 40-hex source_sha and inference_sha required; branch names are refused");

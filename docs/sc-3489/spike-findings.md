@@ -1,5 +1,10 @@
 # sc-3489 — Port image upscaler (Real-ESRGAN) to Rust (Mac): path-selection spike
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 **Decision: GO on path (a) — Real-ESRGAN via Rust `ort` (onnxruntime) + CoreML EP.**
 Paths (b) mlx-gen upscaler and (c) Apple MetalFX/CoreML super-res are rejected
 (reasons below). The chosen path **reuses 100% of the onnxruntime bundling already

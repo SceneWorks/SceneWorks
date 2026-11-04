@@ -1,3 +1,4 @@
+import { sha256 as digest } from "./lib/file-sha256.mjs";
 // Actual selected-checkpoint operands -> pinned CPU bridge -> ignored native consumer.
 // Dispatch-only adapter; no math oracle, model forward, download or license acknowledgment here.
 import assert from 'node:assert/strict';
@@ -30,7 +31,7 @@ export const FROZEN_PROVENANCE=[
 ];
 export const FROZEN_PRODUCERS=FROZEN_PROVENANCE.map(v=>v.script);
 const tolerances={w4a8_projection:0,convrot_projection:0,mixed_w4a8_convrot:0,pruned_timestep_interpolation:2e-6,pruned_reduced_projection:2e-5};
-const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
+
 const sha=value=>assert.match(value??'',/^[a-f0-9]{64}$/,'sha256 required');
 const positive=value=>assert.ok(Number.isSafeInteger(value)&&value>0,'positive safe byte/count bound required');
 const save=(file,value)=>writeFile(file,JSON.stringify(value,null,2)+'\n',{flag:'wx'});

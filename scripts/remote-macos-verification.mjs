@@ -1,8 +1,9 @@
 #!/usr/bin/env node
+import { sha256 } from "./lib/file-sha256.mjs";
 // Optional secondary-Mac facts and focused assertion evidence. Receipts do not gate pushes or PRs.
 // Nothing here grants admission to dispatch a device job.
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import os from "node:os";
@@ -33,13 +34,13 @@ export const OUTPUTS = [
   TARGET_REGISTRY,
 ];
 export const UNIT_SANDBOX = "scripts/unit-hf-sandbox.mjs";
-export const CONTROL_FILES = Object.freeze([WORKFLOW, CONTROLLER, UNIT_SANDBOX, "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH]);
+export const CONTROL_FILES = Object.freeze([WORKFLOW, CONTROLLER, UNIT_SANDBOX, "scripts/lib/jsonc.mjs", "scripts/lib/file-sha256.mjs", ASSERTION_DRIVER, REGISTRY_PATH]);
 const SHA = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const MAX_ARCHIVE = 128 * 1024 * 1024;
 const fail = message => { throw new Error(`remote verification: ${message}`); };
 const requireFact = (value, message) => { if (!value) fail(message); };
-export const sha256 = value => createHash("sha256").update(value).digest("hex");
+export { sha256 };
 export const ownedRef = value => typeof value === "string" && /^(main|(?:story|feature)\/sc-[0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*)$/.test(value);
 export const baseRef = value => value === "main" || (ownedRef(value) && value.startsWith("feature/"));
 export const artifactName = (profile, sha, run, attempt) => `macos-verification-${profile}-${sha}-${run}-${attempt}`;

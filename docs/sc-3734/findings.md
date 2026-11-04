@@ -1,5 +1,10 @@
 # sc-3734 — YOLO11-MLX per-block divergence: root cause + fix
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 **Verdict (high confidence):** the ~1e-2 block10/19 divergence labelled "benign fp32
 backend drift" in sc-3633 was **NOT fp32 drift**. It was **MLX's Metal `matmul` running a
 reduced-precision (≈1e-3 relative, tf32/bf16-class simdgroup) accumulation path**, entering

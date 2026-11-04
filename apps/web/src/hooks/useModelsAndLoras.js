@@ -1,14 +1,14 @@
+import { useConsentRequestOwner } from "./useConsentRequestOwner.js";
+import { useProjectScopedList } from "./useProjectScopedList.js";
+import { modelsApi } from "../api/modelsResources.js";
+import { lorasApi } from "../api/lorasResources.js";
 import { useCallback, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
-import { isCurrentProjectRequest } from "../appStateHelpers.js";
-import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { appConfirm } from "../appConfirm.jsx";
 import {
   borrowedLicenseAcknowledgmentBlocked,
   licenseAckRefusalMessage,
   licenseAcknowledgmentBlocked,
   licenseAcknowledgmentSource,
-  requiresLicenseAcknowledgment,
 } from "../licenseAcknowledgment.js";
 import { upsertJobNewest } from "../sorters.js";
 
@@ -53,63 +53,28 @@ export function useModelsAndLoras({
 }) {
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
+  const captureConsentOwner = useConsentRequestOwner(token, models, loras, activeProject?.id);
 
   // sc-4194: actions wrapped in useCallback so their identity is stable across App's
   // SSE-driven re-renders, letting appContextValue memoize.
-  const refreshLoras = useCallback(
-    async (projectId = activeProject?.id, { signal } = {}) => {
-      if (
-        projectId &&
-        !isCurrentProjectRequest(activeProject?.id ?? null, projectId)
-      ) {
-        return refreshFailure("stale");
-      }
-      try {
-        const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-        const items = await apiFetch(`/api/v1/loras${query}`, token, { signal });
-        // sc-8858: an SSE-triggered refresh for a specific project can resolve after
-        // the user switches away; committing then would clobber the new project's
-        // LoRA overlay with the old one's. Drop the stale response — mirrors
-        // refreshTimelines' guard (useTimelines.js). Only project-scoped refreshes
-        // are guarded; a global refresh (projectId undefined) still commits.
-        if (
-          projectId &&
-          !isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)
-        ) {
-          return refreshFailure("stale");
-        }
-        setLoras(items);
-        setLoraError("");
-        return refreshSuccess(items);
-      } catch (err) {
-        if (
-          projectId &&
-          !isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)
-        ) {
-          return refreshFailure("stale", err);
-        }
-        if (isAbortError(err)) return refreshFailure("aborted", err);
-        setLoraError(err.message);
-        return refreshFailure("error", err);
-      }
-    },
-    [token, activeProject, activeProjectRef, setLoraError],
-  );
+  const refreshLoras = useProjectScopedList({
+    token, activeProject, activeProjectRef,
+    load: (projectId, token, options) => lorasApi.list(projectId ? `?projectId=${encodeURIComponent(projectId)}` : "", token, options),
+    setItems: setLoras,
+    setError: setLoraError,
+    optionalProject: true,
+  });
 
   const deleteModel = useCallback(
     async (model) => {
-      let result = await apiFetch(`/api/v1/models/${encodeURIComponent(model.id)}`, token, {
+      let result = await modelsApi.item(model.id, token, {
         method: "DELETE",
       });
       if (result?.trashUnavailable) {
         if (!(await confirmPermanentDelete())) {
           return { cancelled: true };
         }
-        result = await apiFetch(
-          `/api/v1/models/${encodeURIComponent(model.id)}?permanent=true`,
-          token,
-          { method: "DELETE" },
-        );
+        result = await modelsApi.removePermanently(model.id, token, { method: "DELETE" });
       }
       if (result.removedManifestEntry) {
         setModels((items) => items.filter((item) => item.id !== model.id));
@@ -130,11 +95,7 @@ export function useModelsAndLoras({
   // loop (sc-12088). One DELETE; the confirm dialog makes the permanence explicit.
   const deleteModelVariant = useCallback(
     async (model, variant) => {
-      const result = await apiFetch(
-        `/api/v1/models/${encodeURIComponent(model.id)}/variants/${encodeURIComponent(variant)}`,
-        token,
-        { method: "DELETE" },
-      );
+      const result = await modelsApi.variant(model.id, variant, token, { method: "DELETE" });
       setError("");
       await refreshData();
       return result;
@@ -152,7 +113,7 @@ export function useModelsAndLoras({
       params.set("projectId", activeProject.id);
     }
     const query = params.toString() ? `?${params.toString()}` : "";
-    let result = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
+    let result = await lorasApi.itemWithQuery(lora.id, query, token, {
       method: "DELETE",
     });
     if (result?.trashUnavailable) {
@@ -160,11 +121,7 @@ export function useModelsAndLoras({
         return { cancelled: true };
       }
       params.set("permanent", "true");
-      result = await apiFetch(
-        `/api/v1/loras/${encodeURIComponent(lora.id)}?${params.toString()}`,
-        token,
-        { method: "DELETE" },
-      );
+      result = await lorasApi.item(lora.id, params.toString(), token, { method: "DELETE" });
     }
     if (result.removedManifestEntry) {
       setLoras((items) => items.filter((item) => item.id !== lora.id || item.scope !== lora.scope));
@@ -188,7 +145,7 @@ export function useModelsAndLoras({
         params.set("projectId", activeProject.id);
       }
       const query = params.toString() ? `?${params.toString()}` : "";
-      const updated = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
+      const updated = await lorasApi.itemWithQuery(lora.id, query, token, {
         method: "PATCH",
         body: JSON.stringify(updates),
       });
@@ -211,10 +168,7 @@ export function useModelsAndLoras({
         params.set("projectId", activeProject.id);
       }
       const query = params.toString() ? `?${params.toString()}` : "";
-      const result = await apiFetch(
-        `/api/v1/loras/${encodeURIComponent(lora.id)}/embedded-tags${query}`,
-        token,
-      );
+      const result = await lorasApi.embeddedTags(lora.id, query, token);
       return Array.isArray(result?.tags) ? result.tags : [];
     },
     [token, activeProject],
@@ -222,13 +176,25 @@ export function useModelsAndLoras({
 
   const createModelImportJob = useCallback(
     async (payload, options = {}) => {
+    const ownsRequest = captureConsentOwner(token);
+    if (!ownsRequest()) return null;
     // Request building is loaded on first use so it stays out of the first-paint bundle.
     const { buildModelImportRequest } = await import("../modelImportRequest.js");
-    const { endpoint, body } = buildModelImportRequest(payload, { models });
-    const job = await apiFetch(endpoint, token, {
+    if (!ownsRequest()) return null;
+    // An import may acquire components of the selected base. Reuse current server
+    // consent without turning a cached flag into a new acceptance assertion.
+    const base = models.find((model) => model.id === payload.baseModel);
+    const blocked = await licenseAcknowledgmentBlocked(base, token);
+    if (!ownsRequest()) return null;
+    if (blocked) {
+      throw new Error(licenseAckRefusalMessage(base));
+    }
+    const { endpoint, body } = buildModelImportRequest(payload);
+    const job = await modelsApi.importRequest(endpoint, token, {
       method: "POST",
       body,
     });
+    if (!ownsRequest()) return null;
     setJobs((items) => upsertJobNewest(items, job));
     if (options.navigateToQueue ?? false) {
       setActiveView("Queue");
@@ -236,7 +202,7 @@ export function useModelsAndLoras({
     setError("");
     return job;
     },
-    [token, models, setJobs, setActiveView, setError],
+    [token, models, setJobs, setActiveView, setError, captureConsentOwner],
   );
 
   const createLoraImportJob = useCallback(
@@ -276,7 +242,7 @@ export function useModelsAndLoras({
         projectName: metadata.scope === "project" ? activeProject.name : null,
       });
     }
-    const job = await apiFetch("/api/v1/loras/import", token, {
+    const job = await lorasApi.import(token, {
       method: "POST",
       body,
     });
@@ -292,6 +258,8 @@ export function useModelsAndLoras({
 
   const createModelDownloadJob = useCallback(
     async (model, options = {}) => {
+      const ownsRequest = captureConsentOwner(token);
+      if (!ownsRequest()) return null;
       // Licence-acknowledgment CHOKE POINT (sc-17227). Every download-starting surface funnels
       // through here — the Models screen, the Simple UI's model manager, the first-run Setup
       // Wizard, the studio availability gates, the workflow drop, the Update button — so this is
@@ -302,11 +270,13 @@ export function useModelsAndLoras({
       // `requiresLicenseAcknowledgment` model the repo is PUBLIC, so nothing upstream refuses an
       // unacknowledged fetch and the weights would simply land. The API refuses the same request
       // independently (`apps/rust-api/src/models.rs`) for clients this code never runs in.
-      if (licenseAcknowledgmentBlocked(model)) {
-        setError(licenseAckRefusalMessage(model));
-        return null;
-      }
       try {
+        const blocked = await licenseAcknowledgmentBlocked(model, token);
+        if (!ownsRequest()) return null;
+        if (blocked) {
+          setError(licenseAckRefusalMessage(model));
+          return null;
+        }
         // sc-8509: install a specific quant tier when the caller passes one (the Models-page tier
         // picker for a quant-matrix model). Absent `variant` installs the model's default tier —
         // the back-compat single-download behavior every other caller relies on.
@@ -323,30 +293,29 @@ export function useModelsAndLoras({
         if (options.choices && typeof options.choices === "object" && Object.keys(options.choices).length) {
           body.choices = options.choices;
         }
-        // Carry the acknowledgment to the API, which refuses the download without it. Sent only
-        // when the model actually requires one, so no other download's body changes shape.
-        if (requiresLicenseAcknowledgment(model)) {
-          body.licenseAcknowledged = true;
-        }
-        const job = await apiFetch(`/api/v1/models/${model.id}/download`, token, {
+        // The server reads its current terms-bound record. No new acceptance assertion
+        // may be inferred from browser state, even after the preflight succeeded.
+        const job = await modelsApi.download(model.id, token, {
           method: "POST",
           body: JSON.stringify(body),
         });
+        if (!ownsRequest()) return null;
         setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
+        if (!ownsRequest()) return null;
         setError(err.message);
         return null;
       }
     },
-    [token, setJobs, setError],
+    [token, setJobs, setError, captureConsentOwner],
   );
 
   const createModelConvertJob = useCallback(
     async (model) => {
       try {
-        const job = await apiFetch(`/api/v1/models/${model.id}/convert`, token, {
+        const job = await modelsApi.convert(model.id, token, {
           method: "POST",
           body: JSON.stringify({ requestedGpu: "auto" }),
         });
@@ -366,6 +335,8 @@ export function useModelsAndLoras({
   // Mirrors createModelDownloadJob.
   const createLoraDownloadJob = useCallback(
     async (lora) => {
+      const ownsRequest = captureConsentOwner(token);
+      if (!ownsRequest()) return null;
       // The LoRA half of the licence CHOKE POINT (sc-17227). `POST /api/v1/loras/:id/download`
       // gates on the repo the catalog row resolves to, so a LoRA whose `source.repo` is a
       // restricted repo is refused exactly as the model download is — and without this the refusal
@@ -374,24 +345,24 @@ export function useModelsAndLoras({
       // reads that stamp and the ack the Models screen already persists, so accepting the licence
       // once on the model's card is what makes its LoRAs downloadable.
       const licenseSource = licenseAcknowledgmentSource(lora);
-      if (borrowedLicenseAcknowledgmentBlocked(lora)) {
-        setLoraError(licenseAckRefusalMessage(licenseSource));
-        return null;
-      }
       try {
-        const body = { requestedGpu: "auto" };
-        // Sent only for a row the server flagged, so no other LoRA download changes shape.
-        if (licenseSource) {
-          body.licenseAcknowledged = true;
+        const blocked = await borrowedLicenseAcknowledgmentBlocked(lora, token);
+        if (!ownsRequest()) return null;
+        if (blocked) {
+          setLoraError(licenseAckRefusalMessage(licenseSource));
+          return null;
         }
-        const job = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}/download`, token, {
+        const body = { requestedGpu: "auto" };
+        const job = await lorasApi.download(lora.id, token, {
           method: "POST",
           body: JSON.stringify(body),
         });
+        if (!ownsRequest()) return null;
         setJobs((items) => upsertJobNewest(items, job));
         setLoraError("");
         return job;
       } catch (err) {
+        if (!ownsRequest()) return null;
         // The server probes installState live from the HF cache; our badge is a snapshot
         // from the last catalog fetch. When the cache is filled out-of-band (the on-demand
         // pull at first generation, another client) the row is already "installed" server-
@@ -407,15 +378,19 @@ export function useModelsAndLoras({
         return null;
       }
     },
-    [token, setJobs, setLoraError, refreshLoras],
+    [token, setJobs, setLoraError, refreshLoras, captureConsentOwner],
   );
 
-  const downloadConditionalComponents = useCallback(
-    (model, purpose) => apiFetch(`/api/v1/models/${encodeURIComponent(model)}/conditional-components/${encodeURIComponent(purpose)}/download`, token, {
-      method: "POST", body: JSON.stringify({ licenseAcknowledged: true }),
-    }),
-    [token],
-  );
+  const downloadConditionalComponents = useCallback(async (modelId, purpose) => {
+    const ownsRequest = captureConsentOwner(token);
+    if (!ownsRequest()) return null;
+    const blocked = await licenseAcknowledgmentBlocked(models.find((model) => model.id === modelId), token);
+    if (!ownsRequest()) return null;
+    if (blocked) throw new Error(licenseAckRefusalMessage(models.find((model) => model.id === modelId)));
+    return modelsApi.conditionalDownload(modelId, purpose, token, {
+      method: "POST", body: JSON.stringify({}),
+    });
+  }, [token, models, captureConsentOwner]);
 
   return {
     models,
