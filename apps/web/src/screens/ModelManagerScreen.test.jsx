@@ -3,6 +3,15 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, setSelect } from "../testUtils/dom.js";
 
+// Existing terms-bound server store; localStorage alone is deliberately insufficient.
+const { serverAcks } = vi.hoisted(() => ({ serverAcks: new Set() }));
+vi.mock("../api/yue2.js", () => ({
+  getLicenseAcknowledgment: vi.fn(async (id) => ({ modelId: id, acknowledged: serverAcks.has(id), termsSha256: "current" })),
+  putLicenseAcknowledgment: vi.fn(async (id) => { serverAcks.add(id); return { modelId: id, acknowledged: true }; }),
+  deleteLicenseAcknowledgment: vi.fn(async (id) => { serverAcks.delete(id); return { modelId: id, acknowledged: false }; }),
+}));
+beforeEach(() => serverAcks.clear());
+
 // sc-12068: model / LoRA / tier deletes confirm through the shared desktop-safe appConfirm
 // dialog rather than the raw window.confirm, which silently no-ops inside the Tauri WebView.
 // Mock it so tests control the user's choice and assert the guard fired. resetModules in the
@@ -382,8 +391,8 @@ describe("ModelManagerScreen gated-model notice", () => {
 
   // sc-7872: the ack persists to localStorage, so a returning user keeps a prior
   // accept and the download is unblocked on first render.
-  it("seeds the license-ack from localStorage so a prior accept stays unblocked (sc-7872)", async () => {
-    window.localStorage.setItem("sceneworks-license-ack:sd3_5_large", "true");
+  it("seeds the license-ack from the server so a prior accept stays unblocked (sc-7872)", async () => {
+    serverAcks.add("sd3_5_large");
     await render([SD3_5_MODEL]);
     const ackCheckbox = container.querySelector(".model-license-ack input");
     expect(ackCheckbox.checked).toBe(true);
@@ -395,11 +404,11 @@ describe("ModelManagerScreen gated-model notice", () => {
 
   // sc-7873 (Fix B): the catalog arrives asynchronously, so the screen may mount with an empty
   // `models` list before the gated model loads. The once-only useState initializer would then miss
-  // a returning user's persisted ack; a `useEffect([models])` re-seeds from localStorage when the
+  // a returning user's persisted ack; a `useEffect([models])` re-seeds from the server when the
   // catalog updates. Render empty first (initializer sees no gated model), then re-render with the
   // SD3.5 model after the ack is persisted → the download must be unblocked without a manual check.
-  it("re-seeds the license-ack from localStorage when the catalog loads late (sc-7873)", async () => {
-    window.localStorage.setItem("sceneworks-license-ack:sd3_5_large", "true");
+  it("re-seeds the license-ack from the server when the catalog loads late (sc-7873)", async () => {
+    serverAcks.add("sd3_5_large");
     // Initial mount with an empty catalog (initializer records nothing).
     await render([]);
     // Catalog resolves asynchronously, bringing in the gated SD3.5 model.
@@ -549,10 +558,10 @@ describe("ModelManagerScreen gated-model notice", () => {
     expect(container.querySelector(".model-card-attribution")).toBeNull();
   });
 
-  // sc-17227: the localStorage seeding paths used to key on `gated`, so a returning user's accept
+  // sc-17227: the server hydration paths used to key on `gated`, so a returning user's accept
   // would never re-seed for an acknowledgment-only model and the gate would re-block every visit.
   it("seeds and re-seeds the ack for an acknowledgment-only model (sc-17227)", async () => {
-    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    serverAcks.add("minimax_h3");
     // Mount with an empty catalog first so the once-only useState initializer sees nothing; the
     // catalog then resolves, which is the `useEffect([models])` re-seed path (sc-7873).
     await render([]);
@@ -765,16 +774,10 @@ describe("ModelManagerScreen gated-model notice", () => {
     expect(updateButton.disabled).toBe(true);
   });
 
-  // sc-17227 review MINOR 1. Mutating the `useState` initializer's predicate back to `model.gated`
-  // left all 64 tests green, because the sc-7873 `useEffect([models])` re-seed runs on mount too
-  // and `act` flushes it before any assertion — so no DOM-based test can tell the two apart.
-  //
-  // The initializer's actual job is the FIRST PAINT: a returning user must not see the gate flash
-  // blocked before an effect corrects it. `renderToString` is the one render path that runs the
-  // initializer and NOT the effects, so it isolates exactly that. Mounted with the catalog already
-  // populated — the case the async-catalog test above deliberately does not cover.
-  it("seeds the ack in the initializer itself, before any effect runs (sc-17227)", async () => {
-    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+  // F-209: first paint cannot authorize from a cached browser flag. Even when
+  // a server record exists, hydration must complete before controls unblock.
+  it("requires server hydration before authorizing even the first paint", async () => {
+    serverAcks.add("minimax_h3");
     const { renderToString } = await import("react-dom/server");
     const markup = renderToString(
       <AppContext.Provider
@@ -799,11 +802,10 @@ describe("ModelManagerScreen gated-model notice", () => {
         <ModelManagerScreen />
       </AppContext.Provider>,
     );
-    // The acknowledgment checkbox is rendered checked on the very first pass, and the Download
-    // button is not carrying the blocked title. Both come from the initializer alone.
+    // A server record cannot authorize before hydration has completed.
     expect(markup).toContain('class="model-license-ack"');
-    expect(markup).toMatch(/model-license-ack[^]*?checked=""/);
-    expect(markup).not.toContain("Accept the license above before downloading.");
+    expect(markup).not.toMatch(/model-license-ack[^]*?checked=""/);
+    expect(markup).toContain("Accept the license above before downloading.");
   });
 
   it("offers a one-click Fix on a torn tier that repairs by re-downloading it (sc-13383)", async () => {

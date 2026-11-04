@@ -221,7 +221,9 @@ mod api_client;
 #[cfg(native_lane)]
 mod asset_media;
 #[cfg(native_lane)]
-mod image_sampling;
+mod cv;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod ort_cuda;
 // Shared one-child PNG persistence for upscale (Mac + candle) and smart-select (Mac).
 // Keep the include site on the callers' superset so the neither-backend lane does not
 // compile an otherwise dead helper — plus `test`, because this seam is where the standalone
@@ -935,14 +937,6 @@ mod control_dataset_byo;
 // (`krea_control` → `krea_2_control`). Cross-platform module shell with a neural-build-gated real impl
 // + a loud stub, mirroring `training_jobs`.
 mod control_training_jobs;
-// CUDA execution-provider dependency preloading for the off-Mac candle `ort` paths
-// (sc-6209, epic 5482): `ort::ep::cuda::preload_dylibs` dlopens the CUDA-12 runtime +
-// cuDNN-9 DLLs the onnxruntime CUDA EP needs, so it engages the GPU regardless of PATH
-// (the Mac CoreML path needs no equivalent). Shared by pose_jobs (DWPose, sc-5496) +
-// person_jobs (YOLO, sc-5498), and Real-ESRGAN (sc-5499) next — gated to the candle GPU
-// lane only.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-mod ort_cuda;
 // SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac, plus the
 // candle SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482) — the same
 // InstantID face-stack detector reused in-process for the Key Point Library "extract kps from this
@@ -2810,8 +2804,7 @@ fn progress_report_interval(settings: &Settings) -> Duration {
 }
 
 fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
-    let multiplier = 2_u64.saturating_pow(attempt.saturating_sub(1).min(4));
-    poll_seconds.max(1).saturating_mul(multiplier).clamp(1, 30)
+    sceneworks_core::network_policy::retry_delay_seconds(poll_seconds, attempt)
 }
 
 #[cfg(test)]

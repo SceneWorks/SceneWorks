@@ -1,3 +1,4 @@
+import { useConsentRequestOwner } from "../hooks/useConsentRequestOwner.js";
 import { downloadSizeText } from "../formatting.js";
 import React, { useMemo, useState } from "react";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
@@ -45,6 +46,7 @@ import { useSimpleUi } from "./SimpleUiContext.js";
 // be a second place to get destructive actions wrong. Download enqueues the model's default
 // tier through the same createModelDownloadJob the advanced screen uses.
 
+const EMPTY_CATALOG = [];
 const TABS = [
   { id: "image", label: "Image" },
   { id: "video", label: "Video" },
@@ -54,8 +56,8 @@ const TABS = [
 
 export function SimpleModelManager() {
   const {
-    models = [],
-    loras = [],
+    models = EMPTY_CATALOG,
+    loras = EMPTY_CATALOG,
     jobs = [],
     token = "",
     createModelDownloadJob,
@@ -69,6 +71,7 @@ export function SimpleModelManager() {
   const { toast, openInAdvanced } = useSimpleUi();
   const hostMemory = useHostMemory();
   const [tab, setTab] = useState("image");
+  const captureConsentOwner = useConsentRequestOwner(token, models, loras, tab);
   // Which lane's memory evidence the rows quote. Same derivation as ImageStudio / SimpleImageStudio —
   // the memory numbers are per-backend and must not be crossed (see `needsLabel`).
   const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
@@ -135,6 +138,8 @@ export function SimpleModelManager() {
   );
 
   async function download(row) {
+    const ownsRequest = captureConsentOwner(token);
+    if (!ownsRequest()) return;
     const enqueue = row.kind === "lora" ? createLoraDownloadJob : createModelDownloadJob;
     if (typeof enqueue !== "function") {
       return;
@@ -150,16 +155,23 @@ export function SimpleModelManager() {
     // Without this branch the refusal is a dead end HERE specifically: `createLoraDownloadJob`'s
     // own gate returns null and writes the real reason to `loraError`, which Simple renders
     // nowhere, so the user saw only "Could not start the … download" with no way to act on it.
-    const blocked =
-      row.kind === "lora"
-        ? borrowedLicenseAcknowledgmentBlocked(row.entry)
-        : licenseAcknowledgmentBlocked(row.entry);
-    if (blocked) {
-      toast(`${row.name} needs its license accepted first — opening Models.`);
-      openInAdvanced("Models");
+    try {
+      const blocked = row.kind === "lora"
+        ? await borrowedLicenseAcknowledgmentBlocked(row.entry, token)
+        : await licenseAcknowledgmentBlocked(row.entry, token);
+      if (!ownsRequest()) return;
+      if (blocked) {
+        toast(`${row.name} needs its license accepted first — opening Models.`);
+        openInAdvanced("Models");
+        return;
+      }
+    } catch (error) {
+      if (!ownsRequest()) return;
+      toast(`Could not check license acknowledgment: ${error.message}`);
       return;
     }
     const job = await enqueue(row.entry);
+    if (!ownsRequest()) return;
     toast(job ? `Downloading ${row.name}…` : `Could not start the ${row.name} download`);
   }
 

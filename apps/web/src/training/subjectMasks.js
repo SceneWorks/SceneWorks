@@ -1,4 +1,4 @@
-import { API_BASE_URL, withMediaTicket } from "../api.js";
+import { projectFileUrl } from "../api/media.js";
 
 // Subject masks for training datasets (epic 2123, sc-2126). The upload limits mirror the API's
 // (`crates/sceneworks-core/src/training_subject_masks.rs`): SUBJECT_MASK_MAX_UPLOAD_BYTES and the
@@ -41,5 +41,5 @@ export function subjectMaskUrl(projectId, status) {
     .map((segment) => encodeURIComponent(segment))
     .join("/");
   const version = status.revision ? `?v=${encodeURIComponent(status.revision)}` : "";
-  return withMediaTicket(`${API_BASE_URL}/api/v1/projects/${projectId}/files/${path}${version}`);
+  return projectFileUrl(projectId, path, { encodedPath: true, suffix: version });
 }

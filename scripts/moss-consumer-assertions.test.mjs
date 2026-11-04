@@ -303,6 +303,8 @@ if (!process.env.MOSS_ASSERTIONS_MUTATION_CHILD) test("named driver-policy bypas
     const scratch = mkdtempSync(path.join(os.tmpdir(), "moss-driver-policy-mutation-"));
     try {
       assert.equal(source.split(old).length - 1, 1, id);
+      mkdirSync(path.join(scratch, "lib"), { recursive: true });
+      writeFileSync(path.join(scratch, "lib/file-sha256.mjs"), readFileSync(path.join(ROOT, "scripts/lib/file-sha256.mjs")));
       const mutated = path.join(scratch, "driver.mjs"); writeFileSync(mutated, source.replace(old, replacement)); utimesSync(mutated, new Date(), new Date());
       const env = { ...process.env, MOSS_ASSERTIONS_MUTATION_CHILD: "1", MOSS_ASSERTIONS_UNDER_TEST: mutated }; delete env.NODE_TEST_CONTEXT;
       const result = spawnSync(process.execPath, nestedTestArgs(target), { cwd: ROOT, env, encoding: "utf8", timeout: 10000 });

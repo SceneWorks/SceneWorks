@@ -72,6 +72,8 @@ jobs:
       run:
         shell: bash
     env:
+      DISPATCH_RUNNER: ${{ inputs.runner }}
+      DISPATCH_CELLS: ${{ inputs.cells }}
       CARGO_PROFILE_RELEASE_STRIP: "none"
       CARGO_NET_OFFLINE: "true"
       CARGO_TARGET_DIR: /tmp/sc26243-quant-target
@@ -80,7 +82,7 @@ jobs:
       FLUX3_FOOTPRINT_OUT_DIR: /tmp/sc26243-quant-evidence
     steps:
       - name: Refuse a runner other than the dispatched Mac
-        run: '[[ "$RUNNER_NAME" == "${{ inputs.runner }}" ]] || { echo "::error::dispatched for ${{ inputs.runner }}, running on $RUNNER_NAME"; exit 1; }'
+        run: '[[ "$RUNNER_NAME" == "$DISPATCH_RUNNER" ]] || { echo "::error::dispatched for $DISPATCH_RUNNER, running on $RUNNER_NAME"; exit 1; }'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
@@ -132,7 +134,7 @@ jobs:
           footprint_measure::footprint_flux3_klein_base_mlx_bf16
           footprint_measure::footprint_flux3_klein_base_mlx_q4
           footprint_measure::footprint_flux3_klein_base_mlx_q8"
-          wanted="${{ inputs.cells }}"
+          wanted="$DISPATCH_CELLS"
           if [[ -z "$wanted" ]]; then selected="$all"; else selected=$(tr ',' '\n' <<< "$wanted"); fi
           for cell in $selected; do
             echo "::group::$cell"
@@ -157,6 +159,7 @@ jobs:
       group: flux3-quant-matrix-candle-${{ inputs.runner }}
       cancel-in-progress: false
     env:
+      DISPATCH_RUNNER: ${{ inputs.runner }}
       CUDA_VISIBLE_DEVICES: "1"
       SCENEWORKS_GPU_ID: "1"
       HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || 'E:\huggingface' }}
@@ -167,8 +170,8 @@ jobs:
       - name: Refuse a runner other than the dispatched Windows box
         shell: powershell
         run: |
-          if ($env:RUNNER_NAME -ne '${{ inputs.runner }}') {
-            Write-Error "dispatched for ${{ inputs.runner }}, running on $env:RUNNER_NAME"
+          if ($env:RUNNER_NAME -ne $env:DISPATCH_RUNNER) {
+            Write-Error "dispatched for $env:DISPATCH_RUNNER, running on $env:RUNNER_NAME"
             exit 1
           }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

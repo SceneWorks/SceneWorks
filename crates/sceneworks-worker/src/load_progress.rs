@@ -724,7 +724,8 @@ mod tests {
             .lock()
             .unwrap()
             .push((job.clone(), payload, std::time::Instant::now()));
-        state.changed.notify_one();
+        // Job-specific predicates share this signal, so every waiter must recheck its own posts.
+        state.changed.notify_waiters();
         Json(crate::tests::job_snapshot_json(&job, false))
     }
     async fn api() -> (ApiClient, Recorded, tokio::task::JoinHandle<()>) {
@@ -1506,6 +1507,54 @@ mod tests {
             posts.len()
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn each_job_waiter_observes_its_recorded_progress() {
+        fn poll_once<F: Future<Output = ()>>(future: std::pin::Pin<&mut F>) -> std::task::Poll<()> {
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            future.poll(&mut context)
+        }
+
+        let state = Recorded::default();
+        let mut b = Box::pin(wait_for(&state, |posts| {
+            posts.iter().any(|post| post.0 == "job-b")
+        }));
+        let mut a = Box::pin(wait_for(&state, |posts| {
+            posts.iter().any(|post| post.0 == "job-a")
+        }));
+        // Register B first, so a single-consumer notification for A wakes the wrong predicate.
+        assert!(poll_once(b.as_mut()).is_pending());
+        assert!(poll_once(a.as_mut()).is_pending());
+        let _ = receive(
+            Path("job-a".to_owned()),
+            State(state.clone()),
+            Json(serde_json::json!({"message":"alpha"})),
+        )
+        .await;
+        assert!(
+            poll_once(b.as_mut()).is_pending(),
+            "job B has not reported yet"
+        );
+        let _ = receive(
+            Path("job-b".to_owned()),
+            State(state.clone()),
+            Json(serde_json::json!({"message":"beta"})),
+        )
+        .await;
+        assert_eq!(
+            state.posts.lock().unwrap().len(),
+            2,
+            "both progress callbacks arrived"
+        );
+        assert!(
+            poll_once(a.as_mut()).is_ready(),
+            "job A must observe its recorded post"
+        );
+        assert!(
+            poll_once(b.as_mut()).is_ready(),
+            "job B must observe its recorded post after its earlier wake was for job A"
+        );
     }
 
     async fn isolation() {
