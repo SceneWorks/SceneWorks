@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { withoutRustTestModules } from "./lib/rust-source-slices.mjs";
+import { rustFacadeSource, rustFacadeFunction } from "./lib/rust-facade-source.mjs";
 
 // sc-22738 — Michael's standing rule, verbatim (2026-09-07): "The App Runtime should ALWAYS
 // continue behaving as if the measurement were valid."
@@ -40,9 +42,6 @@ export const RUNTIME_ADMISSION_MODULES = Object.freeze([
   "crates/sceneworks-worker/src/krea_control_fit.rs",
   "crates/sceneworks-worker/src/video_admission.rs",
   "crates/sceneworks-worker/src/video_jobs/wan.rs",
-  // The capture-side mirrors that reproduce production admission before a probe render.
-  "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-  "crates/sceneworks-memory-adapter/src/bin/candle.rs",
 ]);
 
 /**
@@ -120,14 +119,11 @@ export function withoutFunctions(text, names) {
   return result;
 }
 
-/** The production slice: everything before the `#[cfg(test)] mod tests` module (test modules may
- *  still construct stale fixtures, that is their job). Earlier `#[cfg(test)]` items are the small
- *  injection seams production functions consult and are graded with the production code. A file
- *  with no test module is graded whole. */
-export function productionSlice(text) {
-  const boundary = /#\[cfg\(test\)\]\s*\n\s*mod tests\b/.exec(text);
-  return boundary ? text.slice(0, boundary.index) : text;
-}
+/** Test modules are blanked as complete items, including external declarations; later runtime
+ * functions remain graded. Capture binaries are probe tooling, outside the product dependency
+ * boundary enforced by capture_adapters_are_not_product_runtime_dependencies in the native guard.
+ */
+export const productionSlice = withoutRustTestModules;
 
 function isComment(line) {
   return /^\s*(\/\/|\*|\/\*)/.test(line);
@@ -245,8 +241,8 @@ test("the guard itself catches a re-introduced currency comparison", async () =>
     "    if candidate.closure_digest != request.expected_closure_digest {\n        return Ok(CandidateGrade::Estimate);\n    }\n",
     "    let live = sceneworks_core::memory_calibration::packaged_closure_digest(\"mlx\", route);\n",
     "    if !anchor.is_current(closures) { return None; }\n",
-    "    if record.repositories.inference.closure_digest.as_deref() == Some(expected) {\n",
-    "    if value_at_str(record, &[\"closureDigest\"]) != Some(curve.closure_digest.as_str()) {\n",
+    "    if record.repositories.inference.closure_digest.as_deref() == Some(expected) { return None; }\n",
+    "    if value_at_str(record, &[\"closureDigest\"]) != Some(curve.closure_digest.as_str()) { return None; }\n",
     "    let stale = crate::memory_strategy::stale_admitted_peak_bytes(backend, peak);\n",
   ];
   const anchor = "fn candidate_exclusion(";
@@ -258,8 +254,8 @@ test("the guard itself catches a re-introduced currency comparison", async () =>
       currencyViolations(mutated).length > 0,
       `the guard must flag: ${mutation.trim()}`,
     );
-    // The same text in a comment, or after the test-module boundary, is not a violation.
-    const commented = selector.slice(0, at) + "    // " + mutation.trimStart() + selector.slice(at);
+    // The same text in a comment, or inside the test module item, is not a violation.
+    const commented = selector.slice(0, at) + mutation.split("\n").map((line) => `// ${line}`).join("\n") + "\n" + selector.slice(at);
     assert.deepEqual(currencyViolations(commented), [], "a comment is not a comparison");
     const testBoundary = selector.indexOf("#[cfg(test)]\nmod tests");
     assert.ok(testBoundary > 0, "the selector has a test module");
@@ -269,4 +265,41 @@ test("the guard itself catches a re-introduced currency comparison", async () =>
       "a test fixture may construct a stale digest",
     );
   }
+});
+
+
+test("inline and external test modules cannot hide later product admission", () => {
+  const testModule = String.raw`#[cfg(test)]
+#[path = "quoted.rs"]
+mod outside;
+#[cfg(test)]
+mod nested {
+    // } a brace in a comment
+    const S: &str = r##" } #[cfg(test)] mod phantom { "##;
+    fn fixture() { let _ = '{'; if anchor.is_current(closures) {} }
+    /* nested /* } */ comment */
+}
+`;
+  assert.deepEqual(currencyViolations(testModule), []);
+  assert.ok(currencyViolations(`${testModule}fn admission() { if anchor.is_current(closures) {} }`).length > 0);
+  const sliced = productionSlice(`${testModule}fn admission() {}`);
+  assert.ok(sliced.endsWith("fn admission() {}"));
+  assert.equal(sliced.split("\n").length, `${testModule}fn admission() {}`.split("\n").length);
+  assert.ok(currencyViolations('#[cfg(test)] fn injected() { anchor.is_current(closures); }').length > 0,
+    "the existing test-injection seam rule remains strict");
+});
+
+test("capture currency stays owned by probe dispatch, outside the product runtime", async () => {
+  const entry = "crates/sceneworks-memory-adapter/src/bin/mlx.rs";
+  const capture = await rustFacadeSource(entry);
+  const run = await rustFacadeFunction(entry, "run");
+  const runWith = await rustFacadeFunction(entry, "run_with");
+  const predicate = await rustFacadeFunction(entry, "exceeded_bound_is_current");
+  assert.match(run.source, /packaged_anchor_loader_closures\(\)\?/);
+  assert.match(runWith.source, /exceeded_bound_capture_refusal_in/);
+  assert.match(predicate.source, /closures\.digest_for[\s\S]*== Some\(bound\.source\.loader_closure_digest\.as_str\(\)\)/);
+  assert.ok(currencyViolations(capture).length > 0, "capture is explicitly currency aware, never silently blanked");
+  assert.ok(!RUNTIME_ADMISSION_MODULES.includes(entry));
+  const boundary = await source("crates/sceneworks-worker/src/architecture_structural_tests.rs");
+  assert.match(boundary, /fn capture_adapters_are_not_product_runtime_dependencies\(/);
 });
