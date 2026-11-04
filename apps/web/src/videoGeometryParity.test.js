@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
-import { fallbackModels } from "./modelCatalog.js";
+import { fallbackModels } from "./testSupport/builtinModels.js";
 
 // Manifest ↔ constants parity for VIDEO geometry (sc-12294), a sibling of controlModesParity.test.js.
 //

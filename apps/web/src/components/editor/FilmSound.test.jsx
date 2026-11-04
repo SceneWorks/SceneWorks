@@ -75,3 +75,35 @@ describe("FilmSound", () => {
     expect(container.querySelector('[aria-label="Sound findings"]')).toBeNull();
   });
 });
+
+
+describe("FilmSound server capability ownership", () => {
+  const generatedDialogue = () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Add generated dialogue");
+
+  it("does not invent a synthesis default when capabilities are absent", async () => {
+    await render();
+    expect(generatedDialogue().disabled).toBe(true);
+  });
+
+  it("authors a line with the server default and limits choices to its allowlist", async () => {
+    const film = draft();
+    film.referencePack.sound = [{ role: "line", kind: "dialogue", text: "Hello", model: "voice-b" }];
+    const onChange = vi.fn();
+    await render({ draft: film, soundCapabilities: { soundSynthesisModels: ["voice-a", "voice-b"], defaultSoundSynthesisModel: "voice-b" }, onChange });
+    const select = container.querySelector('select[aria-label="Sound 1 speech model"]');
+    expect([...select.options].map((option) => option.value)).toEqual(["voice-a", "voice-b"]);
+    expect(select.value).toBe("voice-b");
+    act(() => generatedDialogue().click());
+    const next = structuredClone(film);
+    onChange.mock.calls[0][0](next);
+    expect(next.referencePack.sound.at(-1).model).toBe("voice-b");
+  });
+
+  it("retains authored models while refusing an unrecognized server default", async () => {
+    const film = draft();
+    film.referencePack.sound = [{ role: "line", kind: "dialogue", text: "Hello", model: "saved-voice" }];
+    await render({ draft: film, soundCapabilities: { soundSynthesisModels: ["voice-a"], defaultSoundSynthesisModel: "unrecognized" } });
+    expect(container.querySelector('select[aria-label="Sound 1 speech model"]').value).toBe("saved-voice");
+    expect(generatedDialogue().disabled).toBe(true);
+  });
+});

@@ -1,11 +1,11 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "../hooks/useProjectScopedList.js";
 import { systemApi } from "../api/systemResources.js";
-import { modelsApi } from "../api/modelsResources.js";
 import { trainingApi } from "../api/trainingResources.js";
 import { assetsApi } from "../api/assetsResources.js";
 import { projectsApi } from "../api/projectsResources.js";
 import { jobsApi } from "../api/jobsResources.js";
-import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { isAbortError } from "../api.js";
 import { beginAssetRequest, settleAssetRequest } from "../startupTiming.js";
 import { sortWorkers } from "../sorters.js";
@@ -18,48 +18,19 @@ import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 
 // F-189: extracted from App along its existing concern boundary.
 export function useShellHydration({
-  refreshModelsRef, refreshModelAndLorasRef, hydrateLaunchDomainsRef, refreshAssetsRef, refreshCharactersRef, refreshPersonTracksRef, ready, token, activeProject, setAssets, setLoadedAssetsProjectId, setAssetLoadState, setCharacters, setSavedVoices, setPersonTracks, setTimelines, setTimelinesProjectId, setPresets, setPromptBatches, setLoras, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, setSelectedTimelineId, setActiveTimeline, setMacCapabilitiesAuthoritative, setMacCapabilitiesLoading, setMacCapabilities, setMacCapabilitiesError, setDomainError, setProjects, setActiveProject, setProjectsLoaded, setJobs, setQueueSummary, setWorkers, setModelCatalogStatus, setModels, domainErrors, setTrainingTargets, setTrainingTargetsError, setTrainingPresets, setTrainingPresetsError, activeProjectRef, loadedAssetsProjectId, setSelectedAssetId, refreshLoras, setupCompleted, authenticated, uiMode, simpleActiveScreen, activeView, refreshCharacters, refreshSavedVoices, refreshPresets, refreshPromptBatches, refreshTrainingDatasets, refreshPersonTracks, refreshTimelines, projectsLoaded, activeAssetLoadState, hasLibraryConsumerAsset
+  ready, token, activeProject, setAssets, setLoadedAssetsProjectId, setAssetLoadState, setCharacters, setSavedVoices, setPersonTracks, setTimelines, setTimelinesProjectId, setPresets, setPromptBatches, setLoras, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, setSelectedTimelineId, setActiveTimeline, setMacCapabilitiesAuthoritative, setMacCapabilitiesLoading, setMacCapabilities, setMacCapabilitiesError, setDomainError, setProjects, setActiveProject, setProjectsLoaded, setJobs, setQueueSummary, setWorkers, refreshModels, domainErrors, setTrainingTargets, setTrainingTargetsError, setTrainingPresets, setTrainingPresetsError, activeProjectRef, loadedAssetsProjectId, setSelectedAssetId, refreshLoras, setupCompleted, authenticated, uiMode, simpleActiveScreen, activeView, refreshCharacters, refreshSavedVoices, refreshPresets, refreshPromptBatches, refreshTrainingDatasets, refreshPersonTracks, refreshTimelines, projectsLoaded, activeAssetLoadState, hasLibraryConsumerAsset
 }) {
-  const refreshShellDataRef = useRef(null);
 
   // A retry or token transition supersedes any older capabilities request. Fetch aborts normally
   // provide this guarantee too, but the request id keeps a late/non-cooperative response from
   // restoring stale platform facts after a newer request has started.
   const macCapabilitiesRequestRef = useRef(0);
 
-  const modelCatalogRequestRef = useRef(0);
-
-  const refreshTrainingTargetsRef = useRef(null);
-
-  const refreshTrainingPresetsRef = useRef(null);
-
   const hydrationLedgerRef = useRef(new Map());
 
   const committedHydrationRouteRef = useRef(null);
 
   const previousHydrationProjectIdRef = useRef(null);
-
-  const refreshSavedVoicesRef = useRef(null);
-
-  const refreshLorasRef = useRef(null);
-
-  const refreshPresetsRef = useRef(null);
-
-  const refreshPromptBatchesRef = useRef(null);
-
-  const refreshTrainingDatasetsRef = useRef(null);
-
-  const refreshTimelinesRef = useRef(null);
-
-  useEffect(() => {
-    if (!ready) {
-      return;
-    }
-    hydrationLedgerRef.current.clear();
-    const controller = new AbortController();
-    refreshShellDataRef.current?.({ signal: controller.signal });
-    return () => controller.abort();
-  }, [ready, token]);
 
   // Project changes reset only project-owned catalogs. Global models/training
   // metadata and shared shell state survive. useLayoutEffect prevents the next
@@ -146,7 +117,7 @@ export function useShellHydration({
     }
   }, [setMacCapabilities, setMacCapabilitiesAuthoritative, setMacCapabilitiesError, setMacCapabilitiesLoading, token]);
 
-  async function refreshShellData({ signal } = {}) {
+  const refreshShellData = useCallback(async ({ signal } = {}) => {
     const fetchInitial = async (domain, label, load, fallback, optional = false) => {
       try {
         const value = await load(token, { signal });
@@ -189,37 +160,9 @@ export function useShellHydration({
       }),
     ];
     await Promise.all([projectsPromise, ...shellPromises]);
-  }
+  }, [refreshMacCapabilities, setActiveProject, setDomainError, setJobs, setProjects, setProjectsLoaded, setQueueSummary, setWorkers, token]);
 
-  async function refreshModels({ signal } = {}) {
-    const requestId = ++modelCatalogRequestRef.current;
-    // Do not blank an already-authoritative catalog during an SSE/manual refresh. This state is
-    // specifically the cold-start boundary where no availability answer exists yet.
-    setModelCatalogStatus((current) => (current === "ready" ? current : "loading"));
-    try {
-      const items = await modelsApi.list(token, { signal });
-      if (requestId !== modelCatalogRequestRef.current) {
-        return refreshFailure("stale");
-      }
-      setModels(items);
-      setModelCatalogStatus("ready");
-      domainErrors.models("");
-      return refreshSuccess(items);
-    } catch (err) {
-      if (requestId !== modelCatalogRequestRef.current) {
-        return refreshFailure("stale", err);
-      }
-      if (isAbortError(err)) {
-        setModelCatalogStatus((current) => (current === "loading" ? "idle" : current));
-        return refreshFailure("aborted", err);
-      }
-      setModelCatalogStatus((current) => (current === "loading" ? "error" : current));
-      domainErrors.models(err.message);
-      return refreshFailure("error", err);
-    }
-  }
-
-  async function refreshTrainingTargets({ signal } = {}) {
+  const refreshTrainingTargets = useCallback(async ({ signal } = {}) => {
     try {
       const catalog = await trainingApi.targets(token, { signal });
       setTrainingTargets(catalog);
@@ -232,9 +175,9 @@ export function useShellHydration({
       domainErrors.trainingTargets(err.message);
       return refreshFailure("error", err);
     }
-  }
+  }, [domainErrors, setTrainingTargets, setTrainingTargetsError, token]);
 
-  async function refreshTrainingPresets({ signal } = {}) {
+  const refreshTrainingPresets = useCallback(async ({ signal } = {}) => {
     try {
       const catalog = await trainingApi.presets(token, { signal });
       setTrainingPresets(catalog);
@@ -247,7 +190,7 @@ export function useShellHydration({
       domainErrors.trainingPresets(err.message);
       return refreshFailure("error", err);
     }
-  }
+  }, [domainErrors, setTrainingPresets, setTrainingPresetsError, token]);
 
   const refreshAssets = useProjectScopedList({
     token, activeProject, activeProjectRef,
@@ -269,23 +212,17 @@ export function useShellHydration({
     onSettled: ({ context }) => settleAssetRequest(context),
   });
 
-  async function refreshModelAndLoras(projectId = activeProjectRef.current?.id) {
-    await Promise.all([
-      refreshModels(),
-      refreshLoras(projectId || undefined),
-    ]);
-  }
+  useEffect(() => {
+    if (!ready) {
+      return;
+    }
+    hydrationLedgerRef.current.clear();
+    const controller = new AbortController();
+    refreshShellData({ signal: controller.signal });
+    return () => controller.abort();
+  }, [ready, refreshShellData, token]);
 
-  // sc-8940: Publish the latest refresh closures into their refs from a post-commit
-  // effect rather than the render body — React documents render-body ref mutation as
-  // unsafe (a discarded concurrent/StrictMode render could leave a ref pointing at an
-  // uncommitted closure). No dep array means this runs on every commit, so the refs
-  // always hold the newest *committed* body (fresh token / activeProject). We use
-  // useLayoutEffect (not useEffect) so the assignment flushes before every passive
-  // effect on the same commit: the consumers of these refs (the [ready,token] load
-  // effect, the project-switch effect, the SSE handler) are all plain useEffects/event
-  // handlers, and React runs all layout effects before any passive effect — preserving
-  // the original ordering where consumers saw the fresh closure.
+  // Publish only committed route ownership for cleanup/reuse decisions.
   useLayoutEffect(() => {
     const setupRoute =
       isDesktopShell && setupCompleted === false && authenticated;
@@ -301,21 +238,6 @@ export function useShellHydration({
       projectId: activeProject?.id ?? null,
     };
     committedHydrationRouteRef.current = committedRoute;
-    refreshShellDataRef.current = refreshShellData;
-    refreshModelsRef.current = refreshModels;
-    refreshModelAndLorasRef.current = refreshModelAndLoras;
-    refreshTrainingTargetsRef.current = refreshTrainingTargets;
-    refreshTrainingPresetsRef.current = refreshTrainingPresets;
-    hydrateLaunchDomainsRef.current = hydrateLaunchDomains;
-    refreshAssetsRef.current = refreshAssets;
-    refreshCharactersRef.current = refreshCharacters;
-    refreshSavedVoicesRef.current = refreshSavedVoices;
-    refreshLorasRef.current = refreshLoras;
-    refreshPresetsRef.current = refreshPresets;
-    refreshPromptBatchesRef.current = refreshPromptBatches;
-    refreshTrainingDatasetsRef.current = refreshTrainingDatasets;
-    refreshPersonTracksRef.current = refreshPersonTracks;
-    refreshTimelinesRef.current = refreshTimelines;
     return () => {
       if (committedHydrationRouteRef.current === committedRoute) {
         committedHydrationRouteRef.current = null;
@@ -323,26 +245,15 @@ export function useShellHydration({
     };
   });
 
-  const hydrationRefresher = useCallback((domain) => {
-    const refreshers = {
-      assets: (id, options) => refreshAssetsRef.current?.(id, options),
-      characters: (id, options) => refreshCharactersRef.current?.(id, options),
-      savedVoices: (id, options) => refreshSavedVoicesRef.current?.(id, options),
-      loras: (id, options) => refreshLorasRef.current?.(id, options),
-      presets: (id, options) => refreshPresetsRef.current?.(id, options),
-      promptBatches: (id, options) => refreshPromptBatchesRef.current?.(id, options),
-      trainingDatasets: (id, options) =>
-        refreshTrainingDatasetsRef.current?.(id, options),
-      personTracks: (id, options) => refreshPersonTracksRef.current?.(id, options),
-      timelines: (id, options) => refreshTimelinesRef.current?.(id, options),
-      models: (_id, options) => refreshModelsRef.current?.(options),
-      trainingTargets: (_id, options) =>
-        refreshTrainingTargetsRef.current?.(options),
-      trainingPresets: (_id, options) =>
-        refreshTrainingPresetsRef.current?.(options),
-    };
-    return refreshers[domain];
-  }, [refreshAssetsRef, refreshCharactersRef, refreshModelsRef, refreshPersonTracksRef]);
+  const hydrationRefreshers = useMemo(() => ({
+    assets: refreshAssets, characters: refreshCharacters, savedVoices: refreshSavedVoices,
+    loras: refreshLoras, presets: refreshPresets, promptBatches: refreshPromptBatches,
+    trainingDatasets: refreshTrainingDatasets, personTracks: refreshPersonTracks, timelines: refreshTimelines,
+    models: (_id, options) => refreshModels(options),
+    trainingTargets: (_id, options) => refreshTrainingTargets(options),
+    trainingPresets: (_id, options) => refreshTrainingPresets(options),
+  }), [refreshAssets, refreshCharacters, refreshLoras, refreshModels, refreshPersonTracks, refreshPresets, refreshPromptBatches, refreshSavedVoices, refreshTimelines, refreshTrainingDatasets, refreshTrainingPresets, refreshTrainingTargets]);
+  const hydrationRefresher = useCallback((domain) => hydrationRefreshers[domain], [hydrationRefreshers]);
 
   const ensureHydrationDomain = useCallback((domain, projectId, options = {}) => {
     if (isProjectHydrationDomain(domain) && !projectId) {
@@ -541,7 +452,7 @@ export function useShellHydration({
     uiMode,
   ]);
 
-  async function hydrateLaunchDomains(view, projectId = activeProjectRef.current?.id) {
+  const hydrateLaunchDomains = useCallback(async (view, projectId = activeProjectRef.current?.id) => {
     const domains = hydrationDomainsForRoute(view);
     const results = await Promise.all(
       domains.map((domain) => ensureHydrationDomain(domain, projectId)),
@@ -550,6 +461,9 @@ export function useShellHydration({
     return failed.length
       ? { ok: false, failures: failed }
       : refreshSuccess();
-  }
-  return { refreshMacCapabilities };
+  }, [activeProjectRef, ensureHydrationDomain]);
+  const context = useAppDomainValue({
+    refreshMacCapabilities
+  });
+  return { ...context, refreshAssets, hydrateLaunchDomains, context };
 }

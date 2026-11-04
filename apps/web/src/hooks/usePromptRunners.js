@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { JOB_PATHS } from "../api/jobs.js";
 import { useCallback } from "react";
 import { pollJobToCompletion } from "../pollJob.js";
@@ -199,5 +200,13 @@ export function usePromptRunners({
       }),
     [token],
   );
-  return { refinePrompt, qwenRewritePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness };
+  const context = useAppDomainValue({
+    refinePrompt,
+    qwenRewritePrompt,
+    magicPrompt,
+    imageCaption,
+    imageDescribe,
+    compareFaceLikeness
+  });
+  return { ...context, context };
 }
