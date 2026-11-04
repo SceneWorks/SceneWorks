@@ -1,3 +1,4 @@
+import { legacyUtf16Json as stable } from "./canonical-json.mjs";
 import { readFileSync } from "node:fs";
 
 const contract = JSON.parse(readFileSync(new URL("./starvector-terminal-limit-cases.json", import.meta.url), "utf8"));
@@ -5,7 +6,7 @@ const tuples = new Set(["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"])
 const scenarios = ["completion", "token", "byte", "wall_time", "queued_cancellation", "in_flight_cancellation"];
 const controlKeys = ["cancel_after_create", "cancel_after_progress", "worker_unloaded"];
 const die = (message) => { throw new Error(`starvector terminal limit cases: ${message}`); };
-const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
+
 
 function tierBudget(tier) {
   const budget = contract.shipping_detail_budgets?.[tier];

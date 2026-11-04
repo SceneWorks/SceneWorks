@@ -1,9 +1,9 @@
+import { useProjectScopedList } from "./useProjectScopedList.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { isAbortError } from "../api.js";
 import { timelineRequest } from "../api/timelines.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
-import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { rebaseTimeline, timelineEdit } from "../timelineEdits.js";
 
 // Canonical serialization of a persisted-timeline snapshot for dirty comparison (sc-11967).
@@ -178,39 +178,19 @@ export function useTimelines({
   // (loadTimeline, applyTimelineGenerationResult, enqueueTimelineGenerationApply) are
   // not part of the context value, so they stay plain function declarations — keeping
   // loadTimeline hoisted for the load-on-selection effect above.
-  const refreshTimelines = useCallback(
-    async (projectId = activeProject?.id, { signal } = {}) => {
-      if (!projectId) {
-        return refreshFailure("missing-project");
-      }
-      if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
-        return refreshFailure("stale");
-      }
-      try {
-        const items = await timelineRequest(projectId, null, token, { signal });
-        if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
-          return refreshFailure("stale");
-        }
-        setTimelines(items);
-        setTimelinesProjectId(projectId);
-        setSelectedTimelineId((current) => (items.some((item) => item.id === current) ? current : items[0]?.id ?? null));
-        if (!items.length) {
-          setActiveTimeline(null);
-          savedTimelineSnapshotRef.current = null;
-        }
-        setError("");
-        return refreshSuccess(items);
-      } catch (err) {
-        if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
-          return refreshFailure("stale", err);
-        }
-        if (isAbortError(err)) return refreshFailure("aborted", err);
-        setError(err.message);
-        return refreshFailure("error", err);
+  const refreshTimelines = useProjectScopedList({
+    token, activeProject, activeProjectRef, setError,
+    load: (projectId, token, options) => timelineRequest(projectId, null, token, options),
+    setItems: setTimelines,
+    onSuccess: (items, projectId) => {
+      setTimelinesProjectId(projectId);
+      setSelectedTimelineId((current) => (items.some((item) => item.id === current) ? current : items[0]?.id ?? null));
+      if (!items.length) {
+        setActiveTimeline(null);
+        savedTimelineSnapshotRef.current = null;
       }
     },
-    [token, activeProject, activeProjectRef, setError, setActiveTimeline],
-  );
+  });
 
   async function loadTimeline(projectId, timelineId) {
     if (

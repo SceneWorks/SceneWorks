@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 # Shared multi-target build for the Rust API and Rust worker images. The builder
 # stage (base image, workspace COPYs, cargo build) was previously copy-pasted
 # between docker/rust-api.Dockerfile and docker/rust-worker.Dockerfile, differing
@@ -13,7 +13,7 @@
 # Production SPA bundle for the opt-in rust-api-embed target. The plain rust-api
 # target has no dependency on this stage, so it neither installs Node packages nor
 # embeds web assets. The license corpus is imported directly by the production UI.
-FROM node:22-bookworm-slim AS web-builder
+FROM node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS web-builder
 WORKDIR /app
 COPY apps/web/package.json apps/web/package-lock.json ./apps/web/
 RUN --mount=type=cache,target=/root/.npm npm ci --prefix apps/web
@@ -33,7 +33,7 @@ ENV VITE_API_BASE_URL=""
 RUN npm run build --prefix apps/web \
     && ! grep -R -q "http://localhost:8000" apps/web/dist
 
-FROM rust:1-bookworm AS builder
+FROM rust:1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b AS builder
 # Which workspace binary to build (sceneworks-rust-api | sceneworks-rust-worker).
 ARG BIN=sceneworks-rust-api
 # Allows resource-constrained local builds without slowing the CI default.
@@ -82,6 +82,7 @@ COPY apps/rust-worker ./apps/rust-worker
 # sources with production `include_str!`s. Copy the source root (not a hand-maintained file list) so a
 # newly added authoritative seam cannot compile in a checkout but disappear from Docker builds.
 COPY apps/web/src ./apps/web/src
+COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
 # Copied purely to satisfy workspace membership (the desktop crate is in the
 # workspace but is not built into either image).
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
@@ -134,7 +135,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp "target/release/${BIN}" "/out/${BIN}"
 
 # --- Rust API runtime ---------------------------------------------------------
-FROM debian:bookworm-slim AS rust-api
+FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS rust-api
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -170,7 +171,7 @@ FROM rust-api AS rust-api-embed
 COPY --from=embed-builder /out/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
 
 # --- Rust worker runtime ------------------------------------------------------
-FROM debian:bookworm-slim AS rust-worker
+FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS rust-worker
 
 # ffmpeg: candle video lanes encode mp4. No Python here: model downloads are the
 # native in-process `ensure_hf_files_cached` path (sc-12227 / sc-12232), so the
@@ -202,7 +203,7 @@ CMD ["sceneworks-rust-worker"]
 # (sc-7544 / sc-13510 — guarded by candle_kernels_patch_guard). The backend-candle
 # feature lives on the sceneworks-worker library crate, enabled through the thin binary
 # (epic 5483 Phase 7 / sc-5503 — the Docker torch→candle cutover).
-FROM nvidia/cuda:12.9.1-devel-ubuntu22.04 AS candle-builder
+FROM nvidia/cuda:12.9.1-devel-ubuntu22.04@sha256:bd4e2680a261c212f1e2fea241606f71497dc67a417f73175d794ec8212b5ba8 AS candle-builder
 ARG CARGO_BUILD_JOBS
 ENV DEBIAN_FRONTEND=noninteractive
 # build-essential + pkg-config for the CUDA/native build scripts; libssl-dev because
@@ -215,7 +216,15 @@ RUN apt-get update \
 # Rust toolchain. The default rustup profile ships rustfmt+clippy; the COPY'd
 # rust-toolchain.toml (a pinned concrete version + those components) is what any
 # in-repo cargo actually resolves, auto-installed by rustup on first use.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+      amd64) rustup_arch=x86_64; rustup_sha=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c ;; \
+      arm64) rustup_arch=aarch64; rustup_sha=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c ;; \
+      *) echo "Unsupported rustup architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl --proto '=https' --tlsv1.2 -sSfLo /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/1.28.2/${rustup_arch}-unknown-linux-gnu/rustup-init" \
+    && echo "$rustup_sha  /tmp/rustup-init" | sha256sum -c - \
+    && chmod +x /tmp/rustup-init && /tmp/rustup-init -y && rm /tmp/rustup-init
 ENV PATH="/root/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 ENV CUDA_PATH=/usr/local/cuda
 ARG CUDA_COMPUTE_CAP=80
@@ -258,6 +267,7 @@ COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
 # Keep the Candle builder on the same fail-closed compile-time matrix inputs as the plain builder.
 COPY apps/web/src ./apps/web/src
+COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
 # Workspace-membership only (not built into this image).
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
 COPY apps/desktop/build.rs ./apps/desktop/build.rs
@@ -314,7 +324,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # below) ships no cp310 Linux wheel, so a 22.04 base's Python 3.10 caps at 1.23.2 and
 # can't satisfy it; cp312 has 1.26.0. The wheels are manylinux, so the libraries they
 # carry run on the CUDA runtime base unchanged.
-FROM ubuntu:24.04 AS ort-builder
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS ort-builder
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv \
@@ -383,7 +393,7 @@ RUN rm -rf "${ORT_PY_SITE}"/pip "${ORT_PY_SITE}"/pip-*.dist-info \
 #
 # ubuntu24.04 base. The candle builder stays on 22.04 — its older-glibc binary runs fine
 # on 24.04 (glibc is backward-compatible).
-FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS rust-worker-candle-base
+FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04@sha256:1287141d283b8f06f45681b56a48a85791398c615888b1f96bfb9fc981392d98 AS rust-worker-candle-base
 
 # Ubuntu may already own UID/GID 1000. Keep its accounts intact and provision
 # only our dedicated home; both leaves use numeric IDs, without inherited groups.

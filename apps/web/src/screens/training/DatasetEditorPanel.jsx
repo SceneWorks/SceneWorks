@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../../hooks/useMediaTicket.js";
 import React from "react";
 import { itemSplit } from "../../training/irisCurricula.js";
 
@@ -15,31 +16,16 @@ import {
   DatasetDoctorDistributions,
   DatasetDoctorReadout,
   NearDuplicateClusters,
-  ReadinessBadge,
-  ReadinessFlagDetails,
 } from "./DatasetDoctor.jsx";
-import { EditReferenceRail } from "./EditReferenceRail.jsx";
+import { DatasetCaptionCard } from "./DatasetCaptionCard.jsx";
+import { DatasetCaptionWindow } from "./DatasetCaptionWindow.jsx";
+import { useLatestHandlers } from "../../training/useLatestHandlers.js";
 import { datasetItemCount, datasetItemSelectionKey, imageAssetName } from "../../training/datasetHelpers.js";
 import { joyCaptionExtraOptions, joyCaptionLengths, joyCaptionTypes } from "../../training/joyCaptionPrompts.js";
 import {
-  SUBJECT_MASK_ACCEPT,
   subjectMaskStatusByItemId,
   subjectMaskUrl,
 } from "../../training/subjectMasks.js";
-
-// Human label for the detected caption source (sc-2025) — read-only on the card. An auto caption
-// made in a non-default mode (sc-24829) names that mode.
-const captionModeLabels = { subjectOnly: "subject only", triggerOnly: "trigger words" };
-
-function captionSourceLabel(source, mode) {
-  if (source === "imported") {
-    return "Imported";
-  }
-  if (source === "auto") {
-    return captionModeLabels[mode] ? `Auto · ${captionModeLabels[mode]}` : "Auto";
-  }
-  return "Manual";
-}
 
 // Character kinds arrive lowercase ("person" / "style" / "object"); the chip shows them capitalized.
 function characterKindLabel(type) {
@@ -101,6 +87,7 @@ export function DatasetEditorPanel({
   // trainable edit target) leaves the editor exactly as it was.
   editPairSession = {},
 }) {
+  useMediaTicket();
   const {
     loadingDatasets, onRefreshDatasets, busyDatasetId, datasetThumbAsset, datasets,
     startNewDataset, openDataset, activeDataset, selectedDatasetId, datasetsError,
@@ -142,6 +129,8 @@ export function DatasetEditorPanel({
   // The pencil button next to a saved dataset's name is a rename affordance: it focuses
   // the (otherwise chrome-less) name input rather than opening anything.
   const nameInputRef = React.useRef(null);
+  const [captionFocus, setCaptionFocus] = React.useState(null);
+  const focusedCaptionId = captionFocus?.datasetId === activeDataset?.id ? captionFocus?.assetId : null;
   const [captionFilter, setCaptionFilter] = React.useState("all");
   const [parquetDialogOpen, setParquetDialogOpen] = React.useState(false);
   const [parquetImporting, setParquetImporting] = React.useState(false);
@@ -201,20 +190,24 @@ export function DatasetEditorPanel({
     : null;
 
   const captionedCount = Math.max(0, health.itemCount - health.missingCaptions);
-  const isMissingCaption = (asset) => !String(captionDraftById[asset.id]?.text ?? "").trim();
-  const isFlagged = (asset) => hasActiveFlags(readinessByKey?.get(asset.id));
-  const visibleAssets = memberAssets.filter((asset) => {
+  const visibleAssets = React.useMemo(() => captionFilter === "all" ? memberAssets : memberAssets.filter((asset) => {
+    // Keep the active editor mounted until focus leaves, even when its first
+    // keystroke resolves the Missing filter. Draft state remains owner-scoped.
+    if (asset.id === focusedCaptionId) return true;
     if (captionFilter === "missing") {
-      return isMissingCaption(asset);
+      return !String(captionDraftById[asset.id]?.text ?? "").trim();
     }
     if (captionFilter === "flagged") {
-      return isFlagged(asset);
+      return hasActiveFlags(readinessByKey?.get(asset.id));
     }
     return true;
-  });
+  }), [memberAssets, focusedCaptionId, captionFilter, captionDraftById, readinessByKey]);
   // Only derivable once the report exists — an item with no entry is "not assessed yet",
   // never silently ready (sc-6534).
-  const readyCount = readiness ? memberAssets.filter((asset) => !isFlagged(asset)).length : 0;
+  const readyCount = React.useMemo(
+    () => readiness ? memberAssets.filter((asset) => !hasActiveFlags(readinessByKey?.get(asset.id))).length : 0,
+    [readiness, memberAssets, readinessByKey],
+  );
   const savedItemBySelection = React.useMemo(
     () => new Map((activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), item])),
     [activeDataset],
@@ -246,6 +239,19 @@ export function DatasetEditorPanel({
       setPreparedUploadingId("");
     }
   }
+
+  const cardHandlers = useLatestHandlers({
+    preview: (asset) => onPreview(asset, memberAssets),
+    toggleItemAck: onToggleItemAck,
+    pickReferences: setReferencePickerFor,
+    setItemReferences,
+    updateCaption,
+    toggleHoldout: onToggleHoldout,
+    uploadPrepared,
+    uploadMask,
+    removeAsset: removeUnavailableAsset,
+    recaption: (asset) => setCaptionDialog({ type: "item", member: asset }),
+  });
 
   // The unsaved-state chip is now a real affordance (sc-11970): when there are unsaved
   // changes it pairs the "Unsaved changes" pill with a Discard action that reverts the
@@ -577,7 +583,15 @@ export function DatasetEditorPanel({
           </div>
         </div>
 
-        <div className="training-caption-grid" aria-label="Dataset images and captions">
+        <div
+          className="training-caption-results"
+          aria-label="Dataset images and captions"
+          onFocusCapture={(event) => setCaptionFocus({ datasetId: activeDataset?.id, assetId: event.target.closest("[data-caption-id]")?.dataset.captionId })}
+          onBlurCapture={(event) => {
+            const nextId = event.relatedTarget?.closest?.("[data-caption-id]")?.dataset.captionId;
+            if (!event.currentTarget.contains(event.relatedTarget) || !nextId) setCaptionFocus(null);
+          }}
+        >
           {!memberAssets.length ? (
             <div className="empty-panel compact-panel">
               No images yet — use “Add images” or “Import Parquet” to build this dataset.
@@ -589,179 +603,34 @@ export function DatasetEditorPanel({
                 : "No images carry an unresolved quality finding."}
             </div>
           ) : (
-            visibleAssets.map((asset) => {
-              const disabled = asset.status?.rejected || asset.status?.trashed;
-              const draft = captionDraftById[asset.id] ?? {};
-              const source = draft.source ?? "manual";
-              const name = asset.displayName ?? imageAssetName(asset);
-              const readinessEntry = readinessByKey?.get(asset.id);
+            <DatasetCaptionWindow key={activeDataset?.id ?? "draft"} assets={visibleAssets} renderItem={(asset) => {
               const savedItem = savedItemBySelection.get(asset.id);
-              const preparedPath = savedItem?.ltxPreparedBundlePath;
-              // Named caption fields (sc-25685): a fresh `.json` import's, else the saved item's.
-              const namedCaptions = namedCaptionsById[asset.id] ?? savedItem?.captions;
-              const namedCaptionFields =
-                namedCaptions && typeof namedCaptions === "object" && !Array.isArray(namedCaptions)
-                  ? Object.keys(namedCaptions)
-                  : [];
               const maskStatus = savedItem ? maskStatusByItemId.get(savedItem.id) : undefined;
-              const maskSrc = showMaskOverlay && maskStatus?.hasMask ? subjectMaskUrl(maskProjectId, maskStatus) : "";
-              const maskError = maskUploadErrors[asset.id];
-              return (
-                <article
-                  className={["training-caption-card", disabled ? "disabled" : ""].filter(Boolean).join(" ")}
-                  key={asset.id}
-                >
-                  <button className="training-caption-card-thumb" onClick={() => onPreview(asset, memberAssets)} type="button">
-                    <AssetThumbnail asset={asset} />
-                    {maskSrc ? (
-                      <img
-                        alt={`Subject mask for ${name}`}
-                        className="training-subject-mask-overlay"
-                        decoding="async"
-                        src={maskSrc}
-                      />
-                    ) : null}
-                    {/* Only flash pending on the first load — during an ack-triggered refetch the
-                        prior report's badges hold steady rather than blinking to "·". */}
-                    <ReadinessBadge entry={readinessEntry} loading={readinessLoading && !readiness} />
-                  </button>
-                  <div className="training-caption-card-body">
-                    <div className="training-caption-card-meta">
-                      <strong title={name}>{name}</strong>
-                      <span className={`training-caption-source source-${source}`}>{captionSourceLabel(source, draft.mode)}</span>
-                      {disabled ? (
-                        <span className="training-asset-badge">{asset.status?.trashed ? "Trashed" : "Rejected"}</span>
-                      ) : null}
-                      {maskStatus?.hasMask && maskStatus.empty ? (
-                        <span
-                          className="training-asset-badge"
-                          title="No person was detected — the mask is empty. Upload a replacement mask."
-                        >
-                          No subject in mask
-                        </span>
-                      ) : null}
-                      {maskStatus?.hasMask && maskStatus.source === "upload" ? (
-                        <span className="training-asset-badge">Mask uploaded</span>
-                      ) : null}
-                    </div>
-                    <ReadinessFlagDetails
-                      entry={readinessEntry}
-                      onToggle={
-                        readinessEntry && typeof onToggleItemAck === "function"
-                          ? (check, dismissed) => onToggleItemAck(readinessEntry, check, dismissed)
-                          : undefined
-                      }
-                    />
-                    {showEditPairs ? (
-                      <EditReferenceRail
-                        assetsById={assetsById}
-                        cap={referenceCap}
-                        itemName={name}
-                        onAdd={() => setReferencePickerFor({ selectionId: asset.id, name })}
-                        onChange={(ids) => setItemReferences?.(asset.id, ids)}
-                        referenceIds={referenceDraftById[asset.id] ?? []}
-                      />
-                    ) : null}
-                    <textarea
-                      aria-label={`Caption for ${name}`}
-                      className={[
-                        "training-caption-card-text",
-                        isMissingCaption(asset) ? "is-empty" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      onChange={(event) => updateCaption(asset.id, event.target.value)}
-                      placeholder={
-                        showEditPairs
-                          ? "Edit instruction"
-                          : "Describe this image…"
-                      }
-                      rows={3}
-                      value={draft.text ?? ""}
-                    />
-                    {onToggleHoldout ? (
-                      <label className="training-checkbox-field" title="Iris training: a holdout item is never trained on; it is the holdout set the run validates against.">
-                        <input
-                          checked={itemSplit(holdoutById, asset.id, savedItem) === "holdout"}
-                          onChange={(event) => onToggleHoldout(asset.id, event.target.checked)}
-                          type="checkbox"
-                        />
-                        Holdout (validation only)
-                      </label>
-                    ) : null}
-                    {namedCaptionFields.length ? (
-                      <span
-                        className="training-field-hint training-caption-named-fields"
-                        title={namedCaptionFields.map((field) => `${field}: ${namedCaptions[field]}`).join("\n")}
-                      >
-                        +{namedCaptionFields.length} caption field{namedCaptionFields.length === 1 ? "" : "s"}:{" "}
-                        {namedCaptionFields.join(", ")}
-                      </span>
-                    ) : null}
-                    <div className="training-caption-card-actions">
-                      <label className="secondary-action strong">
-                        {preparedUploadingId === asset.id
-                          ? "Uploading…"
-                          : preparedPath
-                            ? "Replace LTX bundle"
-                            : "Upload LTX bundle"}
-                        <input
-                          accept=".safetensors,application/octet-stream"
-                          aria-label={`Upload LTX prepared bundle for ${name}`}
-                          disabled={!savedItem?.id || preparedUploadingId === asset.id}
-                          hidden
-                          onChange={(event) => uploadPrepared(asset, event.target.files?.[0])}
-                          type="file"
-                        />
-                      </label>
-                      {preparedPath ? <span className="training-asset-badge">Prepared</span> : null}
-                      {typeof onUploadMask === "function" ? (
-                        <label className="secondary-action">
-                          {maskUploadingId === asset.id
-                            ? "Uploading…"
-                            : maskStatus?.hasMask
-                              ? "Replace mask"
-                              : "Upload mask"}
-                          <input
-                            accept={SUBJECT_MASK_ACCEPT}
-                            aria-label={`Upload subject mask for ${name}`}
-                            disabled={!savedItem?.id || maskUploadingId === asset.id}
-                            hidden
-                            onChange={(event) => {
-                              uploadMask(asset, event.target.files?.[0]);
-                              event.target.value = "";
-                            }}
-                            type="file"
-                          />
-                        </label>
-                      ) : null}
-                      <button
-                        aria-label={`Remove ${name}`}
-                        className="secondary-action"
-                        onClick={() => removeUnavailableAsset(asset.id)}
-                        type="button"
-                      >
-                        Remove
-                      </button>
-                      <button
-                        aria-label={`Re-caption ${name}`}
-                        className="secondary-action strong"
-                        disabled={captioning}
-                        onClick={() => setCaptionDialog({ type: "item", member: asset })}
-                        type="button"
-                      >
-                        Re-Caption
-                      </button>
-                    </div>
-                    {maskError ? (
-                      <p className="inline-warning" role="alert">
-                        {maskError}
-                      </p>
-                    ) : null}
-                  </div>
-                </article>
-              );
-            })
+              return <DatasetCaptionCard
+                key={asset.id}
+                asset={asset}
+                captionDraft={captionDraftById[asset.id]}
+                namedCaptionDraft={namedCaptionsById[asset.id]}
+                savedItem={savedItem}
+                readinessEntry={readinessByKey?.get(asset.id)}
+                readinessPending={readinessLoading && !readiness}
+                maskStatus={maskStatus}
+                maskSrc={showMaskOverlay && maskStatus?.hasMask ? subjectMaskUrl(maskProjectId, maskStatus) : ""}
+                maskError={maskUploadErrors[asset.id]}
+                showEditPairs={showEditPairs}
+                assetsById={assetsById}
+                referenceCap={referenceCap}
+                referenceIds={referenceDraftById[asset.id]}
+                holdout={itemSplit(holdoutById, asset.id, savedItem) === "holdout"}
+                canToggleHoldout={typeof onToggleHoldout === "function"}
+                canToggleItemAck={typeof onToggleItemAck === "function"}
+                canUploadMask={typeof onUploadMask === "function"}
+                preparedUploading={preparedUploadingId === asset.id}
+                maskUploading={maskUploadingId === asset.id}
+                captioning={captioning}
+                handlers={cardHandlers}
+              />;
+            }} />
           )}
         </div>
       </section>

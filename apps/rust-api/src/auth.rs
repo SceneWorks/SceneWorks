@@ -217,7 +217,9 @@ pub(crate) fn cors_layer(settings: &Settings) -> CorsLayer {
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
+            header::IF_MATCH,
             HeaderName::from_static("x-sceneworks-token"),
+            HeaderName::from_static("x-sceneworks-media-ticket"),
         ])
 }
 

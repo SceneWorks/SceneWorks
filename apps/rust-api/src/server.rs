@@ -15,7 +15,7 @@
 //! module reaches them through `crate::`.
 
 use std::collections::HashMap;
-use std::future::{Future, IntoFuture};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -463,6 +463,7 @@ pub struct AppState {
     /// generation would re-parse every ComfyUI base file's safetensors header.
     pub(crate) external_base_model_cache: Arc<Mutex<ExternalBaseModelCache>>,
     pub(crate) http_client: reqwest::Client,
+    pub(crate) planner_http_client: reqwest::Client,
     pub(crate) interrupted_jobs_on_startup: usize,
     /// Safe, path-free status for bounded stale-upload cleanup that starts
     /// after the listener is bound and readiness-critical initialization ends.
@@ -869,12 +870,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let serve_shutdown = film_controller_shutdown.clone();
     let signal_shutdown = api_shutdown.clone();
     let serve = bounded_server_drain(
-        axum::serve(
+        crate::http_boundary::serve(
             listener,
-            bootstrap.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown_signal(serve_shutdown, signal_shutdown))
-        .into_future(),
+            bootstrap,
+            shutdown_signal(serve_shutdown, signal_shutdown),
+        ),
         api_shutdown.clone(),
         API_CONNECTION_DRAIN_TIMEOUT,
     );

@@ -1,4 +1,6 @@
-import { apiFetch } from "./api.js";
+import { submitJobRequest } from "./api/jobs.js";
+import { jobsApi } from "./api/jobsResources.js";
+
 import { errorStatuses } from "./jobTypes.js";
 
 // Resolve after `ms`, or reject with an AbortError if `signal` fires (or is already
@@ -52,7 +54,7 @@ export async function pollJobToCompletion({
   failureError,
   timeoutError,
 }) {
-  const created = await apiFetch(createPath, token, {
+  const created = await submitJobRequest(createPath, token, {
     method: "POST",
     signal,
     body: JSON.stringify(body),
@@ -64,7 +66,7 @@ export async function pollJobToCompletion({
   const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline) {
     await abortableDelay(1000, signal);
-    const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
+    const job = await jobsApi.item(jobId, token, { signal });
     if (job.status === "completed") {
       return resolveResult(job);
     }

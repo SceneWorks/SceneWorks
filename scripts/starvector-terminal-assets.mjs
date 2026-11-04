@@ -1,12 +1,12 @@
 #!/usr/bin/env node
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 // Create a tuple-local project and import the exact 120 raster inputs through
 // the production API.  Asset ids are never preassigned in the corpus index.
-import { createHash } from "node:crypto";
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 
-const sha = (value) => createHash("sha256").update(value).digest("hex");
+
 const die = (message) => { throw new Error(`starvector terminal assets: ${message}`); };
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 async function request(url, init) { const response = await fetch(url, init); const body = await response.json(); if (!response.ok) die(`${response.status}: ${JSON.stringify(body)}`); return body; }
