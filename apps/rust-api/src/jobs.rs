@@ -108,7 +108,13 @@ pub(crate) async fn create_job(
             payload.payload.remove(key);
         }
     }
-    validate_raw_job_payload(&state, &payload.job_type, &mut payload.payload, false).await?;
+    validate_raw_job_payload(
+        &state,
+        &payload.job_type,
+        &mut payload.payload,
+        FetchingLicenseValidation::FreshSubmission,
+    )
+    .await?;
     let canonical_entry =
         canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
     crate::model_sources::ensure_runtime_model_sources(
@@ -993,14 +999,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 return Err(ApiError::bad_request("Invalid saved download binding"));
             }
             crate::models::validate_catalog_download_replay(state, binding, &merged).await?;
-        } else if is_license_gated_fetching_job(&job_type) {
-            // An old payload assertion is not a current server receipt.
-            merged.insert(
-                crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
-                Value::Bool(false),
-            );
         }
-        validate_raw_job_payload(state, &job_type, &mut merged, download_binding.is_some()).await?;
+        let license_validation = if download_binding.is_some() {
+            FetchingLicenseValidation::VerifiedCatalogReplay
+        } else {
+            FetchingLicenseValidation::Replay
+        };
+        validate_raw_job_payload(state, &job_type, &mut merged, license_validation).await?;
     }
     // A replay model switch resets inherited MOSS controls. Explicit new advanced controls still
     // reach validation, so headless clients cannot silently drop a conflicting authored setting.
@@ -1686,6 +1691,12 @@ fn dense_image_detail_error() -> ApiError {
     )
 }
 
+enum FetchingLicenseValidation {
+    FreshSubmission,
+    Replay,
+    VerifiedCatalogReplay,
+}
+
 fn is_license_gated_fetching_job(job_type: &JobType) -> bool {
     matches!(
         job_type,
@@ -1710,7 +1721,7 @@ async fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
     payload: &mut JsonObject,
-    trusted_download_binding: bool,
+    license_validation: FetchingLicenseValidation,
 ) -> Result<(), ApiError> {
     if matches!(
         job_type,
@@ -1818,8 +1829,24 @@ async fn validate_raw_job_payload(
     // `"**"` downloads the entire named repo. Adding the job type alone would have been inert;
     // `ensure_job_payload_license_acknowledged` reads `baseRepo`/`sourceRepo` as well as `repo`
     // (`LICENSE_GATED_REPO_PAYLOAD_KEYS`), which is what makes this line bite.
-    if is_license_gated_fetching_job(job_type) && !trusted_download_binding {
-        crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
+    if is_license_gated_fetching_job(job_type) {
+        match license_validation {
+            FetchingLicenseValidation::VerifiedCatalogReplay => {}
+            FetchingLicenseValidation::FreshSubmission => {
+                crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
+            }
+            FetchingLicenseValidation::Replay => {
+                // Ignore the old assertion only for authorization. Saved import payloads are
+                // also committed-request identities and must remain unchanged on retry.
+                let mut receipt_view = payload.clone();
+                receipt_view.insert(
+                    crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+                    Value::Bool(false),
+                );
+                crate::models::ensure_job_payload_license_acknowledged(state, &receipt_view)
+                    .await?;
+            }
+        }
     }
     // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
     // licence-bound target (Qwen Image 2.1) must not reach the queue around the typed route's gate.
