@@ -1,14 +1,9 @@
+import { deferred } from "../../testUtils/async.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { createLatestMaskAssetLoader } from "./maskAssetLoader.js";
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
+
 
 describe("createLatestMaskAssetLoader", () => {
   it("aborts a superseded asset fetch and commits only the latest mask", async () => {

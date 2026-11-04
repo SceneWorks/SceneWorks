@@ -1224,7 +1224,7 @@ mod tests {
     // (Tests set no backend env vars, so from_env() yields mlx=on / candle=off by default; the
     // helper overrides both explicitly so each case is self-contained regardless of env.)
     fn settings_with_backends(mlx: bool, candle: bool) -> crate::Settings {
-        let mut s = crate::Settings::from_env();
+        let mut s = crate::test_env::offline_settings();
         s.backend_mlx_enabled = mlx;
         s.backend_candle_enabled = candle;
         s

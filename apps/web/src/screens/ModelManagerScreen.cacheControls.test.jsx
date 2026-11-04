@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -205,11 +206,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
 
   // The keep/remove handlers await a promise chain (preview → confirm → mutate → re-read) before
   // the DOM settles, so flush several microtask turns before asserting.
-  async function settle() {
-    await act(async () => {
-      for (let i = 0; i < 8; i += 1) await Promise.resolve();
-    });
-  }
+
 
   const section = () => container.querySelector(".model-local-copy");
   const badgeTexts = () =>
@@ -466,7 +463,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
         </AppContext.Provider>,
       );
     });
-    await settle();
+    await settle({ microtasks: 8 });
     expect(container.textContent).not.toContain("Local model copies can’t be shown");
     expect(section()).toBeTruthy();
   });
@@ -480,7 +477,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     // local state and skipped the round trip would still look right — hence asserting the read.
     status = cacheStatus([cacheEntry({ pinned: true, artifactPinned: true })]);
     await click(copyButton("Keep locally"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(pinCalls).toEqual([{ cacheKey: "sha256:aaa", pinned: true }]);
     expect(cacheReads).toBe(before + 1);
     expect(section().textContent).toContain("Kept — never removed automatically");
@@ -492,7 +489,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     await render([externalModel()]);
     status = cacheStatus([cacheEntry()]);
     await click(copyButton("Allow automatic removal"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(pinCalls).toEqual([{ cacheKey: "sha256:aaa", pinned: false }]);
     expect(liveText()).toContain("can now be removed automatically");
   });
@@ -506,7 +503,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
       return [];
     });
     await click(copyButton("Keep locally"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(liveText()).toContain("journal is locked");
     expect(section().textContent).toContain("Can be removed automatically");
   });
@@ -519,7 +516,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     preview = { ...preview, reclaimableBytes: 9 * GIB };
     await render([externalModel()]);
     await click(copyButton("Remove local copy"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(apiFetch).toHaveBeenCalledWith(
       "/api/v1/model-cache/removal-preview",
       expect.anything(),
@@ -540,7 +537,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     appConfirmMock.mockImplementation(async () => false);
     await render([externalModel()]);
     await click(copyButton("Remove local copy"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(appConfirmMock).toHaveBeenCalledTimes(1);
     expect(removeCalls).toEqual([]);
   });
@@ -551,7 +548,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     preview = { ...preview, blocked: "a runtime lease is active" };
     await render([externalModel()]);
     await click(copyButton("Remove local copy"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(appConfirmMock).not.toHaveBeenCalled();
     expect(removeCalls).toEqual([]);
     expect(liveText()).toContain("can't be removed right now");
@@ -563,7 +560,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     preview = { ...preview, pins: { kind: "unknown" } };
     await render([externalModel()]);
     await click(copyButton("Remove local copy"));
-    await settle();
+    await settle({ microtasks: 8 });
     const { message } = appConfirmMock.mock.calls[0][0];
     expect(message).toContain("couldn't determine whether this copy is being kept");
     expect(message).not.toMatch(/not pinned|isn't pinned/i);
@@ -576,7 +573,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     removeOutcome = { ...removeOutcome, sourceUnavailableWarning: "/Volumes/Models is not mounted" };
     await render([externalModel({ modelAvailability: "installed_external_unavailable" })]);
     await click(copyButton("Remove local copy"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(appConfirmMock.mock.calls[0][0].message).toContain(
       "becomes unusable until its library is reconnected",
     );
@@ -588,7 +585,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     const before = cacheReads;
     status = cacheStatus([]);
     await click(copyButton("Remove local copy"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(cacheReads).toBe(before + 1);
     expect(liveText()).toContain("freed 12.0 GiB");
     expect(section().textContent).toContain("No local copy yet");
@@ -604,7 +601,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
       return [];
     });
     await click(copyButton("Remove local copy"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(liveText()).toContain("entry is leased");
     // The row is still there — nothing claimed it was removed.
     expect(section().textContent).toContain("12.0 GiB");
@@ -615,7 +612,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
   it("announces outcomes in a polite live region", async () => {
     await render([externalModel()]);
     await click(copyButton("Keep locally"));
-    await settle();
+    await settle({ microtasks: 8 });
     const region = container.querySelector('[role="status"]');
     expect(region).toBeTruthy();
     expect(region.getAttribute("aria-live")).toBe("polite");
@@ -646,7 +643,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);
       });
-      await settle();
+      await settle({ microtasks: 8 });
     }
   }
 
@@ -729,7 +726,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     expect(button).toBeTruthy();
     status = cacheStatus([cacheEntry({ state: "complete" })]);
     await click(button);
-    await settle();
+    await settle({ microtasks: 8 });
     expect(cacheReads).toBe(2);
     expect(section().textContent).toContain("Can be removed automatically");
     expect(

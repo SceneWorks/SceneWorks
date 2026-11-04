@@ -1,3 +1,4 @@
+import { deferred } from "./testUtils/async.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -5,13 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { FakeEventSource, response, settle } from "./main.testSupport.jsx";
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
+
 
 function requestPath(url) {
   return new URL(url, window.location.origin).pathname;

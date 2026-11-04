@@ -792,26 +792,16 @@ mod tests {
     fn f011_test_settings(data_dir: PathBuf) -> Settings {
         Settings {
             api_url: "http://127.0.0.1:0".to_owned(),
-            access_token: None,
-            data_dir,
             config_dir: PathBuf::from("config"),
             worker_id: "test-worker".to_owned(),
-            gpu_id: "cpu".to_owned(),
             is_child_worker: true,
-            poll_seconds: 1,
             heartbeat_seconds: 5,
-            shutdown_timeout_seconds: 1,
             huggingface_base_url: "http://127.0.0.1:0".to_owned(),
-            huggingface_token: None,
-            credentials: Vec::new(),
             max_lora_url_bytes: 8u64 * 1024 * 1024 * 1024,
             max_model_url_bytes: 256u64 * 1024 * 1024 * 1024,
             allow_private_lora_urls: true,
-            utility_workers: 1,
             backend_mlx_enabled: true,
-            backend_candle_enabled: false,
-            gpu_memory_limit_bytes: 0,
-            external_model_roots: Vec::new(),
+            ..crate::Settings::for_test(data_dir)
         }
     }
 
