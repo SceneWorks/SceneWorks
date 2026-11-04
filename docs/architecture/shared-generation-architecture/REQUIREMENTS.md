@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** All four round-5 findings are addressed. Michael approved DEC-1…8 on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-9…19 remain open. This is not overall design approval or implementation evidence. Design-only: no program tracker items, pilots or implementation start from an individual decision approval. |
+| **Status** | **Draft 0.6, design decisions approved.** All four round-5 findings are addressed. Michael approved DEC-1…19 on 2026-11-03, taking the remaining recommendations together after DEC-8. This approves the design direction, not implementation evidence or execution. Design-only: no program tracker items, pilots or implementation start from these decisions. |
 | **Date** | 2026-11-03 |
 | **Repositories** | SceneWorks (`main` @ `a1d95e2c4`) and inference (`origin/main` @ `a43724b82`). All citations refer to those revisions. |
 | **Companion** | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): target design, migration strategy and phased roadmap. |
@@ -15,7 +15,7 @@
 
 1. **Every requirement has an ID** (`PIPE-3`, `ADM-2`, …). Comment by ID.
 2. **Requirements state *what* must be true.** Design belongs in the implementation plan. Flag any requirement that reads like a design choice.
-3. **§10 lists the decisions only Michael can make.** Each has a recommendation. A requirement that depends on an open decision is marked `⟂DEC-n`.
+3. **§10 records Michael's approved design decisions.** References `DEC-n` connect requirements to selected policies. Specific route exceptions and unmeasured acceptance evidence remain feature-planning work.
 4. **The program acceptance tests (§7) define done for the whole program.** Each future CodeGraph feature takes the relevant subset as its own feature-level acceptance tests.
 5. **Confidence labels.** `[H]`, `[M]` and `[L]` (high, medium, low) are taken from the evidence. §8 targets are goals, not gates.
 
@@ -205,14 +205,14 @@ Encode includes declared dependencies among encoder components, such as Qwen edi
 - **The driver owns:** solver lookup, per-evaluation cancellation, progress, preview counting, latent observation and span iteration.
 - **`StepInfo` carries:** pass, phase, step, outer step, evaluation index and per-stream σ.
 - **Shared tensor-free code replaces** the duplicated pieces: schedule resolution, img2img start step, `mu` and shift, and the ≥6 candle `init_time_step` copies [A §10, P8-P11].
-- **User-visible progress stays in outer steps.** Per-evaluation accounting stays internal (⟂DEC-19).
+- **User-visible progress stays in outer steps.** Per-evaluation accounting stays internal (DEC-19).
 
 **Accept:** both backends' drivers have the same signature and hook struct. The duplicated functions exist once, in gen-core.
 
 **PIPE-7 — Essential bespoke loops run under the runner through a typed `FamilyDriver` escape hatch.**
 - **Loops that use it:** FLUX3 flow-map, Sana Sprint SCM, Boogu Turbo DMD, MOSS-Image DMD, MiniMax-H3, LTX native, SenseNova, Mage, the Bernini MAR planner, Krea-realtime (autoregressive self-forcing, KV across blocks), Iris FlowDPM-Solver++ (with iOS quanta), the SDXL native ancestral and Wan native UniPC parity loops, the SeedVR2 loop, and the PiD decoder sampler (hosted inside the Decode stage).
 - **Drivers are generic over a forward seam** (the precedent is H3's `JointVelocity`, `denoise/mod.rs:25-29`). This lets a Tier 0 conformance suite verify every capability the driver declares in `DriverSupport`.
-- **Each driver honours `SliceInput`:** arbitrary entry σ, geometry, `Continue`/`Renoise`/`Resample`, and the history policy. Any refusal of these must be approved under ⟂DEC-13.
+- **Each driver honours `SliceInput`:** arbitrary entry σ, geometry, `Continue`/`Renoise`/`Resample`, and the history policy. Any refusal of these must be approved under DEC-13.
 
 **Accept:** every listed loop runs under the runner. Its `DriverSupport` claims pass conformance. Refusals are on the approved list.
 
@@ -523,7 +523,9 @@ Each spec carries:
 
 **OPT-3 — One validator runs identically at every boundary:** API create, retry and duplicate, MCP tools, and worker preflight. The worker keeps only checks that need local state. **Accept:** each rule exists once; the duplicated constants appear once.
 
-**OPT-4 — The web renders the shared validator's results and implements no rule logic of its own.** ⟂DEC-9 chooses the mechanism. Cold-start and offline behaviour is defined. **Accept:** no rule logic in web modules; validation latency on the RunPod proxy is within the UX bound set by DEC-9.
+**OPT-4 — The web renders the shared validator's results and implements no rule logic of its own (DEC-9 approved).** Compile pure Rust validation to WebAssembly; the server revalidates submissions and the worker retains local-state checks. Browser metadata is a snapshot, not live availability. Hybrid cached availability plus server cross-field validation is the fallback if portability or bundle cost is disproportionate.
+
+**Accept:** one rule implementation; shared native/browser corpus results agree. At APP-2 planning, declare and verify the cold-start/bundle and interaction-latency budgets on the desktop and representative RunPod proxy. Loaded/cached rules can validate offline; unavailable live checks remain explicit. No whole native core/runtime dependency is pulled into the browser just to share pure rules.
 
 **OPT-5 — The advanced-option UI is generated from `OptionSpec`s.**
 - **Custom renderers are enumerated** for every structured shape: phase editor, poses, layout editors, structured prompt, H3 Veda settings, MOSS options and reports, prompt batch, sample index, number pair, the YuE2 lab, the Ideogram structured caption and the Character builder.
@@ -596,12 +598,12 @@ Rules:
 ### 6.12 Tooling and generated artifacts (TOOL)
 
 **TOOL-1 — Every derived artifact comes from a typed dump.** Nothing regex-parses source or byte-digests source. This specifically covers:
-- the memory matrix generator (⟂DEC-17);
-- the backend-capability matrix: `routing/matrix.rs`, which digests 61 sources, plus `matrix.json` and `exceptions.json` (⟂DEC-16).
+- the memory matrix generator (DEC-17);
+- the backend-capability matrix: `routing/matrix.rs`, which digests 61 sources, plus `matrix.json` and `exceptions.json` (DEC-16).
 
 **Accept:** each artifact is deleted or regenerated from typed dumps per its decision.
 
-**TOOL-2 — The memory-adapter drives routes through the shared runner and registry**, with no per-family arms. That covers `bin/mlx.rs`, `bin/candle.rs` and the auxiliary bins (`mlx_ltx25`, `flux3_*`, `*_wan_scail2`, `*_iris`, `*_supra2`). Workflow consumers (`memory-catalog-campaign.yml`) are migrated. Proof of the rewrite follows ⟂DEC-18. **Accept:** no per-family arm remains.
+**TOOL-2 — The memory-adapter drives routes through the shared runner and registry**, with no per-family arms. That covers `bin/mlx.rs`, `bin/candle.rs` and the auxiliary bins (`mlx_ltx25`, `flux3_*`, `*_wan_scail2`, `*_iris`, `*_supra2`). Workflow consumers (`memory-catalog-campaign.yml`) are migrated. Proof of the rewrite follows DEC-18. **Accept:** no per-family arm remains.
 
 **TOOL-3 — Hand mirrors are deleted:** the web `modelCatalog.js` seed (being deleted by SW-F327 #3268), `tierSuggestion.js`, and duplicated vocabularies.
 
@@ -628,7 +630,7 @@ Rules:
 
 ### 6.14 Migration and quality (MIG)
 
-**MIG-1 — Every program feature reaches `main` within the window set by ⟂DEC-12.** There is no multi-month integration branch.
+**MIG-1 — Every program feature reaches `main` within the approved ≤6-week window (DEC-12).** Split oversized scope at complete consumer boundaries during planning; re-plan if the window is exceeded. Preserve the full capability surface and terminal acceptance. There is no multi-month integration branch.
 
 **MIG-2 — No cross-feature dual paths (AP9).** **Accept:** at each feature's end, grep finds no legacy path for the migrated routes, and no interim adapter outlives its feature.
 
@@ -647,14 +649,15 @@ Rules:
 Pure admission and routing logic lives cfg-free in `sceneworks-core`, so it runs on Linux CI.
 
 **Tier 1: the dispatched equivalence workflow, with recorded evidence.**
+- **Approved DEC-14 cadence:** once per migration batch, not per PR/story. Reuse unchanged evidence, define the affected proof set and duration/investigation budget first, and follow DEC-7's stop rules.
 - The base commit and the head commit are built and run **on the same runner, in the same job**.
 - They run on **shape-faithful random weights**: real dimensions, truncated depth. Tiny weights do not exercise quantized kernel paths (`candle-llm/src/primitives/quant.rs:8`).
 - The comparison is in-job. No goldens are committed (standing rule `never_commit_a_machine_dependent_value_in_a_golden`).
 - MLX runs on `nax-macos-2` through an `rw-*` label (the workflow needs that route added); candle runs on a CUDA runner labelled `real-weights`.
 
-**Tier 2: real-weight proof on the proof set.** Run at feature end. A/B per ⟂DEC-15.
+**Tier 2: real-weight proof on the proof set (DEC-15 approved).** At feature end, A/B only the affected proof-set routes on the same runner and window, reusing applicable evidence and combining fidelity/time/memory observations. This includes refactor-only features, with no new calibration or memory campaign. DEC-7 bounds numerical investigation.
 
-**Accept:** every consolidation PR shows Tier 0 green before and after. Tier 1 runs at the cadence set by ⟂DEC-14. Tier 2 follows ⟂DEC-15.
+**Accept:** every consolidation PR shows Tier 0 green before and after. Tier 1 follows approved DEC-14; Tier 2 follows approved DEC-15. Resource discovery/holds, duration declaration and separately dispatched learned execution apply when implementation is authorized. These design approvals trigger no run now.
 
 **MIG-4 — The proof set covers each latent layout, loop kind, guidance kind, stream kind and modality.** It is listed in the implementation plan §8. **Accept:** recorded evidence for every family whose code changed.
 
@@ -674,7 +677,7 @@ Pure admission and routing logic lives cfg-free in `sceneworks-core`, so it runs
 
 ### 6.16 First consumer: low-res start (FEAT)
 
-**FEAT-1 — "Low-res start" is an opt-in recipe-class Feature.** The mechanics are recipe v1, in IMPLEMENTATION_PLAN §6.1 and §3.1 (⟂DEC-10).
+**FEAT-1 — "Low-res start" is an opt-in recipe-class Feature.** The mechanics are recipe v1, in IMPLEMENTATION_PLAN §6.1 and §3.1 (DEC-10).
 
 - **Behaviour:**
   - It runs the first K executed steps of the first denoising pass at reduced spatial resolution.
@@ -764,7 +767,7 @@ These are measured at baseline and again at every feature end. They are **goals,
 2. **Branches:**
    - Mirrored `feature/*` branches in both repos.
    - Merge-commit only, `strict: false`, no merge queue.
-   - The inference branch policy must accept CodeGraph keys before the first feature (⟂DEC-11).
+   - The inference branch policy must accept CodeGraph keys before the first feature (approved DEC-11). Reuse a verified delivered fix; land only a missing prerequisite.
 3. **Pin:**
    - At least 8 sites plus `Cargo.lock`. Constraint 3 in [H] supersedes the "five sites" figure in [G §7.2].
    - Coalesce to one pin bump per feature. Never a pin-only PR.
@@ -794,7 +797,7 @@ These are measured at baseline and again at every feature end. They are **goals,
 
 ## 10. Decisions and approval status
 
-**DEC-1…8 approved by Michael on 2026-11-03. DEC-4 is approved in full, including chained-pass product scope; DEC-9…19 remain open.** Approvals here select the design direction; they do not approve the whole design or authorize implementation during this design-only discussion.
+**All DEC-1…19 approved by Michael on 2026-11-03.** DEC-1…8 were settled individually; Michael then accepted the remaining recommendations together. Conditions, fallbacks, bounded validation and later per-route exceptions remain as stated. This completes §10 design decisions, with no implementation, tracker creation, pilot or model execution authorized during this design-only discussion.
 
 | ID | Decision | Options | Recommendation / decision (confidence) | Affects |
 |---|---|---|---|---|
@@ -806,17 +809,17 @@ These are measured at baseline and again at every feature end. They are **goals,
 | **DEC-6 — Approved** | **Structural checks** for shared attention/guidance/schedule ownership, allowed model-id locations and dependency direction. | Narrow automated checks in the existing suite; review/search only | **Michael approved narrow structural checks within TOOL-4's limits (2026-11-03).** Introduce alongside consolidation; prefer visibility/types/Cargo boundaries, with focused syntax checks for gaps. Document legitimate backend/native exceptions and actionable failures. Existing suite/CI lanes only, without model execution. Preserve the ban on memory/measurement gates; no source-hash snapshots, evidence-currency or formatting-sensitive checks. Numerical/runtime proof remains separate. Design-only. (High in narrow checks' value; medium in exact boundaries until migration.) | PIPE-8/9, BACK-2, APPREG-2, PAT-5, TOOL-4 |
 | **DEC-7 — Approved** | **Numerics classes and bounded validation (AP13).** | Bit-exact only; (a)/(b)/(c) with bounded investigation | **Michael approved the revised policy (2026-11-03): bit-exact is preferred, with bounded effort.** Default target (a); supported (b) uses predefined component-specific bounds and acceptable output evidence; material/semantic changes (c) need per-route sign-off. Use finite proof/investigation budgets, reuse evidence and stop GPU retries solely for sub-tolerance drift. Further runs need a concrete unresolved question or relevant changed numerics. “<1%” is illustrative, not a universal threshold. Component limits are set at feature planning; exact pilot exceptions remain explicit. Design-only. (High in bounded-effort policy; medium in unmeasured component limits.) | PIPE-10, COMP-1/4, WGT-3, BACK-5 |
 | **DEC-8 — Approved** | **Feature classes and activation authority.** | Extend the "approximation" regime; explicit recipe/equivalent/diagnostic classes | **Michael approved recipe / equivalent / diagnostic (2026-11-03).** Recipes are user-chosen or part of the selected recipe; equivalent Features preserve intent within declared, evidenced quality bounds and are the only admission-selectable class; diagnostics are explicitly configured observation. Admission cannot silently enable low-res start, add passes, change quantization tier or activate diagnostics to fit memory; insufficient permitted adjustments produce a typed refusal. Quality evidence follows bounded DEC-7 validation. These classes are distinct from AP13's migration-fidelity classes. Design-only. (High.) | HOOK-2, MEM-4 |
-| **DEC-9** | **Web validation mechanism.** | Server endpoint per change; core validator compiled to WebAssembly and run in the browser; hybrid (availability cached per (model, backend, mode) plus server round-trip for cross-field rules) | **WebAssembly-compiled core validator.** One Rust implementation, instant, works offline and over the RunPod proxy. Cost: wasm build and bundle size. **Fallback:** hybrid. (Medium.) | OPT-4 |
-| **DEC-10** | **Low-res start recipe v1** (mechanics: PLAN §6.1, §3.1). | Coverage and modes; step domain; scale and grid policy; estimator; schedule policy; quality acceptance | **Coverage:** every structurally supporting route; noise-start plus img2img. Edit, reference and control refuse on the targeted pass until COMP-5. **Step domain:** the first denoising pass, once; `1 ≤ K < M` executed steps; default `max(1, floor(M/2))`. **Scale:** 0.25–0.9, default 0.5, floor-to-quantum, refuse when invalid. **Schedule:** full-pass schedule and `mu` kept. **Estimator:** `EndpointEvaluation` default; `PreviousEvaluation` is a candidate that completes K steps normally and retains the last step's named guided primary x0. It skips no integration/sub-evaluation; it adds no endpoint forward. Require solver support and bounded quality/time/memory comparison before recipe finalization, with no percentage saving assumed. **Fixed:** estimator identity and semantics are persisted/versioned; no runtime/admission estimator switch; only K/scale user controls. **Quality:** FEAT-1's bounded checks and replay. Proposed, not approved by this revision. (Medium on quality/benefit; high on explicit semantics.) | FEAT-1, PIPE-2/4/5, ADM-3 |
-| **DEC-11** | **Tracker naming in inference CI.** | Land the CodeGraph-key policy fix first; use `sc-` names | **Policy fix first, as a prerequisite PR.** (High.) | MIG-1 |
-| **DEC-12** | **Branch lifetime window.** | ≤4, ≤6 or ≤8 weeks | **≤6 weeks, with a re-plan if it is exceeded.** (Medium.) | MIG-1 |
-| **DEC-13** | **Routes that cannot change geometry or adapters per phase** (Mage watermark, merge-only adapters, fixed-grid planners), plus any driver refusal under PIPE-7. | Refuse; change product behaviour | **Refuse with a typed reason.** Each refusal is listed for your approval when its feature is planned. (High.) | HOOK-4, FEAT-1, PIPE-7 |
-| **DEC-14** | **Tier 1 cadence.** This is an explicit exception to FEATURE_DEVELOPMENT.md's "no per-story validation matrix". | Feature end only; per migration batch; per PR | **Per migration batch, on `nax-macos-2` and a CUDA `real-weights` runner, about 1–3 runner-hours per batch.** Refactors touching numerics on about 40 families × 2 backends cannot wait for the feature end. (Medium-high.) | MIG-3 |
-| **DEC-15** | **Tier 2 for refactor-only features.** SW-F327 E7 says "no campaign solely for refactoring". | None; A/B proof subset per feature | **A/B on the proof-set routes the feature touched, same runner, same window.** Not a campaign. (Medium.) | MIG-3, PERF-1/2 |
-| **DEC-16** | **Backend-capability matrix** (`routing/matrix.rs` digesting 61 sources, `matrix.json`, `exceptions.json`). | Delete; regenerate from `ModelSpec` without source digests | **Delete at the start of APP-1.** `ModelSpec` plus the export make it redundant, and it would fire on almost every APP PR. (Medium-high.) | TOOL-1 |
-| **DEC-17** | **Memory matrix generator** (255k lines, regex over 19 Rust files). | Delete; regenerate from typed dumps | **Delete.** The evidence store and admission replace its purpose (AP11). (Medium.) | TOOL-1 |
-| **DEC-18** | **Proof for the memory-adapter rewrite** (real model execution). | One dispatched old-vs-new run on `nax-macos-2` and CUDA, duration stated; no proof | **One dispatched equivalence run, duration stated up front.** (Medium.) | TOOL-2 |
-| **DEC-19** | **Progress unit.** | Outer steps (today); model evaluations (sc-20414) | **Outer steps, user-visible. Evaluations stay internal.** (High.) | PIPE-6 |
+| **DEC-9 — Approved** | **Web validation mechanism.** | Server round-trips; shared Rust validator in WebAssembly; hybrid | **WebAssembly for pure validation rules, with hybrid fallback if portability or bundle cost is disproportionate.** Same rules as native callers; browser metadata is a snapshot. Server revalidates submissions; live model/device/memory checks remain server/worker-owned. Verify cold start, offline behavior, build/bundle cost and interactive feedback at APP-2 planning. No duplicated JavaScript rules. (Medium.) | OPT-3/4, APP-2 |
+| **DEC-10 — Approved** | **Low-res start recipe v1** (PLAN §6.1, §3.1). | Coverage; coordinates; scale/grid; estimator; schedule; quality | **Every structurally supporting route; noise-start plus img2img.** Edit/reference/control on the target pass refuse until COMP-5. First denoising pass only, once; `1 ≤ K < M` executed steps, default `max(1, floor(M/2))` for M ≥ 2. Scale 0.25–0.9, default 0.5, floor-to-quantum; invalid grids refuse. Keep full-pass schedule/shift. `EndpointEvaluation` default; completed-K `PreviousEvaluation` remains a solver-supported candidate judged by bounded quality/time/memory comparison. Persist estimator identity/semantics; no runtime/admission switch; only K/scale controls. FEAT-1 quality/replay acceptance applies, with no fixed saving promised. (Medium on quality/benefit; high on semantics.) | FEAT-1, PIPE-2/4/5, ADM-3 |
+| **DEC-11 — Approved** | **Tracker naming in inference CI.** | CodeGraph-key policy fix first; legacy names | **CodeGraph-key policy first, before the first feature.** Verify whether the required fix already landed and reuse it; otherwise land the missing policy change as a prerequisite PR. No naming workaround or duplicate fix. (High.) | MIG-1, ENG-1a |
+| **DEC-12 — Approved** | **Branch lifetime window.** | ≤4, ≤6 or ≤8 weeks | **≤6 weeks, with re-planning if exceeded.** Split oversized features at complete consumer boundaries during planning; preserve full scope and terminal acceptance. The window does not authorize dropping work. (Medium.) | MIG-1 |
+| **DEC-13 — Approved** | **Structurally unsupported geometry/adapter changes and PIPE-7 driver operations.** | Typed refusal; change product behavior | **Refuse with a typed reason.** Inventory specific refusals and present them for per-route approval at feature planning; this approves the refusal policy, not an unnamed scope reduction. Supported native generation remains available. (High.) | HOOK-4, FEAT-1, PIPE-7 |
+| **DEC-14 — Approved** | **Tier 1 cadence**, a scoped exception to the no-per-story validation matrix rule. | Feature end; migration batch; every PR | **Per migration batch**, separately dispatched on the designated MLX host and CUDA `real-weights` lane. Reuse unchanged evidence and batch relevant routes; no per-PR or Cartesian campaign. Apply DEC-7 finite investigation budgets. The prior 1–3 runner-hour range is a low-confidence planning estimate, not measured duration or an execution grant. Discover live runner access/labels and state duration before dispatch. (Medium-high in cadence; low in duration.) | MIG-3 |
+| **DEC-15 — Approved** | **Tier 2 for refactor-only features.** | None; affected proof subset | **A/B on affected proof-set routes at feature end, same runner and window.** Reuse applicable evidence, combine fidelity/time/memory observations and apply DEC-7 bounded effort. No new calibration/memory campaign solely for refactoring. (Medium.) | MIG-3, PERF-1/2 |
+| **DEC-16 — Approved** | **Backend-capability source-digest matrix.** | Delete; regenerate without digests | **Delete at APP-1 start.** Migrate its consumers to ModelSpec/capability export and remove `routing/matrix.rs`, `matrix.json` and `exceptions.json`; no replacement source-digest gate. (Medium-high.) | TOOL-1, APP-1 |
+| **DEC-17 — Approved** | **Memory matrix generator and generated mirror.** | Delete; regenerate from typed dumps | **Delete in APP-7.** Evidence store/admission own the facts; migrate consumers and preserve required measured evidence/provenance before removing the generator, its tests and generated mirror. No new matrix or campaign. (Medium.) | TOOL-1, APP-7 |
+| **DEC-18 — Approved** | **Memory-adapter rewrite proof.** | Paired dispatched equivalence proof; none | **One bounded old-vs-new equivalence proof on each designated MLX/CUDA backend, duration stated beforehand.** Combine with applicable feature-end evidence, record settings/source/device/results, and follow DEC-7's rerun limits. Actual dispatch waits for implementation authorization and live resource checks. (Medium.) | TOOL-2, APP-7 |
+| **DEC-19 — Approved** | **Progress unit.** | Outer steps; model evaluations | **User-visible outer steps.** Evaluation accounting stays internal; estimator/corrector evaluations do not invent completed outer steps. Pass/phase composition preserves the declared progress coordinates. (High.) | PIPE-6 |
 
 ---
 

@@ -4,7 +4,7 @@ This is a design-only program. Its aim is to slim SceneWorks and its inference e
 
 | Document | Purpose |
 |---|---|
-| [REQUIREMENTS.md](REQUIREMENTS.md) | Problem, goals, principles (AP1–AP13), requirements, acceptance, metrics, and **decision status** (§10: DEC-1…8 approved; DEC-9…19 open). |
+| [REQUIREMENTS.md](REQUIREMENTS.md) | Problem, goals, principles (AP1–AP13), requirements, acceptance, metrics, and **decision status** (§10: all DEC-1…19 approved). |
 | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | Target architecture, hook map, design traces (§6.5–6.8), production chunk adoption boundary (§6.9), migration, validation, roadmap (ENG-1a/1b…16 with ENG-4a/4b, APP-1…7), and risks. |
 | [REVIEW_LOG.md](REVIEW_LOG.md) | The disposition of every review finding, round by round. |
 | [evidence/](evidence/) | Eight research reports and review reports (round 0 and rounds 2–6). Source-behavior citations retain inference `a43724b82` and SceneWorks `a1d95e2c4`; CodeGraph identifies the current streaming owner. Design walkthroughs are not executed proof. Current dispositions live in REVIEW_LOG. |
@@ -25,17 +25,17 @@ This is a design-only program. Its aim is to slim SceneWorks and its inference e
 
 ## Status
 
-**Draft 0.5.** It addresses all four round-5 findings while retaining the ENG-1a/1b split, earlier numerical/state contracts, existing persistence path and low-confidence planning estimates:
+**Draft 0.6 — all 19 design decisions approved by Michael on 2026-11-03.** DEC-1…8 were settled individually; Michael accepted the remaining recommendations together. The requirements and plan record the selected policies and their conditions.
 
-- **Pricing** reuses aggregate phase/operation evidence with a declared inclusion basis and adds only extra coexisting component/buffer costs. Workspace is covered without a program-wide allocation model or new measurement gate.
-- **Estimator candidate:** `PreviousEvaluation` completes K steps normally and retains their final step's named guided primary x0; it skips no integration. Endpoint evaluation stays default. Choice/provenance is persisted; no fixed saving is assumed.
-- **Chunk adoption:** the current Krea batch path uses one terminal chunk through the shared production output primitive. Repeated decoded streaming stays with **SW-F148 (`sc-8432`)**, including its NO-GO outcome; no dormant streaming hook is justified by a mock alone.
-- **Roadmap:** 17 non-pilot engine features; 25 nodes including pilots and application features. ENG-16 adds the approved configurable chained-pass recipe after ENG-7 and APP-2/3. The calendar remains a low-confidence estimate, with its parallel-delivery assumption stated in the plan.
+- **Shared architecture:** shared host math and layer APIs are the baseline; generic model graphs remain conditional on both pilots. Audio, LLM-based encoders and training are included with staged adoption.
+- **Runner and recipes:** all three schedule sources; selective prior-art reuse; configurable chained passes; approved low-res recipe v1 with endpoint estimation as default. The previous-estimate candidate still needs its bounded comparison and persisted identity.
+- **Control and fidelity:** preserve user choice through recipe/equivalent/diagnostic classes. Admission selects only equivalent Features and never changes quantization tier. Bit-exact output is preferred, with predefined component tolerances and bounded investigation; no endless GPU retries or universal 1% threshold. Material output changes and pilot exceptions remain explicit.
+- **App validation:** pure Rust rules compiled to WebAssembly, authoritative server revalidation and local-state checks; hybrid fallback if portability/bundle cost is disproportionate. APP-2 verifies measurable UX/build budgets.
+- **Delivery and proof:** CodeGraph naming policy first, ≤6-week feature branches with re-planning, typed structural refusals, Tier 1 per migration batch and affected Tier 2 proof subsets at feature end. Evidence is reused and learned execution stays separately dispatched. SW-F327 overlap waits for main delivery; narrow structural checks use existing tests/CI.
+- **Simplification:** delete the source-digest capability matrix and generated memory matrix through their owning features, preserving required evidence and migrating consumers. One bounded paired memory-adapter proof per designated backend; user-visible progress stays in outer steps.
+- **Pricing and output:** aggregate phase/operation evidence covers workspace and concurrent extras without a program-wide allocation model. Shared production terminal-chunk adoption remains in SGA; repeated decoded streaming stays with SW-F148 (`sc-8432`).
+- **Roadmap:** 17 non-pilot engine features; 25 nodes including pilots and application features. ENG-16 delivers configurable chained passes after ENG-7 and APP-2/3. Calendar estimates and parallel-delivery assumptions remain low-confidence.
 
-The round-6 self-review found no unresolved blocker or major finding in the corrected scope. It is a document-level assessment, not native implementation or performance evidence. Michael explicitly approved DEC-1…8 on 2026-11-03: (b) is the backend baseline, with (c) conditional on both pilots passing; audio, LLM-based encoders and training are included, with interfaces designed from the start and staged adoption around the image/video core; all three schedule sources resolve into one immutable per-pass representation. DEC-4 includes configurable chained passes. DEC-5 permits future independent engine progress while overlapping SceneWorks changes wait for remediation on `main` and re-baseline. DEC-6 permits narrow structural checks in existing tests/CI, with no model execution or new memory/measurement gates. DEC-9…19 remain open. The discussion remains design-only; neither pilots nor implementation are authorized by individual decision approvals.
+The round-6 self-review remains historical document-level evidence. The post-decision consistency check is recorded in REVIEW_LOG; no native quality, performance or implementation acceptance is implied. Confidence is high in the documented contracts and medium in unmeasured native feasibility/performance.
 
-No CodeGraph features or items will be created until the design is approved. After approval, each roadmap feature is planned individually with `codegraph-plan`.
-
-Approved DEC-7: prefer bit-exact output, with bounded investigation and no repeated GPU cycles solely to eliminate small, accepted numerical differences. Component-specific tolerances are defined at feature planning; material output changes need per-route approval. “<1%” is not a universal acceptance threshold, and pilot exceptions remain explicit.
-
-Approved DEC-8: recipe / equivalent / diagnostic Feature classes. Admission may select only equivalent Features within declared quality bounds; creative recipes remain explicitly chosen, diagnostics explicitly configured, and the quantization tier unchanged by admission.
+This remains design-only. No CodeGraph program features/items, implementation, pilots, builds, CI dispatches or model runs were started. When implementation is separately requested, plan each roadmap feature with `codegraph-plan`, verify live prerequisites and execute through its tracked items.

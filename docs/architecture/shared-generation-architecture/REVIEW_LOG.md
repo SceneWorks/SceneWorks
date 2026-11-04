@@ -217,3 +217,25 @@ Recorded in REQUIREMENTS (AP13, PIPE-10 and §10), PLAN (§7.3) and README. Conf
 **DEC-8 approved by Michael:** classify Features as recipe, equivalent or diagnostic. Recipes are explicitly user-chosen or part of the selected recipe. Admission may select only equivalent Features with declared, evidenced quality bounds; it cannot silently add low-res start/passes, change quantization tier or enable diagnostics to fit memory. Diagnostics are explicitly configured observation. Insufficient permitted adjustments produce a typed refusal. Feature classes govern runtime activation; AP13 classes govern migration fidelity. Quality evidence follows DEC-7's bounded-validation policy.
 
 Recorded in REQUIREMENTS (HOOK-2, MEM-4 and §10), PLAN (§3.4) and README. Confidence: high. DEC-9…19 remain open: eleven decisions. Design-only: no implementation, program tracker items, builds or execution. Next discussion: DEC-9, web validation mechanism.
+
+## Decision review complete — draft 0.6 (2026-11-03)
+
+Michael accepted the remaining recommendations together after approving DEC-1…8 individually. **All DEC-1…19 are now approved design decisions.** This selects the design direction and its stated conditions; it does not authorize implementation, tracker creation or learned execution during this design-only review. Per-route output changes, specific scope exceptions, pilot outcomes and component limits retain their explicit review/evidence requirements.
+
+| Decision | Approved direction |
+|---|---|
+| DEC-9 | Pure Rust validator in WebAssembly; authoritative server/worker checks; hybrid fallback for disproportionate portability/bundle cost. APP-2 sets and verifies UX/build budgets. |
+| DEC-10 | Low-res recipe v1's declared scope, K/scale/grid/schedule rules and replay. Endpoint evaluation remains default; completed-K previous estimate remains conditional on solver support and bounded comparison. |
+| DEC-11 | CodeGraph-key policy first; verify/reuse a delivered fix or land only the missing prerequisite. |
+| DEC-12 | ≤6-week feature branch window; split/re-plan without dropping scope. |
+| DEC-13 | Typed refusals for structurally unsupported operations; list concrete route exceptions for review at planning. Native generation remains available. |
+| DEC-14 | Separately dispatched Tier 1 per migration batch, with evidence reuse and DEC-7 budgets; no per-PR/Cartesian campaign. Discover live runner access before use. |
+| DEC-15 | At feature end, affected proof-set A/B on the same runner/window, combining fidelity/time/memory observations and reusing evidence; no refactor-only calibration campaign. |
+| DEC-16 | APP-1 deletes the capability source-digest matrix and migrates its consumers. |
+| DEC-17 | APP-7 deletes the memory generator/mirror after consumer migration and required evidence/provenance preservation. |
+| DEC-18 | One bounded paired old-vs-new memory-adapter proof on each designated backend, duration stated beforehand and combined with applicable feature-end evidence. No run now. |
+| DEC-19 | User-visible outer steps; evaluation accounting internal. |
+
+Synchronized REQUIREMENTS (status, §10 and affected requirements) and PLAN (validation, recipe, migration, roadmap dependencies and proof policy); README now summarizes the approved design. Duration, quality and performance estimates remain estimates, not measured acceptance. Confidence: high in recorded choices and contract consistency; medium in unmeasured native feasibility/quality/performance. This is a document consistency check by the revision author, not an independent architecture review or runtime validation.
+
+Verified all 19 unique decision rows are Approved, with no stale open-decision markers in the current requirements/plan/README. Local document links, code fences and whitespace pass. The 25-node roadmap remains acyclic with 17 non-pilot engine features; decision approval changed no dependency edge. Only the four design documents changed. No product code, tracker items, build/test model execution, CI dispatch or shared resource use occurred.

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…8 were approved by Michael on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-9…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
+| **Status** | **Draft 0.6, design decisions approved.** Addresses all four round-5 findings. DEC-1…19 were approved by Michael on 2026-11-03; the remaining recommendations were accepted together after DEC-8. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
 | **Date** | 2026-11-03 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
 | **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
@@ -66,7 +66,7 @@ INFERENCE REPO
                                    │ bundles only (REG-5)
 SCENEWORKS                         ▼
   core   : registry::ModelSpec (static layer ⊕ runtime layer) · OptionSpec + validate()
-           (also compiled to wasm for web, DEC-9) · request upgrader · admission core
+           (pure rules also compiled to wasm for web, DEC-9) · request upgrader · admission core
            (cfg-free, pure) · routing table
   worker : generation lane + LaneHooks · BackendBudget impls · one event consumer ·
            backend module (mlx | cuda | none)
@@ -257,7 +257,7 @@ pub enum BoundaryState<L> {
 - Then use the captured x0 for the declared clean-sample transition at destination σ[K]. Preserve its original σ[K−1], input-state, slot, adapter/branch and dtype provenance; do not relabel it as an endpoint estimate. At a coincident expert boundary its source slot may differ from the slot chosen at σ[K]. The next trajectory evaluation uses the destination phase's normal slot rule.
 - The transition resets incompatible solver/guidance/Feature state and preserves absolute RNG coordinates as for the default recipe. Capture itself neither adds a guidance update nor a noise draw. Retaining x0 through the corrector/midpoint can increase peak memory; price that retained buffer where it coexists with the operation evidence (§3.9).
 - A solver/driver declares whether it exposes this precise guided primary estimate without another model forward and with normal step completion. Shared Euler, Heun and DPM++ SDE paths can use the same capture seam; each needs its trace. Other native drivers must prove the same contract or refuse this **candidate**, leaving the default estimator's coverage intact. No new solver or early-exit variant is introduced.
-- Resolve estimator choice at recipe finalization under DEC-10, persist it and its semantic version/provenance with the resolved recipe, and reject unsupported or unknown identities. It is not a runtime quality switch or an admission-selected approximation. The only proposed UI controls remain K and scale.
+- Resolve estimator choice at recipe finalization under approved DEC-10, persist it and its semantic version/provenance with the resolved recipe, and reject unsupported or unknown identities. It is not a runtime quality switch or an admission-selected approximation. The approved v1 UI controls remain K and scale.
 - There is no fixed percentage saving. Compare full elapsed time, quality and peak memory using the existing bounded proof set. The removed endpoint work's cost depends on scale, M/K, solver and encode/decode overhead; retention can offset some of the benefit.
 
 **Weights-free protocol examples (not runtime evidence):** for K=2, Euler completes steps 0 and 1 and retains the primary x0 from step 1. Heun additionally completes each required corrector, but still retains step 1's **primary** estimate, not its corrector. DPM++ SDE completes step 1's midpoint and its draw addresses 2 and 3 (and earlier step 0 draws 0 and 1); the next step uses addresses 4 and 5 if that step draws. Both estimators have two completed low-res progress ticks. Only the default then performs the read-only endpoint evaluation; the candidate transitions from its captured earlier x0. Tests assert the actual conditional draw sequence, state commits and hooks rather than forcing draws on a terminal node where the solver omits them.
@@ -646,7 +646,7 @@ pub struct OptionSpec {
 - **Seed:** the union of `ADVANCED_KEY_RULES`, `TECHNIQUE_KEYS`, production `advanced.get` literals and film-plan keys.
 - **Custom renderers**, enumerated: phase editor, poses, layout editors, StructuredPrompt, H3VedaSettings, the MOSS family, PromptBatch, SampleIndex, NumberPair, the YuE2 lab, the Ideogram caption and the Character builder.
 - **Studios:** Image, Video, Audio, Training, the Simple studios and Character.
-- **Validation (DEC-9):** `core::validate` is compiled to wasm for the web. It is the same Rust code the API, MCP and worker call, so it runs instantly, offline and through the RunPod proxy. The hybrid approach is the fallback.
+- **Approved DEC-9 validation:** isolate the pure Rust validator from native runtime dependencies and compile it to WebAssembly for local feedback, using the same rules as API/MCP/worker validation. The server always revalidates submissions; live installed-model/device/memory checks stay server/worker-owned. Browser results use their metadata snapshot. APP-2 verifies a shared native/wasm corpus, compatible schema/validator versions, startup/bundle cost, offline behavior and measured interaction latency on desktop/RunPod. Set concrete UX budgets at its planning. If portability or bundle cost is disproportionate, use cached availability plus server cross-field validation, retaining one rule owner; no JavaScript rule copy.
 - **Versioning (OPT-6):** the upgrader handles payloads, recipes, studio settings, share envelopes, film plans, training plans, and the HTTP and MCP DTOs.
   - Writers emit v1-compatible shares when the share is expressible in v1.
   - A newer version is refused with a typed reason.
@@ -715,6 +715,7 @@ pub trait BackendBudget { fn probe(&self) -> Result<MemoryBudget, BudgetUnavaila
 
 - **APP-1, item 0, handles DEC-16:** delete `routing/matrix.rs`, `config/backend-capabilities/matrix.json` and `exceptions.json`. Without that, every APP PR would trip the 61-source digest.
 - **DEC-17:** delete the memory-matrix generator, its tests (`generate-memory-matrix.test.mjs`, `matrix-removed-sources.test.mjs`) and `docs/generated/memory-matrix.json`.
+- DEC-16/17 are approved deletions, not completed work. Their owning features migrate consumers and retain required measured evidence/provenance before removing mirrors. No source-digest gate or replacement matrix is introduced.
 - **The memory-adapter becomes one generic driver.** It covers `bin/mlx.rs`, `bin/candle.rs` and the auxiliary bins, and its workflow consumers in `memory-catalog-campaign.yml` are migrated. DEC-18 governs the single dispatched equivalence run.
 
 ---
@@ -762,7 +763,7 @@ The hook enum in code is the source of truth (HOOK-1). The table below is the de
 | SceneWorks `[SW]` | The `lowResStart` option entry, common parameter validation and web controls, all gated by the export. **Persistence:** a versioned `lowResStart` block (`{version, k, scale}` plus the resolved fields) travels through the existing `ADVANCED_KEY_RULES` and share path. There is no new upgrader: no legacy shape exists. Forward compatibility follows the existing share-envelope rules. APP-2's upgrader later adopts this block as one of its shapes (C4-05). **Admission:** ENG-1b updates admission on adopted routes to the shared plan and pricing interface and to per-phase scope identities (§3.9). It does not wait for APP-4, but it does wait for #3264 (DEC-5). |
 | **Not the PAT-1 measure** | ENG-1b legitimately touches SceneWorks option, validation and web files. PAT-1 is measured on a later Feature (§6.4). |
 
-**Version-1 recipe choices (proposed under DEC-10, R2-09).**
+**Version-1 recipe choices (approved DEC-10, R2-09).**
 
 - M is the selected pass's executed step count after strength truncation. Valid K is `1 ≤ K < M`; default `max(1, floor(M/2))` for M ≥ 2; slider fraction K/M. K=0/M or M<2 refuses. Changing steps/strength to invalidate K produces an issue, not a silent clamp. Feature absent is the no-op.
 - Scale is finite in [0.25,0.9], default 0.5. Spatial dimensions use `floor(full_dim * scale / legal_quantum) * legal_quantum`, then minimum, strict reduction and joint-grid checks. Invalid dimensions refuse with legal limits. Frames, audio duration/tokens and count remain unchanged. Native fixed tables permit only eligible interior boundaries.
@@ -946,6 +947,8 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 ### 8.2 Where runs happen
 
+- **Approved DEC-14/15/18 scope:** Tier 1 is per migration batch; Tier 2 is the affected proof subset at feature end; APP-7 includes one bounded old-vs-new memory-adapter proof on each designated backend, combined with applicable feature-end evidence. Declare finite proof/investigation budgets and duration before dispatch, reuse unchanged evidence and apply DEC-7's rerun criteria. The earlier 1–3 runner-hour estimate per Tier 1 batch is low-confidence, not a measured runtime or permission to spend it.
+- **Before actual dispatch:** discover both organization and repository runner scopes, group/repository access, labels and workflow restrictions; acquire the required shared-resource holds. Dated host names below describe routing intent, not current capacity. No dispatch, GPU loan or model execution occurs during this design-only approval.
 - **Tier 0:** ordinary PR CI.
 - **Tier 1 and Tier 2:** dispatched, with evidence recorded.
   - **Workflow change:** add an MLX route to `model-inference-proofs.yml` targeting `nax-macos-2` via an `rw-*` label. Today it targets hosted `macos-15`, and its `nax` label also matches the dev Mac [APP-30].
@@ -961,7 +964,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 ### 9.1 Conventions
 
 - **Item tags:** `[INF]` identifies inference work; independent items can proceed once implementation is authorized. `[SW]` overlap is checked against approved DEC-5's main-delivery gate.
-- **Feature size:** each feature is ≤6 weeks (DEC-12). A feature estimated above that is split at planning.
+- **Feature size:** each feature is ≤6 weeks (approved DEC-12). Split larger estimates at complete consumer boundaries during planning; if the branch window is exceeded, re-plan while retaining full scope and terminal acceptance.
 - **Estimates:** agent-time at **low confidence**, re-estimated with `codegraph-plan`.
 - **Slices are sketches.** Each feature becomes 5–12 mechanism slices with 1–3 local acceptance criteria.
 - **Every feature's exit** is stated against route-inventory rows (PIPE-18).
@@ -970,8 +973,8 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 | Feature | Scope (slices sketched) | Depends on | Est. |
 |---|---|---|---|
-| **ENG-1a: Runner core + FLUX.1 migration** (walking skeleton; no user-visible change) | **0** `[INF]` prerequisites: the DEC-11 policy PR; the route-inventory dump; baselines (LOC census, fact audit, iOS size); the Tier 1 workflow route on `nax-macos-2`; the prior-art salvage review. **1** `[INF]` the pass/phase `RenderPlan` with stream bundles; typed boundary states; request-owned solver, RNG and guidance state (`RunState`); dependency-keyed preparation; whole-plan validation; `BundleOps`; the runner driving `MemoryRequestScope` with actual phase identities; the error and count contracts. **2** `[INF]` **every FLUX.1 route on both backends** (t2i, img2img, ControlNet, IP, PuLID) moves onto the runner, class (a), and its legacy orchestration is deleted. **3** terminal. **Complete consumer boundary:** FLUX.1 runs entirely on the runner and the old path is gone (AP9). | — | 5–6 wk `[L]` |
-| **ENG-1b: Low-res start (first Feature)** | **1** `[INF]` `FeatureSpec` registry; parameter and composition applicability; the `features` field on the existing dump format; typed refusal, which fixes the silent `phases` ignore. **2** `[INF]` low-res recipe v1: `EstimateSource` (endpoint default; candidate completes K steps and retains named primary x0), the typed noise law, aggregate operation evidence plus transition buffers, scope identities; bounded quality/time/memory and replay acceptance (§6.1, §6.5). **3** `[SW]` existing admission consumers move to the plan and pricing inputs; the `lowResStart` option, validation, versioned persistence block and UI (no upgrader, C4-05). **4** terminal. | ENG-1a; DEC-3 approved; DEC-10/13 approval at planning; DEC-5 (`[SW]` waits for SW-F327 #3264) | 4–6 wk `[L]` |
+| **ENG-1a: Runner core + FLUX.1 migration** (walking skeleton; no user-visible change) | **0** `[INF]` prerequisites: verify the delivered CodeGraph-key branch policy or land its missing prerequisite PR (DEC-11); the route-inventory dump; baselines (LOC census, fact audit, iOS size); the Tier 1 workflow route on `nax-macos-2`; the prior-art salvage review. **1** `[INF]` the pass/phase `RenderPlan` with stream bundles; typed boundary states; request-owned solver, RNG and guidance state (`RunState`); dependency-keyed preparation; whole-plan validation; `BundleOps`; the runner driving `MemoryRequestScope` with actual phase identities; the error and count contracts. **2** `[INF]` **every FLUX.1 route on both backends** (t2i, img2img, ControlNet, IP, PuLID) moves onto the runner, class (a), and its legacy orchestration is deleted. **3** terminal. **Complete consumer boundary:** FLUX.1 runs entirely on the runner and the old path is gone (AP9). | — | 5–6 wk `[L]` |
+| **ENG-1b: Low-res start (first Feature)** | **1** `[INF]` `FeatureSpec` registry; parameter and composition applicability; the `features` field on the existing dump format; typed refusal, which fixes the silent `phases` ignore. **2** `[INF]` low-res recipe v1: `EstimateSource` (endpoint default; candidate completes K steps and retains named primary x0), the typed noise law, aggregate operation evidence plus transition buffers, scope identities; bounded quality/time/memory and replay acceptance (§6.1, §6.5). **3** `[SW]` existing admission consumers move to the plan and pricing inputs; the `lowResStart` option, validation, versioned persistence block and UI (no upgrader, C4-05). **4** terminal. | ENG-1a; DEC-3 approved; DEC-10/13 approved; specific route refusals reviewed at planning; DEC-5 (`[SW]` waits for SW-F327 #3264) | 4–6 wk `[L]` |
 | **ENG-2: Shared-driver image wave** | flux2, chroma, lens, anima, sd3, sana base, boogu base, qwen-image (t2i, edit, control), qwen-2.1, z-image (base, turbo, control), kolors curated, sdxl curated. Schedules as data, `img2img_start`, `mu`/shift; `RefBundle` grid-aligned typing. **Hires.fix becomes an engine Feature** (pass-local prompt/encode/reference bindings plus `PixelRoundTrip`, §6.6); preserve final-pass-only enhancement, legacy pixel-fit, seeds, events and output policies. `[SW]` migrate its existing admission consumers to `PricingPlan` component/phase/operation inputs and actual pass scopes, then delete the worker `HiresFixPlan` path. No wait for APP-4. | ENG-1b | 5–6 wk (split at planning if needed) |
 | **ENG-3: Shared-driver video wave** | Wan curated (σ-keyed MoE slot, history `Carry`), Mochi, SVD, SCAIL-2 | ENG-1b | 4–6 wk |
 | **ENG-4a: Backend primitives + media/LLM Linear spine** | Extract `mlx-layers`/`candle-layers` below media and LLM (§1.2); move primitive contracts without a media↔LLM edge. Migrate media Linears (including LTX-local) and LLM projections with existing dense/quantized/Prism/fused/trainable variants preserved. Resolve all consumers of the moved source in this feature; locked Cargo graph and iOS partitions remain valid. | ENG-2, ENG-3 | 5–6 wk `[L]`; re-estimate against the full projection inventory; split at a complete consumer boundary if larger |
@@ -994,12 +997,12 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 | Feature | Scope | Depends on | Est. |
 |---|---|---|---|
 | **APP-1: Model registry** | **0** delete the backend-capability matrix (DEC-16); hand-table inventory (APPREG-2). Static and runtime layers; one merge rule; job carries the `ModelSpec` snapshot; manifest v2 with upgrader; evidence store (keys verbatim); seeding; consumer migration. The static layer ingests **today's** dumps, and ENG-7 later migrates that ingest (producer migrates consumers). | DEC-5 gate | 5–6 wk |
-| **APP-2: Options core** | **0** control-inventory tool and "before" capture (§10.3). `OptionSpec` union seed; `validate()` at every boundary; wasm build (DEC-9); upgrader and versioning for all shapes; `IntentClass::Context`; option effects; typed refusal rendering; telemetry and stamp stability | APP-1 | 5–6 wk |
+| **APP-2: Options core** | **0** control-inventory tool and "before" capture (§10.3). `OptionSpec` union seed; `validate()` at every boundary; portable-validator wasm build and native/browser corpus, startup/bundle/latency budgets, hybrid fallback (approved DEC-9); upgrader and versioning for all shapes; `IntentClass::Context`; option effects; typed refusal rendering; telemetry and stamp stability | APP-1 | 5–6 wk |
 | **APP-3: Generated panels** | Image, Video, Audio, Training, Simple and Character studios; enumerated custom renderers; accessibility floor; delete `macGating.js`/`candleGating.js`/id gating. Zero diff on the control inventory. | APP-2 | 6 wk (split by studio if needed) |
 | **APP-4: Admission pipeline** | **0** re-inventory by grep. Unify the `PricingPlan` component/phase/operation inputs already delivered for migrated routes in ENG-1a…6; `BackendBudget`, per-route posture, decision-diff, ≥25 paths, typed refusal, one stamp, ADM-7 approvals. Keep legacy memory-contract data until ENG-13 migrates that input. APP-4 centralizes consumers; it does not first activate safe pricing for new Features. | ENG-6 (`RenderPlan` for all routes); APP-1; #3264 merged | 5–6 wk |
 | **APP-5: Generation lane I** | **0** `JobType` table. Image generation lane, one event consumer (on #3258), routing table | ENG-7 (REG-6), APP-1, APP-4 | 5–6 wk |
 | **APP-6: Generation lane II** | Video, audio and utility lanes; backend module (on #3270); LANE-6 API end state | APP-5; audio lane after ENG-14 | 5–6 wk |
-| **APP-7: Tooling** | Generic memory-adapter (DEC-18 run), typed dumps, delete the memory matrix (DEC-17) and mirrors | ENG-9, APP-1 | 4–5 wk |
+| **APP-7: Tooling** | Generic memory-adapter with one bounded paired proof per designated backend (approved DEC-18), typed dumps, consumer migration and evidence preservation before deleting the memory matrix (DEC-17) and mirrors | ENG-9, APP-1 | 4–5 wk |
 
 ### 9.4 Sequencing and delivery bounds
 
@@ -1099,7 +1102,7 @@ A checked-in script counts `git ls-files` lines per area in both repos, separati
 | R6 | iOS size and memory | Med/Med | Baseline in ENG-1a; feature-partitioned crates; MEM-6 |
 | R7 | Training regressions | Med/Med | Trainers in Tier 1 from ENG-8 |
 | R8 | Hardware contention | High/Med | Live pool discovery per planning; Tier 1 off the dev Mac; batching |
-| R9 | Decision latency (DEC-1…19) | Med/Med | Each feature depends on a named decision subset |
+| R9 | Feature-specific exception and acceptance latency | Med/Med | All §10 policies are approved; batch concrete route exceptions with evidence at planning and keep independent work moving |
 | R10 | Hidden coupling (API embeds worker; 17 family crates linked) | Med/Med | REG-5 and REG-6 in ENG-7; LANE-6 in APP-6 |
 | R11 | MLX runtime and thread-state bugs invisible to in-crate tests | Med/High | Process-level worker validation whenever runner, `ExecPolicy` or residency changes |
 | R12 | Disk exhaustion from agent `target/` directories | High/Med | Clean finished `target/`; cap building agents |
