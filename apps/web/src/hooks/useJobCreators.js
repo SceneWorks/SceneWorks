@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { jobsApi } from "../api/jobsResources.js";
 import { useCallback, useMemo } from "react";
 import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../createJob.js";
@@ -136,5 +137,16 @@ export function useJobCreators({
       }),
     [token, activeProject, requestedGpu, setJobs, setError],
   );
-  return { createVideoJob, createAudioJob, createPlaceholderJob, createImageJob, createVectorJob, createVectorPromptWorkflow, createVideoUpscaleJob, createVqaJob, createInterleaveJob };
+  const context = useAppDomainValue({
+    createVideoJob,
+    createAudioJob,
+    createPlaceholderJob,
+    createImageJob,
+    createVectorJob,
+    createVectorPromptWorkflow,
+    createVideoUpscaleJob,
+    createVqaJob,
+    createInterleaveJob
+  });
+  return { ...context, context };
 }

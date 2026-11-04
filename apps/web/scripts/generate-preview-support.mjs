@@ -2,8 +2,8 @@
 // Run via `npm run gen:preview-support` (from apps/web). Emits BOTH:
 //   - config/manifests/builtin.preview-support.jsonc  (the backend catalog block sceneworks-core
 //                                                      embeds and rust-api merges onto /api/v1/models)
-//   - apps/web/src/data/previewSupport.json           (the web app's offline-fallback table)
-// from the SAME derivation, so the served and offline catalogs can never drift. The
+//   - apps/web/src/data/previewSupport.json           (test-only preview support data)
+// from the SAME derivation, so served preview facts and test fixtures stay aligned. The
 // previewSupportCatalog.test.js drift guards fail CI if either committed artifact falls out of sync
 // with its inputs, so this script is the only sanctioned way to update them.
 //

@@ -16,12 +16,13 @@
 //! with an `ffmpeg` fallback (and `ffmpeg`-only off macOS) — so it pulls in no native image-codec
 //! build (libdav1d/nasm/meson) and stays correct on the Windows candle lane.
 
-use std::borrow::Cow;
+use crate::media_process::{self, ProcessOutput};
 use std::fmt;
 use std::path::Path;
-#[cfg(any(windows, test))]
-use std::path::PathBuf;
+#[cfg(test)]
 use std::process::Command;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
 
 /// Raster image formats recognized by magic bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +205,117 @@ pub fn file_content_hash(path: &Path) -> std::io::Result<String> {
     crate::hashing::sha256_file(path)
 }
 
+/// Naming policy for an image copied without transcoding. Storage surfaces intentionally differ.
+#[derive(Debug, Clone, Copy)]
+pub enum ImageCopyNaming {
+    /// Dataset media retains its source extension; unknown/no-extension sources use the fallback.
+    SourceExtension(&'static str),
+    /// Keypoint sources use detected content, then a supported extension, then PNG.
+    Canonical,
+}
+
+/// The stored image and its content/naming metadata.
+#[derive(Debug)]
+pub struct IngestedImage {
+    pub path: std::path::PathBuf,
+    pub extension: String,
+    pub mime: &'static str,
+    pub source_kind: Option<ImageKind>,
+}
+
+#[derive(Debug)]
+pub enum IngestImageError {
+    Io(std::io::Error),
+    Transcode {
+        kind: ImageKind,
+        error: TranscodeError,
+    },
+}
+
+impl fmt::Display for IngestImageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(f),
+            Self::Transcode { kind, error } => write!(
+                f,
+                "Could not convert {} image to a supported format: {error}",
+                kind.label()
+            ),
+        }
+    }
+}
+impl std::error::Error for IngestImageError {}
+impl From<std::io::Error> for IngestImageError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Sniff once, transcode storage-unsupported formats, or copy the original bytes. Dataset media
+/// keeps its source extension (falling back to `.bin`), including unknown formats.
+pub fn ingest_image(source: &Path, dest_stem: &Path) -> Result<IngestedImage, IngestImageError> {
+    ingest_image_with_naming(source, dest_stem, ImageCopyNaming::SourceExtension("bin"))
+}
+
+/// The shared ingestion operation with a surface's explicit copy-naming policy. Transcoding uses
+/// the bounded platform converter, including its first-frame and HDR preview behavior.
+pub fn ingest_image_with_naming(
+    source: &Path,
+    dest_stem: &Path,
+    naming: ImageCopyNaming,
+) -> Result<IngestedImage, IngestImageError> {
+    let source_kind = sniff_image_kind_at(source);
+    let transcode_kind = source_kind.filter(|kind| !kind.is_natively_supported());
+    let source_extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let (extension, mime) = if transcode_kind.is_some() {
+        ("png".to_owned(), "image/png")
+    } else {
+        match naming {
+            ImageCopyNaming::SourceExtension(fallback) => (
+                source_extension.unwrap_or_else(|| fallback.to_owned()),
+                source_kind
+                    .map(|kind| kind.canonical().1)
+                    .unwrap_or("application/octet-stream"),
+            ),
+            ImageCopyNaming::Canonical => {
+                let canonical = source_kind
+                    .map(ImageKind::canonical)
+                    .or(match source_extension.as_deref() {
+                        Some("jpg" | "jpeg") => Some(("jpg", "image/jpeg")),
+                        Some("webp") => Some(("webp", "image/webp")),
+                        Some("png") => Some(("png", "image/png")),
+                        _ => None,
+                    })
+                    .unwrap_or(("png", "image/png"));
+                (canonical.0.to_owned(), canonical.1)
+            }
+        }
+    };
+    // Append rather than replace: callers supply an exact filename stem.
+    let mut filename = dest_stem.as_os_str().to_os_string();
+    filename.push(format!(".{extension}"));
+    let path = std::path::PathBuf::from(filename);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(kind) = transcode_kind {
+        transcode_to_png(source, &path)
+            .map_err(|error| IngestImageError::Transcode { kind, error })?;
+    } else {
+        std::fs::copy(source, &path)?;
+    }
+    Ok(IngestedImage {
+        path,
+        extension,
+        mime,
+        source_kind,
+    })
+}
+
 /// Failure converting an image to PNG.
 #[derive(Debug)]
 pub struct TranscodeError(pub String);
@@ -282,58 +394,24 @@ fn linear_to_srgb(x: f32) -> f32 {
 /// slightly; it is chosen because it is monotonic per channel, which is exactly what keeps
 /// super-white values apart in the output.
 pub fn transcode_hdr_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
-    let (width, height) = image_dimensions(src).ok_or_else(|| {
-        TranscodeError(format!(
-            "could not read HDR image dimensions from {}",
-            src.display()
-        ))
-    })?;
-    let (w, h) = (width as usize, height as usize);
-
-    let configured = ffmpeg_program();
-    let program = resolve_ffmpeg_program(&configured);
-    let output = Command::new(program.as_ref())
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
+    let (width, height) = hdr_dimensions(src)?;
+    let pixels = hdr_pixel_count(width, height)?;
+    let mut command = upload_ffmpeg_command();
+    command
+        .args(["-max_pixels", &MAX_HDR_PIXELS.to_string(), "-i"])
         .arg(src)
-        .args(["-f", "rawvideo", "-pix_fmt", "gbrpf32le", "-"])
-        .output()
-        .map_err(|error| {
-            TranscodeError(format!(
-                "failed to run ffmpeg ({configured}); ensure ffmpeg is installed: {error}"
-            ))
-        })?;
-    if !output.status.success() {
-        return Err(TranscodeError(format!(
-            "ffmpeg failed to decode the HDR image: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let plane = w * h;
-    let want = plane * 3 * 4;
-    if output.stdout.len() < want {
-        return Err(TranscodeError(format!(
-            "ffmpeg returned {} bytes for a {width}x{height} HDR image (need {want})",
-            output.stdout.len()
-        )));
-    }
-    let sample = |plane_index: usize, i: usize| -> f32 {
-        let at = (plane_index * plane + i) * 4;
-        f32::from_le_bytes([
-            output.stdout[at],
-            output.stdout[at + 1],
-            output.stdout[at + 2],
-            output.stdout[at + 3],
-        ])
-    };
-
-    let mut rgb = Vec::with_capacity(plane * 3);
-    for i in 0..plane {
-        // gbrp: plane 0 is G, plane 1 is B, plane 2 is R.
-        for linear in [sample(2, i), sample(0, i), sample(1, i)] {
-            let mapped = linear_to_srgb(reinhard(linear));
-            rgb.push((mapped * 255.0 + 0.5).clamp(0.0, 255.0) as u8);
-        }
-    }
+        .args([
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gbrpf32le",
+            "pipe:1",
+        ]);
+    let output = run_upload_command(command, move |stdout| read_hdr_planes(stdout, pixels))?;
+    require_success(&output, "decode the HDR image")?;
+    let rgb = output.stdout;
     let buffer = image::RgbImage::from_raw(width, height, rgb)
         .ok_or_else(|| TranscodeError("tone-mapped buffer did not match the image size".into()))?;
     buffer
@@ -342,147 +420,264 @@ pub fn transcode_hdr_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError
     ensure_nonempty_output(dst)
 }
 
-#[cfg(target_os = "macos")]
-fn run_sips_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
-    let output = Command::new("/usr/bin/sips")
-        .arg("-s")
-        .arg("format")
-        .arg("png")
-        .arg(src)
-        .arg("--out")
-        .arg(dst)
-        .output()
-        .map_err(|error| TranscodeError(format!("failed to run sips: {error}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+/// Bound HDR decoding before any frame allocation (64 megapixels, at most 192 MiB
+/// for the RGB preview). Decoder-side `max_pixels` also constrains a header mismatch.
+const MAX_HDR_PIXELS: usize = 64 * 1024 * 1024;
+const MAX_HDR_DIMENSION: u32 = 16_384;
+
+fn hdr_pixel_count(width: u32, height: u32) -> Result<usize, TranscodeError> {
+    let pixels = usize::try_from(width)
+        .ok()
+        .and_then(|w| usize::try_from(height).ok().and_then(|h| w.checked_mul(h)));
+    let Some(pixels) = pixels.filter(|pixels| *pixels > 0 && *pixels <= MAX_HDR_PIXELS) else {
         return Err(TranscodeError(format!(
-            "sips failed to convert image to PNG: {}",
-            stderr.trim()
+            "HDR dimensions {width}x{height} exceed the {MAX_HDR_PIXELS}-pixel preview limit"
+        )));
+    };
+    if width > MAX_HDR_DIMENSION
+        || height > MAX_HDR_DIMENSION
+        || pixels
+            .checked_mul(3)
+            .and_then(|n| n.checked_mul(4))
+            .is_none()
+    {
+        return Err(TranscodeError(format!(
+            "HDR dimensions {width}x{height} exceed the preview dimension/byte limit"
         )));
     }
+    Ok(pixels)
+}
+
+/// EXR's dataWindow describes stored pixels, while FFmpeg emits the displayWindow
+/// canvas (including black padding around a crop). imagesize reports only dataWindow.
+/// Inspect both before decoding so a small crop cannot hide an unbounded canvas.
+fn hdr_dimensions(src: &Path) -> Result<(u32, u32), TranscodeError> {
+    use std::io::{Read, Seek, SeekFrom};
+    if sniff_image_kind_at(src) != Some(ImageKind::OpenExr) {
+        return image_dimensions(src).ok_or_else(|| {
+            TranscodeError(format!(
+                "could not read HDR image dimensions from {}",
+                src.display()
+            ))
+        });
+    }
+    let file = std::fs::File::open(src).map_err(exr_header_error)?;
+    let file_len = file.metadata().map_err(exr_header_error)?.len();
+    let mut reader = std::io::BufReader::new(file);
+    let mut prelude = [0u8; 8];
+    reader.read_exact(&mut prelude).map_err(exr_header_error)?;
+    let flags = u32::from_le_bytes(prelude[4..8].try_into().expect("four-byte version"));
+    let name_limit = if flags & 0x400 != 0 { 255 } else { 31 };
+    let mut data_window = None;
+    let mut display_window = None;
+    for _ in 0..4096 {
+        let name = exr_attribute_name(&mut reader, name_limit)?;
+        if name.is_empty() {
+            return match (data_window, display_window) {
+                (Some(_), Some(display)) => Ok(display),
+                _ => Err(TranscodeError(
+                    "OpenEXR is missing dataWindow/displayWindow dimensions".into(),
+                )),
+            };
+        }
+        let kind = exr_attribute_name(&mut reader, name_limit)?;
+        let mut size = [0u8; 4];
+        reader.read_exact(&mut size).map_err(exr_header_error)?;
+        let size = u32::from_le_bytes(size);
+        let end = reader
+            .stream_position()
+            .map_err(exr_header_error)?
+            .checked_add(u64::from(size))
+            .filter(|end| *end <= file_len)
+            .ok_or_else(|| TranscodeError("OpenEXR attribute exceeds the file bounds".into()))?;
+        if name == b"dataWindow" || name == b"displayWindow" {
+            if kind != b"box2i" || size != 16 {
+                return Err(TranscodeError(
+                    "OpenEXR dimensions require a sixteen-byte box2i".into(),
+                ));
+            }
+            let mut window = [0u8; 16];
+            reader.read_exact(&mut window).map_err(exr_header_error)?;
+            let coords: Vec<_> = window
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| i64::from(i32::from_le_bytes(*bytes)))
+                .collect();
+            let width = u32::try_from(coords[2] - coords[0] + 1).unwrap_or(0);
+            let height = u32::try_from(coords[3] - coords[1] + 1).unwrap_or(0);
+            hdr_pixel_count(width, height)?;
+            let destination = if name == b"dataWindow" {
+                &mut data_window
+            } else {
+                &mut display_window
+            };
+            if destination.replace((width, height)).is_some() {
+                return Err(TranscodeError(
+                    "OpenEXR has duplicate dimension attributes".into(),
+                ));
+            }
+        }
+        reader
+            .seek(SeekFrom::Start(end))
+            .map_err(exr_header_error)?;
+    }
+    Err(TranscodeError(
+        "OpenEXR header exceeds the 4096-attribute preview limit".into(),
+    ))
+}
+
+fn exr_header_error(error: std::io::Error) -> TranscodeError {
+    TranscodeError(format!("could not read OpenEXR dimensions: {error}"))
+}
+
+fn exr_attribute_name(
+    reader: &mut impl std::io::Read,
+    limit: usize,
+) -> Result<Vec<u8>, TranscodeError> {
+    let mut name = Vec::new();
+    for _ in 0..=limit {
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte).map_err(exr_header_error)?;
+        if byte[0] == 0 {
+            return Ok(name);
+        }
+        if name.len() == limit {
+            break;
+        }
+        name.push(byte[0]);
+    }
+    Err(TranscodeError(
+        "OpenEXR attribute name exceeds the format limit".into(),
+    ))
+}
+
+async fn read_hdr_planes(
+    mut stdout: impl tokio::io::AsyncRead + Unpin,
+    pixels: usize,
+) -> std::io::Result<Vec<u8>> {
+    // Keep only the final RGB8 image and a fixed-size float chunk, never three full float planes.
+    let bytes = pixels
+        .checked_mul(3)
+        .ok_or_else(|| std::io::Error::other("HDR RGB size overflow"))?;
+    let mut rgb = Vec::new();
+    rgb.try_reserve_exact(bytes).map_err(|error| {
+        std::io::Error::other(format!("could not allocate HDR preview: {error}"))
+    })?;
+    rgb.resize(bytes, 0);
+    let mut floats = [0u8; 16 * 1024];
+    for channel in [1usize, 2, 0] {
+        // gbrpf32le is G, B, R.
+        let mut offset = 0;
+        while offset < pixels {
+            let count = (pixels - offset).min(floats.len() / 4);
+            stdout.read_exact(&mut floats[..count * 4]).await?;
+            for (index, sample) in floats[..count * 4].as_chunks::<4>().0.iter().enumerate() {
+                let linear = f32::from_le_bytes(*sample);
+                let mapped = linear_to_srgb(reinhard(linear));
+                rgb[(offset + index) * 3 + channel] =
+                    (mapped * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+            }
+            offset += count;
+        }
+    }
+    if stdout.read(&mut [0u8; 1]).await? != 0 {
+        return Err(std::io::Error::other(
+            "HDR decoder returned more than one dimension-matched frame",
+        ));
+    }
+    Ok(rgb)
+}
+
+/// Upload decodes are short utility work; operator settings may lower the bound, but
+/// a long-running export setting cannot turn an upload into a twelve-hour request.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn upload_ffmpeg_command() -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(media_process::ffmpeg_program("ffmpeg"));
+    command.args([
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-protocol_whitelist",
+        "file,pipe",
+    ]);
+    command
+}
+
+fn run_upload_command<F, R, T>(
+    command: tokio::process::Command,
+    read_stdout: F,
+) -> Result<ProcessOutput<T>, TranscodeError>
+where
+    F: FnOnce(tokio::process::ChildStdout) -> R + Send,
+    R: std::future::Future<Output = std::io::Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    // Public store/normalization APIs are synchronous and are also called inside Tokio
+    // request handlers. A dedicated thread avoids nested Runtime::block_on panics.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("media-utility".into())
+            .spawn_scoped(scope, move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        TranscodeError(format!("could not start media utility runtime: {e}"))
+                    })?;
+                runtime
+                    .block_on(media_process::run_command(
+                        command,
+                        None,
+                        media_process::ffmpeg_execution_timeout().min(UPLOAD_TIMEOUT),
+                        std::future::pending::<std::convert::Infallible>(),
+                        read_stdout,
+                    ))
+                    .map_err(|e| TranscodeError(e.to_string()))
+            })
+            .map_err(|e| TranscodeError(format!("could not start media utility thread: {e}")))?
+            .join()
+            .map_err(|_| TranscodeError("media utility thread panicked".into()))?
+    })
+}
+
+fn require_success<T>(output: &ProcessOutput<T>, action: &str) -> Result<(), TranscodeError> {
+    match output.failure_detail() {
+        None => Ok(()),
+        Some(detail) => Err(TranscodeError(format!(
+            "ffmpeg failed to {action}: {detail}"
+        ))),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_sips_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
+    let mut command = tokio::process::Command::new("/usr/bin/sips");
+    command
+        .args(["-s", "format", "png"])
+        .arg(src)
+        .arg("--out")
+        .arg(dst);
+    let output = run_upload_command(command, media_process::discard_stdout)?;
+    require_success(&output, "convert image to PNG with sips")?;
     ensure_nonempty_output(dst)
 }
 
-/// Resolve an ffmpeg program string to a spawn-ready path, working around a Windows launch
-/// failure. An executable reached through a symlink/reparse point — e.g. WinGet's
-/// `…\Microsoft\WinGet\Links\ffmpeg.exe` shim, a symbolic link to the real Gyan.FFmpeg binary —
-/// cannot be started under redirection-trust enforcement: `CreateProcess` returns
-/// `ERROR_UNTRUSTED_MOUNT_POINT` (os error 448), the very wall the HF-cache symlinks hit in the
-/// model loaders (see `sceneworks_worker::model_jobs`). We locate the program (searching `PATH`
-/// for a bare name) and, if it is a reparse point, resolve it to its real target — read **without
-/// traversing it** (`read_link`, chasing chained links) — and return that plain-file path. A plain
-/// executable, a name we cannot locate, or any non-Windows host returns the input unchanged so
-/// normal resolution (PATH search, the host's own ordering) is preserved.
-///
-/// This is the single resolver shared by the worker's `media_jobs::run_ffmpeg` and the transcoder
-/// below, so every ffmpeg spawn — timeline export, video encode, audio mux, frame extract, image
-/// transcode — is reparse-safe.
-pub fn resolve_ffmpeg_program(program: &str) -> Cow<'_, str> {
-    #[cfg(windows)]
-    {
-        if let Some(real) = resolve_ffmpeg_program_reparse(program) {
-            return Cow::Owned(real);
-        }
-    }
-    Cow::Borrowed(program)
-}
-
-/// Windows reparse-resolution core, factored out so it is unit-testable off-Windows
-/// (`#[cfg(any(windows, test))]`); the public resolver only invokes it under `#[cfg(windows)]`.
-/// Returns `Some(real_path)` only when the program resolves to a reparse point that must be
-/// rewritten; `None` (keep the original string) for a plain file or a name we cannot locate.
-#[cfg(any(windows, test))]
-fn resolve_ffmpeg_program_reparse(program: &str) -> Option<String> {
-    let located = locate_executable(program)?;
-    // A plain file launches fine — leave it to normal resolution.
-    if !is_symlink(&located) {
-        return None;
-    }
-    let real = resolve_reparse_chain(&located)?;
-    Some(real.to_string_lossy().into_owned())
-}
-
-/// `symlink_metadata` does not traverse the link, so a 448-prone reparse point is still detected.
-#[cfg(any(windows, test))]
-fn is_symlink(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false)
-}
-
-/// Find the file `CreateProcess` would launch. An explicit path is used as-is; a bare name is
-/// searched on `PATH` (trying the name and a `.exe` suffix). A candidate is accepted if it is a
-/// file *or* a symlink — the latter via `symlink_metadata`, which does not traverse and so still
-/// sees a link whose target cannot be opened.
-#[cfg(any(windows, test))]
-fn locate_executable(program: &str) -> Option<PathBuf> {
-    let direct = Path::new(program);
-    if direct.is_absolute() || direct.components().count() > 1 {
-        return (direct.exists() || is_symlink(direct)).then(|| direct.to_path_buf());
-    }
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        for suffix in ["", ".exe"] {
-            let candidate = dir.join(format!("{program}{suffix}"));
-            if candidate.is_file() || is_symlink(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-/// Follow a symlink to the first non-symlink path, resolving relative targets against the link's
-/// parent and bounding the walk so a cyclic link cannot loop forever. The caller only invokes this
-/// once `start` is known to be a symlink, so `read_link` runs without ever traversing the reparse
-/// point that would otherwise hit os error 448.
-#[cfg(any(windows, test))]
-fn resolve_reparse_chain(start: &Path) -> Option<PathBuf> {
-    let mut current = start.to_path_buf();
-    for _ in 0..16 {
-        if !is_symlink(&current) {
-            return Some(current);
-        }
-        let target = std::fs::read_link(&current).ok()?;
-        current = if target.is_absolute() {
-            target
-        } else {
-            current.parent()?.join(target)
-        };
-    }
-    None
-}
+// Compatibility export for callers of the original transcoder API.
+pub use crate::media_process::resolve_ffmpeg_program;
 
 fn run_ffmpeg_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
-    // Mirror the worker's ffmpeg resolution: the desktop app points SCENEWORKS_FFMPEG at its bundled
-    // binary (it ships no system ffmpeg); the server stack leaves it unset and uses PATH.
-    let configured = ffmpeg_program();
-    let program = resolve_ffmpeg_program(&configured);
-    let output = Command::new(program.as_ref())
-        .arg("-y")
-        .arg("-loglevel")
-        .arg("error")
+    let mut command = upload_ffmpeg_command();
+    command
         .arg("-i")
         .arg(src)
-        // Take a single frame so an animated input collapses to one still PNG.
-        .arg("-frames:v")
-        .arg("1")
-        .arg("-update")
-        .arg("1")
-        .arg(dst)
-        .output()
-        .map_err(|error| {
-            TranscodeError(format!(
-                "failed to run ffmpeg ({program}); ensure ffmpeg is installed: {error}"
-            ))
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(TranscodeError(format!(
-            "ffmpeg failed to convert image to PNG: {}",
-            stderr.trim()
-        )));
-    }
+        .args(["-frames:v", "1", "-update", "1"])
+        .arg(dst);
+    let output = run_upload_command(command, media_process::discard_stdout)?;
+    require_success(&output, "convert image to PNG")?;
     ensure_nonempty_output(dst)
 }
 
@@ -531,35 +726,19 @@ pub fn transcode_to_wav_pcm16(src: &Path, dst: &Path) -> Result<(), TranscodeErr
         })?;
         return ensure_nonempty(dst, "WAV");
     }
-    let program = ffmpeg_program();
-    let output = Command::new(resolve_ffmpeg_program(&program).as_ref())
-        .arg("-y")
-        .arg("-nostdin")
-        .arg("-loglevel")
-        .arg("error")
+    let input = audio_input_policy(src)?;
+    let mut command = upload_ffmpeg_command();
+    command.args(["-format_whitelist", SAFE_AUDIO_DEMUXERS]);
+    if let Some(demuxer) = input {
+        command.args(["-f", demuxer]);
+    }
+    command
         .arg("-i")
         .arg(src)
-        // First audio stream only, and never a video stream: an upload that is really a movie
-        // container, or an mp3 carrying cover art, must not put a picture into the WAV.
-        .arg("-map")
-        .arg("0:a:0")
-        .arg("-vn")
-        .arg("-c:a")
-        .arg("pcm_s16le")
-        .arg(dst)
-        .output()
-        .map_err(|error| {
-            TranscodeError(format!(
-                "failed to run ffmpeg ({program}); ensure ffmpeg is installed: {error}"
-            ))
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(TranscodeError(format!(
-            "ffmpeg failed to convert audio to PCM-16 WAV: {}",
-            stderr.trim()
-        )));
-    }
+        .args(["-map", "0:a:0", "-vn", "-c:a", "pcm_s16le"])
+        .arg(dst);
+    let output = run_upload_command(command, media_process::discard_stdout)?;
+    require_success(&output, "convert audio to PCM-16 WAV")?;
     ensure_nonempty(dst, "WAV")
 }
 
@@ -624,13 +803,74 @@ pub fn is_canonical_pcm16_wav(path: &Path) -> bool {
     tag == 1 && bits == 16 && channels > 0 && rate > 0 && data_len > 0
 }
 
-/// The ffmpeg the desktop bundle points at (`SCENEWORKS_FFMPEG`), else `ffmpeg` on PATH — the same
-/// resolution the worker's `media_jobs::run_ffmpeg` performs.
-fn ffmpeg_program() -> String {
-    std::env::var("SCENEWORKS_FFMPEG")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "ffmpeg".to_owned())
+/// Binary audio/container demuxers, deliberately excluding all playlists and text
+/// scripts (HLS, DASH, concat, SDP, image2, tty, etc.). Container uploads with cover
+/// art/video remain supported: only the first audio stream is selected by the caller.
+const SAFE_AUDIO_DEMUXERS: &str = "wav,mp3,flac,ogg,mov,matroska,webm,avi,flv,live_flv,mxf,aac,aiff,asf,amr,caf,au,ac3,eac3,dts,dtshd,mpeg,mpegts,ape,wv,tta,tak,alac,mlp,truehd,oma,dsf,iff,w64,rf64,loas,mpc,mpc8,shorten,spdif,adp,adx,aea,afc,aix,alp,aptx,aptx_hd,ast,avs,bfi,brstm,dcstr,dss,dxa,ea,ea_cdata,epaf,fsb,g722,g723_1,g726,g726le,gsm,ircam,iss,iv8,kvag,luodat,lvf,lxf,mca,mgsts,msf,mtaf,musx,nistsphere,nsp,nsv,nut,psxstr,pvf,qcp,r3d,rm,rpl,rsd,rso,sbc,sds,sdx,sfx,sln,smacker,smjpeg,sndstr,sunrast,svag,swf,thp,txd,vag,voc,vpk,vqf,wady,wsaud,wsd,xmv,xvag,xwma";
+
+/// Recognize normal formats from bytes rather than the untrusted name/MIME. For
+/// other binary codecs allow FFmpeg's bounded probe, confined to binary demuxers.
+/// Text never reaches a decoder, even when named .mp3 or prefixed with a BOM.
+fn audio_input_policy(path: &Path) -> Result<Option<&'static str>, TranscodeError> {
+    use std::io::Read;
+    let mut header = [0u8; 4096];
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| TranscodeError(format!("could not inspect uploaded audio: {e}")))?;
+    let count = file
+        .read(&mut header)
+        .map_err(|e| TranscodeError(format!("could not inspect uploaded audio: {e}")))?;
+    let h = &header[..count];
+    // ID3 may precede MP3, AAC, or FLAC; probe only the safe binary demuxers.
+    if h.starts_with(b"ID3") {
+        return Ok(None);
+    }
+    let format = if h.len() >= 12
+        && matches!(&h[..4], b"RIFF" | b"RF64" | b"RIFX")
+        && &h[8..12] == b"WAVE"
+    {
+        Some("wav")
+    } else if h.starts_with(b"fLaC") {
+        Some("flac")
+    } else if h.starts_with(b"OggS") {
+        Some("ogg")
+    } else if h.len() >= 2 && h[0] == 0xff && h[1] & 0xe0 == 0xe0 && h[1] & 0x06 != 0 {
+        Some("mp3")
+    } else if h.len() >= 2 && h[0] == 0xff && h[1] & 0xf6 == 0xf0 {
+        Some("aac")
+    } else if h.len() >= 12 && &h[..4] == b"FORM" && matches!(&h[8..12], b"AIFF" | b"AIFC") {
+        Some("aiff")
+    } else if h.len() >= 8
+        && matches!(
+            &h[4..8],
+            b"ftyp" | b"moov" | b"mdat" | b"free" | b"wide" | b"skip"
+        )
+    {
+        Some("mov")
+    } else if h.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        Some("matroska")
+    } else if h.starts_with(&[0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11]) {
+        Some("asf")
+    } else if h.starts_with(b"#!AMR") {
+        Some("amr")
+    } else if h.starts_with(b"caff") {
+        Some("caf")
+    } else if h.starts_with(b".snd") {
+        Some("au")
+    } else {
+        None
+    };
+    if format.is_none()
+        && (h.is_empty()
+            || std::str::from_utf8(h).is_ok_and(|text| {
+                text.chars()
+                    .all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+            })
+            || h.starts_with(&[0xff, 0xfe])
+            || h.starts_with(&[0xfe, 0xff]))
+    {
+        return Err(TranscodeError("uploaded audio is text or an unrecognized audio header; playlists and external references are not supported".into()));
+    }
+    Ok(format)
 }
 
 fn ensure_nonempty_output(dst: &Path) -> Result<(), TranscodeError> {
@@ -652,6 +892,616 @@ fn ensure_nonempty(dst: &Path, label: &str) -> Result<(), TranscodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_ingestion_preserves_copy_policies_bytes_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.JPEG");
+        let bytes = b"\xff\xd8\xffcopy EXIF ICC unchanged";
+        std::fs::write(&source, bytes).unwrap();
+        let copied = ingest_image(&source, &dir.path().join("nested/target")).unwrap();
+        assert_eq!(copied.extension, "jpeg");
+        assert_eq!(std::fs::read(&copied.path).unwrap(), bytes);
+        let canonical = ingest_image_with_naming(
+            &source,
+            &dir.path().join("canonical"),
+            ImageCopyNaming::Canonical,
+        )
+        .unwrap();
+        assert_eq!(canonical.extension, "jpg");
+        assert_eq!(canonical.mime, "image/jpeg");
+        let unknown = dir.path().join("unknown");
+        std::fs::write(&unknown, b"unknown original").unwrap();
+        assert_eq!(
+            ingest_image(&unknown, &dir.path().join("dataset"))
+                .unwrap()
+                .extension,
+            "bin"
+        );
+        assert_eq!(
+            ingest_image_with_naming(
+                &unknown,
+                &dir.path().join("derived"),
+                ImageCopyNaming::SourceExtension("png")
+            )
+            .unwrap()
+            .extension,
+            "png"
+        );
+        assert_eq!(
+            ingest_image_with_naming(
+                &unknown,
+                &dir.path().join("keypoint"),
+                ImageCopyNaming::Canonical
+            )
+            .unwrap()
+            .mime,
+            "image/png"
+        );
+        assert!(matches!(
+            ingest_image(&dir.path().join("missing"), &dir.path().join("out")),
+            Err(IngestImageError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn image_ingestion_normalizes_non_storage_native_formats() {
+        if (!cfg!(target_os = "macos")
+            || std::env::var("SCENEWORKS_REQUIRE_FFMPEG").as_deref() == Ok("1"))
+            && reachable_test_ffmpeg().is_none()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for (format, extension) in [
+            (image::ImageFormat::Bmp, "bmp"),
+            (image::ImageFormat::Gif, "gif"),
+            (image::ImageFormat::Tiff, "tiff"),
+        ] {
+            let src = dir.path().join(format!("source.{extension}"));
+            image::RgbImage::from_pixel(3, 2, image::Rgb([10, 20, 30]))
+                .save_with_format(&src, format)
+                .unwrap();
+            let result = ingest_image(&src, &dir.path().join(format!("out-{extension}"))).unwrap();
+            assert_eq!(result.extension, "png");
+            assert_eq!(result.mime, "image/png");
+            assert_eq!(image::open(result.path).unwrap().width(), 3);
+        }
+    }
+
+    #[test]
+    fn rejects_audio_playlists_and_text_even_with_audio_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for (index, payload) in [
+            "#EXTM3U\nhttp://127.0.0.1:9/private.wav\n",
+            "[playlist]\nFile1=file:///etc/passwd\n",
+            "ffconcat version 1.0\nfile '/etc/passwd'\n",
+            "<MPD><BaseURL>http://localhost/private</BaseURL></MPD>",
+            "v=0\no=- 0 0 IN IP4 127.0.0.1\n",
+            "\u{feff}#EXTM3U\nsecret.wav\n",
+            "",
+            "ordinary text",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let src = dir.path().join(format!("hostile-{index}.mp3"));
+            std::fs::write(&src, payload).unwrap();
+            let dst = dir.path().join(format!("out-{index}.wav"));
+            let error = transcode_to_wav_pcm16(&src, &dst).unwrap_err();
+            assert!(error.to_string().contains("playlists"), "{error}");
+            assert!(!dst.exists());
+        }
+        // A fake binary prefix cannot bypass the decoder policy: these names
+        // never appear in the whitelist, even for a binary-looking payload.
+        for blocked in ["hls", "dash", "concat", "sdp", "image2", "tty", "libgme"] {
+            assert!(!SAFE_AUDIO_DEMUXERS.split(',').any(|name| name == blocked));
+        }
+    }
+
+    #[test]
+    fn audio_sniff_preserves_normal_container_families_and_ignores_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        for (index, (magic, expected)) in [
+            (b"RIFF0000WAVE".as_slice(), Some("wav")),
+            (b"RF64ffffWAVE", Some("wav")),
+            (b"fLaC", Some("flac")),
+            (b"OggS", Some("ogg")),
+            (b"ID3", None),
+            (&[0xff, 0xfb, 0x90, 0x00], Some("mp3")),
+            (&[0xff, 0xf1, 0x50, 0x00], Some("aac")),
+            (b"FORM0000AIFF", Some("aiff")),
+            (b"FORM0000AIFC", Some("aiff")),
+            (b"0000ftypM4A ", Some("mov")),
+            (b"0000moov0000", Some("mov")),
+            (&[0x1a, 0x45, 0xdf, 0xa3], Some("matroska")),
+            (
+                &[0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11],
+                Some("asf"),
+            ),
+            (b"#!AMR\n", Some("amr")),
+            (b"caff", Some("caf")),
+            (b".snd", Some("au")),
+            (&[0x80, 0x00, 0x81, 0x00], None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let src = dir.path().join(format!("not-audio-{index}.txt"));
+            std::fs::write(&src, magic).unwrap();
+            assert_eq!(
+                audio_input_policy(&src).unwrap(),
+                expected,
+                "fixture {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn upload_ffmpeg_has_noninteractive_local_protocol_policy() {
+        let command = upload_ffmpeg_command();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_str().unwrap())
+            .collect();
+        assert!(args.contains(&"-nostdin"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-protocol_whitelist", "file,pipe"]));
+        assert!(UPLOAD_TIMEOUT > Duration::ZERO && UPLOAD_TIMEOUT <= Duration::from_secs(120));
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for synchronous utility bridge"]
+    fn utility_process_fixture() {
+        eprintln!("utility-bridge-complete");
+    }
+
+    fn assert_sync_utility_bridge() {
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "media_convert::tests::utility_process_fixture",
+            "--ignored",
+            "--nocapture",
+        ]);
+        let output = run_upload_command(command, media_process::discard_stdout).unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("utility-bridge-complete"));
+    }
+
+    #[test]
+    fn synchronous_utility_bridge_works_outside_a_runtime() {
+        assert_sync_utility_bridge();
+    }
+
+    #[tokio::test]
+    async fn synchronous_utility_bridge_works_inside_an_existing_runtime() {
+        assert_sync_utility_bridge();
+    }
+
+    #[test]
+    fn hdr_dimensions_reject_zero_overflow_and_oversize_before_spawn_or_allocation() {
+        for (w, h) in [
+            (0, 1),
+            (1, 0),
+            (u32::MAX, u32::MAX),
+            (8193, 8192),
+            (16_385, 1),
+        ] {
+            assert!(hdr_pixel_count(w, h).is_err(), "{w}x{h}");
+        }
+        assert_eq!(hdr_pixel_count(8192, 8192).unwrap(), MAX_HDR_PIXELS);
+        assert_eq!(hdr_pixel_count(4096, 2160).unwrap(), 4096 * 2160);
+        let dir = tempfile::tempdir().unwrap();
+        let exr = dir.path().join("huge.exr");
+        let dst = dir.path().join("out.png");
+        let mut header = vec![0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0];
+        header.extend_from_slice(b"dataWindow\0box2i\0");
+        header.extend_from_slice(&16u32.to_le_bytes());
+        for coord in [0i32, 0, 100_000, 100_000] {
+            header.extend_from_slice(&coord.to_le_bytes());
+        }
+        std::fs::write(&exr, header).unwrap();
+        assert_eq!(image_dimensions(&exr), Some((100_001, 100_001)));
+        let error = transcode_hdr_to_png(&exr, &dst).unwrap_err();
+        assert!(error.to_string().contains("preview limit"));
+        assert!(!dst.exists());
+    }
+
+    #[test]
+    fn exr_dimension_headers_reject_duplicate_and_out_of_bounds_attributes() {
+        fn window(header: &mut Vec<u8>, name: &[u8]) {
+            header.extend_from_slice(name);
+            header.extend_from_slice(b"\0box2i\0");
+            header.extend_from_slice(&16u32.to_le_bytes());
+            header.extend_from_slice(&[0u8; 16]); // one pixel at the origin
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut valid = vec![0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0];
+        window(&mut valid, b"dataWindow");
+        window(&mut valid, b"displayWindow");
+        let mut duplicate = valid.clone();
+        window(&mut duplicate, b"displayWindow");
+        duplicate.push(0);
+        let mut out_of_bounds = valid;
+        out_of_bounds.extend_from_slice(b"notes\0string\0");
+        out_of_bounds.extend_from_slice(&u32::MAX.to_le_bytes());
+        for (name, header, message) in [
+            ("duplicate", duplicate, "duplicate"),
+            ("bounds", out_of_bounds, "file bounds"),
+            (
+                "truncated",
+                vec![0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0],
+                "could not read",
+            ),
+        ] {
+            let src = dir.path().join(format!("{name}.exr"));
+            std::fs::write(&src, header).unwrap();
+            let error = hdr_dimensions(&src).unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+
+    fn reachable_test_ffmpeg() -> Option<String> {
+        let program = media_process::ffmpeg_program("ffmpeg");
+        match Command::new(&program).arg("-version").output() {
+            Ok(output) if output.status.success() => Some(program),
+            other => {
+                assert!(
+                    std::env::var("SCENEWORKS_REQUIRE_FFMPEG").as_deref() != Ok("1"),
+                    "required ffmpeg is unavailable: {program} ({other:?})"
+                );
+                eprintln!("SKIPPED media codec fixtures: {program} unavailable ({other:?})");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn normal_audio_formats_import_as_pcm16_with_rate_and_channels_preserved() {
+        let Some(ffmpeg) = reachable_test_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        for (extension, codec) in [
+            ("wav", "pcm_s24le"),
+            ("wav", "pcm_f32le"),
+            ("mp3", "libmp3lame"),
+            ("flac", "flac"),
+            ("ogg", "vorbis"),
+            ("opus", "libopus"),
+            ("aac", "aac"),
+            ("m4a", "aac"),
+            ("mp4", "aac"),
+            ("mov", "pcm_s16le"),
+            ("mkv", "pcm_s16le"),
+            ("webm", "libopus"),
+            ("aiff", "pcm_s16be"),
+            ("caf", "pcm_s16le"),
+            ("au", "pcm_s16be"),
+            ("wma", "wmav2"),
+        ] {
+            let src = dir.path().join(format!("{codec}.{extension}"));
+            let built = Command::new(&ffmpeg)
+                .args([
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=48000",
+                    "-t",
+                    "0.05",
+                    "-ac",
+                    "2",
+                    "-c:a",
+                    codec,
+                    "-strict",
+                    "-2",
+                    "-y",
+                ])
+                .arg(&src)
+                .output()
+                .unwrap();
+            if !built.status.success() {
+                let message = String::from_utf8_lossy(&built.stderr);
+                if message.contains("Unknown encoder") || message.contains("Encoder not found") {
+                    eprintln!("SKIPPED optional {extension}/{codec} fixture: {message}");
+                    continue;
+                }
+                panic!("could not build {extension}/{codec}: {message}");
+            }
+            let dst = dir
+                .path()
+                .join(format!("{codec}-{extension}.normalized.wav"));
+            transcode_to_wav_pcm16(&src, &dst)
+                .unwrap_or_else(|error| panic!("{extension}/{codec}: {error}"));
+            assert!(is_canonical_pcm16_wav(&dst), "{extension}/{codec}");
+            if codec == "pcm_f32le" {
+                let async_dst = dir.path().join("from-async-handler.wav");
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async { transcode_to_wav_pcm16(&src, &async_dst) })
+                    .unwrap();
+                assert!(is_canonical_pcm16_wav(&async_dst));
+            }
+            let bytes = std::fs::read(&dst).unwrap();
+            let fmt = bytes
+                .windows(4)
+                .position(|window| window == b"fmt ")
+                .unwrap()
+                + 8;
+            assert_eq!(
+                u16::from_le_bytes(bytes[fmt + 2..fmt + 4].try_into().unwrap()),
+                2,
+                "{extension}/{codec} channels"
+            );
+            assert_eq!(
+                u32::from_le_bytes(bytes[fmt + 4..fmt + 8].try_into().unwrap()),
+                48000,
+                "{extension}/{codec} rate"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_import_keeps_first_audio_stream_and_ignores_cover_art() {
+        let Some(ffmpeg) = reachable_test_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("cover.mp3");
+        let dst = dir.path().join("cover.wav");
+        let built = Command::new(&ffmpeg)
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=sample_rate=44100",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:size=16x16:rate=1",
+                "-map",
+                "0:a:0",
+                "-map",
+                "1:v:0",
+                "-c:a",
+                "libmp3lame",
+                "-c:v",
+                "png",
+                "-disposition:v",
+                "attached_pic",
+                "-t",
+                "0.05",
+                "-y",
+            ])
+            .arg(&src)
+            .output()
+            .unwrap();
+        if !built.status.success()
+            && String::from_utf8_lossy(&built.stderr).contains("Unknown encoder")
+        {
+            eprintln!(
+                "SKIPPED optional cover-art fixture: {}",
+                String::from_utf8_lossy(&built.stderr)
+            );
+            return;
+        }
+        assert!(
+            built.status.success(),
+            "could not build cover-art fixture: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        transcode_to_wav_pcm16(&src, &dst).unwrap();
+        assert!(is_canonical_pcm16_wav(&dst));
+        let bytes = std::fs::read(&dst).unwrap();
+        let fmt = bytes
+            .windows(4)
+            .position(|window| window == b"fmt ")
+            .unwrap()
+            + 8;
+        assert_eq!(
+            u16::from_le_bytes(bytes[fmt + 2..fmt + 4].try_into().unwrap()),
+            1
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[fmt + 4..fmt + 8].try_into().unwrap()),
+            44100
+        );
+    }
+
+    #[test]
+    fn binary_disguised_playlists_and_remote_protocols_cannot_import_audio() {
+        let Some(_) = reachable_test_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        for (index, payload) in [
+            b"ID3\x04\0\0\0\0\0\0#EXTM3U\n#EXT-X-TARGETDURATION:1\nhttp://127.0.0.1:9/private.wav\n".as_slice(),
+            b"ID3\x04\0\0\0\0\0\0ffconcat version 1.0\nfile '/etc/passwd'\n",
+            b"\xff\x80#EXTM3U\nfile:///etc/passwd\n",
+            b"\xff\x80[playlist]\nFile1=http://127.0.0.1:9/private.wav\n",
+        ].into_iter().enumerate() {
+            let src = dir.path().join(format!("binary-playlist-{index}.mp3"));
+            let dst = dir.path().join(format!("out-{index}.wav"));
+            std::fs::write(&src, payload).unwrap();
+            let error = transcode_to_wav_pcm16(&src, &dst).unwrap_err();
+            let message = error.to_string();
+            assert!(!message.contains("Connection refused") && !message.contains("Failed to open segment"), "decoder attempted a remote reference: {message}");
+            assert!(!dst.exists() || std::fs::metadata(&dst).unwrap().len() == 0);
+        }
+        // A recognized container still cannot open a network protocol, even if a
+        // future caller constructs its input URL directly rather than using a file.
+        let mut command = upload_ffmpeg_command();
+        command.args(["-i", "http://127.0.0.1:9/private.wav", "-f", "null", "-"]);
+        let output = run_upload_command(command, media_process::discard_stdout).unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not on whitelist"));
+    }
+
+    #[test]
+    fn upload_rejects_a_local_playlist_that_unrestricted_ffmpeg_would_follow() {
+        let Some(ffmpeg) = reachable_test_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private.wav");
+        let playlist = dir.path().join("disguised.mp3");
+        let control = dir.path().join("unrestricted.wav");
+        let guarded = dir.path().join("guarded.wav");
+        std::fs::write(&private, wav_bytes(1, 16, 1, 800, &[])).unwrap();
+        std::fs::write(&playlist, "ffconcat version 1.0\nfile 'private.wav'\n").unwrap();
+        let decoded = Command::new(&ffmpeg)
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&playlist)
+            .args(["-map", "0:a:0", "-c:a", "pcm_s16le", "-y"])
+            .arg(&control)
+            .output()
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "unrestricted ffmpeg control must demonstrate local indirection: {}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        assert!(is_canonical_pcm16_wav(&control));
+        let error = transcode_to_wav_pcm16(&playlist, &guarded).unwrap_err();
+        assert!(error.to_string().contains("playlists"), "{error}");
+        assert!(!guarded.exists());
+    }
+
+    #[test]
+    fn ffmpeg_image_fallback_preserves_normal_raster_formats() {
+        let Some(ffmpeg) = reachable_test_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        for extension in ["png", "jpg", "webp", "bmp", "gif", "tiff", "avif"] {
+            let src = dir.path().join(format!("source.{extension}"));
+            // The supported host's SVT-AV1 encoder rejects 16x12; use a small valid AVIF canvas.
+            let (width, height, source) = if extension == "avif" {
+                (64, 64, "testsrc=size=64x64:rate=1")
+            } else {
+                (16, 12, "testsrc=size=16x12:rate=1")
+            };
+            if extension == "webp" {
+                image::RgbImage::from_pixel(16, 12, image::Rgb([20, 80, 140]))
+                    .save_with_format(&src, image::ImageFormat::WebP)
+                    .unwrap();
+            } else {
+                let built = Command::new(&ffmpeg)
+                    .args([
+                        "-nostdin",
+                        "-v",
+                        "error",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        source,
+                        "-frames:v",
+                        "1",
+                        "-threads",
+                        "1",
+                        "-y",
+                    ])
+                    .arg(&src)
+                    .output()
+                    .unwrap();
+                if !built.status.success() {
+                    let message = String::from_utf8_lossy(&built.stderr);
+                    if (message.contains("Encoder") || message.contains("encoder"))
+                        && std::env::var("SCENEWORKS_REQUIRE_FFMPEG").as_deref() != Ok("1")
+                    {
+                        eprintln!("SKIPPED optional {extension} encoder fixture: {message}");
+                        continue;
+                    }
+                    panic!("could not build {extension}: {message}");
+                }
+            }
+            let dst = dir.path().join(format!("from-{extension}.png"));
+            run_ffmpeg_to_png(&src, &dst).unwrap_or_else(|error| panic!("{extension}: {error}"));
+            let image = image::open(&dst).unwrap();
+            assert_eq!((image.width(), image.height()), (width, height));
+            let backstop = crate::image_decode::decode_image_any(&src).unwrap();
+            assert_eq!((backstop.width(), backstop.height()), (width, height));
+            let source_bytes = std::fs::read(&src).unwrap();
+            assert_eq!(
+                crate::image_decode::decode_image_bytes_any(&source_bytes)
+                    .unwrap()
+                    .width(),
+                width
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn platform_decoder_preserves_heic_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("source.png");
+        let heic = dir.path().join("source.heic");
+        let out = dir.path().join("preview.png");
+        image::RgbImage::from_pixel(64, 64, image::Rgb([20, 80, 140]))
+            .save(&png)
+            .unwrap();
+        let built = Command::new("/usr/bin/sips")
+            .args(["-s", "format", "heic"])
+            .arg(&png)
+            .arg("--out")
+            .arg(&heic)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "could not build HEIC: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        assert_eq!(sniff_image_kind_at(&heic), Some(ImageKind::Heif));
+        transcode_to_png(&heic, &out).unwrap();
+        let image = image::open(&out).unwrap();
+        assert_eq!((image.width(), image.height()), (64, 64));
+    }
+
+    #[tokio::test]
+    async fn hdr_plane_reader_checks_truncation_extra_bytes_and_channel_order() {
+        let mut planes = Vec::new();
+        for value in [1.0f32, 2.0, 4.0] {
+            planes.extend_from_slice(&value.to_le_bytes());
+        }
+        let rgb = read_hdr_planes(planes.as_slice(), 1).await.unwrap();
+        let mapped = |v| (linear_to_srgb(reinhard(v)) * 255.0 + 0.5) as u8;
+        assert_eq!(rgb, [mapped(4.0), mapped(1.0), mapped(2.0)]);
+        assert!(read_hdr_planes(&planes[..11], 1).await.is_err());
+        planes.push(0);
+        assert!(read_hdr_planes(planes.as_slice(), 1)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("more than one"));
+        // Cross the fixed float-chunk boundary and preserve per-plane RGB order.
+        let pixels = 4097;
+        let mut planes = Vec::new();
+        for value in [f32::NAN, -1.0, 8.0] {
+            for _ in 0..pixels {
+                planes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let rgb = read_hdr_planes(planes.as_slice(), pixels).await.unwrap();
+        assert_eq!(rgb.len(), pixels * 3);
+        assert!(rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [mapped(8.0), 0, 0]));
+    }
 
     /// A RIFF/WAVE with one `fmt ` chunk of the given tag/bits and a `data` chunk of `samples`
     /// 16-bit frames, with `extra` chunks inserted before `fmt `.
@@ -851,6 +1701,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hdr_preview_checks_and_preserves_cropped_exr_display_windows() {
+        let Some(ffmpeg) = reachable_test_ffmpeg() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.exr");
+        let built = Command::new(&ffmpeg)
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=33x17:rate=1",
+                "-frames:v",
+                "1",
+                "-pix_fmt",
+                "gbrpf32le",
+                "-y",
+            ])
+            .arg(&original)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let bytes = std::fs::read(&original).unwrap();
+        let marker = b"displayWindow\0box2i\0";
+        let window = bytes
+            .windows(marker.len())
+            .position(|part| part == marker)
+            .unwrap()
+            + marker.len()
+            + 4;
+        for (name, max, allowed) in [("cropped", 63i32, true), ("huge-canvas", 100_000, false)] {
+            let mut bytes = bytes.clone();
+            for (index, coord) in [0i32, 0, max, max].into_iter().enumerate() {
+                bytes[window + index * 4..window + (index + 1) * 4]
+                    .copy_from_slice(&coord.to_le_bytes());
+            }
+            let src = dir.path().join(format!("{name}.exr"));
+            let dst = dir.path().join(format!("{name}.png"));
+            std::fs::write(&src, bytes).unwrap();
+            assert_eq!(
+                image_dimensions(&src),
+                Some((33, 17)),
+                "imagesize exposes only the stored crop"
+            );
+            if allowed {
+                assert_eq!(hdr_dimensions(&src).unwrap(), (64, 64));
+                transcode_hdr_to_png(&src, &dst).unwrap();
+                let image = image::open(&dst).unwrap().to_rgb8();
+                assert_eq!(image.dimensions(), (64, 64));
+                assert_eq!(image.get_pixel(63, 63).0, [0, 0, 0]);
+            } else {
+                let error = transcode_hdr_to_png(&src, &dst).unwrap_err();
+                assert!(error.to_string().contains("preview limit"), "{error}");
+                assert!(!dst.exists());
+            }
+        }
+    }
+
     /// The tone-map curve itself: highlights above diffuse white stay below 255 AND stay apart.
     ///
     /// Pure-Rust, so it runs everywhere and pins the property clipping destroys. A clipping
@@ -1044,48 +1960,6 @@ mod tests {
         bytes.extend_from_slice(&height.to_le_bytes());
         bytes.extend_from_slice(&[0x00, 0x00, 0x00]); // packed fields, bg color, aspect ratio
         bytes
-    }
-
-    /// The ffmpeg reparse-resolution fix (os error 448): a program reached through a symlink — e.g.
-    /// WinGet's `…\WinGet\Links\ffmpeg.exe` shim — resolves to its real, non-reparse target so
-    /// `CreateProcess` never has to traverse the reparse point. Skips when the platform won't let
-    /// the test create a symlink (e.g. Windows without Developer Mode).
-    #[test]
-    fn resolve_ffmpeg_program_follows_reparse_to_real_binary() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let real = dir.path().join("ffmpeg-real.exe");
-        std::fs::write(&real, b"MZ-stub").expect("write real binary");
-        let link = dir.path().join("ffmpeg.exe");
-
-        // Absolute target, like WinGet's Links shim.
-        #[cfg(unix)]
-        let made = std::os::unix::fs::symlink(&real, &link).is_ok();
-        #[cfg(windows)]
-        let made = std::os::windows::fs::symlink_file(&real, &link).is_ok();
-        #[cfg(not(any(unix, windows)))]
-        let made = false;
-        if !made {
-            return; // no privilege to create a symlink — nothing to resolve
-        }
-        assert!(is_symlink(&link), "precondition: the shim is a symlink");
-
-        let resolved = resolve_ffmpeg_program_reparse(&link.to_string_lossy())
-            .expect("a symlinked program resolves to its target");
-        assert_eq!(
-            std::fs::canonicalize(&resolved).expect("canonicalize resolved"),
-            std::fs::canonicalize(&real).expect("canonicalize real"),
-            "resolved path must point at the real binary"
-        );
-        assert!(
-            !is_symlink(Path::new(&resolved)),
-            "resolved path must not itself be a reparse point"
-        );
-
-        // A plain binary is left untouched (None → caller keeps the original program).
-        assert!(
-            resolve_ffmpeg_program_reparse(&real.to_string_lossy()).is_none(),
-            "a plain file needs no rewrite"
-        );
     }
 
     /// Real conversion path: a hand-rolled BMP → PNG via `sips`. macOS-only because `sips` is the

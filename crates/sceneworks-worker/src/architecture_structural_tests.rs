@@ -1210,6 +1210,75 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         ("crates/sceneworks-core/src/slug.rs", "slugify"),
         ("crates/sceneworks-core/src/slug.rs", "slugify_with"),
         (
+            "crates/sceneworks-core/src/api_control.rs",
+            "post_json_with_client",
+        ),
+        ("crates/sceneworks-core/src/safetensors.rs", "read_header"),
+        (
+            "crates/sceneworks-core/src/safetensors.rs",
+            "read_file_header",
+        ),
+        ("crates/sceneworks-core/src/safetensors.rs", "dtype_bits"),
+        (
+            "crates/sceneworks-core/src/builtin_manifests.rs",
+            "builtin_manifest",
+        ),
+        ("crates/sceneworks-core/src/fsutil.rs", "write_atomic"),
+        ("crates/sceneworks-core/src/fsutil.rs", "write_atomic_with"),
+        (
+            "crates/sceneworks-core/src/fsutil.rs",
+            "atomic_create_supported",
+        ),
+        (
+            "crates/sceneworks-core/src/fsutil.rs",
+            "write_new_unpublished_with",
+        ),
+        (
+            "crates/sceneworks-core/src/fsutil.rs",
+            "payload_entry_metadata",
+        ),
+        (
+            "crates/sceneworks-core/src/fsutil.rs",
+            "sync_parent_directory",
+        ),
+        (
+            "crates/sceneworks-core/src/media_process.rs",
+            "ffmpeg_program",
+        ),
+        (
+            "crates/sceneworks-core/src/media_process.rs",
+            "resolve_ffmpeg_program",
+        ),
+        (
+            "crates/sceneworks-core/src/media_process.rs",
+            "bounded_tail",
+        ),
+        ("crates/sceneworks-core/src/media_process.rs", "run_command"),
+        (
+            "crates/sceneworks-core/src/image_decode.rs",
+            "decode_image_any",
+        ),
+        (
+            "crates/sceneworks-core/src/image_decode.rs",
+            "decode_image_bytes_any",
+        ),
+        (
+            "crates/sceneworks-core/src/image_decode.rs",
+            "decode_image_with",
+        ),
+        (
+            "crates/sceneworks-core/src/image_decode.rs",
+            "decode_image_bounded",
+        ),
+        (
+            "crates/sceneworks-core/src/media_convert.rs",
+            "ingest_image",
+        ),
+        (
+            "crates/sceneworks-core/src/media_convert.rs",
+            "ingest_image_with_naming",
+        ),
+        (
             "crates/sceneworks-core/src/slug.rs",
             "slugify_worker_id_part",
         ),
@@ -1336,8 +1405,32 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
                 && adapter.heartbeat == 1
                 && !adapter.loops;
         }
-        let [syn::Stmt::Expr(expression, _)] = function.block.stmts.as_slice() else {
-            return false;
+        if function.sig.asyncness.is_some() && name == "sync_parent_directory" {
+            // A checked-in blocking adapter owns join/error conversion, while core owns all I/O.
+            // Match its complete body, including the spawn boundary; extra I/O or loops fail.
+            let expected: syn::ItemFn = syn::parse_quote! {
+                async fn sync_parent_directory(path: &Path) -> WorkerResult<()> {
+                    let path = path.to_path_buf();
+                    crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
+                        Ok(sceneworks_core::fsutil::sync_parent_directory(&path)?)
+                    })
+                    .await
+                    .map_err(|error| task_join_error("download directory sync", error))?
+                }
+            };
+            return helper_fingerprint(function) == helper_fingerprint(&expected);
+        }
+        let expression = match function.block.stmts.as_slice() {
+            [syn::Stmt::Expr(expression, _)] => expression,
+            [syn::Stmt::Local(local)]
+                if name == "sync_parent_directory" && matches!(local.pat, syn::Pat::Wild(_)) =>
+            {
+                let Some(initializer) = &local.init else {
+                    return false;
+                };
+                initializer.expr.as_ref()
+            }
+            _ => return false,
         };
         let expression = if let Expr::Return(returned) = expression {
             let Some(value) = &returned.expr else {
@@ -1362,11 +1455,15 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         let Expr::Path(target) = call.func.as_ref() else {
             return false;
         };
-        target
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == name)
+        let store_atomic_facade = in_core
+            && name == "write_atomic"
+            && target.path.to_token_stream().to_string() == "crate :: store_util :: atomic_write";
+        (store_atomic_facade
+            || target
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == name))
             && target.path.segments.first().is_some_and(|segment| {
                 segment.ident == "sceneworks_core" || (in_core && segment.ident == "crate")
             })
@@ -1470,6 +1567,38 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         }
     };
     assert!(delegates_to_core(&mapped, "random_hex", true));
+    let sync_adapter = function(
+        &std::fs::read_to_string(root.join("crates/sceneworks-worker/src/downloads.rs")).unwrap(),
+        "sync_parent_directory",
+    );
+    assert!(delegates_to_core(
+        &sync_adapter,
+        "sync_parent_directory",
+        false
+    ));
+    let mut extra_io = sync_adapter.clone();
+    extra_io.block.stmts.insert(
+        0,
+        syn::parse_quote! { std::fs::write(path, b"unexpected")?; },
+    );
+    assert!(
+        !delegates_to_core(&extra_io, "sync_parent_directory", false),
+        "a blocking adapter cannot hide additional file I/O"
+    );
+    let best_effort: syn::ItemFn = syn::parse_quote! {
+        fn sync_parent_directory(path: &Path) { let _ = sceneworks_core::fsutil::sync_parent_directory(path); }
+    };
+    assert!(delegates_to_core(
+        &best_effort,
+        "sync_parent_directory",
+        false
+    ));
+    let store_facade: syn::ItemFn = syn::parse_quote! {
+        fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+            crate::store_util::atomic_write(path, bytes).map_err(Error::from)
+        }
+    };
+    assert!(delegates_to_core(&store_facade, "write_atomic", true));
     let mut associated = Functions(Vec::new());
     associated.visit_file(&parse(&format!(
         "struct NewOwner; impl NewOwner {{ {} }}",

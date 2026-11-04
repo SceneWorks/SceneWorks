@@ -1,3 +1,4 @@
+import { deferred } from "./testUtils/async.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The seam under test only decides WHAT goes on the wire, so the transport is mocked.
@@ -22,13 +23,7 @@ afterEach(async () => {
   window.localStorage.clear();
 });
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
+
 
 // sc-15136. `/api/v1/ui-preferences` is method-asymmetric on the server: the GET is public (the
 // pre-auth theme read) but the PUT writes to disk and is GATED (sc-8869, F-067). Six call sites

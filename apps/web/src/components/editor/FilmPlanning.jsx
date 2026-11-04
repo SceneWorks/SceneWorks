@@ -1,14 +1,13 @@
 import React, { lazy, Suspense, useState } from "react";
 import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
 
-const QWEN_MODEL_ID = "film_planner_qwen3_6_27b";
 const FilmPlannerConnection = lazy(() => import("./FilmPlannerConnection.jsx"));
 
 export function FilmPlanning({ draft, availability, operation, disabled, installError, installJob, models = [], onChange, onStart, onCancel, onApply, onInstall, onNotice, onRefreshAvailability, token }) {
   const [maxRepairRounds, setMaxRepairRounds] = useState("2");
   const [llmTimeoutSeconds, setLlmTimeoutSeconds] = useState("1200");
   const planning = draft.planning ?? { provider: "prompt_refiner", thinkingMode: "disabled", refinePrompts: false };
-  const qwen = availability?.providers?.find((item) => item.modelId === QWEN_MODEL_ID);
+  const qwen = availability?.providers?.find((item) => item.provider === "native");
   const active = operation && ["running", "canceling"].includes(operation.status);
   const candidate = operation?.candidatePlan;
   const installActive = installJob && !terminalStatuses.has(installJob.status);
@@ -24,7 +23,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
       next.planning = {
         ...next.planning,
         provider,
-        modelId: provider === "native" ? QWEN_MODEL_ID : undefined,
+        modelId: provider === "native" ? qwen?.modelId : undefined,
         connectionId: provider === "openai_compatible" ? next.planning?.connectionId : undefined,
         thinkingMode: provider === "native" ? "enabled" : "disabled",
         sendReferencePixels: provider === "openai_compatible" ? Boolean(next.planning?.sendReferencePixels) : false,
@@ -39,7 +38,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
         <label>Planning provider
           <select aria-label="Planning provider" disabled={disabled || active} value={planning.provider} onChange={(event) => setProvider(event.target.value)}>
             <option value="prompt_refiner">Built-in prompt refiner (default)</option>
-            <option value="native">Native Qwen3.6-27B (optional)</option>
+            <option disabled={!qwen?.modelId} value="native">Native Qwen3.6-27B (optional)</option>
             <option value="openai_compatible">Saved OpenAI-compatible connection</option>
           </select>
         </label>
@@ -80,7 +79,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
           : "New drafts use the built-in prompt refiner. Qwen3.6-27B is not required."}
       </p>
       {planning.provider === "native" && availability != null && !qwen?.available ? (
-        <button disabled={disabled || installActive} onClick={() => onInstall(QWEN_MODEL_ID)} type="button">Install Qwen3.6-27B (large download)</button>
+        <button disabled={disabled || installActive || !qwen?.modelId} onClick={() => onInstall(qwen.modelId)} type="button">Install Qwen3.6-27B (large download)</button>
       ) : null}
       {installJob ? <div aria-live="polite" className={`ve-film-operation is-${installJob.status}`}>
         <strong>Qwen3.6-27B download: {installJob.status}</strong>
