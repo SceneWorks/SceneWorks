@@ -3696,6 +3696,24 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn versioned_qwen_repository_metadata_outweighs_generic_trainer_label() {
+        for version in ["Qwen/Qwen-Image-2.1", "qwen_image_2_1"] {
+            for key in ["baseModel", "base_model"] {
+                let mut header =
+                    header_from_keys(&["transformer_blocks.0.attn.to_q.lora_A.weight"]);
+                header["__metadata__"] = json!({
+                    key: version,
+                    "ss_base_model_version": "qwen_image"
+                });
+                assert_eq!(
+                    detect_lora_family(&header).as_deref(),
+                    Some("qwen-image-2-1")
+                );
+            }
+        }
+    }
+
     fn header_from_keys(keys: &[&str]) -> Value {
         let mut object = serde_json::Map::new();
         object.insert("__metadata__".to_owned(), json!({"format": "pt"}));

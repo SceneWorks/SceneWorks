@@ -2699,6 +2699,77 @@ mod base_model_gating_tests {
     }
 
     #[test]
+    fn catalog_base_facts_survive_api_normalization_and_worker_validation() {
+        let models = vec![
+            json!({"id":"ltx_2_3", "family":"ltx-video", "loraCompatibility":{"families":["ltx-video"],"generation":"2.3"}}),
+            json!({"id":"custom_ltx_base", "family":"ltx-video", "loraCompatibility":{"families":["ltx-video"],"generation":"2.3"}}),
+        ];
+        let lora = json!({"id":"custom_adapter", "family":"ltx-video", "baseModel":"custom_ltx_base", "installState":"installed"});
+        for inline in [false, true] {
+            let mut attached = if inline {
+                lora.clone()
+            } else {
+                json!({"id":"custom_adapter"})
+            };
+            attached["baseModelManifestEntry"] =
+                json!({"id":"forged", "loraCompatibility":{"generation":"2.5"}});
+            let normalized = validate_lora_specs_for_model(
+                &models,
+                std::slice::from_ref(&lora),
+                "ltx_2_3",
+                &[attached],
+                inline,
+                "LoRA",
+            )
+            .unwrap();
+            let forwarded: Vec<Value> =
+                serde_json::from_slice(&serde_json::to_vec(&normalized).unwrap()).unwrap();
+            sceneworks_core::lora_family::validate_lora_compatibility_with_manifest(
+                &forwarded,
+                Some("ltx-video"),
+                "ltx_video",
+                Some("ltx_2_3"),
+                models[0].as_object(),
+            )
+            .expect("the worker must accept the same catalog-based pairing as API preflight");
+            assert_eq!(forwarded[0]["baseModelManifestEntry"], models[1]);
+            for bad in [
+                json!({"id":"different_base", "loraCompatibility":{"generation":"2.3"}}),
+                json!({"id":"custom_ltx_base", "loraCompatibility":{"generation":"2.5"}}),
+                Value::Null,
+            ] {
+                let mut changed = forwarded.clone();
+                changed[0]["baseModelManifestEntry"] = bad;
+                assert!(
+                    sceneworks_core::lora_family::validate_lora_compatibility_with_manifest(
+                        &changed,
+                        Some("ltx-video"),
+                        "ltx_video",
+                        Some("ltx_2_3"),
+                        models[0].as_object(),
+                    )
+                    .is_err()
+                );
+            }
+        }
+        let mut incompatible = models.clone();
+        incompatible[1]["loraCompatibility"]["generation"] = json!("2.5");
+        assert!(validate_lora_specs_for_model(
+            &incompatible,
+            &[],
+            "ltx_2_3",
+            &[lora.clone()],
+            true,
+            "LoRA"
+        )
+        .is_err());
+        assert!(
+            validate_lora_specs_for_model(&models[..1], &[], "ltx_2_3", &[lora], true, "LoRA")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn flux3_hydrated_scales_preserve_numbers_strings_defaults_and_refuse_invalid() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("adapter.safetensors");
