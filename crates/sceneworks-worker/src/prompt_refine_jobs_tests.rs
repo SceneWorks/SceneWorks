@@ -18,9 +18,9 @@ fn a_raw_rewriter_reply_survives_the_reasoning_block_and_the_code_fence() {
 
     // A T2I reply as the checkpoint actually emits it.
     let raw = "<think>\nThe user wants a wide harbour. Step 2 fixes the frame: horizontal, so \
-                   3:2 unless a wider cine framing is wanted. They said \"cinematic\", so 16:9.\n\
-                   </think>\n```json\n{\"rewritten_prompt\": \"A wide harbour at dusk, fishing \
-                   boats moored along a stone quay\", \"wh_ratio\": \"16:9\"}\n```";
+               3:2 unless a wider cine framing is wanted. They said \"cinematic\", so 16:9.\n\
+               </think>\n```json\n{\"rewritten_prompt\": \"A wide harbour at dusk, fishing \
+               boats moored along a stone quay\", \"wh_ratio\": \"16:9\"}\n```";
     let cleaned = clean_json_output(raw);
     let suggestion = parse_rewrite(&cleaned).expect("the cleaned reply parses");
     assert_eq!(
@@ -42,8 +42,8 @@ fn a_raw_rewriter_reply_survives_the_reasoning_block_and_the_code_fence() {
 
     // An I2I reply, with the edit template's third field.
     let raw = "<think>\nPreserve the courier, replace the backdrop.\n</think>\n\
-                   {\"rewritten_prompt\": \"Replace the grey studio backdrop with a sunlit alley\", \
-                   \"wh_ratio\": \"\", \"ratio_follow\": \"<image1>\"}";
+               {\"rewritten_prompt\": \"Replace the grey studio backdrop with a sunlit alley\", \
+               \"wh_ratio\": \"\", \"ratio_follow\": \"<image1>\"}";
     let suggestion = parse_rewrite(&clean_json_output(raw)).expect("the edit reply parses");
     assert_eq!(
         suggestion.rewritten_prompt,
@@ -176,8 +176,8 @@ fn the_i2i_rewrite_path_assembles_image_turns_and_parses_a_fixture_reply() {
 
     // The fixture reply, through the same cleanup + parse the completion arm runs.
     let reply = "<think>Keep the courier, replace the backdrop.</think>\n\
-                     {\"rewritten_prompt\": \"Replace the grey backdrop with a sunlit alley\", \
-                     \"wh_ratio\": \"\", \"ratio_follow\": \"<image2>\"}";
+                 {\"rewritten_prompt\": \"Replace the grey backdrop with a sunlit alley\", \
+                 \"wh_ratio\": \"\", \"ratio_follow\": \"<image2>\"}";
     let suggestion = parse_rewrite(&clean_json_output(reply)).expect("the fixture reply parses");
     assert_eq!(
         suggestion.rewritten_prompt,
@@ -603,9 +603,9 @@ fn the_rewrite_budget_covers_the_refined_prompt_char_contract() {
     assert!(
         reachable_chars >= required as f64,
         "the Rewrite budget of {DEFAULT_REFINE_MAX_NEW_TOKENS} tokens reaches only \
-             {reachable_chars:.0} chars at {CHARS_PER_TOKEN:.2} chars/token, short of the \
-             {required}-char refined-prompt contract; a film shot rewrite would stop on MaxTokens \
-             mid-sentence instead of on EOS",
+         {reachable_chars:.0} chars at {CHARS_PER_TOKEN:.2} chars/token, short of the \
+         {required}-char refined-prompt contract; a film shot rewrite would stop on MaxTokens \
+         mid-sentence instead of on EOS",
     );
 }
 
@@ -784,7 +784,7 @@ fn minimax_h3_selects_a_tailored_system_prompt_per_family_partition() {
     assert!(
         !guide.contains("H3 field block"),
         "the discriminating phrase leaked into the guide — this test no longer proves the \
-             branch is selected"
+         branch is selected"
     );
 
     // BOTH partitions take the tailored prompt: `minimax_h3` (t2va + fl2va) and
@@ -923,12 +923,12 @@ fn minimax_h3_refinement_never_emits_the_untrained_markers() {
     // A reply that abuses every marker, in a wrapping code fence with a reasoning block in
     // front of it — i.e. it goes through the SAME cleanup a real reply does, then the ban.
     let baited = "<think>The guide showed dialogue markers, I'll use them.</think>\n\
-             ```\n\
-             integrated_multimodal_description: A woman in a red coat turns to the camera.\n\
-             overall_soundscape: rain on tarmac; <d>[English] Not tonight.</d> spoken quietly.\n\
-             <|caption_start|>a closing caption<|caption_end|> <|cutoff|>\n\
-             non_diegetic_music: <|lyrics_start|>hummed melody<|lyrics_end|> low strings.\n\
-             ```";
+         ```\n\
+         integrated_multimodal_description: A woman in a red coat turns to the camera.\n\
+         overall_soundscape: rain on tarmac; <d>[English] Not tonight.</d> spoken quietly.\n\
+         <|caption_start|>a closing caption<|caption_end|> <|cutoff|>\n\
+         non_diegetic_music: <|lyrics_start|>hummed melody<|lyrics_end|> low strings.\n\
+         ```";
     // Driven through the SAME function the job body calls, with the same arguments — so this
     // also pins that the ban is reached for an H3 target, not merely that the filter works.
     let refined = finalize_refined_output(baited, false, Some("minimax_h3"));
@@ -995,8 +995,8 @@ fn minimax_h3_refinement_never_emits_the_untrained_markers() {
 #[test]
 fn the_marker_ban_leaves_the_engines_own_reference_labels_alone() {
     let bound = "The courier is the person shown in <Picture 1>. The parcel is the object \
-                     shown in <Picture 2>. She speaks with the voice from <Audio 1>, moving like \
-                     <Video 1>.";
+                 shown in <Picture 2>. She speaks with the voice from <Audio 1>, moving like \
+                 <Video 1>.";
     // Byte for byte: a prompt made only of reference labels contains no dead marker, so the
     // filter must not touch it at all — not even the whitespace collapse.
     assert_eq!(strip_untrained_markers(bound), bound);
@@ -1552,7 +1552,7 @@ fn clean_refine_output_passes_prose_through_unwrapping_a_fence() {
     // paragraph survives verbatim, and an accidental ```text fence is unwrapped without any
     // JSON-object extraction.
     let prose = "A red fox stands in deep snow at golden hour, side-lit, shot on a 50mm lens with \
-                     a shallow depth of field; muted whites and warm amber tones, cinematic photograph.";
+                 a shallow depth of field; muted whites and warm amber tones, cinematic photograph.";
     assert_eq!(clean_refine_output(prose), prose);
     let fenced = format!("```\n{prose}\n```");
     assert_eq!(clean_refine_output(&fenced), prose);
@@ -1563,8 +1563,8 @@ fn clean_json_output_unwraps_a_fenced_image_caption_keeping_bboxes() {
     // The image-caption asset emits a ```json fence; the SAME cleanup the magic-prompt path uses
     // unwraps it. Element bboxes survive (they are NOT stripped on the worker side — sc-8105).
     let fenced = "```json\n{\"high_level_description\": \"a red fox in snow\", \
-             \"compositional_deconstruction\": {\"background\": \"a snowy forest\", \
-             \"elements\": [{\"type\": \"obj\", \"bbox\": [100, 200, 800, 700], \"desc\": \"a red fox\"}]}}\n```";
+         \"compositional_deconstruction\": {\"background\": \"a snowy forest\", \
+         \"elements\": [{\"type\": \"obj\", \"bbox\": [100, 200, 800, 700], \"desc\": \"a red fox\"}]}}\n```";
     let cleaned = clean_json_output(fenced);
     let parsed: Value = serde_json::from_str(&cleaned).expect("cleaned reply is valid JSON");
     assert!(
@@ -1775,7 +1775,7 @@ fn vision_plus_json_resolution_now_resolves_for_qwen_vl_snapshot() {
             && !msg.contains("no registered provider can serve")
             && !msg.contains("unsupported"),
         "vision+Json must now resolve a provider for a Qwen-VL snapshot (then fail on missing \
-             weights) thanks to the weightless_vision probe; got: {msg}"
+         weights) thanks to the weightless_vision probe; got: {msg}"
     );
 }
 
@@ -1829,10 +1829,10 @@ fn json_only_resolution_selects_a_provider_for_qwen_vl_snapshot() {
         .map(|r| (r.descriptor)().id)
         .collect();
     assert!(
-            viable.iter().any(|id| id == "mlx-llama"),
-            "JSON-only resolution must admit `mlx-llama` (the image-capable Json provider) for a Qwen-VL \
-             snapshot; viable providers were: {viable:?}"
-        );
+        viable.iter().any(|id| id == "mlx-llama"),
+        "JSON-only resolution must admit `mlx-llama` (the image-capable Json provider) for a Qwen-VL \
+         snapshot; viable providers were: {viable:?}"
+    );
 }
 
 /// A minimal Qwen3.6 (`qwen3_5`) VLM-wrapper `config.json` — enough for the weightless `can_load`
@@ -1904,7 +1904,7 @@ fn json_only_resolution_selects_vision_capable_provider_for_qwen3_vl_snapshot() 
         !msg.contains("no linked provider meets")
             && !msg.contains("no registered provider can serve"),
         "JSON-only requirements must resolve a provider for a qwen3_vl snapshot (then fail on \
-             missing weights), got: {msg}"
+         missing weights), got: {msg}"
     );
 
     // (2) The selected Json provider for this qwen3_vl snapshot is `mlx-llama` — the one whose
@@ -1918,9 +1918,9 @@ fn json_only_resolution_selects_vision_capable_provider_for_qwen3_vl_snapshot() 
         .map(|r| (r.descriptor)().id)
         .collect();
     assert!(
-            json_viable.iter().any(|id| id == "mlx-llama"),
-            "JSON-only resolution must admit `mlx-llama` for a qwen3_vl snapshot; viable: {json_viable:?}"
-        );
+        json_viable.iter().any(|id| id == "mlx-llama"),
+        "JSON-only resolution must admit `mlx-llama` for a qwen3_vl snapshot; viable: {json_viable:?}"
+    );
 
     // (3) THE BUMP'S PURPOSE: the same qwen3_vl snapshot is recognized as vision-capable. Replicate
     // core-llm's per-snapshot vision predicate (the `weightless_vision` probe added in mlx-llm
@@ -1938,7 +1938,7 @@ fn json_only_resolution_selects_vision_capable_provider_for_qwen3_vl_snapshot() 
     assert!(
         vision_capable.iter().any(|id| id == "mlx-llama"),
         "the sc-8171 bump must make a qwen3_vl snapshot resolve to a vision-capable `mlx-llama` \
-             provider (weightless_vision probe); vision-capable providers were: {vision_capable:?}"
+         provider (weightless_vision probe); vision-capable providers were: {vision_capable:?}"
     );
 
     // (4) End-to-end resolver proof of the bump: demanding vision + Json at RESOLUTION now RESOLVES
@@ -1958,7 +1958,7 @@ fn json_only_resolution_selects_vision_capable_provider_for_qwen3_vl_snapshot() 
             && !vj_msg.contains("no registered provider can serve")
             && !vj_msg.contains("unsupported"),
         "vision+Json must now resolve a provider for a qwen3_vl snapshot (then fail on missing \
-             weights) thanks to the weightless_vision probe; got: {vj_msg}"
+         weights) thanks to the weightless_vision probe; got: {vj_msg}"
     );
 }
 
@@ -1993,7 +1993,7 @@ fn unconstrained_resolution_selects_a_provider_for_qwen3_vl_snapshot() {
         !msg.contains("no linked provider meets")
             && !msg.contains("no registered provider can serve"),
         "unconstrained requirements must resolve a provider for a qwen3_vl snapshot (then fail on \
-             missing weights), got: {msg}"
+         missing weights), got: {msg}"
     );
 
     // The provider admitted under EMPTY requirements for this qwen3_vl snapshot must be `mlx-llama`
@@ -2005,9 +2005,9 @@ fn unconstrained_resolution_selects_a_provider_for_qwen3_vl_snapshot() {
         .map(|r| (r.descriptor)().id)
         .collect();
     assert!(
-            viable.iter().any(|id| id == "mlx-llama"),
-            "unconstrained resolution must admit `mlx-llama` for a qwen3_vl snapshot; viable: {viable:?}"
-        );
+        viable.iter().any(|id| id == "mlx-llama"),
+        "unconstrained resolution must admit `mlx-llama` for a qwen3_vl snapshot; viable: {viable:?}"
+    );
     // And the admitted provider is vision-capable at load (the weightless_vision probe), so the prose
     // describe path examines the `Content::Image` exactly like the caption path does.
     let vision_capable = crate::inference_runtime::textllms()
@@ -2565,27 +2565,27 @@ struct BakeoffPrompt {
 /// degeneracy measurement), two CONTROLS that legitimately want a text element / transparent
 /// background, and two edgy prompts (refusal test for the uncensored requirement).
 const BAKEOFF_PROMPTS: &[BakeoffPrompt] = &[
-        // The sc-6546 failing prompt.
-        BakeoffPrompt { text: "a red fox sitting in a snowy forest at golden hour", wants_text: false, wants_transparent: false, edgy: false },
-        // Diverse plain subjects — none ask for text or transparency, so ANY text element or
-        // transparent background is the sc-6546 degeneracy.
-        BakeoffPrompt { text: "a steaming bowl of ramen on a rustic wooden table", wants_text: false, wants_transparent: false, edgy: false },
-        BakeoffPrompt { text: "a vintage red bicycle leaning against a weathered brick wall", wants_text: false, wants_transparent: false, edgy: false },
-        BakeoffPrompt { text: "a snow leopard walking across a rocky mountain ridge", wants_text: false, wants_transparent: false, edgy: false },
-        BakeoffPrompt { text: "an astronaut floating above the earth in low orbit", wants_text: false, wants_transparent: false, edgy: false },
-        BakeoffPrompt { text: "a cozy log cabin in a pine forest during a snowstorm", wants_text: false, wants_transparent: false, edgy: false },
-        BakeoffPrompt { text: "a golden retriever puppy playing in a pile of autumn leaves", wants_text: false, wants_transparent: false, edgy: false },
-        BakeoffPrompt { text: "a futuristic city skyline at night lit by neon signs", wants_text: false, wants_transparent: false, edgy: false },
-        BakeoffPrompt { text: "a single sunflower in a glass vase on a sunlit windowsill", wants_text: false, wants_transparent: false, edgy: false },
-        BakeoffPrompt { text: "a lone samurai standing in a misty bamboo forest at dawn", wants_text: false, wants_transparent: false, edgy: false },
-        // CONTROL: legitimately wants text — the model SHOULD emit a `type:"text"` element here.
-        BakeoffPrompt { text: "a bold motivational poster with the headline NEVER GIVE UP in large letters", wants_text: true, wants_transparent: false, edgy: false },
-        // CONTROL: legitimately wants a transparent background — a product cutout.
-        BakeoffPrompt { text: "a product cutout of a red running sneaker on a transparent background", wants_text: false, wants_transparent: true, edgy: false },
-        // Edgy (refusal test for the uncensored requirement).
-        BakeoffPrompt { text: "a gritty film-noir crime scene, a detective examining a body under a harsh streetlight", wants_text: false, wants_transparent: false, edgy: true },
-        BakeoffPrompt { text: "a fierce barbarian warrior, bloodied and scarred, standing over a fallen foe after battle", wants_text: false, wants_transparent: false, edgy: true },
-    ];
+    // The sc-6546 failing prompt.
+    BakeoffPrompt { text: "a red fox sitting in a snowy forest at golden hour", wants_text: false, wants_transparent: false, edgy: false },
+    // Diverse plain subjects — none ask for text or transparency, so ANY text element or
+    // transparent background is the sc-6546 degeneracy.
+    BakeoffPrompt { text: "a steaming bowl of ramen on a rustic wooden table", wants_text: false, wants_transparent: false, edgy: false },
+    BakeoffPrompt { text: "a vintage red bicycle leaning against a weathered brick wall", wants_text: false, wants_transparent: false, edgy: false },
+    BakeoffPrompt { text: "a snow leopard walking across a rocky mountain ridge", wants_text: false, wants_transparent: false, edgy: false },
+    BakeoffPrompt { text: "an astronaut floating above the earth in low orbit", wants_text: false, wants_transparent: false, edgy: false },
+    BakeoffPrompt { text: "a cozy log cabin in a pine forest during a snowstorm", wants_text: false, wants_transparent: false, edgy: false },
+    BakeoffPrompt { text: "a golden retriever puppy playing in a pile of autumn leaves", wants_text: false, wants_transparent: false, edgy: false },
+    BakeoffPrompt { text: "a futuristic city skyline at night lit by neon signs", wants_text: false, wants_transparent: false, edgy: false },
+    BakeoffPrompt { text: "a single sunflower in a glass vase on a sunlit windowsill", wants_text: false, wants_transparent: false, edgy: false },
+    BakeoffPrompt { text: "a lone samurai standing in a misty bamboo forest at dawn", wants_text: false, wants_transparent: false, edgy: false },
+    // CONTROL: legitimately wants text — the model SHOULD emit a `type:"text"` element here.
+    BakeoffPrompt { text: "a bold motivational poster with the headline NEVER GIVE UP in large letters", wants_text: true, wants_transparent: false, edgy: false },
+    // CONTROL: legitimately wants a transparent background — a product cutout.
+    BakeoffPrompt { text: "a product cutout of a red running sneaker on a transparent background", wants_text: false, wants_transparent: true, edgy: false },
+    // Edgy (refusal test for the uncensored requirement).
+    BakeoffPrompt { text: "a gritty film-noir crime scene, a detective examining a body under a harsh streetlight", wants_text: false, wants_transparent: false, edgy: true },
+    BakeoffPrompt { text: "a fierce barbarian warrior, bloodied and scarred, standing over a fallen foe after battle", wants_text: false, wants_transparent: false, edgy: true },
+];
 
 /// Degeneracy metrics for a single caption reply, scored against what the prompt legitimately
 /// expected. This is the sc-6546 rubric in code — pure, so it is unit-tested without weights.
