@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 // sc-15105: the desktop half of the 401 re-prompt. The desktop shell reaches its own API
 // over trusted loopback and is authenticated unconditionally (epic 4484), so it must never
 // be prompted for a password — it doesn't even register a 401 reaction. That requires
@@ -31,13 +32,7 @@ vi.mock("../runtime.js", async (importOriginal) => {
   return { ...actual, isDesktop: true };
 });
 
-async function settle() {
-  await act(async () => {
-    for (let i = 0; i < 6; i += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 describe("useAccessGate on the desktop shell (sc-15105)", () => {
   let container;

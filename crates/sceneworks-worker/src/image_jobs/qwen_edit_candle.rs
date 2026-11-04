@@ -1432,7 +1432,7 @@ mod qwen_edit_tier_reconcile_tests {
             ("HF_HOME", ""),
         ]);
         let data = tempfile::tempdir().expect("temp data dir");
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = data.path().to_path_buf();
         let base = sceneworks_core::hf_home::huggingface_repo_cache_path(
             data.path(),

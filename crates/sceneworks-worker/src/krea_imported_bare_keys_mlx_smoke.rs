@@ -30,31 +30,10 @@ const BASE_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
 /// The cached Turbo snapshot's dense `bf16/` tier: the text encoder, VAE, tokenizer and DiT config
 /// the transformer-only checkpoint is paired with.
 fn cached_base_tier() -> Option<PathBuf> {
-    let hub = ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"]
-        .iter()
-        .find_map(|key| std::env::var(key).ok().filter(|v| !v.trim().is_empty()))
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HF_HOME")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .map(|home| PathBuf::from(home).join("hub"))
-        })
-        .or_else(|| {
-            Some(PathBuf::from(std::env::var("HOME").ok()?).join(".cache/huggingface/hub"))
-        })?;
-    let snapshots = hub
-        .join(format!("models--{}", BASE_REPO.replace('/', "--")))
-        .join("snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .find_map(|entry| {
-            let tier = entry.path().join("bf16");
-            tier.join("transformer/config.json")
-                .is_file()
-                .then_some(tier)
-        })
+    super::smoke_support::cached_snapshot("SceneWorks/krea-2-turbo-mlx", |root| {
+        root.join("bf16/transformer/config.json").is_file()
+    })
+    .map(|root| root.join("bf16"))
 }
 
 #[test]
