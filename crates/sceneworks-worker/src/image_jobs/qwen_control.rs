@@ -1,4 +1,5 @@
 use super::advanced;
+use super::tier_resolver::qwen_control_tier_subdir;
 use super::{
     attach_manifest_text_encoder, pose_entries, resolve_adapters, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
@@ -11,7 +12,6 @@ use super::{
     safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
-use serde_json::json;
 
 // Candle (Windows/CUDA) Qwen-Image 2512-Fun-Controlnet-Union (strict control) route (sc-5489 origin /
 // sc-8350 repoint, epic 8236) — `qwen_image` + `advanced.poses` off-Mac via
@@ -127,50 +127,6 @@ fn qwen_control_guidance(request: &ImageRequest) -> f32 {
         QWEN_CONTROL_DEFAULT_GUIDANCE,
         0.0..=30.0,
     )
-}
-
-/// The packed control tier subdir the request's `advanced.mlxQuantize` selects (sc-9870): `bf16` (opt
-/// out of quantization, `<= 0` / "none"), `q8` (`> 4`), `q4` for an explicit Q4 pick (`1..=4`), else —
-/// with NO explicit `mlxQuantize` — the **`q8`** default (sc-10726) — the SAME mapping
-/// [`standard_tier_subdir`] uses for the base transformer tier, so the control overlay tier tracks the
-/// base tier for a coherent A/B (a q8-default base pairs with the q8 control overlay). The whole control
-/// matrix (q4/q8/bf16) installs as co-requisites alongside the base, so the q8 overlay is on disk
-/// whenever the base is.
-///
-/// The Q8 default is CLAMPED to what's installed (sc-10726): `snapshot` is the control repo's HF cache
-/// snapshot, and — with NO explicit pick — the resolver picks the highest CLEAN overlay tier whose
-/// `<tier>/model.safetensors` is actually on disk (q8 → bf16 → q4), so a legacy/partial install that
-/// carries only the q4 overlay resolves q4 rather than forcing a NEW q8 fetch (via
-/// [`ensure_qwen_control_weights`]) on the plain default path. An EXPLICIT pick is returned as-is (it
-/// may legitimately fetch its tier on demand), and an absent `snapshot` falls back to `q8`, the
-/// fresh-install co-requisite the base download brings. Mirrors the MLX `qwen_control_tier_subdir`.
-fn qwen_control_tier_subdir(request: &ImageRequest, snapshot: Option<&Path>) -> &'static str {
-    request.quant_bits().map_or_else(
-        || qwen_control_installed_default_tier(snapshot),
-        |bits| crate::payload::tier_for_bits(Some(bits), "q8"),
-    )
-}
-
-/// The highest CLEAN control overlay tier (q8 → bf16 → q4) whose `<tier>/model.safetensors` is present
-/// in the control repo `snapshot`, else `"q8"` (the fresh-install co-requisite default). Keeps a plain
-/// default job from forcing a NEW on-demand fetch on a legacy/partial install that carries only q4
-/// (sc-10726) — the default tier only wins when it is actually on disk. Mirrors the MLX
-/// `qwen_control_installed_default_tier`.
-fn qwen_control_installed_default_tier(snapshot: Option<&Path>) -> &'static str {
-    let present = |tier: &str| {
-        snapshot
-            .map(|root| root.join(tier).join(QWEN_CONTROL_FILE).is_file())
-            .unwrap_or(false)
-    };
-    if present("q8") {
-        "q8"
-    } else if present("bf16") {
-        "bf16"
-    } else if present("q4") {
-        "q4"
-    } else {
-        "q8"
-    }
 }
 
 /// The (repo, repo-relative file path) of the ControlNet weights.
@@ -293,18 +249,16 @@ pub(super) fn qwen_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
-    raw.insert("realModelInference".to_owned(), Value::Bool(true));
-    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    raw.insert("numInferenceSteps".to_owned(), json!(steps));
-    raw.insert("guidanceScale".to_owned(), json!(guidance));
-    raw.insert("controlScale".to_owned(), json!(control_scale));
-    raw.insert("poseCount".to_owned(), json!(pose_count));
-    raw.insert(
-        "controlEngine".to_owned(),
-        Value::String(QWEN_CONTROL_ENGINE.to_owned()),
-    );
-    raw
+    super::tier_resolver::control_raw_settings(
+        request,
+        repo,
+        steps,
+        control_scale,
+        pose_count,
+        super::tier_resolver::ControlBackend::Candle,
+        Some(guidance),
+        Some(QWEN_CONTROL_ENGINE),
+    )
 }
 
 /// The per-lane half of the candle Qwen 2512-Fun strict-control [`CandleStrictControl`] driver (sc-8304 /
@@ -410,7 +364,7 @@ impl CandleStrictControl for QwenStrictControl {
             let vae = self.qwen_base.join("vae");
             if transformer.is_dir() && vae.is_dir() {
                 let mut staged = vec![
-                    crate::conditioning_fit::weights_source_path(text_encoder),
+                    crate::weights_source::WeightsSourceExt::path(text_encoder),
                     vae.as_path(),
                 ];
                 staged.extend(overlays.iter().copied());

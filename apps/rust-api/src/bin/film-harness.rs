@@ -127,7 +127,8 @@ OPTIONS (plan / compile):
 
 OPTIONS (run):
   --api URL              SceneWorks API base URL (default http://127.0.0.1:8000, or $SCENEWORKS_API_URL)
-  --token TOKEN          API token (default $SCENEWORKS_ACCESS_TOKEN; sent as X-SceneWorks-Token)
+  --token-stdin          Read API token from stdin (preferred; or $SCENEWORKS_ACCESS_TOKEN)
+  --token TOKEN          Legacy API token argument; visible in process listings
   --compiled FILE        Compiled requests to dispatch (default: compiled.json beside the plan)
   --shots A,B            Render only these shot ids, in plan order (default: every shot)
   --project-id ID        Reuse an existing project instead of creating one named after the plan
@@ -207,6 +208,13 @@ correct takes; nothing it says approves, rejects or conditions anything.
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = match token_arguments(args, std::io::stdin().lock()) {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("film-harness: {error}");
+            return ExitCode::from(1);
+        }
+    };
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -215,6 +223,70 @@ fn main() -> ExitCode {
         }
     };
     runtime.block_on(main_async(args))
+}
+
+/// Normalize the secure input option before routing so every subcommand supports it.
+fn token_arguments(
+    mut args: Vec<String>,
+    input: impl std::io::BufRead,
+) -> Result<Vec<String>, String> {
+    // Match option positions, not values: a legacy token, filename or reason may
+    // itself literally be "--token-stdin". Every other long option takes a value
+    // except these existing switches, whose cardinality the command parsers share.
+    let mut stdin_positions = Vec::new();
+    let mut argv_token = false;
+    let mut position = 0;
+    while position < args.len() {
+        let argument = args[position].as_str();
+        let step = match argument {
+            "--token-stdin" => {
+                stdin_positions.push(position);
+                1
+            }
+            "--token" => {
+                argv_token = true;
+                2
+            }
+            value
+                if !value.starts_with("--")
+                    || matches!(
+                        value,
+                        "--no-refine"
+                            | "--force"
+                            | "--no-export"
+                            | "--skip-install-check"
+                            | "--export"
+                            | "--scripted"
+                            | "--help"
+                    ) =>
+            {
+                1
+            }
+            _ => 2,
+        };
+        position += step;
+    }
+    if stdin_positions.len() > 1 || (!stdin_positions.is_empty() && argv_token) {
+        return Err("Use one of --token-stdin or --token.".to_owned());
+    }
+    if let Some(index) = stdin_positions.first().copied() {
+        use std::io::Read;
+        let mut token = String::new();
+        input
+            .take(64 * 1024 + 1)
+            .read_to_string(&mut token)
+            .map_err(|_| "Cannot read token from stdin")?;
+        if token.len() > 64 * 1024 || token.trim().is_empty() {
+            return Err("Invalid stdin token (empty or exceeds 64 KiB).".to_owned());
+        }
+        args.splice(
+            index..=index,
+            ["--token".to_owned(), token.trim().to_owned()],
+        );
+    } else if argv_token {
+        eprintln!("film-harness: --token exposes the token in process listings; prefer --token-stdin or SCENEWORKS_ACCESS_TOKEN.");
+    }
+    Ok(args)
 }
 
 async fn main_async(args: Vec<String>) -> ExitCode {
@@ -2013,5 +2085,55 @@ fn fixture_sound(args: &[String]) -> ExitCode {
             eprintln!("film-harness: {error}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod token_input_tests {
+    use super::*;
+    #[test]
+    fn stdin_tokens_apply_to_every_command_and_reject_ambiguous_or_oversized_input() {
+        let args = vec![
+            "review".to_owned(),
+            "--token-stdin".to_owned(),
+            "--out".to_owned(),
+            "dir".to_owned(),
+        ];
+        let normalized = token_arguments(args, std::io::Cursor::new(b" secret\n")).unwrap();
+        assert_eq!(
+            flag_value(&normalized, "--token").as_deref(),
+            Some("secret")
+        );
+        assert_eq!(flag_value(&normalized, "--out").as_deref(), Some("dir"));
+        for args in [
+            vec!["run", "--token", "--token-stdin"],
+            vec!["accept-take", "--reason", "--token-stdin", "--out", "dir"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert_eq!(
+                token_arguments(args.clone(), std::io::Cursor::new(b"ignored")).unwrap(),
+                args
+            );
+        }
+        for args in [
+            vec!["--token-stdin", "--token", "x"],
+            vec!["--token-stdin", "--token-stdin"],
+        ] {
+            assert!(token_arguments(
+                args.into_iter().map(str::to_owned).collect(),
+                std::io::Cursor::new(b"secret")
+            )
+            .is_err());
+        }
+        assert!(token_arguments(
+            vec!["--token-stdin".to_owned()],
+            std::io::Cursor::new(vec![b'x'; 64 * 1024 + 1])
+        )
+        .is_err());
+        assert!(token_arguments(
+            vec!["--token-stdin".to_owned()],
+            std::io::Cursor::new(b"  ")
+        )
+        .is_err());
     }
 }
