@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…7 were approved by Michael on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-8…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
+| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…8 were approved by Michael on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-9…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
 | **Date** | 2026-11-03 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
 | **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
@@ -445,6 +445,7 @@ pub trait FeatureHooks<B: RunnerBackend>: Send + Sync {
 }
 ```
 
+- **Approved DEC-8:** recipe Features are activated by explicit user choice or the selected recipe; equivalent Features preserve requested results within declared, evidenced quality bounds and are the only class admission may select; diagnostic Features are explicitly configured observation. Admission never adds a recipe, changes quantization tier or enables diagnostics to fit memory. If permitted equivalent candidates cannot fit, it returns a typed refusal. These runtime classes are separate from AP13 migration-fidelity classes; quality evidence uses DEC-7's bounded effort. No implementation is authorized during design review.
 - **Composition.** Pass producers and targeted phase contributions follow §3.1's typed coordinates, transition ownership and complete-plan validation. Applicability exports separate structural availability from parameter/combination restrictions; a broad static “available” flag never overrides runtime composed-plan validation. Every active Feature's requirements, conflicts and ordering apply to the full active set, not only pairwise checks.
 - **Hook ordering** uses declared keys; equal keys are a registration error.
 - **Memory effects include transition residency:** both latents during a resample, the learned upsampler, the VAE during a pixel round trip, and step contexts kept for later phases [ENG-23].

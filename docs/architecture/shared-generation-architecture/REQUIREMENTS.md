@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** All four round-5 findings are addressed. Michael approved DEC-1…7 on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-8…19 remain open. This is not overall design approval or implementation evidence. Design-only: no program tracker items, pilots or implementation start from an individual decision approval. |
+| **Status** | **Draft 0.5, decision review in progress.** All four round-5 findings are addressed. Michael approved DEC-1…8 on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-9…19 remain open. This is not overall design approval or implementation evidence. Design-only: no program tracker items, pilots or implementation start from an individual decision approval. |
 | **Date** | 2026-11-03 |
 | **Repositories** | SceneWorks (`main` @ `a1d95e2c4`) and inference (`origin/main` @ `a43724b82`). All citations refer to those revisions. |
 | **Companion** | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): target design, migration strategy and phased roadmap. |
@@ -293,6 +293,13 @@ Encode includes declared dependencies among encoder components, such as Qwen edi
 
 and optional per-backend **`FeatureHooks`**, for model-internal hooks such as caches or attention perturbation.
 
+**Approved DEC-8 classes and activation:**
+- **Recipe:** intentionally changes generation (low-res start, chained passes, guidance changes); activated by explicit user choice or the selected recipe.
+- **Equivalent:** preserves the requested result within a declared, evidenced quality bound (for example validated tiled decoding); admission may select it to fit memory.
+- **Diagnostic:** observes execution (tracing, profiling or debugging); activated through explicit diagnostic configuration and does not change generation results.
+
+These runtime classes determine purpose and activation authority. AP13's separate (a)/(b)/(c) classes determine fidelity of a migration. Equivalent does not require byte-identical pixels; evidence follows DEC-7's bounded-validation policy.
+
 **Accept:** these are implemented as Features with no family-file edits: low-res start (FEAT-1), per-phase adapters and guidance, and Hires.fix (via pass-local stage bindings and the pixel round-trip transition, with all intermediate residency priced).
 
 **HOOK-3 — Features compose deterministically.**
@@ -431,9 +438,9 @@ Pricing uses per-component weights, existing aggregate phase/operation peak evid
 - Pure fixtures cover two streams that each fit alone but exceed the budget together, a transition peak above either steady phase, and alias deduplication.
 - A learned-transition workspace is priced above latent-only deltas; a joint-total evidence value is not added to its already included stream totals. Ambiguous evidence follows the existing route's unpriced-evidence posture and is reported as such, rather than silently reinterpreted.
 
-**MEM-4 — Equivalent-class Features stay within a declared, recorded quality bound.**
+**MEM-4 — Admission selects only equivalent-class Features (DEC-8 approved).**
 - **Equivalent-class Features are output-preserving within a declared and recorded quality bound.** Tiled decode changes pixels (`gen-core/src/memory_strategy/decode_quality.rs`), so "output-preserving" cannot mean byte-identical here.
-- **Admission never selects a recipe-class Feature and never changes the quantization tier**, because tier is a creative choice.
+- **Admission selects only equivalent-class Features and never changes the quantization tier**, because tier is a creative choice. It cannot enable low-res start, add passes or activate diagnostics to make a request fit. If permitted, applicable adjustments are insufficient, it refuses with a typed reason.
 
 **Accept:** admission decisions contain only equivalent-class selections.
 
@@ -787,7 +794,7 @@ These are measured at baseline and again at every feature end. They are **goals,
 
 ## 10. Decisions and approval status
 
-**DEC-1…7 approved by Michael on 2026-11-03. DEC-4 is approved in full, including chained-pass product scope; DEC-8…19 remain open.** Approvals here select the design direction; they do not approve the whole design or authorize implementation during this design-only discussion.
+**DEC-1…8 approved by Michael on 2026-11-03. DEC-4 is approved in full, including chained-pass product scope; DEC-9…19 remain open.** Approvals here select the design direction; they do not approve the whole design or authorize implementation during this design-only discussion.
 
 | ID | Decision | Options | Recommendation / decision (confidence) | Affects |
 |---|---|---|---|---|
@@ -798,7 +805,7 @@ These are measured at baseline and again at every feature end. They are **goals,
 | **DEC-5 — Approved** | **SW-F327 coordination.** | Entire program waits; independent engine work with overlapping SceneWorks halves gated; full parallel | **Michael approved independent engine progress with overlapping SceneWorks changes gated on remediation reaching `main` (2026-11-03).** Once implementation is authorized, preserve worker-facing APIs and pin compatibility; re-baseline each overlapping app change after main delivery. Reuse delivered remediation and leave in-review fixes with their current owner. Refresh file/contract overlap at feature planning and verify main ancestry; feature-branch merges do not clear the gate. The dated PR snapshot lives in PLAN §7.5. Design-only: this decision starts no implementation. (High.) | MIG-7, all `[SW]` items |
 | **DEC-6 — Approved** | **Structural checks** for shared attention/guidance/schedule ownership, allowed model-id locations and dependency direction. | Narrow automated checks in the existing suite; review/search only | **Michael approved narrow structural checks within TOOL-4's limits (2026-11-03).** Introduce alongside consolidation; prefer visibility/types/Cargo boundaries, with focused syntax checks for gaps. Document legitimate backend/native exceptions and actionable failures. Existing suite/CI lanes only, without model execution. Preserve the ban on memory/measurement gates; no source-hash snapshots, evidence-currency or formatting-sensitive checks. Numerical/runtime proof remains separate. Design-only. (High in narrow checks' value; medium in exact boundaries until migration.) | PIPE-8/9, BACK-2, APPREG-2, PAT-5, TOOL-4 |
 | **DEC-7 — Approved** | **Numerics classes and bounded validation (AP13).** | Bit-exact only; (a)/(b)/(c) with bounded investigation | **Michael approved the revised policy (2026-11-03): bit-exact is preferred, with bounded effort.** Default target (a); supported (b) uses predefined component-specific bounds and acceptable output evidence; material/semantic changes (c) need per-route sign-off. Use finite proof/investigation budgets, reuse evidence and stop GPU retries solely for sub-tolerance drift. Further runs need a concrete unresolved question or relevant changed numerics. “<1%” is illustrative, not a universal threshold. Component limits are set at feature planning; exact pilot exceptions remain explicit. Design-only. (High in bounded-effort policy; medium in unmeasured component limits.) | PIPE-10, COMP-1/4, WGT-3, BACK-5 |
-| **DEC-8** | **Feature classes.** | Reuse the "approximation" regime; add a recipe class | **Recipe / equivalent (within a declared quality bound) / diagnostic.** Admission selects only equivalent-class Features. (High.) | HOOK-2, MEM-4 |
+| **DEC-8 — Approved** | **Feature classes and activation authority.** | Extend the "approximation" regime; explicit recipe/equivalent/diagnostic classes | **Michael approved recipe / equivalent / diagnostic (2026-11-03).** Recipes are user-chosen or part of the selected recipe; equivalent Features preserve intent within declared, evidenced quality bounds and are the only admission-selectable class; diagnostics are explicitly configured observation. Admission cannot silently enable low-res start, add passes, change quantization tier or activate diagnostics to fit memory; insufficient permitted adjustments produce a typed refusal. Quality evidence follows bounded DEC-7 validation. These classes are distinct from AP13's migration-fidelity classes. Design-only. (High.) | HOOK-2, MEM-4 |
 | **DEC-9** | **Web validation mechanism.** | Server endpoint per change; core validator compiled to WebAssembly and run in the browser; hybrid (availability cached per (model, backend, mode) plus server round-trip for cross-field rules) | **WebAssembly-compiled core validator.** One Rust implementation, instant, works offline and over the RunPod proxy. Cost: wasm build and bundle size. **Fallback:** hybrid. (Medium.) | OPT-4 |
 | **DEC-10** | **Low-res start recipe v1** (mechanics: PLAN §6.1, §3.1). | Coverage and modes; step domain; scale and grid policy; estimator; schedule policy; quality acceptance | **Coverage:** every structurally supporting route; noise-start plus img2img. Edit, reference and control refuse on the targeted pass until COMP-5. **Step domain:** the first denoising pass, once; `1 ≤ K < M` executed steps; default `max(1, floor(M/2))`. **Scale:** 0.25–0.9, default 0.5, floor-to-quantum, refuse when invalid. **Schedule:** full-pass schedule and `mu` kept. **Estimator:** `EndpointEvaluation` default; `PreviousEvaluation` is a candidate that completes K steps normally and retains the last step's named guided primary x0. It skips no integration/sub-evaluation; it adds no endpoint forward. Require solver support and bounded quality/time/memory comparison before recipe finalization, with no percentage saving assumed. **Fixed:** estimator identity and semantics are persisted/versioned; no runtime/admission estimator switch; only K/scale user controls. **Quality:** FEAT-1's bounded checks and replay. Proposed, not approved by this revision. (Medium on quality/benefit; high on explicit semantics.) | FEAT-1, PIPE-2/4/5, ADM-3 |
 | **DEC-11** | **Tracker naming in inference CI.** | Land the CodeGraph-key policy fix first; use `sc-` names | **Policy fix first, as a prerequisite PR.** (High.) | MIG-1 |
