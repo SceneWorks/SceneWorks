@@ -16,6 +16,8 @@
 //! UNCERTIFIED artifact gets no floors at all (the manifest rows describe the certified bytes,
 //! not an imported checkpoint) and keeps its resident-estimate-only behavior.
 
+#[cfg(test)]
+use crate::memory_route_registry::SD35_REQUEST_EVIDENCE_REVISION;
 pub(crate) use crate::memory_route_registry::{
     KOLORS_REQUEST_EVIDENCE_REVISION, PULID_FLUX_REQUEST_EVIDENCE_REVISION,
     SDXL_REQUEST_EVIDENCE_REVISION,

@@ -6,6 +6,8 @@ use super::*;
 use super::{bernini::*, krea_realtime::*, ltx::*, mochi::*, scail2::*, svd::*, vace::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use gen_core::AdapterKind;
 
 /// Admission must see the exact temporal chunk already resolved onto the engine input. Re-reading
 /// the sparse payload or dropping this field would turn the real 25-frame/chunk-8 SVD execution
