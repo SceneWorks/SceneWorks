@@ -2226,23 +2226,7 @@ fn detect_metadata_family(header: &Value) -> Option<MetadataFamily> {
         "modelspec.architecture",
         "modelspec.implementation",
     ];
-    for key in keys {
-        let Some(value) = metadata.get(key).and_then(Value::as_str) else {
-            continue;
-        };
-        if let Some(family) = crate::model_family::exact_identity(value) {
-            // A generic trainer label cannot erase a preceding versioned repository stamp.
-            // Leave it to the ordered fallback below, which still accepts generic-only metadata.
-            if family == crate::model_family::QWEN_IMAGE && is_generic_qwen_image_label(value) {
-                continue;
-            }
-            return Some(MetadataFamily {
-                generic_qwen_label: family == crate::model_family::QWEN_IMAGE
-                    && is_generic_qwen_image_label(value),
-                family: family.to_owned(),
-            });
-        }
-    }
+    // Keep the established field order; canonical aliases apply within each value.
     for key in keys {
         let Some(value) = metadata.get(key).and_then(Value::as_str) else {
             continue;
