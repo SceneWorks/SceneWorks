@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -50,13 +51,7 @@ function context(overrides = {}) {
   };
 }
 
-async function settle() {
-  await act(async () => {
-    for (let index = 0; index < 10; index += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 describe("TrainingStudio — Iris", () => {
   let container;
@@ -89,7 +84,7 @@ describe("TrainingStudio — Iris", () => {
     await act(async () => {
       root.render(<AppContext.Provider value={ctx}>{<TrainingStudio />}</AppContext.Provider>);
     });
-    await settle();
+    await settle({ microtasks: 10 });
     const select = [...container.querySelectorAll("label")]
       .find((label) => label.textContent.startsWith("Dataset"))
       .querySelector("select");
@@ -98,7 +93,7 @@ describe("TrainingStudio — Iris", () => {
       setter.call(select, "dataset-1");
       select.dispatchEvent(new window.Event("change", { bubbles: true }));
     });
-    await settle();
+    await settle({ microtasks: 10 });
   }
 
   it("shows the data-walk warning for the picked dataset and submits advanced.iris", async () => {
@@ -127,7 +122,7 @@ describe("TrainingStudio — Iris", () => {
     await act(async () => {
       start.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
-    await settle();
+    await settle({ microtasks: 10 });
     expect(ctx.createTrainingJob).toHaveBeenCalledTimes(1);
     const { config } = ctx.createTrainingJob.mock.calls[0][0];
     expect(config.advanced.iris).toMatchObject({ text_conditioning: "cached", ema_enabled: true, export_dtype: "fp32" });

@@ -57,18 +57,10 @@ fn resolve_q4_dir(root: &Path) -> PathBuf {
 /// snapshot whose `q4/` subdir carries the packed transformer. `None` if the q4 tier hasn't been pulled
 /// (the smoke then panics with the `LENS_BASE_Q4_DIR` hint).
 fn cached_turnkey_root() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let snapshots =
-        PathBuf::from(home).join(".cache/huggingface/hub/models--SceneWorks--lens-mlx/snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .find_map(|e| {
-            let dir = e.path();
-            dir.join("q4/transformer/diffusion_pytorch_model.safetensors")
-                .is_file()
-                .then_some(dir)
-        })
+    super::smoke_support::cached_snapshot("SceneWorks/lens-mlx", |root| {
+        root.join("q4/transformer/diffusion_pytorch_model.safetensors")
+            .is_file()
+    })
 }
 
 #[test]

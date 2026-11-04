@@ -4758,26 +4758,14 @@ mod tests {
     fn test_settings(data_dir: &Path) -> Settings {
         Settings {
             api_url: "http://127.0.0.1".to_owned(),
-            access_token: None,
-            data_dir: data_dir.to_path_buf(),
             config_dir: data_dir.join("config"),
             worker_id: "test-worker".to_owned(),
             gpu_id: "gpu-0".to_owned(),
-            is_child_worker: false,
-            poll_seconds: 1,
-            heartbeat_seconds: 1,
-            shutdown_timeout_seconds: 1,
             huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
-            huggingface_token: None,
-            credentials: Vec::new(),
             max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
             max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
-            allow_private_lora_urls: false,
-            utility_workers: 1,
             backend_mlx_enabled: true,
-            backend_candle_enabled: false,
-            gpu_memory_limit_bytes: 0,
-            external_model_roots: Vec::new(),
+            ..crate::Settings::for_test(data_dir.to_path_buf())
         }
     }
 
@@ -5611,25 +5599,10 @@ mod tests {
         use axum::{
             extract::{Path as AxumPath, State},
             response::{IntoResponse, Response},
-            routing::{get, post},
-            Json, Router,
+            routing::post,
+            Json,
         };
         use base64::Engine as _;
-        async fn job_route() -> Response {
-            Json(prepass_job_value(json!({}))).into_response()
-        }
-        async fn progress_route(
-            State(state): State<PrepassApi>,
-            Json(body): Json<Value>,
-        ) -> Response {
-            if let Some(progress) = body["progress"].as_f64() {
-                state.progress.lock().unwrap().push(progress);
-            }
-            Json(prepass_job_value(json!({}))).into_response()
-        }
-        async fn heartbeat_route() -> Response {
-            Json(json!({})).into_response()
-        }
         async fn masks_route(
             State(state): State<PrepassApi>,
             AxumPath((_project, _dataset)): AxumPath<(String, String)>,
@@ -5670,24 +5643,21 @@ mod tests {
         }
         let state = PrepassApi::default();
         *state.dataset_root.lock().unwrap() = dataset_root;
-        let app = Router::new()
-            .route("/api/v1/jobs/:job_id", get(job_route))
-            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-            .route(
-                "/api/v1/workers/:worker_id/heartbeat",
-                post(heartbeat_route),
-            )
-            .route(
-                "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks",
-                post(masks_route),
-            )
-            .with_state(state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        crate::load_progress::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("http://{address}"), state)
+        let app = crate::test_api_stub::routes(
+            |_: &PrepassApi, _, _| prepass_job_value(json!({})),
+            |state, _, body| {
+                if let Some(progress) = body["progress"].as_f64() {
+                    state.progress.lock().unwrap().push(progress);
+                }
+            },
+            |_, _| json!({}),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks",
+            post(masks_route),
+        )
+        .with_state(state.clone());
+        (crate::test_api_stub::serve(app).await, state)
     }
 
     /// A stub segmenter: a full-white mask per image, counting the images it was asked to segment.

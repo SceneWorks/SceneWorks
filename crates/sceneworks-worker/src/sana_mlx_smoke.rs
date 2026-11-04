@@ -68,22 +68,13 @@ const TIERS: &[(&str, Option<Quant>)] = &[
 /// turnkeys pack the backbone under `transformer/diffusion_pytorch_model.safetensors`. `None` if the
 /// repo isn't cached at all.
 fn cached_snapshot(repo_folder: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let snapshots = PathBuf::from(home)
-        .join(".cache/huggingface/hub")
-        .join(repo_folder)
-        .join("snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|dir| {
-            TIERS.iter().any(|(t, _)| {
-                dir.join(t)
-                    .join("transformer/diffusion_pytorch_model.safetensors")
-                    .is_file()
-            })
+    super::smoke_support::cached_snapshot(repo_folder, |root| {
+        TIERS.iter().any(|(tier, _)| {
+            root.join(tier)
+                .join("transformer/diffusion_pytorch_model.safetensors")
+                .is_file()
         })
+    })
 }
 
 #[test]

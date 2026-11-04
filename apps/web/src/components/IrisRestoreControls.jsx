@@ -1,7 +1,7 @@
 import { imageRestorationApi } from "../api/imageRestorationResources.js";
 import React, { useEffect, useRef, useState } from "react";
 import { isAbortError } from "../api.js";
-import { useAppContextOptional } from "../context/AppContext.js";
+import { useAppStaticOptional } from "../context/AppContext.js";
 import {
   IRIS_INPUT_SIZINGS,
   IRIS_SCALE_PRESETS,
@@ -15,7 +15,7 @@ import {
 // Studio run of `task` is installed (or a reopened setting names one). "" = the release export.
 // `models` defaults to the app catalog.
 export function TrainedIrisModelSelect({ task, value, onChange, models, releaseLabel, disabled = false }) {
-  const catalog = useAppContextOptional()?.models;
+  const catalog = useAppStaticOptional()?.models;
   const trained = trainedTaskModels(models ?? catalog, task);
   if (!trained.length && !value) return null;
   return (
@@ -48,7 +48,7 @@ export function IrisRestoreControls({ value, onChange, planBody = null, token = 
   const [preview, setPreview] = useState({ state: "idle", lines: [], error: null, blocked: false });
   const statusRef = useRef(onStatus);
   statusRef.current = onStatus;
-  const appModels = useAppContextOptional()?.models;
+  const appModels = useAppStaticOptional()?.models;
   // With the release export absent, a selection that names no model runs the first installed
   // trained restoration model — set on the value, so the host's job carries it (and re-derived when
   // the catalog loads late or a trained model is installed later).

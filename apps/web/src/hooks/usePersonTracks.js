@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { personTracksApi } from "../api/personTracksResources.js";
 import { useCallback, useState } from "react";
@@ -91,12 +92,11 @@ export function usePersonTracks({ token, activeProject, activeProjectRef, setErr
     [token, activeProject, setError],
   );
 
-  return {
+  const context = useAppDomainValue({
     personTracks,
-    setPersonTracks,
-    refreshPersonTracks,
     createPersonDetectionJob,
     createPersonTrackJob,
-    saveTrackCorrections,
-  };
+    saveTrackCorrections
+  });
+  return { ...context, setPersonTracks, refreshPersonTracks, context };
 }
