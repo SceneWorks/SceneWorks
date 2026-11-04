@@ -2900,3 +2900,6 @@ mod weights_source;
 
 #[cfg(any(test, native_lane))]
 mod adapter_resolution;
+
+#[cfg(test)]
+mod source_tests;
