@@ -447,6 +447,8 @@ crates/media/candle-gen/vendor/candle-core/src/quantized/cuda.rs	679b9ebc8247453
 crates/media/candle-gen/vendor/candle-flash-attn/build.rs	bcff750e73d842e6542b68cf51cb14397ac987de	700d6a849b3d56e20af61c16e407b05bcd5e5065cbc1f695bb0b15e5a80c2b8d	architecture:crates/media/candle-gen/vendor/candle-flash-attn
 crates/media/candle-gen/vendor/candle-flash-attn/src/lib.rs	255338032079bba905390adfb95718fc59ac3729	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/candle-gen/vendor/candle-flash-attn
 crates/media/candle-gen/vendor/candle-kernels/build.rs	c460367c561866ec4b687576a62a677efb2b1bd6	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/candle-gen/vendor/candle-kernels
+crates/media/gen-cv/src/pose.rs	f85d01eb3bffcfecc06d4f52e3f7f205a580ec3b	4bc18b1c414724c7258b611b436d26a3d0ad6f010639714d5c6300d55a8844f6	architecture:crates/media/gen-cv
+crates/media/gen-cv/src/upscale.rs	0bdc68e55c9503a8ad2edf87808b0b66b3c15fcd	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/gen-cv
 crates/media/mlx-gen/mlx-gen-anima/src/conditioner.rs	030f5c5a62d6cd3e8c6997b5a97cf41de1a2e48a	2e01018e65f8f1e279bc16e89359022da0def06ad8320585036a0e3180e26aa5	architecture:crates/media/mlx-gen/mlx-gen-anima
 crates/media/mlx-gen/mlx-gen-anima/src/loader.rs	69d13e477761a51b8718a2f2ae03158b29414c0c	47393e8a3e80a3cb2361b7011ce193932ce3da257c5d07f7da0f11dd3a0fb0b9	architecture:crates/media/mlx-gen/mlx-gen-anima
 crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs	3347dbc996a8341edd69edb99c307b741fa063f1	34685acc925d60791c8d6707c4027321ed9dc62c68dc213590994c517d1533f9	architecture:crates/media/mlx-gen/mlx-gen-anima

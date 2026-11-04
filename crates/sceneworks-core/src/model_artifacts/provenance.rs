@@ -652,13 +652,7 @@ fn acquired_component_is_source(
             && receipt.revision == revision
     }) {
         receipt.validate()?;
-        let digest = format!(
-            "sha256:{}",
-            pin.content_sha256()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        );
+        let digest = format!("sha256:{}", crate::hashing::hex(pin.content_sha256()));
         if receipt.sha256 != digest || receipt.size_bytes != pin.target_fingerprint().size {
             return Err(
                 "H3 component staging SHA/bytes binding differs from acquired content".into(),
@@ -743,13 +737,7 @@ pub fn verify_prepared_h3_component_closure_with_staging(
                 pin.verify_unchanged().map_err(|error| {
                     refuse(format!("acquired seal changed for {relative}: {error}"))
                 })?;
-                let digest = format!(
-                    "sha256:{}",
-                    pin.content_sha256()
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>()
-                );
+                let digest = format!("sha256:{}", crate::hashing::hex(pin.content_sha256()));
                 if expected.get("sha256").and_then(Value::as_str) != Some(digest.as_str()) {
                     return Err(format!("H3 component content drift: {component} ({repo}@{revision}) {relative}; expected {}, acquired {digest}; explicitly repair/reimport or rescan",expected["sha256"]));
                 }

@@ -71,57 +71,9 @@ pub(crate) fn read_json(path: &Path) -> ProjectStoreResult<Value> {
     Ok(serde_json::from_str(&payload)?)
 }
 
-/// Atomically writes `contents` to `path`: stage into a uniquely-named temp file
-/// in the same directory, fsync the temp (and the directory) so its bytes hit the
-/// disk before the rename, then rename it into place.
-///
-/// The temp suffix carries random bytes so two threads writing the *same* target
-/// never collide on the temp path. Previously the temp name was deterministic
-/// (`foo.json` -> `foo.json.tmp`), so overlapping writers interleaved their bytes
-/// into one temp file and the second `rename` failed once the first had already
-/// renamed the temp away (sc-1633). Pair with [`lock_project_files`] when the
-/// caller does a read-modify-write so concurrent updates don't clobber each other.
-///
-/// The `sync_all` before the rename closes the crash window the atomic pattern is
-/// meant to preclude: without it a filesystem may persist the rename before the
-/// temp's data, so a power loss right after the write could leave a zero-length or
-/// partial "atomically written" sidecar/manifest (sc-8949 / F-147). The parent-dir
-/// fsync then durably records the rename itself so the new name survives too.
+/// Store-error adapter for the shared neutral filesystem writer.
 pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> ProjectStoreResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or("json");
-    let token = random_hex(8)?;
-    let tmp_path = path.with_extension(format!("{extension}.{token}.tmp"));
-    write_and_sync(&tmp_path, contents)?;
-    fs::rename(&tmp_path, path)?;
-    sync_parent_dir(path);
-    Ok(())
-}
-
-/// Write `contents` to `path` and `sync_all` the handle so the bytes are durable
-/// before the caller renames the file into place (see [`atomic_write`]).
-fn write_and_sync(path: &Path, contents: &[u8]) -> ProjectStoreResult<()> {
-    use std::io::Write;
-    let mut file = fs::File::create(path)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-/// fsync the directory holding `path` so a just-completed rename is itself durable.
-/// Best-effort: some platforms/filesystems refuse to open a directory for this, and
-/// the temp fsync already covers the data — so a failure here is not fatal.
-fn sync_parent_dir(path: &Path) {
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
+    Ok(crate::fsutil::write_atomic(path, contents)?)
 }
 
 pub(crate) fn write_json<T: Serialize>(path: &Path, payload: &T) -> ProjectStoreResult<()> {
@@ -179,19 +131,23 @@ pub(crate) fn relative_string(root: &Path, path: &Path) -> ProjectStoreResult<St
         .replace('\\', "/"))
 }
 
-pub(crate) fn is_safe_relative_path(relative_path: &str) -> bool {
-    !relative_path.trim().is_empty()
-        && !relative_path.contains('\\')
-        && Path::new(relative_path)
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
+pub fn is_safe_relative_path(relative_path: &str) -> bool {
+    crate::safe_path::relative_normal_components(relative_path).is_ok()
 }
 
-pub(crate) fn is_safe_id(value: &str) -> bool {
-    !value.trim().is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+pub use crate::ids::{is_safe_id, is_safe_id_with_max};
+
+/// Required string field; whitespace and empty strings are validated by each store's domain rules.
+pub(crate) fn required_str<'a>(value: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
+    required_str_with(value, key, || format!("Missing required field: {key}"))
+}
+
+pub(crate) fn required_str_with<'a>(
+    value: &'a Value,
+    key: &str,
+    message: impl FnOnce() -> String,
+) -> ProjectStoreResult<&'a str> {
+    optional_str(value, key).ok_or_else(|| ProjectStoreError::BadRequest(message()))
 }
 
 pub(crate) fn optional_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -218,16 +174,8 @@ pub(crate) fn optional_f64(value: &Value, key: &str) -> Option<f64> {
 /// `getrandom` and hex-encodes in Rust — no connection, no SQLite failure
 /// surface.
 pub(crate) fn random_hex(bytes: usize) -> ProjectStoreResult<String> {
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut buffer = vec![0u8; bytes];
-    getrandom::fill(&mut buffer)
-        .map_err(|error| ProjectStoreError::Io(std::io::Error::other(error.to_string())))?;
-    let mut hex = String::with_capacity(bytes * 2);
-    for byte in buffer {
-        hex.push(HEX_DIGITS[(byte >> 4) as usize] as char);
-        hex.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    Ok(hex)
+    crate::hashing::random_hex(bytes)
+        .map_err(|error| ProjectStoreError::Io(std::io::Error::other(error.to_string())))
 }
 
 /// Deserialize a single string into one of the crate's [`StringEnum`] types.
@@ -348,6 +296,25 @@ mod tests {
                     assert_eq!(actual, expected, "catalog {pragma}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn required_strings_preserve_domain_text_and_diagnostics() {
+        let value = serde_json::json!({"raw":"  text  ","empty":"","wrong":7});
+        assert_eq!(super::required_str(&value, "raw").unwrap(), "  text  ");
+        assert_eq!(super::required_str(&value, "empty").unwrap(), "");
+        for key in ["wrong", "missing"] {
+            assert_eq!(
+                super::required_str(&value, key).unwrap_err().to_string(),
+                format!("Missing required field: {key}")
+            );
+            assert_eq!(
+                super::required_str_with(&value, key, || "Display Name is required".into())
+                    .unwrap_err()
+                    .to_string(),
+                "Display Name is required"
+            );
         }
     }
 

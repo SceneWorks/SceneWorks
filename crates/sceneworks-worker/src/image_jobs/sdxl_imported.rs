@@ -74,9 +74,7 @@ fn resolve_imported_sdxl_pin(
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
         })
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
     else {
         return Ok(None);
     };

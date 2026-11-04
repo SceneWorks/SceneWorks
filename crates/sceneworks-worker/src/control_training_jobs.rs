@@ -22,10 +22,7 @@
 //! [`crate::control_dataset_byo`]) are a separate source wired by a follow-up (see the module decl in
 //! `lib.rs`); B1 ships the render-from-an-existing-dataset path.
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod imp {
     use super::super::*;
 
@@ -252,78 +249,47 @@ mod imp {
             })
         });
 
-        // Bind the blocking prep to its cancel flag (sc-8804, F-003): every `update_job`/`heartbeat`
-        // `?` below returns early on a transient POST failure or a 409 reclaim; on that early return the
-        // guard trips `cancel` and bounded-joins the prep thread instead of dropping-and-running it.
-        let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
-        let mut interval = tokio::time::interval(progress_report_interval(settings));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // Defer the terminal `Canceled`: a cancel poll only trips the engine flag (so the prep stops at
-        // its next item boundary) and marks `canceled`; the terminal write happens AFTER the task stops,
-        // so the worker row isn't freed while the render is still on the GPU (sc-8917, mirrors
-        // `consume_training_events` / `run_batched_analysis_job`).
-        let mut canceled = false;
-        let loop_result: WorkerResult<()> = async {
+        let mut supervisor =
+            StreamSupervisor::new(cancel, blocking, progress_report_interval(settings), None);
+        let handling: WorkerResult<()> = async {
             loop {
-                tokio::select! {
-                    event = rx.recv() => {
-                        match event {
-                            Some((done, total)) => {
-                                // Per-item render progress scaled into the prep band 0.05..0.20 (the
-                                // plan rewrite + training take the rest). This is a UI signal only; the
-                                // stale-sweep keepalive is the heartbeat on the interval tick.
-                                let frac = done as f64 / total.max(1) as f64;
-                                update_job(
-                                    api,
-                                    &job.id,
-                                    training_progress(
-                                        JobStatus::Preparing,
-                                        ProgressStage::Preparing,
-                                        0.05 + 0.15 * frac,
-                                        &format!(
-                                            "Rendering {label} conditions ({done}/{total})."
-                                        ),
-                                        None,
-                                        backend,
-                                    ),
-                                )
-                                .await?;
-                            }
-                            None => break,
-                        }
+                match supervisor
+                    .next(api, settings, &job.id, Some(&mut rx))
+                    .await?
+                {
+                    StreamSignal::Event((done, total)) => {
+                        // Per-item render progress scaled into the prep band 0.05..0.20 (the
+                        // plan rewrite + training take the rest). This is a UI signal only; the
+                        // stale-sweep keepalive is the heartbeat on the interval tick.
+                        let frac = done as f64 / total.max(1) as f64;
+                        update_job(
+                            api,
+                            &job.id,
+                            training_progress(
+                                JobStatus::Preparing,
+                                ProgressStage::Preparing,
+                                0.05 + 0.15 * frac,
+                                &format!("Rendering {label} conditions ({done}/{total})."),
+                                None,
+                                backend,
+                            ),
+                        )
+                        .await?;
                     }
-                    _ = interval.tick() => {
-                        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                        // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
-                        // poll (a local flag read) so a quit stops the render at its next item check.
-                        if !canceled
-                            && (shutdown_requested() || cancel_requested_peek(api, &job.id).await)
-                        {
-                            cancel.cancel();
-                            canceled = true;
-                        }
-                    }
+                    StreamSignal::CancelRequested | StreamSignal::ProgressTick => {}
+                    StreamSignal::Finished => break,
                 }
             }
             Ok(())
         }
         .await;
-        if let Err(error) = loop_result {
-            guard.cancel_and_join().await;
-            return Err(error);
-        }
-
-        // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
-        let join_result = guard
-            .into_handle()
-            .await
-            .map_err(|error| task_join_error("control prep task", error))?;
+        let (canceled, result) = supervisor.finish_stream(handling, &mut rx).await?;
+        let result = result.map_err(|error| task_join_error("control prep task", error))?;
         if canceled {
-            // The prep has actually stopped now, so post the TERMINAL `Canceled` here.
             mark_job_canceled(api, &job.id, PREP_CANCEL_MESSAGE).await?;
             return Err(WorkerError::Canceled(PREP_CANCEL_MESSAGE.to_owned()));
         }
-        let report = join_result?;
+        let report = result?;
 
         // Surface the per-image skip tally rather than silently shrinking the corpus (the report
         // exists for exactly this). The manifest path + the individual reasons go to the log; the
@@ -624,19 +590,13 @@ mod imp {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) use imp::run_control_training_job;
 
 /// Stub for a build with no native control trainer (off-Mac without `backend-candle`). The routing
 /// gate (`training_job_is_candle_eligible`) keeps a `control_training` job off such a worker, so this
 /// is a loud backstop rather than a reachable path.
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_control_training_job(
     _api: &crate::ApiClient,
     _settings: &crate::Settings,

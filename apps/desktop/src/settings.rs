@@ -342,22 +342,9 @@ fn sanitize_resolved_cache_policy(settings: &mut AppSettings) {
     }
 }
 
-/// Write `body` to `path` atomically via temp-file + rename, so a crash / full disk
-/// mid-write can't leave a truncated file (F-127, sc-8929). The temp file sits next to
-/// the target so the rename stays on the same filesystem (a cross-device rename is not
-/// atomic). Mirrors the sidecar pidfile writer's temp+rename. Extracted from
-/// [`save_settings`] so the atomicity contract is unit-testable against a scratch path.
+/// Persist settings through the shared durable filesystem writer.
 fn atomic_write(path: &std::path::Path, body: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body).map_err(|error| error.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|error| {
-        // Leave no stray temp file behind if the rename fails.
-        let _ = std::fs::remove_file(&tmp);
-        error.to_string()
-    })
+    sceneworks_core::fsutil::write_atomic(path, body).map_err(|error| error.to_string())
 }
 
 fn save_settings(settings: &AppSettings) -> Result<(), String> {
@@ -2119,11 +2106,10 @@ mod tests {
         atomic_write(&path, b"{\"new\":1}").expect("atomic write");
         assert_eq!(std::fs::read(&path).expect("read back"), b"{\"new\":1}");
 
-        // The temp file used for the rename must not survive a successful write.
-        let tmp = path.with_extension("json.tmp");
-        assert!(
-            !tmp.exists(),
-            "temp file must be renamed away, not left behind"
+        assert_eq!(
+            std::fs::read_dir(root).expect("entries").count(),
+            1,
+            "only the published settings file may remain"
         );
 
         // A round-trip of real settings through save-shaped bytes stays valid JSON.

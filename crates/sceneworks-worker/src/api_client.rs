@@ -37,13 +37,7 @@ impl ApiClient {
 
     /// Test-support dispatch reuses the existing bounded control-plane transport;
     /// it must not introduce another HTTP client factory outside this module.
-    #[cfg(all(
-        feature = "test-support",
-        any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        )
-    ))]
+    #[cfg(all(feature = "test-support", native_lane))]
     pub(crate) fn http_client(&self) -> &reqwest::Client {
         &self.client
     }

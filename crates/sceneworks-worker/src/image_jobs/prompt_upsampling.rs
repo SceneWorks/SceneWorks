@@ -802,7 +802,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn native_progress_bridge_keeps_upsampling_separate_from_denoise_steps() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
@@ -826,7 +826,7 @@ mod tests {
     }
 
     // Production image consumer + HTTP API seam, with tensor-free provider events.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn flux3_saved_provenance_and_progress_use_only_the_per_image_provider_report() {
         use crate::image_jobs::*;
@@ -922,7 +922,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn native_aspect_fallback_with_layout_survives_real_consumer_but_not_annotation_tampering(
     ) {
@@ -1053,7 +1053,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn flux3_prefill_cancellation_stops_before_denoising_or_asset_writes() {
         use crate::image_jobs::*;

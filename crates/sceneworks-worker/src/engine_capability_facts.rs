@@ -1010,7 +1010,7 @@ pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, S
     let registry = crate::inference_runtime::media();
     let mut facts = facts_from_registry(
         registry,
-        crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+        sceneworks_core::inference_provenance::INFERENCE_REVISION,
         dumper_invocation(),
     )?;
     let contract_registry = crate::inference_runtime::memory_contract_surface_registry()
@@ -1135,7 +1135,7 @@ pub fn collect_audio_capability_facts() -> Result<Vec<AudioCapabilityFacts>, Str
         .collect();
     audio_facts_from_descriptors(
         &descriptors,
-        crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+        sceneworks_core::inference_provenance::INFERENCE_REVISION,
         AUDIO_DUMPER_INVOCATION,
     )
 }
@@ -1171,15 +1171,12 @@ pub fn collect_runtime_descriptor_facts() -> Result<RuntimeDescriptorFacts, Stri
         video_model_mappings,
         trainer_mappings,
         worker_capabilities,
-        crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+        sceneworks_core::inference_provenance::INFERENCE_REVISION,
         dumper_invocation(),
     )
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn collect_video_model_mappings(backend: &str) -> Result<Vec<VideoModelMapping>, String> {
     let (_, source) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
         .iter()
@@ -1236,10 +1233,7 @@ fn collect_video_model_mappings(backend: &str) -> Result<Vec<VideoModelMapping>,
     Ok(mappings)
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn collect_video_model_mappings(_backend: &str) -> Result<Vec<VideoModelMapping>, String> {
     Err("video model mappings require a matching MLX or backend-candle build".to_owned())
 }
@@ -1269,18 +1263,12 @@ fn matching_platform_worker_capabilities() -> Result<Vec<String>, String> {
         &crate::preflight::GpuHealth::Usable,
     );
 
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     return Err(
         "runtime descriptor facts require a matching MLX or backend-candle build".to_owned(),
     );
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         let mut capabilities: Vec<String> =
             crate::gpu::worker_capabilities_with_utility(&gpu, true)
@@ -1997,7 +1985,7 @@ mod tests {
     // the backend IT links is declared. An undeclared backend would ship with no stage-2 coverage
     // assertion at all — a third engine could be added, never dumped, and stay invisible exactly
     // the way `mlx` did.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn the_linked_backend_is_declared() {
         let facts = collect_engine_capability_facts()
@@ -2152,7 +2140,7 @@ mod tests {
     // Unlike SCENEWORKS_BACKENDS, this list is NOT a union across mutually exclusive lanes: audio is
     // candle-native everywhere, so either lane links the whole audio catalog and can verify the list
     // completely. That is also why both lanes' audio dumps are byte-identical.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn the_linked_audio_backend_is_declared() {
         let facts = collect_audio_capability_facts()
@@ -2176,7 +2164,7 @@ mod tests {
     // being true: at the live pin EVERY audio generator reports `supports_preview: false`, which is
     // why this story is a completeness fix (unknown -> false) rather than a user-visible one. If a
     // future pin lights one up, this test goes red and the follow-up work is a UI question.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn no_audio_generator_advertises_live_preview_at_this_pin() {
         let facts = collect_audio_capability_facts().expect("audio facts");
@@ -2200,7 +2188,7 @@ mod tests {
     // it oscillate in git history — silently, since nothing reads `dumper`. The engine list already
     // is (candle-audio-catalog gates no registration on the platform); provenance is the field that
     // could quietly stop being.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn the_audio_dump_provenance_does_not_vary_by_lane() {
         let facts = collect_audio_capability_facts().expect("audio facts");
