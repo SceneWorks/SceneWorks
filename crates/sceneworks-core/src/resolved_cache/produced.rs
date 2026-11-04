@@ -215,13 +215,7 @@ impl ProducedFile {
             self.relative.clone(),
             ProducedFileAttestation {
                 size_bytes: self.written,
-                sha256: format!(
-                    "sha256:{}",
-                    digest
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>()
-                ),
+                sha256: format!("sha256:{}", crate::hashing::hex(&digest)),
                 stamp,
                 seal,
             },

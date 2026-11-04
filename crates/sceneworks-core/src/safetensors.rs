@@ -6,7 +6,7 @@
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::Path;
 
 const MAX_HEADER_BYTES: usize = 100_000_000;
 
@@ -119,17 +119,7 @@ pub fn file_is_structurally_valid(path: &Path) -> bool {
 }
 
 fn safe_relative_shard_path(shard: &str) -> bool {
-    if shard.trim() != shard
-        || shard.is_empty()
-        || shard.starts_with(['/', '\\'])
-        || shard.contains('\\')
-        || shard.contains(':')
-    {
-        return false;
-    }
-    Path::new(shard)
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
+    shard.trim() == shard && crate::safe_path::relative_normal_components(shard).is_ok()
 }
 
 /// Validate every unique shard named by a safetensors index under `dir`.

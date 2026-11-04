@@ -232,32 +232,7 @@ const UNIFIED_STAGE2_RESIDUE: f64 = 0.35;
 const UNIFIED_CODEC_BYTES_PER_SONG_SEC: u64 = 5_872_026; // 5.6 MiB
 
 /// The LM tier both stage 1 and stage 2 load at (epic R2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum YueTier {
-    Bf16,
-    Q8,
-    Q4,
-}
-
-impl YueTier {
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            Self::Bf16 => "bf16",
-            Self::Q8 => "q8",
-            Self::Q4 => "q4",
-        }
-    }
-
-    /// The tier a resolved `AudioTier::name` names (`bf16` / `q8` / `q4`).
-    pub(crate) fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "bf16" => Some(Self::Bf16),
-            "q8" => Some(Self::Q8),
-            "q4" => Some(Self::Q4),
-            _ => None,
-        }
-    }
-}
+pub(crate) use crate::fit_gate::AudioWeightTier as YueTier;
 
 /// Lyric sections the engine renders at most one segment each: the count of
 /// `candle_audio_yue::tokenizer::split_lyrics` matches — the reference `split_lyrics`
@@ -807,7 +782,14 @@ pub(crate) fn decide(
                 return YueAdmission::Admit;
             }
             // `vram_gate::with_reclaimable`: credit the pool the evict returns, clamped to total.
-            let reclaimed = (free_gb + reclaimable_gb.max(0.0)).min(*total_gb);
+            let reclaimed = crate::fit_gate::with_reclaimable(
+                crate::fit_gate::VramBudget {
+                    free_gb: *free_gb,
+                    total_gb: *total_gb,
+                },
+                *reclaimable_gb,
+            )
+            .free_gb;
             if *reclaimable_gb > 0.0 && fits(reclaimed, needed) {
                 return YueAdmission::AdmitAfterEvict;
             }
@@ -944,21 +926,21 @@ fn note_budget_probe() {
 /// Read this host's budget for the candle audio lane.
 #[cfg(target_os = "macos")]
 pub(crate) async fn live_budget(_gpu_id: &str) -> Option<YueBudget> {
-    let working_set_gb = working_set_ceiling_bytes().map(gib).or_else(|| {
-        // No working-set reading: fall back to the unified total less the legacy reserve.
-        let total_gb = gib(crate::mlx_fit_gate::probe_total_unified_memory_bytes()?);
-        Some(total_gb - crate::fit_gate::legacy_unified_reserve(total_gb).gb)
-    })?;
-    // The small-Mac emulation cap (`SCENEWORKS_MLX_MEMORY_CAP_GB`) caps the reading, as it does for
-    // every other unified-memory gate.
-    let gb = crate::mlx_fit_gate::mlx_memory_cap_gb()
-        .map_or(working_set_gb, |cap| cap.min(working_set_gb));
+    let gb = crate::fit_gate::working_set_capacity_gb(
+        working_set_ceiling_bytes().map(gib),
+        || {
+            crate::mlx_fit_gate::probe_total_unified_memory_bytes()
+                .map(gib)
+                .map(crate::fit_gate::unified_available_gb)
+        },
+        crate::mlx_fit_gate::mlx_memory_cap_gb(),
+    )?;
     Some(YueBudget::UnifiedWorkingSet { gb })
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
 fn working_set_ceiling_bytes() -> Option<u64> {
-    Some(crate::generator_cache::device_wired_ceiling_bytes() as u64).filter(|&bytes| bytes > 0)
+    crate::fit_gate::working_set_ceiling_bytes()
 }
 
 #[cfg(all(target_os = "macos", test))]
@@ -968,10 +950,7 @@ fn working_set_ceiling_bytes() -> Option<u64> {
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) async fn live_budget(gpu_id: &str) -> Option<YueBudget> {
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    )?;
+    let budget = crate::vram_gate::live_capped_budget(gpu_id).await?;
     Some(YueBudget::DedicatedVram {
         free_gb: budget.free_gb,
         total_gb: budget.total_gb,
@@ -980,7 +959,7 @@ pub(crate) async fn live_budget(gpu_id: &str) -> Option<YueBudget> {
     })
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn live_budget(_gpu_id: &str) -> Option<YueBudget> {
     None
 }

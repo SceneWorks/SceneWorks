@@ -46,11 +46,8 @@ pub const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Read one trusted shipped model from the same embedded catalog used to seed installations.
-/// Shared by component semantics and provenance; this is not an imported-model registry.
-pub fn builtin_model_entry(
-    id: &str,
-) -> Option<&'static serde_json::Map<String, serde_json::Value>> {
+/// Trusted shipped model rows. This shared read-only owner is not an imported-model registry.
+pub fn builtin_model_entries() -> &'static [serde_json::Value] {
     static MODELS: std::sync::LazyLock<Option<Vec<serde_json::Value>>> =
         std::sync::LazyLock::new(|| {
             let (_, text) = BUILTIN_MANIFESTS
@@ -60,8 +57,14 @@ pub fn builtin_model_entry(
                 serde_json::from_str(&crate::jsonc::strip_jsonc_comments(text)).ok()?;
             value.get("models")?.as_array().cloned()
         });
-    MODELS
-        .as_ref()?
+    MODELS.as_deref().unwrap_or_default()
+}
+
+/// Read one trusted shipped model from the same embedded catalog used to seed installations.
+pub fn builtin_model_entry(
+    id: &str,
+) -> Option<&'static serde_json::Map<String, serde_json::Value>> {
+    builtin_model_entries()
         .iter()
         .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(id))?
         .as_object()
