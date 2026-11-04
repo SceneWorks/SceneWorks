@@ -294,13 +294,6 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "synthetic-component-staging",
         CacheRole::Scratch,
     ),
-    // Explicit per-fixture HF-layout library for pinned-vs-mutable-source regression cases.
-    (
-        "worker",
-        "video_jobs/minimax_h3_import_tests.rs",
-        "source-library",
-        CacheRole::HfCache,
-    ),
     // Prepared control-training datasets, regenerated from the source images.
     (
         "worker",
@@ -2826,11 +2819,6 @@ fn synthetic_fixture_cache_roles_do_not_authorize_new_destinations() {
             "synthetic-component-staging",
             CacheRole::Scratch,
         ),
-        (
-            "video_jobs/minimax_h3_import_tests.rs",
-            "source-library",
-            CacheRole::HfCache,
-        ),
     ] {
         assert_eq!(
             allowed.get(&("worker".into(), file.into(), subdir.into())),
@@ -3138,7 +3126,8 @@ fn the_guard_module_is_excluded_from_its_own_scan() {
     assert!(
         test_only.contains("tests.rs")
             && test_only.contains("tests/lora_and_downloads.rs")
-            && test_only.contains("tests/test_api_stub.rs"),
+            && test_only.contains("tests/test_api_stub.rs")
+            && test_only.contains("video_jobs/minimax_h3_import_tests.rs"),
         "the module walk must follow `include!` edges into src/tests/, or the crate's own download \
          tests read as production job-time downloads"
     );
