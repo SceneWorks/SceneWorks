@@ -1,19 +1,20 @@
 //! mlx_fit_gate calibration owner.
 use super::*;
 
-// Must remain identical to mlx-gen-mage's loaded provider contract. sc-22733 (inference #953,
-// epic sc-22723) retired the single string `mage-flow-mlx-shared-ladder-2026-08-03-v1` for a
-// table keyed on (route, PROVEN artifact tier) — `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`,
-// eighteen cells — because the three tiers of one route are three different resident sets and one
-// anchor cannot price all three. The engine binds a cell only when the tier is proven off the
-// `quantization.bits` marker of the component directories the loader itself opened (DiT and text
-// encoder agreeing) and equals `LoadSpec::quantize`, so the plan's `tier.quant` IS the tier axis.
-// The worker mirrors the table here rather than calling the engine because the Resident-path
-// handshake below is compiled on every platform; the macOS test
-// `mage_estimator_fingerprint_matches_the_linked_provider_contract` pins every cell to the linked
-// engine's `production_calibration_fingerprint`, so a move on either side is red at test time.
-// The prior generation-peak token predated the shared ladder and caused every exact Mage request
-// to fail the provider/gate handshake before selection.
+/// Suffix shared by the worker's route/tier Mage calibration identities.
+/// The complete identities must remain identical to mlx-gen-mage's loaded provider contract. sc-22733 (inference #953,
+/// epic sc-22723) retired the single string `mage-flow-mlx-shared-ladder-2026-08-03-v1` for a
+/// table keyed on (route, PROVEN artifact tier) — `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`,
+/// eighteen cells — because the three tiers of one route are three different resident sets and one
+/// anchor cannot price all three. The engine binds a cell only when the tier is proven off the
+/// `quantization.bits` marker of the component directories the loader itself opened (DiT and text
+/// encoder agreeing) and equals `LoadSpec::quantize`, so the plan's `tier.quant` IS the tier axis.
+/// The worker mirrors the table here rather than calling the engine because the Resident-path
+/// handshake below is compiled on every platform; the macOS test
+/// `mage_estimator_fingerprint_matches_the_linked_provider_contract` pins every cell to the linked
+/// engine's `production_calibration_fingerprint`, so a move on either side is red at test time.
+/// The prior generation-peak token predated the shared ladder and caused every exact Mage request
+/// to fail the provider/gate handshake before selection.
 pub(super) const MAGE_CALIBRATION_FINGERPRINT_SUFFIX: &str = "-mlx-shared-ladder-v1";
 
 /// The route label inside a Mage-Flow calibration string, mirroring
