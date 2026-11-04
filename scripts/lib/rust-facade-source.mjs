@@ -26,7 +26,7 @@ export async function rustFacadeSource(entry) {
 export async function rustFacadeFunction(entry, name) {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`Invalid Rust function name ${name}`);
   const matches = [];
-  const declaration = new RegExp(`^(?:pub(?:\\([^)]*\\))?\\s+)?(?:const\\s+)?fn\\s+${name}\\s*\\(`, "m");
+  const declaration = new RegExp(`^(?:pub(?:\\([^)]*\\))?\\s+)?(?:const\\s+)?fn\\s+${name}\\s*(?:<[^\\n]*>)?\\s*\\(`, "m");
   for (const file of await rustFacadeSources(entry)) {
     const found = declaration.exec(file.source);
     if (!found) continue;
