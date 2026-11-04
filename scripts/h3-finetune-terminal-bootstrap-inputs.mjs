@@ -1,3 +1,4 @@
+import { sha256 as digest } from "./lib/file-sha256.mjs";
 // First-run input resolution for the existing H3 terminal routes. No CLI, model work or code execution.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -17,7 +18,7 @@ export const PRODUCT_COMPONENT_EXTENSIONS = Object.freeze(['safetensors', 'gguf'
 export const isProductComponentMember = file => PRODUCT_COMPONENT_EXTENSIONS.includes(path.posix.extname(String(file)).slice(1));
 const METADATA_LIMIT = 8 * 1024 * 1024;
 const REFERENCE_LIMIT = 4 * 1024 * 1024;
-const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+
 const sha40 = value => assert.match(value ?? '', /^[a-f0-9]{40}$/, 'immutable revision/Git blob SHA1 required');
 const sha64 = value => assert.match(value ?? '', /^[a-f0-9]{64}$/, 'content SHA256 required (not Git blob SHA1)');
 const positive = value => assert.ok(Number.isSafeInteger(value) && value > 0, 'actual positive file byte size required');

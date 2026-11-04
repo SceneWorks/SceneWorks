@@ -182,6 +182,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_manual_h3_import_smoke:
+        description: "Skip only the implicit manual MiniMax-H3 ConvRot smoke; other explicit profiles and their existing admission rules are unchanged"
+        required: false
+        type: boolean
+        default: false
       run_five_rung_reference:
         description: "Capture the Candle Krea q4 anchor (krea_2_turbo:q4:candle in the anchor plan)"
         required: false
@@ -730,7 +735,7 @@ jobs:
           HF_HUB_DISABLE_TELEMETRY: "1"
           HF_HUB_VERBOSITY: "error"
         run: |
-          python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
           if ($LASTEXITCODE -ne 0) { throw "installing huggingface_hub failed with exit code $LASTEXITCODE" }
           @'
           import os
@@ -899,7 +904,7 @@ jobs:
       # sc-26683: exercise the consumer's real managed-import -> native projection seam.
       # Plain manual dispatch only: no weights, provisioning or measurement campaign.
       - name: Run the synthetic MiniMax-H3 ConvRot CUDA import projection
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && !inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_ltx_eros_acceptance && !inputs.run_epic_20738_terminal_cuda && !inputs.run_iris_worker_smoke && !inputs.run_supra2_worker_smoke }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && !inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_ltx_eros_acceptance && !inputs.run_epic_20738_terminal_cuda && !inputs.run_iris_worker_smoke && !inputs.run_supra2_worker_smoke && !inputs.skip_manual_h3_import_smoke }}
         timeout-minutes: 3
         shell: cmd
         run: |
@@ -1168,7 +1173,7 @@ jobs:
           python -m venv $venv
           if ($LASTEXITCODE -ne 0) { throw 'failed to create the job-local LTX provisioning venv' }
           $python = Join-Path $venv 'Scripts\python.exe'
-          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
           if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned huggingface_hub client' }
           @'
           import os
@@ -1489,7 +1494,7 @@ jobs:
           python -m venv $venv
           if ($LASTEXITCODE -ne 0) { throw 'Python 3 with venv support is required for terminal artifact staging' }
           $python = Join-Path $venv 'Scripts\python.exe'
-          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
           if ($LASTEXITCODE -ne 0) { throw 'failed to install pinned huggingface_hub 0.36.0 in the isolated terminal venv' }
           & $python -c "from huggingface_hub import __version__; assert __version__ == '0.36.0', __version__; print('terminal artifact Python ready')"
           if ($LASTEXITCODE -ne 0) { throw 'isolated terminal Python did not retain exact huggingface_hub 0.36.0' }

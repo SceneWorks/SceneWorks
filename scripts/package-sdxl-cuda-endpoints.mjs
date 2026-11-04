@@ -1,6 +1,6 @@
 #!/usr/bin/env node
+import { sha256 } from "./lib/file-sha256.mjs";
 // Package two completed physical captures; never execute a model or promote runtime certification.
-import { createHash } from "node:crypto";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,7 @@ const CONFIG = "config/sdxl-cuda-memory-endpoints.json";
 const CORE = "crates/sceneworks-core/src/sdxl_cuda_memory_endpoints.rs";
 const SUMMARY = "sdxl-cuda-endpoints.json";
 const NAMES = ["resident", "sequential"];
-const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
 const require = (ok, reason) => { if (!ok) throw new Error(`SDXL packaging: ${reason}`); };
 const relative = (name) => `${EVIDENCE_DIR}/${name}`;
 

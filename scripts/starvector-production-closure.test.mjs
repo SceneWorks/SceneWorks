@@ -70,7 +70,12 @@ test("packaged production closure retains integrity independently of source curr
   // Preserve the recorded provenance; source currency is advisory. Controlled
   // fixtures above and below verify that source drift changes the closure.
   validateProductionClosureShape(closure);
-  assert.deepEqual(closure.entries.map(({ path }) => path).sort(), [...PRODUCTION_CLOSURE_PATHS].sort());
+  // Historical closure membership is immutable. New helper dependencies belong to future
+  // source closures; they must not cause this packaged evidence to be restamped.
+  const addedDependencies = ["scripts/lib/canonical-json.mjs", "scripts/lib/exec-file-with-fds.mjs"];
+  for (const dependency of addedDependencies) assert.ok(PRODUCTION_CLOSURE_PATHS.includes(dependency));
+  assert.deepEqual(closure.entries.map(({ path }) => path).sort(),
+    PRODUCTION_CLOSURE_PATHS.filter(file => !addedDependencies.includes(file)).sort());
 });
 
 test("the API vector timeout contract is sealed and byte drift invalidates its closure", async () => {
