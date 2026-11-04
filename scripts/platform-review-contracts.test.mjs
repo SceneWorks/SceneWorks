@@ -1382,7 +1382,7 @@ const NON_CERTIFYING_PROBE_SITES = new Map([
 ]);
 
 function enclosingFunctions(source) {
-  const starts = [...source.matchAll(/^(?:pub )?fn ([a-z_][a-z0-9_]*)/gm)]
+  const starts = [...source.matchAll(/^(?:pub(?:\([^)]*\))? )?fn ([a-z_][a-z0-9_]*)/gm)]
     .map((match) => ({ name: match[1], at: match.index }));
   return (index) => starts.filter((entry) => entry.at <= index).at(-1)?.name ?? "(top level)";
 }
@@ -1392,7 +1392,7 @@ function assertSdxlEndpointProbeGuards(adapter) {
   const body = (name) => {
     const at = adapter.indexOf(`fn ${name}(`);
     assert.ok(at >= 0, `${name} exists`);
-    const next = adapter.slice(at + 1).search(/^fn /m);
+    const next = adapter.slice(at + 1).search(/^(?:pub(?:\([^)]*\))? )?fn /m);
     return adapter.slice(at, next < 0 ? undefined : at + 1 + next);
   };
   const binding = body("validate_sdxl_endpoint_binding");
@@ -1465,7 +1465,7 @@ test("manual SDXL probe exception rejects missing activity, headroom, stability 
     ["run_sdxl_endpoint", "if context_uuid != expected", "if false"],
   ]) {
     const start = adapter.indexOf(`fn ${owner}(`);
-    const next = adapter.slice(start + 1).search(/^fn /m);
+    const next = adapter.slice(start + 1).search(/^(?:pub(?:\([^)]*\))? )?fn /m);
     const end = next < 0 ? adapter.length : start + 1 + next;
     const original = adapter.slice(start, end);
     assert.ok(original.includes(from), `${owner} owns the mutated guard`);
