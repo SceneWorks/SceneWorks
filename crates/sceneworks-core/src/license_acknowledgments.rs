@@ -16,7 +16,6 @@
 //! replaced atomically (write to a sibling, then rename), so a reader never sees a torn record.
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -98,18 +97,9 @@ fn read_file(path: &Path) -> Result<AcknowledgmentFile, AcknowledgmentError> {
 }
 
 fn write_file(path: &Path, file: &AcknowledgmentFile) -> Result<(), AcknowledgmentError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(AcknowledgmentError::Io)?;
-    }
     let mut bytes = serde_json::to_vec_pretty(file).expect("the record serializes");
     bytes.push(b'\n');
-    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    {
-        let mut handle = std::fs::File::create(&temp).map_err(AcknowledgmentError::Io)?;
-        handle.write_all(&bytes).map_err(AcknowledgmentError::Io)?;
-        handle.sync_all().map_err(AcknowledgmentError::Io)?;
-    }
-    std::fs::rename(&temp, path).map_err(AcknowledgmentError::Io)
+    crate::fsutil::write_atomic(path, &bytes).map_err(AcknowledgmentError::Io)
 }
 
 /// The stored acknowledgment of `model_id`, whatever terms it was given for.

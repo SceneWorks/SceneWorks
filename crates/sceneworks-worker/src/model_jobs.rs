@@ -3077,9 +3077,7 @@ pub(crate) fn write_app_managed_artifact_receipt(
         tree_stamp,
     };
     let marker = root.join(ARTIFACT_PROVENANCE_MARKER);
-    let temporary = root.join(format!("{ARTIFACT_PROVENANCE_MARKER}.tmp"));
-    std::fs::write(&temporary, serde_json::to_vec_pretty(&receipt)?)?;
-    std::fs::rename(temporary, marker)?;
+    sceneworks_core::fsutil::write_atomic(&marker, &serde_json::to_vec_pretty(&receipt)?)?;
     Ok(ResolvedArtifactProvenance {
         identity: ResolvedArtifactIdentity {
             repository: repository.to_owned(),
