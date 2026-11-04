@@ -1,3 +1,4 @@
+import { rustFacadeSource, rustFacadeFunction } from "./lib/rust-facade-source.mjs";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -1271,7 +1272,7 @@ test("every contract_estimate row is on a lane that implements the per-rung ladd
   };
   const implementing = [];
   for (const [backend, relative] of Object.entries(laneSources)) {
-    const source = await readFile(path.join(ROOT, relative), "utf8");
+    const source = await rustFacadeSource(path.join(ROOT, relative));
     if (/fn floor_pseudo_anchor\b/.test(source)) implementing.push(backend);
   }
   assert.deepEqual(
@@ -1300,9 +1301,8 @@ test("every contract_estimate row is on a lane that implements the per-rung ladd
 // ---------------------------------------------------------------------------------------------
 
 test("RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced, read from its source", async () => {
-  const source = await readFile(
+  const source = await rustFacadeSource(
     path.join(ROOT, "crates/sceneworks-worker/src/candle_memory_strategy.rs"),
-    "utf8",
   );
   const body = source.match(
     /pub\(crate\) fn is_receipt_priced\(engine_id: &str\) -> bool \{([\s\S]*?)\n\}/,
@@ -1316,14 +1316,25 @@ test("RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced, read from it
     ([, helper]) => helper,
   );
   assert.ok(helpers.length > 0, "is_receipt_priced delegates to per-family helpers");
+  const registry = await rustFacadeFunction(
+    path.join(ROOT, "crates/sceneworks-worker/src/memory_route_registry.rs"), "gate_family",
+  );
+  const familyArms = [...registry.source.matchAll(/((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*=>\s*([A-Za-z0-9_]+)/g)];
+  assert.ok(familyArms.length > 0, "the canonical gate-family registry has explicit provider arms");
   for (const helper of helpers) {
     const helperBody = source.match(
       new RegExp(`fn ${helper}\\(engine_id: &str\\) -> bool \\{([\\s\\S]*?)\\n\\}`),
     );
     assert.ok(helperBody, `${helper} is defined on the worker`);
-    const literals = helperBody[1].match(/matches!\(\s*engine_id,([\s\S]*?)\)\s*$/);
-    assert.ok(literals, `${helper} is a matches! over engine-id literals`);
-    for (const [, literal] of literals[1].matchAll(/"([^"]+)"/g)) routes.add(literal);
+    const family = helperBody[1].match(
+      /crate::memory_route_registry::gate_family\(engine_id\)\s*==\s*Some\(crate::memory_route_registry::MemoryGateFamily::([A-Za-z0-9_]+)\)/,
+    );
+    assert.ok(family, `${helper} reads the canonical gate-family predicate`);
+    const arms = familyArms.filter((arm) => arm[2] === family[1]);
+    assert.ok(arms.length > 0, `${family[1]} has canonical provider identities`);
+    for (const arm of arms) {
+      for (const [, literal] of arm[1].matchAll(/"([^"]+)"/g)) routes.add(literal);
+    }
   }
   assert.deepEqual(
     [...RECEIPT_PRICED_ROUTES].sort(),

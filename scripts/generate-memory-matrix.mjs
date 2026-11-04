@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { rustFacadeSource, rustSourceWithTests } from "./lib/rust-facade-source.mjs";
 
 import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -2797,7 +2798,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       canonicalSourceText(
         Object.hasOwn(sourceOverrides, name)
           ? sourceOverrides[name]
-          : await readFile(path.join(ROOT, relative), "utf8"),
+          : name === "mlxFitGate"
+            ? await rustSourceWithTests(path.join(ROOT, relative))
+            : relative.endsWith(".rs")
+              ? await rustFacadeSource(path.join(ROOT, relative))
+            : await readFile(path.join(ROOT, relative), "utf8"),
       ),
     ),
   );

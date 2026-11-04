@@ -1,24 +1,17 @@
 //! Backend-neutral engine dispatch table + registry-derived capability advertisement
 //! (sc-3723, epic 3720 Phase 0).
 //!
-//! [`MODEL_TABLE`] is the SceneWorks-id → mlx-gen-registry-id map plus the per-variant
-//! defaults the worker needs that are NOT on the engine descriptor (HF repo, step/guidance
-//! defaults, the asset `adapter` label). It is **all-targets** (no `#[cfg(target_os = …)]`):
-//! the table is pure data, and keeping it neutral lets the registry-derived advertisement run
-//! off-macOS (where the provider crates aren't linked, so the registry is empty and the derived
-//! capability set is correctly empty — "absence, not runtime failure").
+//! [`MODEL_TABLE`] maps SceneWorks image-model ids to provider registry ids and supplies
+//! per-variant worker defaults that are not descriptor capabilities: repository, steps, guidance,
+//! and the asset adapter label. The table is pure data on every target.
 //!
-//! The two descriptor-duplicating flags that used to live on each row
-//! (`supports_guidance` / `supports_negative_prompt`) are gone: they are now read from the
-//! linked gen_core descriptor through [`ResolvedModel`], so a row can never drift from the
-//! engine's own advertised surface. A future candle backend lights up with **zero** worker
-//! changes — it registers its descriptors into the same `inventory` registry and
-//! [`registry_capabilities`] picks them up.
+//! Capability flags such as guidance and negative-prompt support come from the linked provider
+//! descriptor through [`ResolvedModel`]. [`registry_capabilities`] reads the platform's explicitly
+//! composed media and text registries and filters descriptors by the enabled MLX/Candle backends.
+//! An unlinked provider contributes no capability.
 
-/// One engine-backed image family: how a SceneWorks model id maps onto the linked
-/// mlx-gen registry, and the per-variant defaults (all chosen for parity with the
-/// Python `MODEL_TARGETS` + the per-family MLX adapter). Adding a family = one row
-/// here + its provider crate dep + a `use mlx_gen_<x> as _;` in `image_jobs.rs`.
+/// One engine-backed image family and its worker defaults. A row names a provider id;
+/// the platform runtime catalog owns which providers are linked and registered.
 pub(crate) struct ModelRow {
     /// SceneWorks model id (the job payload `model`).
     pub sceneworks_id: &'static str,
@@ -26,11 +19,11 @@ pub(crate) struct ModelRow {
     pub engine_id: &'static str,
     /// Default HuggingFace repo when the manifest entry omits `repo`.
     pub default_repo: &'static str,
-    /// Default denoise steps (Python `MODEL_TARGETS[...]["steps"]`).
+    /// Default denoise steps when the request omits them.
     pub default_steps: u32,
     /// Default guidance when supported and the request omits it.
     pub default_guidance: f32,
-    /// The `adapter` id recorded on generated assets (the Python MLX adapter id).
+    /// The adapter label recorded on generated assets.
     pub adapter_label: &'static str,
 }
 
@@ -1016,17 +1009,11 @@ pub(crate) fn engine_id_for_model(sceneworks_id: &str) -> Option<&'static str> {
         .map(|row| row.engine_id)
 }
 
-/// The registry-DERIVED subset of the MLX worker's capabilities (sc-3723): exactly the
-/// capabilities backed by a linked generator/trainer/captioner descriptor whose backend is
-/// enabled in `settings`. Off-macOS the provider crates aren't linked, so the registry is
-/// empty and this returns an empty vec — the capability is *absent*, not a runtime failure.
-/// A future candle backend lights up here with zero worker changes: it registers descriptors
-/// with `backend = "candle"` and (with `backend_candle_enabled`) they are picked up.
+/// Capabilities backed by linked media or text descriptors whose backend is enabled in
+/// `settings`. Both MLX and Candle descriptors are filtered through the same contract.
 ///
-/// The carve-outs the worker advertises that are NOT expressible as a single registered
-/// generator descriptor (ImageEdit/ImageDetail/Vqa/Interleave, the advanced video modes,
-/// pose/kps/upscale/person detect+track) stay hardcoded at the [`crate::gpu::mlx_gpu`] call
-/// site; this function returns only the descriptor-derived core.
+/// Capabilities that cannot be expressed by one registered descriptor, such as specialized
+/// edit/control and video routes, remain owned by the GPU advertisement call sites.
 pub(crate) fn registry_capabilities(
     settings: &crate::Settings,
 ) -> Vec<sceneworks_core::contracts::WorkerCapability> {
