@@ -1,10 +1,11 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { assetsApi } from "../api/assetsResources.js";
 import { useCallback, useLayoutEffect } from "react";
 import { appConfirm } from "../appConfirm.jsx";
 
 // F-189: extracted from App along its existing concern boundary.
 export function useAssetActions({
-  token, setAssets, setError, refreshCharactersRef, setSelectedAssetId, previewNavigation, previewDirectionRef, setPreviewAsset, closePreview, purgeAssetRef, activeProject, activeProjectRef
+  token, setAssets, setError, refreshCharacters, setSelectedAssetId, previewNavigation, previewDirectionRef, setPreviewAsset, closePreview, purgeAssetRef, activeProject, activeProjectRef
 }) {
   const updateAssetStatus = useCallback(
     async (asset, changes) => {
@@ -57,7 +58,7 @@ export function useAssetActions({
           method: "POST",
         });
         const updated = mergeMovedAssets(moved);
-        refreshCharactersRef.current?.(asset.projectId);
+        refreshCharacters(asset.projectId);
         setError("");
         return updated;
       } catch (err) {
@@ -65,7 +66,7 @@ export function useAssetActions({
         throw err;
       }
     },
-    [token, mergeMovedAssets, refreshCharactersRef, setError],
+    [token, mergeMovedAssets, refreshCharacters, setError],
   );
 
   // Move an asset into a character's assets (sc-10200): the true-move twin of
@@ -81,7 +82,7 @@ export function useAssetActions({
           body: JSON.stringify({ characterId }),
         });
         const updated = mergeMovedAssets(moved);
-        refreshCharactersRef.current?.(asset.projectId);
+        refreshCharacters(asset.projectId);
         setError("");
         return updated;
       } catch (err) {
@@ -89,7 +90,7 @@ export function useAssetActions({
         throw err;
       }
     },
-    [token, mergeMovedAssets, refreshCharactersRef, setError],
+    [token, mergeMovedAssets, refreshCharacters, setError],
   );
 
   const deleteAsset = useCallback(
@@ -229,5 +230,14 @@ export function useAssetActions({
     },
     [activeProject, activeProjectRef, setAssets, setError, setSelectedAssetId, token],
   );
-  return { updateAssetStatus, updateAssetTags, moveAssetToLibrary, moveAssetToCharacter, deleteAsset, purgeAsset, deletePreviewAsset, previewAssetInDirection, purgePreviewAsset, importAsset };
+  const context = useAppDomainValue({
+    updateAssetStatus,
+    updateAssetTags,
+    moveAssetToLibrary,
+    moveAssetToCharacter,
+    deleteAsset,
+    purgeAsset,
+    importAsset
+  });
+  return { ...context, deletePreviewAsset, previewAssetInDirection, purgePreviewAsset, context };
 }

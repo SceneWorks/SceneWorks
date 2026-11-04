@@ -1,3 +1,5 @@
+import { FakeEventSource } from "./testUtils/events.js";
+import { settleLazyImports as settle } from "./testUtils/dom.js";
 // Shared test scaffolding for the App-shell test suite (sc-8943).
 //
 // main.test.jsx grew to ~11k lines because every App-wiring assertion had no
@@ -9,7 +11,6 @@
 // what main.test.jsx defined. It is named *.testSupport.jsx (not *.test.jsx) so
 // Vitest's default include glob does not collect it as a test file.
 import React, { act } from "react";
-import { waitForLazyScreenImports } from "./components/LazyScreen.jsx";
 import { AppContext } from "./context/AppContext.js";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
@@ -171,21 +172,7 @@ if (typeof Blob !== "undefined" && typeof Blob.prototype.text !== "function") {
   };
 }
 
-export class FakeEventSource {
-  static instances = [];
-
-  constructor(url) {
-    this.url = url;
-    this.listeners = {};
-    FakeEventSource.instances.push(this);
-  }
-
-  addEventListener(event, handler) {
-    this.listeners[event] = handler;
-  }
-
-  close() {}
-}
+export { FakeEventSource };
 
 export function response(payload) {
   return {
@@ -202,20 +189,7 @@ export function errorResponse(status, detail) {
   };
 }
 
-export async function settle() {
-  await act(async () => {
-    for (let index = 0; index < 6; index += 1) {
-      await Promise.resolve();
-    }
-    // Route screens resolve through Vite's dynamic-import transform. Await the
-    // imports tracked by the shared lazy boundary, then drain the React work
-    // queued when each Suspense boundary resolves.
-    await waitForLazyScreenImports();
-    for (let index = 0; index < 6; index += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+export { settle };
 
 // Find a control by its visible <label>, falling back to an aria-label for the controls
 // that carry no visible label — e.g. the Data Sets name field, which reads as the page's

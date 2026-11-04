@@ -3,20 +3,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
-import { fallbackModels } from "./modelCatalog.js";
+import { fallbackModels } from "./testSupport/builtinModels.js";
 
-// Manifest ↔ constants parity for the `image` capability sub-block (sc-15299).
-//
-// Image Studio hides Guidance / Negative prompt for an engine that declares
-// `image.supportsGuidance` / `image.supportsNegativePrompt` false. At runtime that comes from the
-// live catalog (seeded from config/manifests/builtin.models.jsonc), but `constants.js`
-// (`fallbackModels`) carries a HAND-MIRRORED copy used BEFORE the catalog loads. Without this
-// guard the mirror silently drifts and a CFG-free model briefly renders both dead controls on a
-// cold start. Same shape as controlModesParity.test.js.
-//
-// ⚠️ Polarity: an ABSENT `image` block means BOTH axes are supported — the opposite of `audio`.
-// So the reverse direction matters just as much: a mirror entry must not declare an axis absent
-// that the manifest says is present, or the seed would hide a live control.
+// Image Studio reads generation axes from the live API. This test-only projection
+// reads the shipped manifest, including absent (opt-out) axes, without maintaining
+// a second catalog or supplying runtime installation/availability facts.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../config/manifests/builtin.models.jsonc");
 
@@ -42,7 +33,7 @@ describe("image axes ↔ manifest parity (sc-15299)", () => {
       }
       expect(
         fallback.image ?? null,
-        `${fallback.id}: the pre-catalog seed must declare the same generation axes as the manifest`,
+        `${fallback.id}: the test projection must declare the same generation axes as the manifest`,
       ).toEqual(manifest.image ?? null);
     }
   });

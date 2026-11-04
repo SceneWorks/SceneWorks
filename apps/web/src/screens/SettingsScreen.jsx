@@ -11,8 +11,8 @@ import { generationQualityLabel, readDefaultGenerationQuality, writeDefaultGener
 import { writeClipboardText } from "../clipboard.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { formatBytes } from "../formatting.js";
-import { bytesToGib, daysToSeconds, describeDisableConsequence, describeLimitConsequence, fetchModelCache, gibToBytes, secondsToDays } from "../modelCache.js";
-import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
+import { bytesToGib, daysToSeconds, describeDisableConsequence, describeLimitConsequence, gibToBytes, secondsToDays } from "../modelCache.js";
+import { useModelCacheStatus } from "../hooks/useModelCacheStatus.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 
 import { ModeTabs } from "../components/generationStudio.jsx";
@@ -240,8 +240,7 @@ export function SettingsScreen({
   // bounded cadence ONLY while the store still has an entry in flight — so the storage totals
   // converge while a promotion runs, and a settled cache is still read exactly once. A timer that
   // ran unconditionally would put back the per-row read cost sc-19708 removed from the catalog.
-  const [cache, setCache] = useState(null);
-  const [cacheError, setCacheError] = useState("");
+  const { cache, error: cacheError, refresh: refreshCache } = useModelCacheStatus(token);
   // Draft limit/interval so typing doesn't fire a save per keystroke; committed on blur / Apply.
   const [cacheLimitGb, setCacheLimitGb] = useState("");
   const [cacheDays, setCacheDays] = useState("");
@@ -281,28 +280,6 @@ export function SettingsScreen({
   useEffect(() => {
     if (settings) setGpuLimitPercent(fractionToPercent(settings.gpuMemoryLimitFraction));
   }, [settings]);
-
-  const refreshCache = useCallback(async () => {
-    try {
-      const snapshot = await fetchModelCache();
-      setCache(snapshot);
-      setCacheError("");
-      return snapshot;
-    } catch (error) {
-      // Report the failure rather than rendering a reassuring empty cache.
-      setCache(null);
-      setCacheError(String(error?.message ?? error));
-      return null;
-    }
-  }, []);
-
-  useEffect(() => {
-    refreshCache();
-  }, [refreshCache]);
-
-  // Bounded convergence refresh — the same one the Model Manager runs, so the two surfaces cannot
-  // disagree about when the app stops polling. It re-reads only while an entry is still moving.
-  useCacheConvergence(cache, refreshCache);
 
   // The persisted (shell-owned) policy seeds the editable fields. On a non-desktop deployment
   // there is no shell to ask, so the running policy is both what is persisted and what applies.
