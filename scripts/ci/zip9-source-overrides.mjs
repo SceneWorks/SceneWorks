@@ -1,3 +1,4 @@
+import { sha256 as sha } from "../lib/file-sha256.mjs";
 // Exact leaf security overrides are part of the effective producer, not hidden by a Git pin.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -8,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const manifestFile = new URL('../../vendor/zip9-source-overrides.json', import.meta.url);
-const sha = (data) => createHash('sha256').update(data).digest('hex');
+
 export const SECURITY_BACKPORT_MANIFEST_SHA256 = sha(readFileSync(manifestFile));
 export const SECURITY_BACKPORT = JSON.parse(readFileSync(manifestFile, 'utf8'));
 const names = ['candle-audio-kokoro', 'candle-core', 'mlx-gen', 'tauri-plugin-updater'];

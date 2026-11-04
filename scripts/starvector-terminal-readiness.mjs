@@ -1,8 +1,9 @@
 #!/usr/bin/env node
+import { legacyUtf16Json as stable } from "./lib/canonical-json.mjs";
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 // Read-only host gate for the SC-22261 terminal campaign. This validates every
 // pre-provisioned input without starting SceneWorks, running inference, or
 // claiming a campaign/tuple marker.
-import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -24,10 +25,10 @@ import {
 
 const execFile = promisify(execFileCallback);
 const SHA256 = /^[a-f0-9]{64}$/;
-const sha = (value) => createHash("sha256").update(value).digest("hex");
+
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 const die = (message) => { throw new Error(`starvector terminal readiness: ${message}`); };
-const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
+
 
 function safeRelative(relative, label) {
   if (typeof relative !== "string" || !relative || path.isAbsolute(relative) || path.win32.isAbsolute(relative) || relative.split(/[\\/]/).includes("..")) die(`${label} path is unsafe`);

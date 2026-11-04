@@ -1,3 +1,4 @@
+import { safeExternalUrl } from "../urls.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
@@ -250,6 +251,7 @@ function Yue2Gate({ model, models, identity, ack, onAccept, busy, error, optIn, 
   const [accepted, setAccepted] = useState(Boolean(ack.acknowledged));
   const alternatives = commercialAlternatives(model, models);
   const canEnable = understood && accepted && !busy && ack.status === "ready";
+  const licenseUrl = safeExternalUrl(identity.licenseUrl);
   return (
     <div className="yue2-gate" data-testid="yue2-gate">
       <div className="yue2-gate__head">
@@ -262,8 +264,8 @@ function Yue2Gate({ model, models, identity, ack, onAccept, busy, error, optIn, 
         Studio modes changes when you enable it.
       </p>
       {model.licenseNotice ? <p className="model-license-terms">{model.licenseNotice}</p> : null}
-      {identity.licenseUrl ? (
-        <a href={identity.licenseUrl} rel="noreferrer" target="_blank">
+      {licenseUrl ? (
+        <a href={licenseUrl} rel="noreferrer" target="_blank">
           Read the full licence
         </a>
       ) : null}

@@ -1,0 +1,182 @@
+name: Native CV provider validation
+# SW-6775/SW-6680: model execution is explicit only; never PR/push CI.
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact SceneWorks SHA, matching the dispatch ref
+        required: true
+        type: string
+      inference_sha:
+        description: Exact inference SHA pinned by source_sha
+        required: true
+        type: string
+      backend:
+        description: MLX plus CoreML on Mac, or ORT/CUDA on physical GPU1
+        required: true
+        type: string
+      build_only:
+        description: Compile and discover proofs without model execution
+        required: true
+        type: boolean
+      mac_go:
+        description: Developer Mac GPU execution explicitly authorized
+        required: true
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact SceneWorks SHA, matching the dispatch ref
+        required: true
+        type: string
+      inference_sha:
+        description: Exact inference SHA pinned by source_sha
+        required: true
+        type: string
+      backend:
+        description: MLX plus CoreML on Mac, or ORT/CUDA on physical GPU1
+        required: true
+        type: choice
+        options: [mlx, cuda]
+      build_only:
+        description: Compile and discover proofs without model execution
+        required: true
+        type: boolean
+        default: true
+      mac_go:
+        description: Developer Mac GPU execution explicitly authorized
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  oracle:
+    if: ${{ inputs.backend == 'mlx' && !inputs.build_only }}
+    uses: ./.github/workflows/cv-oracle-provision.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      inference_sha: ${{ inputs.inference_sha }}
+      mac_go: ${{ inputs.mac_go }}
+  validate:
+    needs: oracle
+    if: ${{ !cancelled() && (needs.oracle.result == 'success' || needs.oracle.result == 'skipped') }}
+    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
+    timeout-minutes: 180
+    concurrency:
+      # Distinct dispatches remain queued; shared physical leases own execution.
+      group: cv-validation-${{ inputs.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    env:
+      CV_SOURCE_SHA: ${{ inputs.source_sha }}
+      CV_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      CV_BACKEND: ${{ inputs.backend }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ""
+      PYTHONNOUSERSITE: "1"
+      CV_BUILD_ONLY: ${{ inputs.build_only }}
+      CV_MAC_GO: ${{ inputs.mac_go }}
+      DISPATCH_SHA: ${{ github.sha }}
+      SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '1' || 'mlx' }}
+      CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '1' || '' }}
+      NVIDIA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '1' || '' }}
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_COMPUTE_CAP: "120"
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUSTC_WRAPPER: ""
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Require native host CPython 3.12 without privileged installation
+        if: ${{ inputs.backend == 'mlx' && !inputs.build_only }}
+        shell: bash
+        run: bash scripts/select-cv-python.sh
+      - name: Select verified native Windows CPython without privileged installation
+        if: ${{ inputs.backend == 'cuda' && !inputs.build_only }}
+        shell: node {0}
+        run: |
+          require('node:child_process').execFileSync(process.execPath, ['scripts/select-cv-python.mjs'], {stdio: 'inherit'});
+      - name: Select run-private provisioning paths
+        if: ${{ !inputs.build_only }}
+        shell: node {0}
+        run: |
+          require('node:child_process').execFileSync(process.execPath, ['scripts/cv-provision-entry.mjs', 'paths', 'provider'], {stdio: 'inherit'});
+      - name: Receive independent CPU oracle artifact
+        if: ${{ inputs.backend == 'mlx' && !inputs.build_only }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.oracle.outputs.artifact_name }}
+          path: ${{ env.CV_ORACLE_ARTIFACT }}
+      - name: Provision pinned model fixtures and verified native runtime
+        if: ${{ !inputs.build_only }}
+        shell: node {0}
+        run: |
+          require('node:child_process').execFileSync(process.execPath, ['scripts/cv-provision-entry.mjs', 'proof'], {stdio: 'inherit'});
+      - uses: ./.github/actions/prepare-rust-runner
+        if: ${{ inputs.backend == 'cuda' }}
+        with:
+          workspace-directory: .
+      - name: Select listener-owned CUDA dependency caches
+        if: ${{ inputs.backend == 'cuda' }}
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'CUDA cache selection failed' }
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        if: ${{ inputs.backend == 'mlx' }}
+        with:
+          toolchain: "1.98.0"
+      - name: Prepare validated MLX prebuilt
+        if: ${{ inputs.backend == 'mlx' }}
+        shell: bash
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Debug --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Native Mac proofs under the shared Metal lease
+        if: ${{ inputs.backend == 'mlx' }}
+        shell: bash
+        env:
+          CV_OUTPUT: ${{ runner.temp }}/cv-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cv-validation-target-${{ inputs.source_sha }}-${{ inputs.backend }}
+        run: node scripts/cv-provider-validation.mjs
+      - name: Native Windows proofs under physical GPU1 ownership
+        if: ${{ inputs.backend == 'cuda' }}
+        shell: cmd
+        env:
+          CV_OUTPUT: ${{ runner.temp }}/cv-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cv-validation-target-${{ inputs.source_sha }}-${{ inputs.backend }}
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b %errorlevel%
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          if "%CV_BUILD_ONLY%"=="true" (node scripts/cv-provider-validation.mjs) else (python -I scripts/ci/windows_cuda_execution.py --actor cv-provider-validation --admission-policy strict-idle --budget-minutes 170 --cuda-ordinals 0 --probe-visible 1 -- node scripts/cv-provider-validation.mjs)
+      - name: Retain exact paired provenance, model identities, outputs and failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cv-validation-${{ inputs.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cv-validation-${{ github.run_id }}-${{ github.run_attempt }}/
+            ${{ runner.temp }}/cv-provision-${{ github.run_id }}-${{ github.run_attempt }}/*.json
+            ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-cv-provider-validation/
+            ${{ runner.temp }}/cv-python-selection-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: error
+          retention-days: 30
