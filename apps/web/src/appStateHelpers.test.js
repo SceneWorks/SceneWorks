@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import appSource from "./App.jsx?raw";
+import appSource from "./hooks/useShellHydration.js?raw";
 import scopedListSource from "./hooks/useProjectScopedList.js?raw";
 import {
   applySuccessfulProjectRefresh,
