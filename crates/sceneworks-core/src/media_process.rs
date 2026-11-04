@@ -10,15 +10,14 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 
 /// Exports retain the existing twelve-hour default. Uploads impose a shorter cap.
 const FFMPEG_EXECUTION_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
 /// Operator overrides remain finite and representable, even for a mistyped u64::MAX.
 pub const FFMPEG_EXECUTION_TIMEOUT_MAX: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const FFMPEG_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// Retain only a tail while continuing to drain. Probes need progress metadata, not an
-/// unbounded history of every FFmpeg progress tick.
+/// Ordinary diagnostics retain a tail; structured consumers use their own streaming reader.
 pub const STDERR_LIMIT: usize = 64 * 1024;
 
 pub fn ffmpeg_execution_timeout_from(raw: Option<&str>) -> Duration {
@@ -187,10 +186,10 @@ impl<E: std::fmt::Display> std::fmt::Display for ProcessError<E> {
 }
 
 #[derive(Debug)]
-pub struct ProcessOutput<T> {
+pub struct ProcessOutput<T, S = Vec<u8>> {
     pub status: ExitStatus,
     pub stdout: T,
-    pub stderr: Vec<u8>,
+    pub stderr: S,
 }
 
 /// Last lines/characters for a bounded, Unicode-safe process diagnostic.
@@ -213,14 +212,14 @@ pub fn bounded_tail(value: &str, max_lines: usize, max_chars: usize) -> String {
     output
 }
 
-impl<T> ProcessOutput<T> {
+impl<T, S: AsRef<[u8]>> ProcessOutput<T, S> {
     /// Shared failure reporting for imports and jobs. Probes may intentionally
     /// consume nonzero status, so the runner preserves it instead of rejecting it.
     pub fn failure_detail(&self) -> Option<String> {
         if self.status.success() {
             return None;
         }
-        let stderr = String::from_utf8_lossy(&self.stderr);
+        let stderr = String::from_utf8_lossy(self.stderr.as_ref());
         let tail = bounded_tail(&stderr, 10, 2000);
         Some(if tail.trim().is_empty() {
             "FFmpeg command failed without stderr output.".to_owned()
@@ -235,7 +234,7 @@ pub async fn discard_stdout(mut stdout: ChildStdout) -> io::Result<()> {
     Ok(())
 }
 
-async fn drain_tail(mut pipe: impl tokio::io::AsyncRead + Unpin) -> io::Result<Vec<u8>> {
+pub async fn read_stderr_tail(mut pipe: ChildStderr) -> io::Result<Vec<u8>> {
     let mut tail = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
@@ -243,9 +242,86 @@ async fn drain_tail(mut pipe: impl tokio::io::AsyncRead + Unpin) -> io::Result<V
         if count == 0 {
             return Ok(tail);
         }
-        let drop = (tail.len() + count).saturating_sub(STDERR_LIMIT);
+        retain_stderr_tail(&mut tail, &buffer[..count]);
+    }
+}
+
+/// Stream structured stderr into caller data while bounding diagnostic and partial-line storage.
+/// FFmpeg's structured fields precede optional payload text on each line; oversized line suffixes
+/// are drained without retaining them. The final unterminated line is delivered at EOF.
+pub struct ParsedStderr<T> {
+    pub data: T,
+    diagnostics: Vec<u8>,
+    line: Vec<u8>,
+    parse_line: fn(&mut T, &str),
+}
+
+impl<T> AsRef<[u8]> for ParsedStderr<T> {
+    fn as_ref(&self) -> &[u8] {
+        &self.diagnostics
+    }
+}
+
+impl<T> ParsedStderr<T> {
+    pub fn new(data: T, parse_line: fn(&mut T, &str)) -> Self {
+        Self {
+            data,
+            diagnostics: Vec::new(),
+            line: Vec::new(),
+            parse_line,
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) {
+        retain_stderr_tail(&mut self.diagnostics, bytes);
+        for &byte in bytes {
+            if byte == b'\n' || byte == b'\r' {
+                self.complete_line();
+            } else if self.line.len() < STDERR_LIMIT {
+                self.line.push(byte);
+            }
+        }
+    }
+
+    fn complete_line(&mut self) {
+        (self.parse_line)(&mut self.data, &String::from_utf8_lossy(&self.line));
+        self.line.clear();
+    }
+
+    pub fn complete(mut self) -> Self {
+        self.complete_line();
+        self
+    }
+
+    pub fn buffered_log_bytes(&self) -> usize {
+        self.diagnostics.len() + self.line.len()
+    }
+}
+
+fn retain_stderr_tail(tail: &mut Vec<u8>, bytes: &[u8]) {
+    if bytes.len() >= STDERR_LIMIT {
+        tail.clear();
+        tail.extend_from_slice(&bytes[bytes.len() - STDERR_LIMIT..]);
+    } else {
+        let drop = (tail.len() + bytes.len()).saturating_sub(STDERR_LIMIT);
         tail.drain(..drop);
-        tail.extend_from_slice(&buffer[..count]);
+        tail.extend_from_slice(bytes);
+    }
+}
+
+pub async fn read_stderr_lines<T>(
+    mut pipe: ChildStderr,
+    data: T,
+    parse_line: fn(&mut T, &str),
+) -> io::Result<ParsedStderr<T>> {
+    let mut capture = ParsedStderr::new(data, parse_line);
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = pipe.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(capture.complete());
+        }
+        capture.push(&buffer[..read]);
     }
 }
 
@@ -253,7 +329,7 @@ async fn drain_tail(mut pipe: impl tokio::io::AsyncRead + Unpin) -> io::Result<V
 /// caller-owned heartbeat/cancellation loop; its first error terminates/reaps the child.
 /// The stdout consumer must stream or impose its own allocation bound.
 pub async fn run_command<E, C, F, R, T>(
-    mut command: Command,
+    command: Command,
     stdin_chunks: Option<Vec<Vec<u8>>>,
     timeout: Duration,
     control: C,
@@ -264,6 +340,36 @@ where
     F: FnOnce(ChildStdout) -> R,
     R: Future<Output = io::Result<T>> + Send + 'static,
     T: Send + 'static,
+{
+    run_command_with_stderr(
+        command,
+        stdin_chunks,
+        timeout,
+        control,
+        read_stdout,
+        read_stderr_tail,
+    )
+    .await
+}
+
+/// Run the same bounded lifecycle with a caller-owned streaming stderr consumer.
+/// Structured readers must bound diagnostics and retain only the data their contract needs.
+pub async fn run_command_with_stderr<E, C, F, R, T, G, H, S>(
+    mut command: Command,
+    stdin_chunks: Option<Vec<Vec<u8>>>,
+    timeout: Duration,
+    control: C,
+    read_stdout: F,
+    read_stderr: G,
+) -> Result<ProcessOutput<T, S>, ProcessError<E>>
+where
+    C: Future<Output = E>,
+    F: FnOnce(ChildStdout) -> R,
+    R: Future<Output = io::Result<T>> + Send + 'static,
+    T: Send + 'static,
+    G: FnOnce(ChildStderr) -> H,
+    H: Future<Output = io::Result<S>> + Send + 'static,
+    S: Send + 'static,
 {
     let (deadline, timeout) = ffmpeg_execution_deadline(timeout);
     command
@@ -285,7 +391,7 @@ where
             stdin.shutdown().await
         })
     });
-    let mut stderr_task = Some(tokio::spawn(drain_tail(
+    let mut stderr_task = Some(tokio::spawn(read_stderr(
         child.stderr.take().expect("piped stderr"),
     )));
     let mut stdout_task = Some(tokio::spawn(read_stdout(
@@ -422,10 +528,10 @@ fn task_cleanup_detail(label: &str, error: FfmpegTaskDeadlineError) -> String {
 /// Explicitly terminate and reap the child, then stand down both pipe tasks. `kill_on_drop` remains
 /// a panic/unwind backstop, but ordinary timeout/heartbeat/cancel paths never rely on drop semantics
 /// and never leave a detached stdin or stderr task behind.
-async fn stop_ffmpeg_child<T>(
+async fn stop_ffmpeg_child<T, S>(
     child: &mut Child,
     stdin_task: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
-    stderr_task: &mut Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>>,
+    stderr_task: &mut Option<tokio::task::JoinHandle<std::io::Result<S>>>,
     stdout_task: &mut Option<tokio::task::JoinHandle<std::io::Result<T>>>,
 ) -> Option<String> {
     let deadline = checked_deadline_from(tokio::time::Instant::now(), FFMPEG_TEARDOWN_TIMEOUT);
