@@ -34,6 +34,17 @@ use tokio::sync::oneshot;
 
 use crate::{WorkerError, WorkerResult};
 
+/// All resident model caches share one user setting and the same five-minute default.
+pub(crate) const CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
+pub(crate) const DEFAULT_CACHE_IDLE_SECONDS: u64 = 300;
+
+pub(crate) fn idle_timeout_from_env() -> Option<Duration> {
+    idle_timeout_from_secs(
+        std::env::var(CACHE_IDLE_SECONDS_ENV).ok().as_deref(),
+        DEFAULT_CACHE_IDLE_SECONDS,
+    )
+}
+
 /// A unit of work handed to a cache worker thread: a boxed closure that runs against the resident
 /// [`CacheThread`] on that thread and signals completion through its own captured reply channel. The
 /// closure is `Send` (it crosses the channel) but the resident model `M` never leaves the thread, so
@@ -1094,5 +1105,24 @@ mod tests {
         assert_eq!(panic_message(s.as_ref()), "boom-str");
         let s = std::panic::catch_unwind(|| panic!("{}", "boom-string".to_owned())).unwrap_err();
         assert_eq!(panic_message(s.as_ref()), "boom-string");
+    }
+}
+
+#[cfg(test)]
+mod shared_idle_configuration_tests {
+    use super::*;
+    #[test]
+    fn shared_idle_env_preserves_default_parse_and_disabled_behavior() {
+        for (raw, seconds) in [
+            ("", Some(300)),
+            ("bad", Some(300)),
+            (" 42 ", Some(42)),
+            ("0", None),
+        ] {
+            crate::test_env::temp_env_var(CACHE_IDLE_SECONDS_ENV, raw, || {
+                assert_eq!(idle_timeout_from_env(), seconds.map(Duration::from_secs));
+            });
+        }
+        assert_eq!(DEFAULT_CACHE_IDLE_SECONDS, 300);
     }
 }

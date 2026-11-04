@@ -313,11 +313,7 @@ pub(crate) fn insert_facts_into_raw_settings(
 /// Gated to the lanes that build image metrics at all: `image_jobs/base.rs` is included only where
 /// a media backend is linked, so on the "neither" build (no MLX, no candle) there is no metrics
 /// producer to call this and an ungated definition would be a dead-code error on that PR lane.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn facts_metrics_pair(
     facts: Option<&CheckpointWeightFactsV1>,
 ) -> (Option<String>, Option<String>) {
@@ -336,11 +332,7 @@ pub(crate) fn facts_metrics_pair(
 /// The telemetry pair for a request's model-manifest entry — the whole producer in one call, for
 /// the cross-platform metrics path.
 /// Gated with [`facts_metrics_pair`], its only consumer's consumer.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn manifest_entry_metrics_pair(
     entry: &Map<String, Value>,
 ) -> (Option<String>, Option<String>) {

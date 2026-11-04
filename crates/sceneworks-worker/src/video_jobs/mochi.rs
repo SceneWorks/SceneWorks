@@ -40,10 +40,7 @@ pub(super) const MOCHI_ADAPTER: &str = "mlx_mochi";
 /// directly, `SceneWorks/mochi-1-candle` was never published, and pointing every platform here also
 /// sidesteps sc-12113 (upstream `genmo/mochi-1-preview` ships both a bf16 and an fp32 `vae/` and the
 /// loader's dir-glob picks fp32 non-deterministically — this rehost ships bf16 only).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MOCHI_REPO: &str = "SceneWorks/mochi-1-mlx";
 
 /// Pinned revision for the fixed [`MOCHI_REPO`]. The repo is a hard-coded const (no manifest/payload
@@ -52,18 +49,12 @@ pub(super) const MOCHI_REPO: &str = "SceneWorks/mochi-1-mlx";
 /// defense-in-depth, mirroring [`LTX_BUNDLE_REVISION`] / the SeedVR2 + Real-ESRGAN pins. This is the
 /// same revision B1's manifest sizes were read from (HF API rev `90a87786`); the native downloader
 /// still verifies each file's own hash on download.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MOCHI_REVISION: &str = "90a87786d9b5b592c3b3c083e5fcdf130007b1de";
 
 /// Operator override for the Mochi model root (or a single tier dir) — the smoke's seam and the
 /// escape hatch for a hand-staged conversion, mirroring `$SCENEWORKS_MLX_LTX_DIR`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MOCHI_DIR_ENV: &str = "SCENEWORKS_MLX_MOCHI_DIR";
 
 /// SceneWorks Mochi model id → the gen-core registry id, or `None` if not a Mochi family id.
@@ -83,10 +74,7 @@ pub(super) fn mochi_engine_id(model: &str) -> Option<&'static str> {
 /// Whether `dir` is a loadable Mochi TIER dir: the `split_model.json` the provider reads to resolve
 /// the tier's baked-in quant, plus the AsymmDiT weights themselves. A tier dir mid-download (manifest
 /// written, `transformer/` absent, or vice versa) fails this, so it never half-loads.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn mochi_tier_dir_is_complete(dir: &Path) -> bool {
     dir.join("split_model.json").is_file()
         && dir.join("transformer").join("model.safetensors").is_file()
@@ -97,48 +85,30 @@ pub(super) fn mochi_tier_dir_is_complete(dir: &Path) -> bool {
 /// tracked once and excluded from the tier matrix — so a user can genuinely have a complete `q4/` and
 /// no `text_encoder/`. Checking the tier dir alone would then resolve "successfully" and dead-end
 /// inside the provider on a missing-file error.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn mochi_shared_is_complete(root: &Path) -> bool {
     ["text_encoder", "tokenizer", "vae"]
         .iter()
         .all(|component| root.join(component).is_dir())
 }
 
-/// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
-/// Mirrors [`ltx_quant_bits`].
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn mochi_quant_bits(request: &VideoRequest) -> Option<i64> {
-    request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-}
-
 /// Whether the request opts into the Q8 tier (`advanced.mlxQuantize >= 8`, int or string).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn mochi_wants_q8(request: &VideoRequest) -> bool {
-    mochi_quant_bits(request).is_some_and(|bits| (8..=15).contains(&bits))
+    request
+        .quant_bits()
+        .is_some_and(|bits| (8..=15).contains(&bits))
 }
 
 /// Whether the request opts into the dense **bf16** tier (`advanced.mlxQuantize <= 0`, or an explicit
 /// `>= 16`). Never the default: absent ⇒ q4, so the ~20 GB dense tier is a deliberate opt-in
 /// (mirrors [`ltx_wants_bf16`] / [`resolve_mlx_dense_quant`]'s `<= 0` rule, and additionally accepts
 /// a literal `16` since bf16 IS 16-bit and a caller may say so).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn mochi_wants_bf16(request: &VideoRequest) -> bool {
-    mochi_quant_bits(request).is_some_and(|bits| bits <= 0 || bits >= 16)
+    request
+        .quant_bits()
+        .is_some_and(|bits| bits <= 0 || bits >= 16)
 }
 
 /// The Mochi tier search order — preferred tier first, then the always-SMALLER fallback tiers so a
@@ -150,10 +120,7 @@ pub(super) fn mochi_wants_bf16(request: &VideoRequest) -> bool {
 /// Q8 — see [`wan_tier_order`] / [`ltx_bundle_tier_order`] for that carve-out's rationale. For Mochi
 /// the argument is sharper still: the untiled decode already dominates the footprint, so a silent Q8
 /// buys quality the machine may not have the memory to spend.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn mochi_tier_order(request: &VideoRequest) -> &'static [&'static str] {
     if mochi_wants_bf16(request) {
         &["bf16", "q8", "q4"]
@@ -167,10 +134,7 @@ pub(super) fn mochi_tier_order(request: &VideoRequest) -> &'static [&'static str
 /// Pick the first COMPLETE tier subdir of a Mochi model `root`, trying `order` (preferred first).
 /// Requires the shared co-requisite at `root` too — a tier dir without the T5/VAE siblings is not
 /// loadable, so it must not resolve.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn mochi_tier_subdir(root: &Path, order: &[&str]) -> Option<PathBuf> {
     if !mochi_shared_is_complete(root) {
         return None;
@@ -189,10 +153,7 @@ pub(super) fn mochi_tier_subdir(root: &Path, order: &[&str]) -> Option<PathBuf> 
 /// cross-check that our tier selection and its manifest read agree. Deriving this from the RESOLVED
 /// dir rather than from `advanced.mlxQuantize` is what keeps a fallback (requested q8, only q4
 /// installed) from turning into the provider's hard "spec.quantize disagrees with the tier" error.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn mochi_tier_quant(tier_dir: &Path) -> Option<Quant> {
     let raw = std::fs::read_to_string(tier_dir.join("split_model.json")).ok()?;
     let manifest: Value = serde_json::from_str(&raw).ok()?;
@@ -223,10 +184,7 @@ pub(super) fn mochi_tier_quant(tier_dir: &Path) -> Option<Quant> {
 /// for, the `MOCHI_DIR_ENV` override, and the one hosted [`MOCHI_REPO`] snapshot that serves candle and
 /// MLX alike. Widened from macOS-only rather than copied, so the two pre-download gates cannot disagree
 /// about which directory they are measuring.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn mochi_precheck_dir(settings: &Settings, request: &VideoRequest) -> Option<PathBuf> {
     // The preferred tier — `mochi_tier_order`'s head is the one the request actually asked for; the
     // rest of the order is fallback, which the pre-check must not measure.
@@ -349,10 +307,7 @@ pub(super) fn mochi_vram_precheck(
 ///
 /// Shared by BOTH lanes (one repo, both backends), so the candle generation arm calls this instead of
 /// `candle_video_snapshot_dir` — the flat-snapshot resolver has no notion of the tier layout.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_mochi_model_dir(
     settings: &Settings,
     request: &VideoRequest,
@@ -433,11 +388,7 @@ pub(super) fn resolve_mochi_model_dir(
 /// DEFAULTS to `image_to_video` when the payload omits one, so a mode check is what keeps a
 /// conditioning-shaped Mochi job out of the route rather than letting it reach the engine's
 /// `validate_request` (or, worse, an unrelated arm of the ladder).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 pub(super) fn validate_mochi_mode(request: &VideoRequest) -> WorkerResult<()> {
     if request.mode == "text_to_video" {
         Ok(())
@@ -461,10 +412,7 @@ pub(super) fn mochi_available(request: &VideoRequest, settings: &Settings) -> bo
 /// pre-installed q8 pulls just `q8/*` from the FIXED [`MOCHI_REVISION`] before any compute. No-op when
 /// q8 isn't requested, when the snapshot isn't downloaded at all (resolve surfaces the clear
 /// "not downloaded" error), or when `q8/` is already complete. Fails loud on a real download error.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn ensure_mochi_q8_present(
     api: &ApiClient,
     settings: &Settings,
@@ -479,10 +427,7 @@ pub(super) async fn ensure_mochi_q8_present(
 
 /// Fetch the dense `bf16/` tier on demand (~20 GB) — the [`ensure_mochi_q8_present`] sibling for the
 /// power-user tier ([`mochi_wants_bf16`]).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn ensure_mochi_bf16_present(
     api: &ApiClient,
     settings: &Settings,
@@ -497,10 +442,7 @@ pub(super) async fn ensure_mochi_bf16_present(
 
 /// The shared body behind the two on-demand tier fetches: pull `<tier>/*` from the pinned
 /// [`MOCHI_REVISION`] when the snapshot exists but that tier doesn't.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn ensure_mochi_tier_present(
     api: &ApiClient,
     settings: &Settings,

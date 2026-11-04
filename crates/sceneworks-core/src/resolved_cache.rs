@@ -4202,16 +4202,7 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), Resolved
         .parent()
         .ok_or_else(|| ResolvedCacheError::new("cache record has no parent"))?;
     ensure_regular_directory(parent)?;
-    let temporary = parent.join(format!(".tmp-{}", random_id()?));
-    let result = (|| {
-        write_synced_file(&temporary, &body)?;
-        std::fs::rename(&temporary, path)?;
-        sync_dir(parent)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result.map_err(|error| {
+    crate::fsutil::write_atomic(path, &body).map_err(|error| {
         ResolvedCacheError::new(format!("write cache record {}: {error}", path.display()))
     })
 }
@@ -4355,10 +4346,8 @@ fn publish_rename_error(
 }
 
 fn random_id() -> Result<String, ResolvedCacheError> {
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| ResolvedCacheError::new(format!("generate cache id: {error}")))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    crate::hashing::random_hex(16)
+        .map_err(|error| ResolvedCacheError::new(format!("generate cache id: {error}")))
 }
 
 fn now_seconds() -> Result<u64, ResolvedCacheError> {

@@ -1,7 +1,4 @@
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::ltx::resolve_clip_media_path;
 #[allow(unused_imports)]
 use super::prelude::*;
@@ -42,10 +39,7 @@ pub(super) fn validate_vace_fun_capability(
         }
     }
 
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         let _ = settings;
         Err(WorkerError::InvalidPayload(
@@ -55,19 +49,13 @@ pub(super) fn validate_vace_fun_capability(
         ))
     }
 }
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::wan::ClipFramePosition;
 #[cfg(target_os = "macos")]
 use super::wan::{
     generate_video, resolve_wan_model_dir, resolve_wan_vace_adapters, wan_load_quant, VideoGenInput,
 };
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::image_jobs::load_reference_image;
 
 // ---------------------------------------------------------------------------
@@ -93,18 +81,12 @@ pub(super) const WAN_VACE_FUN_ADAPTER: &str = "mlx_wan_vace_fun";
 /// background (`0x12110f` = RGB 18,17,15) so the box masks (rasterized from the same
 /// normalized boxes at W×H) stay aligned with the control frames through the engine's
 /// identity-resize preprocess.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const FRAME_PAD_COLOR: &str = "0x12110f";
 
 /// Raw-settings recorded on a real Wan-VACE asset (`advanced` knobs + the real-inference
 /// markers; the engine id is `wan_vace`, not the user-picked replace-capable model).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn wan_vace_raw_settings(request: &VideoRequest, model: &str) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
@@ -118,10 +100,7 @@ pub(super) fn wan_vace_raw_settings(request: &VideoRequest, model: &str) -> Valu
 }
 
 /// SceneWorks `replacementMode` string → engine [`ReplacementMode`] (default FaceOnly).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn replacement_mode_from(value: &str) -> ReplacementMode {
     match value {
         "full_person_keep_outfit" => ReplacementMode::FullPersonKeepOutfit,
@@ -312,10 +291,7 @@ fn resolve_wan_vace_fun_model_dir(settings: &Settings) -> WorkerResult<PathBuf> 
 /// `FRAME_PAD_COLOR`), evenly resampled across the clip — the new shared frame-extraction
 /// helper (Python `load_source_video_frames`; also the seam extend/bridge will reuse). The
 /// frames are the (un-neutralized) Wan-VACE control video; the engine masks them.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn load_source_video_frames(
     api: &ApiClient,
     settings: &Settings,
@@ -372,10 +348,7 @@ pub(super) async fn load_source_video_frames(
 /// Collect the extracted PNG frames in `work_dir`, resample them to `count` evenly-spaced
 /// indices (Python `evenly_spaced_indices` — the same arithmetic as the mask resample), and
 /// decode the selected frames to engine [`Image`]s. Blocking IO/decoding runs off the runtime.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResult<Vec<Image>> {
     crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&work_dir)?
@@ -401,10 +374,7 @@ async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResul
 /// One immutable character-reference receipt plus its decoded RGB identity image. Keeping the
 /// asset id beside the pixels lets provider-specific paths record exactly which approved identities
 /// were physically conditioned, rather than reporting only an untraceable count.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) struct CharacterReferenceReceipt {
     pub(super) asset_id: String,
     pub(super) image: Image,
@@ -414,10 +384,7 @@ pub(super) struct CharacterReferenceReceipt {
 /// `approvedReferenceIds`, else the character's approved `references`. Every selected identity is
 /// mandatory: dropping an unreadable item or silently truncating the ordered list changes the model
 /// input while retaining a misleading successful replacement receipt.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_character_reference_receipts(
     settings: &Settings,
     request: &VideoRequest,
@@ -488,10 +455,7 @@ pub(super) fn resolve_character_reference_receipts(
 /// Legacy image-only resolver for existing Wan/SCAIL paths. Keep its historical best-effort
 /// semantics isolated here; LTX replacement must use [`resolve_character_reference_receipts`],
 /// whose immutable carrier cannot truthfully omit an approved identity.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_character_references(
     settings: &Settings,
     request: &VideoRequest,
@@ -582,10 +546,7 @@ pub(super) fn resolve_character_references(
 }
 
 /// Convert an `image::RgbImage` (the rasterized mask) to an engine [`Image`].
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn rgb_image_to_engine(image: image::RgbImage) -> Image {
     Image {
         width: image.width(),
@@ -597,10 +558,7 @@ pub(super) fn rgb_image_to_engine(image: image::RgbImage) -> Image {
 /// Build the Wan-VACE conditioning: one [`Conditioning::ControlClip`] (source frames + the
 /// per-frame person mask; the engine neutralizes the masked region) plus one
 /// [`Conditioning::Reference`] per character reference image.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn build_vace_conditioning(
     frames: Vec<Image>,
     masks: Vec<image::RgbImage>,
@@ -635,10 +593,7 @@ pub(super) fn build_vace_conditioning(
 
 /// The honest `replacementStatus` recorded on the asset fact (mirrors the torch
 /// `replacement_status`); the API folds it into the video sidecar's normalizedSettings.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn replacement_status_value(
     track: &Value,
     track_id: &str,
@@ -844,10 +799,7 @@ async fn generate_wan_vace_engine(
 /// Mid-gray (≈0 after the engine's `2·x/255 − 1` normalization) control frame for the
 /// to-generate span: a neutral `reactive = video·mask` signal so the masked region is generated
 /// freely from the kept frames + prompt, never biased toward a frozen filler image.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn neutral_control_frame(width: u32, height: u32) -> Image {
     Image {
         width,
@@ -858,10 +810,7 @@ fn neutral_control_frame(width: u32, height: u32) -> Image {
 
 /// A solid W×H mask (`0` = keep the control frame, `255` = regenerate; the engine binarizes at
 /// 0.5), matching the `image::RgbImage` form `person_track_masks` produces for replace_person.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn solid_mask(width: u32, height: u32, value: u8) -> image::RgbImage {
     image::RgbImage::from_pixel(width, height, image::Rgb([value, value, value]))
 }
@@ -870,10 +819,7 @@ fn solid_mask(width: u32, height: u32, value: u8) -> image::RgbImage {
 /// truer continuity but fewer freely-generated frames. Overridable via advanced `motionAnchorFrames`
 /// (per side); defaults to ~⅓ of the output budget (split across the two boundaries for bridge), and
 /// is clamped so at least 5 frames (one z16 chunk) are left to generate.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn extend_anchor_frames(request: &VideoRequest, frame_count: usize) -> usize {
     let per_side = if request.mode == "video_bridge" { 2 } else { 1 };
     let max_total = frame_count.saturating_sub(5).max(1);
@@ -896,10 +842,7 @@ pub(super) fn extend_anchor_frames(request: &VideoRequest, frame_count: usize) -
 /// engine [`Image`]s, in temporal order (sc-3812). Unlike [`load_source_video_frames`] — which
 /// resamples the *whole* clip evenly — this keeps *consecutive* real frames so the model sees the
 /// clip's actual motion velocity at the boundary. Decodes only the kept subset (`decode_png_image`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn load_clip_anchor_frames(
     api: &ApiClient,
@@ -954,10 +897,7 @@ pub(super) async fn load_clip_anchor_frames(
 
 /// Pick the head/tail `count` consecutive PNGs from `work_dir` (sorted) and decode them to engine
 /// [`Image`]s, preserving temporal order. Fewer available than `count` ⇒ all of them (short clip).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn select_anchor_frames(
     work_dir: PathBuf,
     count: usize,
@@ -986,10 +926,7 @@ async fn select_anchor_frames(
 }
 
 /// Decode one RGB PNG into an engine [`Image`] (shared by the resample + anchor frame selectors).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn decode_png_image(path: &Path) -> WorkerResult<Image> {
     let decoded = crate::image_decode::decode_image_any(path)
         .map_err(|error| {
@@ -1010,10 +947,7 @@ fn decode_png_image(path: &Path) -> WorkerResult<Image> {
 /// control clip is `frame_count` long (`1 + 4·k`, the engine's z16-chunk constraint) with no
 /// reference images. `masking_strength`/`mode` are inert in the WanVACE mask math (carried for the
 /// shared [`Conditioning::ControlClip`] contract), so they take the neutral defaults.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn build_extend_bridge_vace_conditioning(
     request: &VideoRequest,
     width: u32,
@@ -1085,10 +1019,7 @@ pub(super) fn build_extend_bridge_vace_conditioning(
 /// markers, recording the actual engine (`wan_vace`) and `fidelityTier` so the substitution under the
 /// user's `wan_2_2` pick is an inspectable fact (sc-3812). Unlike [`wan_vace_raw_settings`] there is
 /// no `replacementMode` (these modes are not person-replacement).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn wan_vace_extend_raw_settings(request: &VideoRequest) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));

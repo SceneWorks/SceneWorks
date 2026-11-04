@@ -92,11 +92,7 @@ pub(crate) fn u32_clamped(
 
 /// Trimmed non-empty string, else `default`.
 pub(crate) fn str(advanced: &JsonObject, key: &str, default: &str) -> String {
-    advanced
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    crate::payload::trimmed_string(advanced.get(key))
         .unwrap_or(default)
         .to_owned()
 }
