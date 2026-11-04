@@ -136,13 +136,8 @@ mod tests {
     use serde_json::{json, Value};
 
     fn builtin_models() -> Vec<Value> {
-        let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .map(|(_, contents)| *contents)
-            .expect("builtin.models.jsonc is embedded");
-        let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(raw))
-            .expect("builtin.models.jsonc parses");
+        let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         manifest["models"]
             .as_array()
             .expect("models array")
