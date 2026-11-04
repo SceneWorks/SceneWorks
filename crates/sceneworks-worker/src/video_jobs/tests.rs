@@ -15651,13 +15651,9 @@ async fn the_seedvr2_upscale_mux_keeps_every_frame_for_short_long_vfr_and_absent
 
 /// Probe `path` with the production SeedVR2 probe command and read back its frame count and timing.
 async fn seedvr2_measure(path: &Path) -> (u64, Seedvr2SourceTiming) {
-    let stderr =
-        crate::media_jobs::run_ffmpeg_capture_stderr(seedvr2_source_probe_args(path), None)
-            .await
-            .expect("the SeedVR2 probe command");
-    let probe = parse_seedvr2_source_probe(&stderr).expect("a frame count and geometry");
-    let timing =
-        parse_seedvr2_source_timing(&stderr, probe.frame_count).expect("a readable frame timing");
+    let (probe, timing) = probe_seedvr2_with_context(seedvr2_source_probe_args(path), None)
+        .await
+        .expect("the production SeedVR2 streaming probe");
     (probe.frame_count, timing)
 }
 
@@ -21948,4 +21944,90 @@ fn video_prepared_ltx_auto_distill_classification_and_load_retain_one_token() {
     let mut spec = LoadSpec::new(WeightsSource::Dir(data.path().to_path_buf()))
         .with_adapters(prepared.specs.clone());
     assert!(prepared.install(&mut spec).is_err());
+}
+
+/// A real FFmpeg showinfo stream outgrows the shared diagnostic tail in a short clip.
+/// Keep every PTS and the initial time base, while bounding unrelated log/partial-line storage.
+#[test]
+fn seedvr2_streaming_probe_preserves_all_timing_beyond_the_diagnostic_tail() {
+    let frames = 1200_u64;
+    let pts: Vec<String> = (0..frames).map(|i| (i * 1001).to_string()).collect();
+    let refs: Vec<&str> = pts.iter().map(String::as_str).collect();
+    let mut log = String::from(
+        "Input Video: h264, yuv420p, 1920x1080\nOutput Video: wrapped_avframe, yuv420p, 960x540\n",
+    );
+    log.push_str(&showinfo_log("1/30000", "30000/1001", &refs));
+    log.push_str(&"unrelated metadata ".repeat(20_000));
+    log.push_str(&format!("\nframe= {frames}\n"));
+    let limit = sceneworks_core::media_process::STDERR_LIMIT;
+    assert!(log.len() > 4 * limit);
+    assert_eq!(
+        parse_seedvr2_source_timing(&log[log.len() - limit..], frames),
+        None,
+        "the former tail-only consumer loses the initial time base and frames"
+    );
+    for chunk_size in [7, 8192, log.len()] {
+        let mut collector = sceneworks_core::media_process::ParsedStderr::new(
+            Seedvr2ProbeCollector::default(),
+            Seedvr2ProbeCollector::read_line,
+        );
+        for chunk in log.as_bytes().chunks(chunk_size) {
+            collector.push(chunk);
+            assert!(collector.buffered_log_bytes() <= 2 * limit);
+        }
+        let collector = collector.complete();
+        assert!(collector.as_ref().len() <= limit);
+        let (probe, timing) = collector
+            .data
+            .result()
+            .expect("complete structured timing survives every chunk split");
+        assert_eq!(
+            probe,
+            Seedvr2SourceProbe {
+                frame_count: frames,
+                width: 960,
+                height: 540
+            }
+        );
+        assert_eq!(
+            timing.frames,
+            Seedvr2Timing::Constant {
+                num: 30000,
+                den: 1001
+            }
+        );
+        assert_eq!(timing.start_micros, 0);
+    }
+}
+
+#[cfg(all(unix, native_lane))]
+#[tokio::test]
+async fn seedvr2_streaming_probe_uses_the_shared_process_lifecycle_for_long_logs() {
+    // Shell emits only a recorded showinfo-shaped transport fixture; no media/model inference.
+    let script = r#"
+        printf 'Output Video: wrapped_avframe, yuv420p, 16x16\n' >&2
+        printf '[Parsed_showinfo_0 @ 0x1] config in time_base: 1/30000, frame_rate: 30/1\n' >&2
+        i=0
+        while [ "$i" -lt 1200 ]; do
+            printf '[Parsed_showinfo_0 @ 0x1] n: %d pts: %d pts_time:0 fmt:yuv420p s:16x16 diagnostic-padding\n' "$i" "$((i * 1000))" >&2
+            i=$((i + 1))
+        done
+        printf 'frame= 1200\n' >&2
+    "#;
+    let (probe, timing) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        probe_seedvr2_with_context(vec!["sh".into(), "-c".into(), script.into()], None),
+    )
+    .await
+    .expect("bounded fixture process")
+    .expect("complete process timing");
+    assert_eq!(
+        probe,
+        Seedvr2SourceProbe {
+            frame_count: 1200,
+            width: 16,
+            height: 16
+        }
+    );
+    assert_eq!(timing.frames, Seedvr2Timing::Constant { num: 30, den: 1 });
 }

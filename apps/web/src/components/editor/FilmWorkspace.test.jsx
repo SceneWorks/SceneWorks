@@ -850,7 +850,7 @@ describe("FilmWorkspace", () => {
       if (path.endsWith("/film-runs")) return Promise.resolve([]);
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
       if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
-      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [], soundSynthesisModels: ["kokoro_82m", "chatterbox_tts", "moss_tts_realtime", "moss_ttsd_v05"], defaultSoundSynthesisModel: "kokoro_82m" });
       if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
       if (path.endsWith("/films/film_1") && options.method === "PUT") {
         savedBody = JSON.parse(options.body);
@@ -860,7 +860,10 @@ describe("FilmWorkspace", () => {
     });
     await renderWorkspace();
     const addLine = [...container.querySelectorAll("button")].find((button) => button.textContent === "Add generated dialogue");
+    expect(addLine.disabled).toBe(false);
     await act(async () => { addLine.click(); await Promise.resolve(); });
+    expect([...container.querySelector('select[aria-label="Sound 1 speech model"]').options].map((option) => option.value))
+      .toEqual(["kokoro_82m", "chatterbox_tts", "moss_tts_realtime", "moss_ttsd_v05"]);
     await act(async () => {
       changeValue(container.querySelector('textarea[aria-label="Sound 1 dialogue text"]'), "The parcel is here.");
       changeValue(container.querySelector('input[aria-label="Sound 1 voice"]'), "am_michael");
@@ -876,6 +879,21 @@ describe("FilmWorkspace", () => {
     expect(savedBody.productionPlan.sound).toMatchObject({ generatedAudio: "include", dialogue: { gain: 0.75, muted: true } });
     expect(savedBody.productionPlan.shots[0].generatedAudio).toBe("mute");
     expect(apiFetchMock.mock.calls.some(([path]) => path.includes("/audio/jobs") || path.endsWith("/export"))).toBe(false);
+  });
+
+  it("does not offer generated dialogue without synthesis facts", async () => {
+    const film = draft();
+    apiFetchMock.mockImplementation((path) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      throw new Error(`Unexpected request ${path}`);
+    });
+    await renderWorkspace();
+    const addLine = [...container.querySelectorAll("button")].find((button) => button.textContent === "Add generated dialogue");
+    expect(addLine.disabled).toBe(true);
   });
 
   it("places a staged SFX role as an editable sequence bed", async () => {

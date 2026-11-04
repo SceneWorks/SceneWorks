@@ -1,3 +1,4 @@
+import { deferred } from "../testUtils/async.js";
 import React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -23,13 +24,7 @@ function response(payload, status = 200) {
   });
 }
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
+
 
 function catalog(overrides = {}) {
   return {

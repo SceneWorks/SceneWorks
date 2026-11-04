@@ -1565,15 +1565,6 @@
   cursor: pointer;
 }
 
-.su-notice--error {
-  border-color: color-mix(in oklch, var(--danger) 45%, var(--border));
-  background: var(--danger-soft);
-}
-
-.su-notice--error svg {
-  color: var(--danger);
-}
-
 /* ---------- Assets ---------- */
 
 .su-search {
@@ -1650,20 +1641,6 @@
   top: 5px;
   right: 5px;
   color: var(--warm);
-}
-
-.su-asset-placeholder {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  height: 100%;
-  color: var(--text-faint);
-  background: repeating-linear-gradient(
-      45deg,
-      color-mix(in oklch, var(--accent) 18%, transparent) 0 5px,
-      transparent 5px 10px
-    ),
-    var(--surface-2);
 }
 
 /* ---------- Model Manager ---------- */

@@ -1,8 +1,11 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
+import { isAbortError } from "../api.js";
+import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { useConsentRequestOwner } from "./useConsentRequestOwner.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { modelsApi } from "../api/modelsResources.js";
 import { lorasApi } from "../api/lorasResources.js";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { appConfirm } from "../appConfirm.jsx";
 import {
   borrowedLicenseAcknowledgmentBlocked,
@@ -30,16 +33,9 @@ function confirmPermanentDelete() {
   });
 }
 
-// Owns the model + LoRA catalogs and their import/download/convert/delete actions.
-// Extracted from App.jsx (sc-1651). Models and LoRAs are coupled (a LoRA delete/
-// import re-pulls both via the lora overlay), so they share one hook. App keeps the
-// cross-cutting orchestrators — refreshData (bulk loader; seeds models+loras through
-// the returned setters) and refreshDataWithLoraOverlay (refreshData + refreshLoras,
-// also called by the SSE handler) — and passes them in. Both props MUST be
-// identity-stable (sc-8811): they are useCallback deps of deleteModel/deleteLora,
-// which sit in appContextValue's dependency array, so an unstable prop rebuilds the
-// context value every App render and defeats the sc-4194 memoization. App passes
-// ref-delegating useCallbacks for both.
+// Owns model/LoRA catalogs, callback-stable refreshes and catalog mutations.
+// Optional refresh overrides retain the hook test/embedding contract. App uses
+// these owned callbacks directly, so it needs no cyclic forwarding refs.
 export function useModelsAndLoras({
   token,
   activeProject,
@@ -48,10 +44,13 @@ export function useModelsAndLoras({
   setLoraError = setError,
   setJobs,
   setActiveView,
-  refreshData,
-  refreshDataWithLoraOverlay,
+  refreshData: refreshModelsOverride,
+  refreshDataWithLoraOverlay: refreshWithLorasOverride,
 }) {
   const [models, setModels] = useState([]);
+  const [modelCatalogStatus, setModelCatalogStatus] = useState("idle");
+  const modelCatalogRequestRef = useRef(0);
+
   const [loras, setLoras] = useState([]);
   const captureConsentOwner = useConsentRequestOwner(token, models, loras, activeProject?.id);
 
@@ -64,6 +63,44 @@ export function useModelsAndLoras({
     setError: setLoraError,
     optionalProject: true,
   });
+
+  const refreshModels = useCallback(async ({ signal } = {}) => {
+    const requestId = ++modelCatalogRequestRef.current;
+    // Do not blank an already-authoritative catalog during an SSE/manual refresh. This state is
+    // specifically the cold-start boundary where no availability answer exists yet.
+    setModelCatalogStatus((current) => (current === "ready" ? current : "loading"));
+    try {
+      const items = await modelsApi.list(token, { signal });
+      if (requestId !== modelCatalogRequestRef.current) {
+        return refreshFailure("stale");
+      }
+      setModels(items);
+      setModelCatalogStatus("ready");
+      setError("");
+      return refreshSuccess(items);
+    } catch (err) {
+      if (requestId !== modelCatalogRequestRef.current) {
+        return refreshFailure("stale", err);
+      }
+      if (isAbortError(err)) {
+        setModelCatalogStatus((current) => (current === "loading" ? "idle" : current));
+        return refreshFailure("aborted", err);
+      }
+      setModelCatalogStatus((current) => (current === "loading" ? "error" : current));
+      setError(err.message);
+      return refreshFailure("error", err);
+    }
+  }, [token, setError]);
+
+  const refreshModelAndLoras = useCallback(async (projectId = activeProjectRef.current?.id) => {
+    await Promise.all([
+      refreshModels(),
+      refreshLoras(projectId || undefined),
+    ]);
+  }, [activeProjectRef, refreshModels, refreshLoras]);
+
+  const refreshData = refreshModelsOverride ?? refreshModels;
+  const refreshDataWithLoraOverlay = refreshWithLorasOverride ?? refreshModelAndLoras;
 
   const deleteModel = useCallback(
     async (model) => {
@@ -392,12 +429,10 @@ export function useModelsAndLoras({
     });
   }, [token, models, captureConsentOwner]);
 
-  return {
+  const context = useAppDomainValue({
+    modelCatalogStatus,
     models,
-    setModels,
     loras,
-    setLoras,
-    refreshLoras,
     deleteModel,
     deleteModelVariant,
     deleteLora,
@@ -408,6 +443,7 @@ export function useModelsAndLoras({
     createModelDownloadJob,
     downloadConditionalComponents,
     createLoraDownloadJob,
-    createModelConvertJob,
-  };
+    createModelConvertJob
+  });
+  return { ...context, refreshModels, refreshModelAndLoras, setModels, setLoras, refreshLoras, context };
 }
