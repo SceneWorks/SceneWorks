@@ -33,6 +33,7 @@ vi.mock("../api.js", async (importOriginal) => {
   };
 });
 
+import { apiFetch } from "../api.js";
 import { AppContext } from "../context/AppContext.js";
 import { PoseLibraryScreen } from "./PoseLibraryScreen.jsx";
 
@@ -79,6 +80,21 @@ describe("PoseLibraryScreen", () => {
     });
     await act(async () => {}); // flush the refresh() effect
   }
+
+  it("keeps a replacement refresh loading when an aborted request resolves late", async () => {
+    let resolveFirst;
+    let resolveSecond;
+    vi.mocked(apiFetch)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
+    await act(async () => root.render(<AppContext.Provider value={{ token: "first" }}><PoseLibraryScreen /></AppContext.Provider>));
+    await act(async () => root.render(<AppContext.Provider value={{ token: "second" }}><PoseLibraryScreen /></AppContext.Provider>));
+    await act(async () => resolveFirst([poseAsset({ displayName: "Stale" })]));
+    expect(container.textContent).toContain("Loading poses");
+    expect(container.textContent).not.toContain("Stale");
+    await act(async () => resolveSecond([poseAsset({ displayName: "Current" })]));
+    expect(container.textContent).toContain("Current");
+  });
 
   it("fetches reserved-project poses and groups them by category", async () => {
     poseAssets = [poseAsset()];

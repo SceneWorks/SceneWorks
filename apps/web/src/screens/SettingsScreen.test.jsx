@@ -9,7 +9,7 @@ import { click } from "../testUtils/dom.js";
 // The redesigned screen (Settings-page handoff) reads theme + the worker registry off the
 // app context and splits its content across four tabs, so every test mounts it inside a
 // legacy combined <AppContext.Provider> and clicks through to the tab under test.
-const APP_CONTEXT = { theme: "light", changeTheme: vi.fn(), visibleWorkers: [], macCapabilities: {} };
+const APP_CONTEXT = { token: "context-token", theme: "light", changeTheme: vi.fn(), visibleWorkers: [], macCapabilities: {} };
 
 // AppContext has to be re-imported alongside the screen after vi.resetModules(): a statically
 // imported context object is a DIFFERENT module instance from the one the freshly-imported
@@ -427,7 +427,7 @@ describe("SettingsScreen server (REST) mode", () => {
     await click(buttonByText(container, "Restart"));
     expect(apiFetch).toHaveBeenCalledWith(
       "/api/v1/worker/restart",
-      expect.anything(),
+      "context-token",
       expect.objectContaining({ method: "POST" }),
     );
   });

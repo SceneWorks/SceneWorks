@@ -159,7 +159,8 @@ pub(crate) async fn test_film_planner_connection(
     }
     let credential = resolve_connection_credential(&state, &connection).await?;
     let models =
-        crate::openai_planner::list_models(&state.http_client, &connection, credential).await?;
+        crate::openai_planner::list_models(&state.planner_http_client, &connection, credential)
+            .await?;
     Ok(Json(ConnectionTestResult {
         ok: true,
         capability: "model_listing",
@@ -394,11 +395,7 @@ fn write_connections(
         connections: connections.to_vec(),
     })
     .map_err(|error| ApiError::internal(error.to_string()))?;
-    let temp = path.with_extension(format!("json.{}.tmp", Uuid::new_v4().simple()));
-    std::fs::write(&temp, body).map_err(|error| {
-        ApiError::internal(format!("Failed to save planning connections: {error}"))
-    })?;
-    std::fs::rename(&temp, &path).map_err(|error| {
+    sceneworks_core::fsutil::write_atomic(&path, &body).map_err(|error| {
         ApiError::internal(format!("Failed to install planning connections: {error}"))
     })
 }

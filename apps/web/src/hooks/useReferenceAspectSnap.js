@@ -1,5 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { getMediaTicket } from "../api.js";
+import { useMediaTicket } from "./useMediaTicket.js";
 import { assetIsHdrSource, assetNativeSize, assetUrl } from "../components/assetMedia.jsx";
 import { probeImageDimensions } from "../imageDimensions.js";
 
@@ -42,6 +44,15 @@ export function useReferenceAspectSnap({
   enabled = true,
 }) {
   const snapped = useRef("");
+  const ticket = useMediaTicket();
+  const [failedTicket, setFailedTicket] = useState(null);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    if (failedTicket !== null && failedTicket !== ticket) {
+      setFailedTicket(null);
+      setRetry((value) => value + 1);
+    }
+  }, [failedTicket, ticket]);
   useEffect(() => {
     // Wrapping the callback below defeats probeImageDimensions' own callable check, and a throw
     // from an image onload lands outside React's tree where no boundary catches it.
@@ -70,9 +81,11 @@ export function useReferenceAspectSnap({
       }
       return undefined;
     }
+    const requestTicket = getMediaTicket();
     return probeImageDimensions(asset && assetUrl(asset), (width, height) => {
+      setFailedTicket(null);
       snapped.current = pairKey;
       onReferenceImageLoaded(width, height);
-    });
-  }, [referenceId, assets, onReferenceImageLoaded, snapKey, enabled]);
+    }, () => setFailedTicket(requestTicket));
+  }, [referenceId, assets, onReferenceImageLoaded, snapKey, enabled, retry]);
 }
