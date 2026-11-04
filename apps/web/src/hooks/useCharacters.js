@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { charactersApi } from "../api/charactersResources.js";
 import { useCallback, useState } from "react";
@@ -232,10 +233,8 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
     [withCharacterApi, token, requestedGpu, setActiveView],
   );
 
-  return {
+  const context = useAppDomainValue({
     characters,
-    setCharacters,
-    refreshCharacters,
     createCharacter,
     updateCharacter,
     archiveCharacter,
@@ -250,6 +249,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
     attachCharacterLora,
     updateCharacterLora,
     detachCharacterLora,
-    createCharacterTestJob,
-  };
+    createCharacterTestJob
+  });
+  return { ...context, setCharacters, refreshCharacters, context };
 }

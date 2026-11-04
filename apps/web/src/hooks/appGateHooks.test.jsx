@@ -1136,7 +1136,7 @@ describe("useJobEvents (sc-9750)", () => {
   });
 
   // A superset of the hook's props with stable no-op stand-ins; a test overrides only
-  // what it asserts on. Refs mirror how App feeds live handles into the handlers.
+  // what it asserts on. Refresh callbacks follow the committed App domain owners.
   function baseProps(overrides = {}) {
     return {
       access: { authRequired: false },
@@ -1151,10 +1151,10 @@ describe("useJobEvents (sc-9750)", () => {
       pushNotice: () => {},
       dismissNoticeKind: () => {},
       generatedAssetRefreshesRef: { current: new Map() },
-      refreshAssetsRef: { current: () => {} },
-      refreshModelsRef: { current: () => {} },
-      refreshModelAndLorasRef: { current: () => {} },
-      refreshPersonTracksRef: { current: () => {} },
+      refreshAssets: () => {},
+      refreshModels: () => {},
+      refreshModelAndLoras: () => {},
+      refreshPersonTracks: () => {},
       activeProjectRef: { current: null },
       enqueueTimelineGenerationApply: () => {},
       hasVisibleLocalFailure: () => false,
@@ -1245,6 +1245,34 @@ describe("useJobEvents (sc-9750)", () => {
     expect(FakeEventSource.instances.length).toBe(1);
   });
 
+  it("keeps SSE refresh callbacks on committed owners across a suspended transition", async () => {
+    const a = vi.fn();
+    const b = vi.fn();
+    const props = baseProps({ refreshAssets: a });
+    const pending = new Promise(() => {});
+    function Owner({ refreshAssets, suspend }) {
+      useJobEvents({ ...props, refreshAssets });
+      if (suspend) throw pending;
+      return null;
+    }
+    const view = (callback, suspend = false) => <React.Suspense fallback="loading"><Owner refreshAssets={callback} suspend={suspend} /></React.Suspense>;
+    root = createRoot(container);
+    await act(async () => root.render(view(a)));
+    await settle();
+    const source = FakeEventSource.instances[0];
+    await act(async () => React.startTransition(() => root.render(view(b, true))));
+    const event = (id) => act(() => source.listeners["job.updated"]({ data: JSON.stringify({
+      id, projectId: "p", status: "running", result: { generationSetId: id, assetIds: [id] },
+    }) }));
+    event("suspended");
+    expect(a).toHaveBeenCalledWith("p");
+    expect(b).not.toHaveBeenCalled();
+    await act(async () => root.render(view(b)));
+    event("committed");
+    expect(b).toHaveBeenCalledWith("p");
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
   it("routes job.updated through setJobs and refreshes generated assets", async () => {
     const jobs = [];
     const refreshedProjects = [];
@@ -1253,7 +1281,7 @@ describe("useJobEvents (sc-9750)", () => {
         jobs.length = 0;
         jobs.push(...updater([]));
       },
-      refreshAssetsRef: { current: (projectId) => refreshedProjects.push(projectId) },
+      refreshAssets: (projectId) => refreshedProjects.push(projectId),
     });
     mount(props);
     await settle();
@@ -1537,9 +1565,9 @@ describe("useJobEvents (sc-9750)", () => {
         jobs = updater(jobs);
         jobsRef.current = jobs;
       },
-      refreshModelsRef: { current: refreshData },
-      refreshModelAndLorasRef: { current: () => {} },
-      refreshAssetsRef: { current: refreshAssets },
+      refreshModels: refreshData,
+      refreshModelAndLoras: () => {},
+      refreshAssets: refreshAssets,
       enqueueTimelineGenerationApply: applyTimeline,
       pushNotice,
     }));
@@ -1704,7 +1732,7 @@ describe("useJobEvents (sc-9750)", () => {
         jobs = updater(jobs);
         jobsRef.current = jobs;
       },
-      refreshAssetsRef: { current: refreshAssets },
+      refreshAssets: refreshAssets,
       enqueueTimelineGenerationApply: applyTimeline,
     }));
     await settle();
@@ -1758,7 +1786,7 @@ describe("useJobEvents (sc-9750)", () => {
         jobs = updater(jobs);
         jobsRef.current = jobs;
       },
-      refreshAssetsRef: { current: refreshAssets },
+      refreshAssets: refreshAssets,
       enqueueTimelineGenerationApply: applyTimeline,
     }));
     await settle();
@@ -1799,7 +1827,7 @@ describe("useJobEvents (sc-9750)", () => {
         jobs = updater(jobs);
         jobsRef.current = jobs;
       },
-      refreshAssetsRef: { current: refreshAssets },
+      refreshAssets: refreshAssets,
       enqueueTimelineGenerationApply: applyTimeline,
     }));
     await settle();
