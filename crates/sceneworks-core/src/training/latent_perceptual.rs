@@ -16,6 +16,18 @@
 //! Both default to upstream's (ai-toolkit-perceptual) schedule once given a weight: noise window
 //! `[0, 0.5]`, added to the diffusion loss on every in-window step (`every = 1`).
 
+/// Every advanced technique key parsed by this module.
+pub const TECHNIQUE_KEYS: &[&str] = &[
+    VAE_ANCHOR.weight_key,
+    VAE_ANCHOR.min_t_key,
+    VAE_ANCHOR.max_t_key,
+    VAE_ANCHOR.every_key,
+    LATENT_LPIPS.weight_key,
+    LATENT_LPIPS.min_t_key,
+    LATENT_LPIPS.max_t_key,
+    LATENT_LPIPS.every_key,
+];
+
 use serde_json::Value;
 
 use super::depth_anchoring::AuxTrainingModel;
@@ -116,20 +128,6 @@ pub const LATENT_LPIPS_TARGETS: [&str; 7] = [
     "sd3_5_large_lora",
     "sd3_5_medium_lora",
 ];
-
-/// Insert the latent-perceptual support flags into a builtin target's `limits`.
-pub(super) fn insert_limits(target: &mut TrainingTarget) {
-    for (spec, targets) in [
-        (&VAE_ANCHOR, &VAE_ANCHOR_TARGETS[..]),
-        (&LATENT_LPIPS, &LATENT_LPIPS_TARGETS[..]),
-    ] {
-        if targets.contains(&target.id.as_str()) {
-            target
-                .limits
-                .insert(spec.support_limit.to_owned(), Value::Bool(true));
-        }
-    }
-}
 
 /// Why `spec` cannot run for a `base_model` target + config even though the target advertises
 /// it, or `None` — mirroring the engine's typed refusals: a full base fine-tune (aux losses train

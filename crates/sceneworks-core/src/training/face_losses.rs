@@ -15,6 +15,20 @@
 //! `py-feat/mp_facemesh_v2` onnx2torch checkpoint lowered to the native fx-program format (inference
 //! `crates/media/mlx-gen/tools/convert_mp_facemesh_v2.py`) and rehosted at a pinned revision.
 
+/// Every advanced technique key parsed by this module.
+pub const TECHNIQUE_KEYS: &[&str] = &[
+    IDENTITY_LOSS_WEIGHT_KEY,
+    IDENTITY_LOSS_MIN_T_KEY,
+    IDENTITY_LOSS_MAX_T_KEY,
+    IDENTITY_LOSS_EVERY_KEY,
+    IDENTITY_LOSS_MIN_COS_KEY,
+    IDENTITY_LOSS_REFERENCE_KEY,
+    FACE_LANDMARK_LOSS_WEIGHT_KEY,
+    FACE_LANDMARK_LOSS_MIN_T_KEY,
+    FACE_LANDMARK_LOSS_MAX_T_KEY,
+    FACE_LANDMARK_LOSS_EVERY_KEY,
+];
+
 use serde_json::Value;
 
 use super::depth_anchoring::AuxTrainingModel;

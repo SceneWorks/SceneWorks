@@ -1247,11 +1247,12 @@ fn validate_video_lora_compatibility(request: &VideoRequest) -> WorkerResult<()>
     if !is_ltx_model(&request.model) {
         return Ok(());
     }
-    sceneworks_core::lora_family::validate_lora_compatibility(
+    sceneworks_core::lora_family::validate_lora_compatibility_with_manifest(
         &request.loras,
         Some("ltx-video"),
         "ltx_video",
         Some(&request.model),
+        (!request.model_manifest_entry.is_empty()).then_some(&request.model_manifest_entry),
     )
     .map_err(WorkerError::InvalidPayload)
 }

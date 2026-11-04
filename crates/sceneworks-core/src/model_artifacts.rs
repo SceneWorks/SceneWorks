@@ -55,9 +55,11 @@ impl ArtifactIdentity {
         variant: impl Into<String>,
     ) -> Result<Self, ArtifactContractError> {
         let repository = repository.into();
+        let repository = crate::hf_repo_id::namespaced(&repository)
+            .map_err(|error| ArtifactContractError(error.to_owned()))?
+            .to_owned();
         let revision = revision.into();
         let variant = variant.into();
-        validate_repository(&repository)?;
         validate_immutable_revision(&revision)?;
         if variant.trim().is_empty()
             || variant.contains(['/', '\\'])
@@ -962,7 +964,7 @@ impl ArtifactSourceLibrary {
 
     pub fn repository_root(&self, repository: &str) -> Result<PathBuf, ArtifactContractError> {
         validate_repository(repository)?;
-        let safe = repository.replace('/', "--");
+        let safe = repository.trim().replace('/', "--");
         Ok(self.root.join(format!("models--{safe}")))
     }
 
@@ -1156,21 +1158,9 @@ pub fn validate_immutable_revision(revision: &str) -> Result<(), ArtifactContrac
 }
 
 fn validate_repository(repository: &str) -> Result<(), ArtifactContractError> {
-    let mut parts = repository.split('/');
-    let valid_part = |part: &str| {
-        !part.is_empty()
-            && part != "."
-            && part != ".."
-            && part.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
-            })
-    };
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(owner), Some(name), None) if valid_part(owner) && valid_part(name) => Ok(()),
-        _ => Err(ArtifactContractError(format!(
-            "invalid artifact repository {repository:?}"
-        ))),
-    }
+    crate::hf_repo_id::namespaced(repository)
+        .map(|_| ())
+        .map_err(|error| ArtifactContractError(error.to_owned()))
 }
 
 fn validate_sha256(hash: &str) -> Result<(), ArtifactContractError> {

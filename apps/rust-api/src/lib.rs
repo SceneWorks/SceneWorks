@@ -4324,11 +4324,10 @@ async fn resolve_project_confined_asset_path(
 }
 
 fn model_lora_families(model: &Value) -> Vec<String> {
-    families_from_value_chain(
-        model,
-        &["families", "compatibleFamilies", "modelFamilies"],
-        Some("loraCompatibility"),
-    )
+    model
+        .as_object()
+        .map(sceneworks_core::lora_family::declared_model_lora_families)
+        .unwrap_or_default()
 }
 
 /// Every LoRA family this model can load: the families it DECLARES plus each one's
@@ -4350,16 +4349,10 @@ fn model_lora_families(model: &Value) -> Vec<String> {
 /// `validate_lora_specs_for_model` are in the canonical form, so skipping this re-normalization
 /// silently un-does sc-8185 and falsely rejects a Krea 2 LoRA.
 fn accepted_model_lora_families(model: &Value) -> Vec<String> {
-    let mut accepted: Vec<String> = Vec::new();
-    for declared in model_lora_families(model) {
-        for family in sceneworks_core::lora_family::accepted_lora_families(&declared) {
-            let family = normalize_lora_family(&family);
-            if !accepted.contains(&family) {
-                accepted.push(family);
-            }
-        }
-    }
-    accepted
+    model
+        .as_object()
+        .map(sceneworks_core::lora_family::accepted_model_lora_families)
+        .unwrap_or_default()
 }
 
 fn families_from_value_chain(

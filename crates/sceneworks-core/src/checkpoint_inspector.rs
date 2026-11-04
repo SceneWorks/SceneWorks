@@ -2411,10 +2411,20 @@ fn validate_json_descriptor(
     }
     dialects.sort();
     dialects.dedup();
-    let families = dialects
+    let explicit_families = dialects
         .iter()
-        .filter_map(|value| normalize_family(value))
+        .filter_map(|value| crate::model_family::exact_identity(value).map(str::to_owned))
         .collect::<BTreeSet<_>>();
+    let families = if explicit_families.is_empty() {
+        dialects
+            .iter()
+            .filter_map(|value| normalize_family(value))
+            .collect::<BTreeSet<_>>()
+    } else {
+        // A generic pipeline-class substring is weaker evidence than an explicit generation or
+        // family identity. Preserve conflicting exact declarations as a diagnostic below.
+        explicit_families
+    };
     if families.len() > 1 {
         return Err(CheckpointDiagnosticV1::error(
             CheckpointDiagnosticCodeV1::FamilyDialectConflict,
@@ -2449,39 +2459,7 @@ fn collect_strings(value: &Value, output: &mut Vec<String>) {
 }
 
 fn normalize_family(value: &str) -> Option<String> {
-    let lower = value.to_ascii_lowercase();
-    for (needle, family) in [
-        // MiniMax-H3's diffusers `_class_name` (`MiniMaxH3Transformer3DModel`, sc-26680). First so
-        // no broader needle below can claim it.
-        ("minimaxh3", "minimax-h3"),
-        ("minimax_h3", "minimax-h3"),
-        ("minimax-h3", "minimax-h3"),
-        ("stable diffusion xl", "sdxl"),
-        ("stablediffusionxl", "sdxl"),
-        ("sdxl", "sdxl"),
-        ("qwenimage", "qwen-image"),
-        ("qwen_image", "qwen-image"),
-        ("qwen-image", "qwen-image"),
-        ("flux2", "flux2"),
-        ("flux.2", "flux2"),
-        ("flux", "flux"),
-        ("wan", "wan-video"),
-        ("z_image", "z-image"),
-        ("z-image", "z-image"),
-        ("mageflow", "mage-flow"),
-        ("mage_flow", "mage-flow"),
-        ("mage-flow", "mage-flow"),
-        ("krea", "krea_2"),
-        ("ltx", "ltx-video"),
-        ("ideogram", "ideogram"),
-        ("anima", "anima"),
-        ("cosmos", "anima"),
-    ] {
-        if lower.contains(needle) {
-            return Some(family.to_owned());
-        }
-    }
-    None
+    crate::model_family::checkpoint_descriptor_family(value)
 }
 
 fn is_auxiliary_family(family: &str) -> bool {
@@ -3471,5 +3449,53 @@ impl<'a> ByteReader<'a> {
             _ => return Err(format!("unsupported GGUF metadata value type {value_type}")),
         }
         .ok_or_else(|| "truncated metadata value".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod canonical_descriptor_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn exact_generation_outweighs_generic_class_and_exact_conflicts_remain_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("model")).unwrap();
+        let request =
+            CheckpointInspectionRequestV1::linked("fixture", temp.path(), "model", "root").unwrap();
+        let resolved = resolve_input(&request).unwrap();
+        for (class, family) in [
+            ("QwenImagePipeline", "qwen-image-2-1"),
+            ("KreaPipeline", "krea-realtime"),
+        ] {
+            let raw =
+                serde_json::to_vec(&json!({"_class_name":class,"architecture":family})).unwrap();
+            let evidence = validate_json_descriptor(
+                &resolved,
+                &temp.path().join("model/config.json"),
+                "model/config.json",
+                &raw,
+                raw.len() as u64,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(evidence.family.as_deref(), Some(family));
+        }
+        let raw =
+            serde_json::to_vec(&json!({"architectures":["qwen-image", "qwen-image-2-1"]})).unwrap();
+        let error = validate_json_descriptor(
+            &resolved,
+            &temp.path().join("model/config.json"),
+            "model/config.json",
+            &raw,
+            raw.len() as u64,
+            &mut Vec::new(),
+        )
+        .err()
+        .expect("conflicting explicit families must be refused");
+        assert_eq!(
+            error.code,
+            CheckpointDiagnosticCodeV1::FamilyDialectConflict
+        );
     }
 }
