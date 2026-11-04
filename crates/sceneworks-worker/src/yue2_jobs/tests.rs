@@ -12,7 +12,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode as HttpStatus;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Json;
 
 const BF16_REVISION: &str = "1a96eca688d6ae5d7f0feb88573fec89920fcd19";
 const VAE_REVISION: &str = "95535e72a97bc0f09b8ada125d26b4009428c0e8";
@@ -100,9 +100,7 @@ async fn spawn_api(state: ApiState) -> String {
             None => (HttpStatus::NOT_FOUND, Json(json!({"detail": "no version"}))).into_response(),
         }
     }
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job))
-        .route("/api/v1/jobs/:job_id/progress", post(progress))
+    let app = crate::test_api_stub::job_progress_routes(job, progress)
         .route("/api/v1/jobs/:job_id/yue2-eligibility", get(eligibility))
         .route("/api/v1/workers/:worker_id/heartbeat", post(heartbeat))
         .route(
@@ -524,7 +522,7 @@ impl Harness {
             .unwrap();
         let state = ApiState::default();
         let url = spawn_api(state.clone()).await;
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.api_url = url;
         settings.worker_id = "test-worker".into();
         settings.data_dir = data.path().to_path_buf();
@@ -1582,7 +1580,7 @@ async fn a_cancel_after_the_run_published_still_publishes_it() {
 /// A generic audio job must not run a symbolic-song model: it is refused before anything loads.
 #[tokio::test]
 async fn a_generic_audio_job_for_a_symbolic_song_model_is_refused() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     let api = ApiClient::new(&settings);
     let mut job: JobSnapshot = serde_json::from_value(job_json("generic-yue2", false)).unwrap();
     job.payload = json!({

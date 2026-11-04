@@ -8,7 +8,6 @@ pub struct Settings {
     pub data_dir: PathBuf,
     /// App-owned resolved-model cache policy. Invalid environment is fail-closed to the finite,
     /// disabled shared default rather than enabling or unbounding the cache.
-    #[cfg(not(test))]
     pub resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
     pub config_dir: PathBuf,
     pub worker_id: String,
@@ -66,7 +65,6 @@ impl fmt::Debug for Settings {
             .field("api_url", &self.api_url)
             .field("access_token", &self.access_token.as_ref().map(|_| "***"))
             .field("data_dir", &self.data_dir);
-        #[cfg(not(test))]
         debug.field("resolved_cache", &self.resolved_cache);
         debug
             .field("config_dir", &self.config_dir)
@@ -120,23 +118,11 @@ impl Settings {
         }
     }
 
-    /// The effective resolved-model cache policy (sc-19707). The field itself is
-    /// `cfg(not(test))` — the dozens of test fixtures that build `Settings` literally predate it —
-    /// so under test the SAME environment `from_env` would have read is consulted directly. Both
-    /// forms therefore answer with `ResolvedCachePolicy::from_env_or_safe_default()` for any
-    /// process that took its settings from the environment.
-    #[cfg(not(test))]
+    /// The launch-time policy is identical in production and tests.
     pub(crate) fn resolved_cache_policy(
         &self,
     ) -> sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
         self.resolved_cache.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn resolved_cache_policy(
-        &self,
-    ) -> sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
-        sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default()
     }
 
     /// A minimal offline `Settings` for tests that only care about `data_dir`. Every field that
@@ -148,6 +134,7 @@ impl Settings {
             api_url: crate::test_env::OFFLINE_URL.to_owned(),
             access_token: None,
             data_dir,
+            resolved_cache: Default::default(),
             config_dir: PathBuf::new(),
             worker_id: "worker".to_owned(),
             gpu_id: "cpu".to_owned(),
@@ -180,7 +167,6 @@ impl Settings {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
             data_dir: env_path_or("SCENEWORKS_DATA_DIR", &defaults.data_dir),
-            #[cfg(not(test))]
             resolved_cache:
                 sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default(),
             config_dir: config_dir.clone(),
@@ -306,5 +292,36 @@ mod memory_limit_tests {
         }
         std::fs::remove_file(&path).unwrap();
         assert_eq!(settings.requested_gpu_memory_limit().unwrap(), Bytes(999));
+    }
+}
+
+#[cfg(test)]
+mod test_builder_contracts {
+    use super::*;
+    #[test]
+    fn fixture_settings_ignore_ambient_secrets_network_and_cache_policy() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("SCENEWORKS_API_URL", "https://ambient.invalid"),
+            ("SCENEWORKS_ACCESS_TOKEN", "ambient-token"),
+            ("HF_TOKEN", "ambient-hf-token"),
+            ("SCENEWORKS_RESOLVED_CACHE_ENABLED", "1"),
+        ]);
+        let mut settings = Settings::for_test(PathBuf::from("fixture"));
+        assert_eq!(settings.data_dir, PathBuf::from("fixture"));
+        assert_eq!(settings.api_url, crate::test_env::OFFLINE_URL);
+        assert_eq!(settings.huggingface_base_url, crate::test_env::OFFLINE_URL);
+        assert!(settings.access_token.is_none() && settings.huggingface_token.is_none());
+        assert!(settings.credentials.is_empty());
+        assert_eq!(settings.resolved_cache_policy(), Default::default());
+        settings.resolved_cache.enabled = true;
+        assert!(
+            settings.resolved_cache_policy().enabled,
+            "the same field backs both build modes"
+        );
+        settings.resolved_cache.enabled = false;
+        assert!(
+            !settings.resolved_cache_policy().enabled,
+            "ambient cache enablement cannot override the field"
+        );
     }
 }
