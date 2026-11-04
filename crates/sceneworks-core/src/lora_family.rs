@@ -3692,6 +3692,47 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn worker_compatibility_canonicalizes_declared_and_model_aliases() {
+        for (alias, family, other) in [
+            ("qwenimage", "qwen-image", "qwen-image-2-1"),
+            ("qwen-image-2.1", "qwen-image-2-1", "qwen-image"),
+        ] {
+            for key in ["family", "modelFamilies"] {
+                let declared = if key == "family" {
+                    json!(alias)
+                } else {
+                    json!([alias])
+                };
+                let lora = json!({ "id": "installed-alias", key: declared });
+                for model in [alias, family] {
+                    assert!(
+                        validate_lora_compatibility_with_manifest(
+                            std::slice::from_ref(&lora),
+                            Some(model),
+                            "worker",
+                            None,
+                            None
+                        )
+                        .is_ok(),
+                        "{key}: {alias} must load on {model}"
+                    );
+                }
+                assert!(
+                    validate_lora_compatibility_with_manifest(
+                        &[lora],
+                        Some(other),
+                        "worker",
+                        None,
+                        None
+                    )
+                    .is_err(),
+                    "versioned Qwen families remain distinct"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn recorded_base_metadata_precedes_later_family_aliases() {
         for (base, alias, family) in [
             ("black-forest-labs/FLUX.2-klein-9B", "flux", "flux2"),
