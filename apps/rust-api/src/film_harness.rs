@@ -63,7 +63,6 @@ use sceneworks_core::film_planner::{capabilities_for, PlannerCapabilities};
 use sceneworks_core::jobs_store::TERMINAL_STATUSES;
 use sceneworks_core::time::{parse_utc_seconds, utc_now};
 use serde_json::{json, Map as JsonObject, Value};
-use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 /// The latest controller action is separate from the film verdict: a refused resume or
@@ -831,8 +830,7 @@ fn newest_export_job(
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 /// One request that must succeed, against a bare transport. The planner (sc-22713) drives the same
@@ -1979,18 +1977,7 @@ async fn download_media(
 
 /// A project-relative media path that is safe to interpolate into the file route: no absolute
 /// path, no `..`, no escaping or encoding needed.
-fn is_safe_media_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.starts_with('/')
-        && !path.split('/').any(|segment| {
-            segment.is_empty()
-                || segment == ".."
-                || segment == "."
-                || !segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        })
-}
+use sceneworks_core::safe_path::is_safe_media_path;
 
 fn take_from_result(result: &Value, model: &str, backend: Option<&str>) -> Option<TakeRecord> {
     let asset = result.get("assets")?.as_array()?.first()?;

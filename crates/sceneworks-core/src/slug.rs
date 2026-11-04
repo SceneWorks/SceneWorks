@@ -27,9 +27,45 @@ pub fn slugify(value: &str, fallback: &str, max_length: Option<usize>) -> String
     slug
 }
 
+/// Worker routing identifiers preserve ASCII case, dots and underscores.
+pub fn slugify_worker_id_part(value: &str, fallback: &str) -> String {
+    let mut output = String::new();
+    let mut previous_dash = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+            output.push(character);
+            previous_dash = false;
+        } else if !previous_dash && !output.is_empty() {
+            output.push('-');
+            previous_dash = true;
+        }
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    if output.is_empty() {
+        fallback.to_owned()
+    } else {
+        output
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::slugify;
+
+    #[test]
+    fn worker_id_slug_policy_preserves_case_dots_and_underscores() {
+        assert_eq!(
+            super::slugify_worker_id_part("GPU_0.1 / device", "fallback"),
+            "GPU_0.1-device"
+        );
+        assert_eq!(super::slugify_worker_id_part("///", "fallback"), "fallback");
+        assert_eq!(
+            slugify("GPU_0.1 / device", "fallback", None),
+            "gpu-0-1-device"
+        );
+    }
 
     #[test]
     fn lowercases_and_collapses_separators() {

@@ -658,8 +658,8 @@ fn fit_ladder_for_tier(
             );
             estimates.push((
                 selection,
-                MemoryEvidence {
-                    key: MemoryEvidenceKey {
+                sceneworks_core::memory_contracts::unverified_estimate(
+                    MemoryEvidenceKey {
                         model_family: KREA_CONTROL_ROUTE.to_owned(),
                         resolved_route: KREA_CONTROL_ROUTE.to_owned(),
                         backend: gen_core::MemoryBackend::Candle,
@@ -674,29 +674,15 @@ fn fit_ladder_for_tier(
                         engaged_composition: engaged,
                         parameters: selection.parameters,
                     },
-                    conformance: MemoryConformanceState::ImplementedUnverified,
-                    dimensions: MemoryEvidenceDimensions {
-                        static_implementation: MemoryEvidenceVerdict::Satisfied,
-                        declared_calibration: MemoryEvidenceVerdict::Missing,
-                        historical_verification: MemoryEvidenceVerdict::Missing,
-                        current_environment_verification: MemoryEvidenceVerdict::Missing,
-                        canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-                        exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-                    },
-                    calibration_abi: contract
+                    contract
                         .calibration
                         .as_ref()
                         .expect("control calibration")
                         .abi,
-                    calibration_fingerprint: KREA_CONTROL_CALIBRATION.to_owned(),
-                    sceneworks_revision: KREA_CONTROL_ESTIMATE_REVISION.to_owned(),
-                    inference_revision: measured_closure_digest.to_owned(),
-                    harness_version: String::new(),
+                    KREA_CONTROL_CALIBRATION.to_owned(),
+                    KREA_CONTROL_ESTIMATE_REVISION.to_owned(),
                     predicted_peak_bytes,
-                    observed_peak_bytes: None,
-                    parity: MemoryParityContract::Exact,
-                    parity_result: MemoryParityResult::NotRun,
-                },
+                ),
             ));
         }
     }

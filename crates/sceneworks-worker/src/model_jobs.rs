@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) mod receipt_verification;
 
 use sceneworks_core::base_weights::{
@@ -750,7 +750,7 @@ fn convert_flux2_klein_diffusers(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 fn convert_flux2_klein_diffusers(
     _source_file: &Path,
     _base_dir: &Path,
@@ -1337,9 +1337,7 @@ async fn resolve_convert_plan(
             // VAE/text-encoder/tokenizer are dense and identical across tiers, so the manifest's
             // `convertBaseSubdir` names the preferred tier and any installed tier serves. A base with a
             // plain root diffusers layout (no `baseSubdir`) borrows from the snapshot root (sc-14978).
-            let base_subdir = optional_payload_string(&job.payload, "baseSubdir")
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
+            let base_subdir = optional_payload_string(&job.payload, "baseSubdir");
             let Some(base_dir) = resolve_flux2_klein_base_dir(&base_snapshot, base_subdir) else {
                 return Ok(Err(ConvertPlanError {
                     message: "Base FLUX.2-klein model is installed but incomplete.",
@@ -1365,7 +1363,6 @@ async fn resolve_convert_plan(
             }
             let upscaler_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
             let upscaler_file = optional_payload_string(&job.payload, "upscalerFile")
-                .filter(|value| !value.trim().is_empty())
                 .unwrap_or(LTX_SPATIAL_UPSCALER_FILE)
                 .to_owned();
             let Some(upscaler_dir) =
@@ -2240,10 +2237,7 @@ fn confined_renamed_hf_single_file(
 /// NOTICE) would otherwise strand every install made at the previous commit — the Model Manager
 /// still sees the tier on disk while a render fails "not installed". Rows without a declaration
 /// resolve exactly as [`huggingface_pinned_snapshot_dir`] always has.
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn huggingface_pinned_tier_snapshot_dir(
     data_dir: &Path,
     repo: &str,
@@ -2727,12 +2721,7 @@ pub(crate) fn resolve_co_requisites_for_tier(
 /// the same reason `files` and `revision` are (sc-13583 / sc-13842): a `..`/absolute entry would
 /// otherwise stage an arbitrary host directory as this component's weights.
 fn component_dir(snapshot: &Path, download: &Value, model_id: &str) -> WorkerResult<PathBuf> {
-    let Some(subdir) = download
-        .get("subdir")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(subdir) = crate::payload::trimmed_string(download.get("subdir")) else {
         return Ok(snapshot.to_path_buf());
     };
     let dir = safe_join(snapshot, subdir)?;
@@ -3028,8 +3017,6 @@ pub(crate) fn resolved_files_tree_stamp(
 }
 
 fn artifact_content_fingerprint(root: &Path) -> WorkerResult<String> {
-    use std::io::Read;
-
     let mut digest = Sha256::new();
     for path in artifact_files(root)? {
         let relative = path.strip_prefix(root).map_err(|_| {
@@ -3045,26 +3032,10 @@ fn artifact_content_fingerprint(root: &Path) -> WorkerResult<String> {
         if metadata.file_type().is_symlink() {
             digest.update(std::fs::read_link(&path)?.to_string_lossy().as_bytes());
             if std::fs::metadata(&path)?.is_file() {
-                let mut file = std::fs::File::open(&path)?;
-                let mut buffer = [0_u8; 64 * 1024];
-                loop {
-                    let read = file.read(&mut buffer)?;
-                    if read == 0 {
-                        break;
-                    }
-                    digest.update(&buffer[..read]);
-                }
+                sceneworks_core::hashing::update_sha256(std::fs::File::open(&path)?, &mut digest)?;
             }
         } else if metadata.is_file() {
-            let mut file = std::fs::File::open(&path)?;
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let read = file.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                digest.update(&buffer[..read]);
-            }
+            sceneworks_core::hashing::update_sha256(std::fs::File::open(&path)?, &mut digest)?;
         }
         digest.update([0xff]);
     }
@@ -3937,7 +3908,7 @@ mod artifact_provenance_tests {
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn huggingface_receipt_weights_dir(
     data_dir: &Path,
     repo: &str,
@@ -4004,7 +3975,7 @@ pub(crate) fn huggingface_receipt_weights_dir_at_revision(
 /// Exact PUP package handoff: every file the native package can consume must belong to the
 /// verified download inventory, including an optional shipped system-prompt override. A compatible
 /// Qwen directory or an extra unreceipted sidecar is not an installation receipt.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn flux3_prompt_upsampler_snapshot(data_dir: &Path) -> Option<PathBuf> {
     use gen_core_flux3::pup::{
         SYSTEM_PROMPTS_FILE, UPSAMPLER_REPO, UPSAMPLER_REQUIRED_FILES, UPSAMPLER_REVISION,
@@ -4091,7 +4062,7 @@ pub(crate) fn flux3_prompt_upsampler_snapshot(data_dir: &Path) -> Option<PathBuf
     inventory.is_empty().then(|| root.clone())
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn huggingface_receipt_weights(
     data_dir: &Path,
     repo: &str,
@@ -4179,7 +4150,7 @@ fn huggingface_receipt_weights_with_revision(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProvenanceRepair {
     Allow,
-    #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+    #[cfg(any(test, native_lane))]
     Skip,
 }
 
@@ -4359,11 +4330,7 @@ fn receipt_weights_dir_from_marker(
         let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
         let snapshots = repo_dir.join("snapshots");
         let snapshot_entries = std::fs::read_dir(&snapshots).ok()?;
-        let recorded_revision = receipt
-            .get("snapshotRevision")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|revision| !revision.is_empty());
+        let recorded_revision = crate::payload::trimmed_string(receipt.get("snapshotRevision"));
         let matching = snapshot_entries
             .flatten()
             .map(|entry| entry.path())
@@ -5628,9 +5595,7 @@ fn ltx_import_base_model_error(
             .get("manifestEntry")
             .and_then(Value::as_object)
             .and_then(|entry| entry.get("baseModel"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|base| !base.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
     });
     match recorded {
         None => Some(
@@ -6512,14 +6477,7 @@ fn managed_provenance_from_payload(payload: &JsonObject) -> WorkerResult<Managed
     let Some(object) = payload.get("importProvenance").and_then(Value::as_object) else {
         return Ok(ManagedProvenanceV1::of_source("legacy-import"));
     };
-    let field = |key: &str| {
-        object
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-    };
+    let field = |key: &str| crate::payload::trimmed_string(object.get(key)).map(str::to_owned);
     let provenance = ManagedProvenanceV1 {
         source: field("source").unwrap_or_else(|| "legacy-import".to_owned()),
         reference: field("reference"),
@@ -6671,11 +6629,7 @@ async fn authenticate_import_recovery(
             return Ok(false);
         };
         // IDs are server-generated, but do not interpolate an arbitrary persisted path.
-        if parent.is_empty()
-            || !parent
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
+        if !sceneworks_core::ids::is_safe_id(parent) {
             return Ok(false);
         }
         let previous: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{parent}")).await?;

@@ -28,7 +28,7 @@
 use super::*;
 // The macOS (MLX) and candle (Windows/CUDA) handlers parse an `ImageRequest`; the defensive
 // no-backend stub does not.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 use sceneworks_core::image_request::ImageRequest;
 
 // CARVE-OUT(epic 3720): backend-specific; absorbed by TextLlm in Phase 5.
@@ -92,7 +92,7 @@ use runtime_cuda::providers::sensenova::{
 /// budget to exactly this request. `predicted_peak_gb` is `None` when the manifest carries no
 /// memory declaration for this backend + tier (the MLX lane today); the loaded provider contract's
 /// own asset facts price the request instead.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct SenseNovaDirectAdmission {
     model_id: String,
@@ -102,10 +102,10 @@ struct SenseNovaDirectAdmission {
     predicted_peak_gb: Option<f64>,
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
-const SENSENOVA_BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+#[cfg(native_lane)]
+const SENSENOVA_BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn sensenova_gib_bytes(gb: f64) -> u64 {
     (gb * SENSENOVA_BYTES_PER_GIB)
         .ceil()
@@ -117,7 +117,7 @@ fn sensenova_gib_bytes(gb: f64) -> u64 {
 /// A tier key outside that set is a typed refusal, not a panic and not a silent dense default: the
 /// providers validate the declared tier against the checkpoint's own quantization provenance, so
 /// guessing here would only move the failure later.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn sensenova_quant(tier: &str) -> WorkerResult<Option<gen_core::Quant>> {
     match tier {
         "bf16" => Ok(None),
@@ -129,7 +129,7 @@ fn sensenova_quant(tier: &str) -> WorkerResult<Option<gen_core::Quant>> {
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn sensenova_memory_tier(tier: &str) -> WorkerResult<gen_core::MemoryNumericTier> {
     Ok(gen_core::MemoryNumericTier {
         precision: gen_core::Precision::Bf16,
@@ -155,22 +155,16 @@ fn sensenova_mlx_tier_key(request: &ImageRequest, weights_dir: &Path) -> &'stati
         // A flat `modelPath` has no tier basename: fall back to the requested/declared MLX bit
         // width, the same reading `vram_gate::requested_tier_key` performs (that module is compiled
         // only on the candle lane, so it cannot be called from here).
-        _ => match request
-            .advanced
-            .get("mlxQuantize")
-            .and_then(json_to_i64)
-            .or_else(|| {
+        _ => crate::payload::tier_for_bits(
+            request.quant_bits().or_else(|| {
                 request
                     .model_manifest_entry
                     .get("mlx")
                     .and_then(|mlx| mlx.get("quantize"))
-                    .and_then(json_to_i64)
-            }) {
-            None => "q8",
-            Some(bits) if bits <= 0 => "bf16",
-            Some(bits) if bits <= 4 => "q4",
-            Some(_) => "q8",
-        },
+                    .and_then(quant_int)
+            }),
+            "q8",
+        ),
     }
 }
 
@@ -229,7 +223,7 @@ fn sensenova_manifest_peak_gb(
 
 /// The public SceneWorks route id this request resolves to. Shared by both lanes so the
 /// `LoadSpec::resolved_route` and the job's reported `model` cannot drift.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn sensenova_model_id(request: &ImageRequest) -> String {
     if request.model.trim().is_empty() {
         "sensenova_u1_8b".to_owned()
@@ -253,10 +247,7 @@ async fn sensenova_direct_admission(
                 ))
             },
         )?;
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let (total_gb, free_gb) = budget
         .map(|budget| (budget.total_gb, budget.free_gb))
         .unwrap_or((predicted_peak_gb, predicted_peak_gb));
@@ -283,7 +274,7 @@ async fn sensenova_direct_admission(
 /// because `resolve_weights_dir` resolves through `engines::default_repo_for`, whose `default_repo`
 /// for every SenseNova route is exactly `SceneWorks/<route-with-dashes>-mlx` — see
 /// `worker_resolves_every_public_route_under_its_rehost_repository` below, which pins the coupling.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn sensenova_direct_spec(
     weights_dir: &Path,
     admission: &SenseNovaDirectAdmission,
@@ -301,7 +292,7 @@ fn sensenova_direct_spec(
 /// `mode_key` is the provider-owned `MemoryMode::Other` key (`"vqa"` / `"interleave"`); the
 /// geometry must match, field for field, the `GenerationRequest` the provider is subsequently
 /// handed — both pinned providers re-derive it and refuse a mismatch.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SenseNovaRunShape {
     mode_key: &'static str,
@@ -311,9 +302,9 @@ struct SenseNovaRunShape {
     reference_count: u32,
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 const SENSENOVA_VQA_MODE: &str = "vqa";
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 const SENSENOVA_INTERLEAVE_MODE: &str = "interleave";
 
 /// Candidate selections for one operation, DEEPEST FIRST.
@@ -324,7 +315,7 @@ const SENSENOVA_INTERLEAVE_MODE: &str = "interleave";
 /// does offer it, and whether it is actually selectable is then decided by the LOADED contract —
 /// rung 4 is declared `Implemented` only for a re-openable deferred snapshot, which an eager worker
 /// load is not, so in practice the ladder degrades to rung 3 without hardcoding that outcome.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn sensenova_candidate_ladder(mode_key: &str) -> &'static [gen_core::MemoryStrategy] {
     if mode_key == SENSENOVA_VQA_MODE {
         &[
@@ -347,53 +338,16 @@ fn sensenova_candidate_ladder(mode_key: &str) -> &'static [gen_core::MemoryStrat
 /// declared candidates; every rung it does not engage must carry `None`. `None` here means the
 /// contract declares no candidate for a knob this composition requires — the selection cannot be
 /// validated, so no candidate is synthesized for it.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn sensenova_selection_parameters(
     contract: &gen_core::MemoryProviderContract,
     strategy: gen_core::MemoryStrategy,
 ) -> Option<gen_core::MemoryStrategyParameters> {
-    let smallest = |rung: gen_core::MemoryStrategy,
-                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
-     -> Option<Option<u32>> {
-        if !contract.engages(strategy, rung) {
-            return Some(None);
-        }
-        pick(&contract.capability(rung)?.parameters)
-            .iter()
-            .copied()
-            .min()
-            .map(Some)
-    };
-    let window_component = if contract.engages(
-        strategy,
-        gen_core::MemoryStrategy::BoundedTransformerResidency,
-    ) {
-        contract
-            .capability(gen_core::MemoryStrategy::BoundedTransformerResidency)?
-            .parameters
-            .transformer_window_components
-            .first()
-            .copied()
-    } else {
-        None
-    };
-    Some(gen_core::MemoryStrategyParameters {
-        stage_residency: None,
-        decode_tile_edge: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_tile_edges
-        })?,
-        decode_overlap: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_overlaps
-        })?,
-        attention_chunk_size: smallest(gen_core::MemoryStrategy::BoundedAttention, |ranges| {
-            &ranges.attention_chunk_sizes
-        })?,
-        transformer_window_size: smallest(
-            gen_core::MemoryStrategy::BoundedTransformerResidency,
-            |ranges| &ranges.transformer_window_sizes,
-        )?,
-        transformer_window_component: window_component,
-    })
+    sceneworks_core::memory_contracts::smallest_parameters(
+        contract,
+        &contract.engaged_composition(strategy),
+        sceneworks_core::memory_contracts::TransformerScopeParameters::ProviderOrder,
+    )
 }
 
 /// The request's predicted resident peak, in bytes.
@@ -408,7 +362,7 @@ fn sensenova_selection_parameters(
 ///
 /// A zero footprint is a refusal, not a zero: it means neither the manifest nor the checkpoint said
 /// anything, and admitting against "0 bytes" would make the budget gate vacuous.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn sensenova_predicted_peak_bytes(
     contract: &gen_core::MemoryProviderContract,
     admission: &SenseNovaDirectAdmission,
@@ -438,7 +392,7 @@ fn sensenova_predicted_peak_bytes(
 /// `Estimated` is also the honest claim: this ladder is priced off a manifest/asset-facts estimate,
 /// never off a measured campaign, and claiming `Calibrated` would grade the request against
 /// evidence captured at a geometry it is not running.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 fn sensenova_memory_context(
     contract: &gen_core::MemoryProviderContract,
@@ -511,7 +465,7 @@ fn sensenova_memory_context(
 /// delegate to. The providers re-run their own route gates on top of it at execution, so this is an
 /// admission filter, never a substitute for them. If nothing accepts, the job fails closed with the
 /// per-candidate reasons, before a single tensor is touched.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn sensenova_admitted_context(
     contract: &gen_core::MemoryProviderContract,
     admission: &SenseNovaDirectAdmission,
@@ -569,9 +523,9 @@ const SENSENOVA_ADAPTER: &str = "candle_sensenova";
 /// flag tripped) and the engine-error mapping below (which posts them when the engine's per-token /
 /// per-step cancel check surfaces the typed `Canceled` itself), so the terminal status message is
 /// identical whichever side observes the trip first (sc-9123).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 const VQA_CANCEL_MESSAGE: &str = "Visual question answering canceled by user.";
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 const INTERLEAVE_CANCEL_MESSAGE: &str = "Interleaved generation canceled by user.";
 
 /// Lift a SenseNova engine error into the worker's error space, preserving the TYPED cancellation:
@@ -620,7 +574,7 @@ fn map_sensenova_engine_error(
 /// assembly) is backend-neutral and shared; the only per-backend piece is the blocking
 /// load → preprocess → `vqa` → think-strip seam, injected as [`vqa_generate`] (one cfg-gated impl
 /// per engine — sc-8839, the F-037 dedupe).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) async fn run_vqa_job(
     api: &ApiClient,
     settings: &Settings,
@@ -633,22 +587,12 @@ pub(crate) async fn run_vqa_job(
         ));
     }
     let model_id = sensenova_model_id(&request);
-    let question = job
-        .payload
-        .get("question")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let question = crate::payload::trimmed_string(job.payload.get("question"))
         .ok_or_else(|| {
             WorkerError::InvalidPayload("Visual question answering requires a question.".to_owned())
         })?
         .to_owned();
-    let source_asset_id = job
-        .payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let source_asset_id = crate::payload::trimmed_string(job.payload.get("sourceAssetId"))
         .ok_or_else(|| {
             WorkerError::InvalidPayload(
                 "Visual question answering requires a source image asset.".to_owned(),
@@ -945,7 +889,7 @@ fn vqa_generate(
 
 /// Off macOS without the candle backend the in-process engine is unavailable; the capability is not
 /// advertised and `image_vqa` remains queued (macOS runs MLX; Windows/CUDA runs candle when enabled).
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_vqa_job(
     _api: &ApiClient,
     _settings: &Settings,
@@ -965,7 +909,7 @@ pub(crate) async fn run_vqa_job(
 /// [`interleave_generate`] seam. Bundled into one struct so the seam stays a small arity and both
 /// engine impls read the exact same resolved values (sc-8839, the F-037 dedupe). The pure
 /// [`resolve_interleave_params`] resolver is unit-tested on the macOS lane.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[derive(Debug, PartialEq)]
 struct InterleaveParams {
     /// Snapped bucket width (a 32-aligned interleave-resolution bucket).
@@ -990,7 +934,7 @@ struct InterleaveParams {
 /// (upstream `examples/interleave/inference.py` @238d6cf), and pick the think/no-think system
 /// message. Pure + backend-neutral (the shared handler's brain), so both engine seams see identical
 /// values and it can be unit-tested without weights or a device (sc-8839).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> InterleaveParams {
     let advanced = &request.advanced;
     // Snap the requested W×H to the nearest interleave bucket by aspect ratio (log-space), mirroring
@@ -1013,11 +957,7 @@ fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> In
             .get("thinkMode")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        system_message: advanced
-            .get("systemMessage")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        system_message: crate::payload::trimmed_string(advanced.get("systemMessage"))
             .map(str::to_owned)
             .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned()),
         seed: resolve_seed(request, 0),
@@ -1034,7 +974,7 @@ fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> In
 /// cancel, document-write hand-off) is backend-neutral and shared; the only per-backend piece is the
 /// blocking load → preprocess → `interleave_gen` → decode seam, injected as [`interleave_generate`]
 /// (one cfg-gated impl per engine — sc-8839, the F-037 dedupe).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) async fn run_interleave_job(
     api: &ApiClient,
     settings: &Settings,
@@ -1488,7 +1428,7 @@ fn interleave_generate(
 
 /// Off macOS without the candle backend the in-process engine is unavailable; the capability is not
 /// advertised and `image_interleave` remains queued (macOS runs MLX; Windows/CUDA runs candle when enabled).
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_interleave_job(
     _api: &ApiClient,
     _settings: &Settings,
@@ -1510,7 +1450,7 @@ pub(crate) async fn run_interleave_job(
 // document `fs::write`/`rename`; all call sites hand it to `spawn_blocking` under
 // `run_blocking_with_heartbeat`, so it must own its inputs (no borrows into the async frame) and
 // never touch the runtime thread itself (sc-8838).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 fn write_interleaved_document(
     request: ImageRequest,
@@ -1659,7 +1599,7 @@ fn write_interleaved_document(
 /// Split the model output on its inline `<image>` markers and slot the generated image assets in
 /// order: text[0], image[0], text[1], image[1], …. Mirrors the Python `_build_interleaved_segments`
 /// (reads each image fact's `assetId` + `mediaPath`).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn build_interleaved_segments(generated_text: &str, image_writes: &[Value]) -> Vec<Value> {
     let mut segments = Vec::new();
     for (index, part) in generated_text.split("<image>").enumerate() {
@@ -1685,7 +1625,7 @@ fn build_interleaved_segments(generated_text: &str, image_writes: &[Value]) -> V
 /// Assemble the VQA `{answer, question, sourceAssetId, model, realModelInference}` result object —
 /// the shared backend-neutral response shape both engine handlers post (mirrors the Python
 /// `SenseNovaU1Adapter.answer_question` result). Pure, so it is unit-tested cross-platform (sc-8839).
-#[cfg(any(target_os = "macos", test, feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 fn vqa_result_json(
     answer: &str,
     question: &str,
@@ -1783,14 +1723,9 @@ fn image_to_chw01_candle(img: &Image, min_pixels: i64, max_pixels: i64) -> Worke
 }
 
 /// The SenseNova-U1 repo (manifest `repo` else the default), for the document telemetry.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn model_repo_for(request: &ImageRequest) -> String {
-    request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model)
                 .unwrap_or("sensenova/SenseNova-U1-8B-MoT")
@@ -1801,7 +1736,7 @@ fn model_repo_for(request: &ImageRequest) -> String {
 /// Snap a requested W×H to the nearest interleave bucket by aspect ratio in log-space (ties resolve
 /// to the first bucket). Mirrors the Python `snap_to_aspect_bucket` over the same
 /// `INTERLEAVE_RESOLUTIONS` table (priority order).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn interleave_resolution_snap(width: i64, height: i64) -> (i32, i32) {
     let target = (width.max(1) as f64 / height.max(1) as f64).ln();
     let mut best = INTERLEAVE_RESOLUTIONS[0].1;
@@ -1820,30 +1755,16 @@ fn interleave_resolution_snap(width: i64, height: i64) -> (i32, i32) {
 /// blocks and any dangling/unclosed one (reasoning truncated by `max_new_tokens`). Mirrors the
 /// Python `SenseNovaU1Adapter._strip_reasoning`. Used by the macOS VQA handler; also unit-tested
 /// cross-platform (it is pure string logic), so it compiles under `test` off macOS too.
-#[cfg(any(target_os = "macos", test, feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 fn strip_reasoning(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("<think>") {
-        out.push_str(&rest[..start]);
-        match rest[start..].find("</think>") {
-            // Complete block: drop `<think>…</think>` and continue after it.
-            Some(end) => rest = &rest[start + end + "</think>".len()..],
-            // Dangling/unclosed block (truncated by max_new_tokens): drop everything from
-            // `<think>` on.
-            None => {
-                rest = "";
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
-    out.trim().to_owned()
+    crate::text_clean::strip_think_blocks(text, crate::text_clean::ThinkPolicy::DropUnclosed)
+        .trim()
+        .to_owned()
 }
 
 /// `safe_int` over a top-level payload field: parse (int / float / numeric string) else `default`,
 /// then clamp to `[lo, hi]`. Used by the macOS handlers; also unit-tested cross-platform.
-#[cfg(any(target_os = "macos", test, feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 fn payload_int(payload: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) -> i64 {
     payload
         .get(key)
@@ -1853,13 +1774,13 @@ fn payload_int(payload: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) 
 }
 
 /// `safe_int` over an `advanced` field (same parse/clamp as [`payload_int`]).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn advanced_int(advanced: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) -> i64 {
     payload_int(advanced, key, default, lo, hi)
 }
 
 /// `_advanced_float`: parse an `advanced` field as f32 else `default`.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn advanced_float(advanced: &JsonObject, key: &str, default: f32) -> f32 {
     advanced
         .get(key)
@@ -1872,7 +1793,7 @@ fn advanced_float(advanced: &JsonObject, key: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
-#[cfg(any(target_os = "macos", test, feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 fn json_to_i64(value: &Value) -> Option<i64> {
     value
         .as_i64()
@@ -3017,7 +2938,7 @@ mod tests {
     /// `advanced.prefixKvCache` must not reach its image assets as a "which path ran" record.
     ///
     /// *Mutation that reds this:* dropping the removal from `write_interleaved_document`.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn a_forged_prefix_kv_cache_never_reaches_an_interleaved_image_asset() {
         let dir = tempfile::tempdir().expect("tempdir");

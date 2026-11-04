@@ -4661,25 +4661,7 @@ fn string_array_field(payload: &Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn safe_download_dir(repo: &str) -> String {
-    let mut output = String::new();
-    let mut in_replacement = false;
-    for character in repo.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
-            output.push(character);
-            in_replacement = false;
-        } else if !in_replacement {
-            output.push_str("__");
-            in_replacement = true;
-        }
-    }
-    let output = output.trim_matches('_').to_owned();
-    if output.is_empty() {
-        "download".to_owned()
-    } else {
-        output
-    }
-}
+use sceneworks_core::model_artifacts::artifact_selection::safe_download_dir;
 
 fn sanitized_upload_filename(filename: &str) -> String {
     let filename = filename

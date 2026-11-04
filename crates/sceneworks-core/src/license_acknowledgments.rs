@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 /// File name inside the config dir.
 pub const FILE_NAME: &str = "license-acknowledgments.json";
@@ -84,11 +83,7 @@ pub fn terms_sha256(entry: &Value) -> String {
         "licenseNotice": entry.get("licenseNotice").cloned().unwrap_or(Value::Null),
     });
     let canonical = serde_json::to_string(&terms).expect("a JSON value serializes");
-    hex(&Sha256::digest(canonical.as_bytes()))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::hashing::sha256_bytes(canonical.as_bytes())
 }
 
 fn read_file(path: &Path) -> Result<AcknowledgmentFile, AcknowledgmentError> {

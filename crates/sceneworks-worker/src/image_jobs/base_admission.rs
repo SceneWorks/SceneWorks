@@ -211,10 +211,7 @@ pub(super) async fn admit_candle_base(
         );
     }
 
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let (plan, budget) = gate_with_evict_reclaim(
         &settings.gpu_id,
         raw_budget,
@@ -282,10 +279,7 @@ pub(super) async fn admit_candle_base_floor_with_resident_overlay(
         );
         return Ok(());
     };
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let (plan, budget) = gate_with_evict_reclaim(
         &settings.gpu_id,
         raw_budget,
@@ -369,11 +363,9 @@ impl CachedCandleBaseFloorAdmission {
             );
             return Ok(());
         };
-        let raw_budget = crate::vram_gate::apply_vram_cap(
-            self.runtime
-                .block_on(crate::gpu::nvidia_vram_budget_gb(&self.gpu_id)),
-            crate::vram_gate::cuda_vram_cap_gb(),
-        );
+        let raw_budget = self
+            .runtime
+            .block_on(crate::vram_gate::live_capped_budget(&self.gpu_id));
         let reclaimable_gb = resident_reclaimable_weight_bytes as f64 / BYTES_PER_GIB;
         let budget = cached_floor_budget(raw_budget, resident_reclaimable_weight_bytes);
         let needed = Some(floor_gb);

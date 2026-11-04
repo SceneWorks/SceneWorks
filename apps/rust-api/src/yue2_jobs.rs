@@ -471,11 +471,8 @@ async fn recording_source(
         )));
     }
     let sha256 = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
-        use sha2::Digest;
-        let mut file = std::fs::File::open(&path)?;
-        let mut hasher = sha2::Sha256::new();
-        std::io::copy(&mut file, &mut hasher)?;
-        Ok(format!("{:x}", hasher.finalize()))
+        sceneworks_core::hashing::sha256_reader_retry(std::fs::File::open(&path)?)
+            .map(|(hash, _)| hash)
     })
     .await
     .map_err(|error| ApiError::internal(error.to_string()))?

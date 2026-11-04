@@ -18,18 +18,11 @@ use super::*;
 // Used only by the generation harness in base.rs (the metrics builders), which is
 // itself `include!`d only on macOS / the backend-candle lane — so gate the import to
 // match, or the Linux-no-candle "neither" build sees it as unused (`-D warnings`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::contracts::GenerationMetrics;
 use sceneworks_core::image_request::ImageRequest;
 use sceneworks_core::workflow_png::write_workflow_chunk;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 use sceneworks_core::workflow_share::trusted_lora_for_share;
 use sceneworks_core::workflow_share::{
     embeddable_workflow_share, WorkflowAssetFacts, WorkflowLora, OMITTED_PHASES,
@@ -41,27 +34,24 @@ use std::sync::Arc;
 // the few bespoke utility APIs that do not implement the general registry traits.
 // Contract types for the generation harness — shared by the macOS MLX path AND the Windows candle
 // lane (sc-3675), so broadened from macOS-only. `gen_core` is a direct worker dep on every platform.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{
     AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
     Generator, Image, LoadPhase, LoadSpec, Progress, Quant, WeightsSource,
 };
 // These helpers are tensor-neutral and identical in the two native lanes. CPU unit tests compile
 // this same implementation without pulling in an accelerator runtime bundle.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) mod flux3_references;
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 mod prompt_upsampling;
 // sc-26241: FLUX 3 package selection (bf16 / derived q4 q8 / publisher fp8r nvfp4). The request
 // check compiles on every lane, so the worker trust-boundary refusal holds even without a native
 // backend; package resolution compiles with the native lanes.
 pub(crate) mod flux3_precision;
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 use prompt_upsampling::prompt_enhancement_fact;
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 use prompt_upsampling::{attach_prompt_upsampler, publish_upsampling_progress, PromptEnhance};
 
 // `IdentityWeights` (the PuLID-FLUX `LoadSpec::identity` seam, sc-8827) is used only by the macOS MLX
@@ -74,10 +64,7 @@ use gen_core::IdentityWeights;
 // strict-control trio (`candle_strict_control.rs`) now shares the cross-platform `strict_control.rs`
 // `(engine_id, supported_kinds)` table + `preprocess_control_entry`, so `ControlKind` is in scope on the
 // candle build too.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::ControlKind;
 
 // Provider-specific utilities below are explicit exports of the selected runtime bundle; ordinary
@@ -217,10 +204,7 @@ const CANDLE_ADAPTER: &str = "candle_sdxl";
 // MAX_JOB_LORAS (`resolve_adapters`), so the const is available on the Windows candle build too.
 // The web pickers enforce a lower user-selectable cap (presetUtils.MAX_USER_JOB_LORAS) that leaves
 // headroom for an auto-applied builtin within this total (sc-8936).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const MAX_JOB_LORAS: usize = 5;
 
 // The engine dispatch table + its `ModelRow`/`mlx_model` join moved to the all-targets
@@ -229,10 +213,7 @@ const MAX_JOB_LORAS: usize = 5;
 // descriptor via `ResolvedModel`. Shared by the macOS MLX path and the Windows candle lane
 // (sc-5096) — the join is backend-neutral, so `generate_candle_stream` resolves repo/steps/guidance
 // through the same `mlx_model` lookup the MLX path uses.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::engines::{mlx_model, ResolvedModel};
 
 /// Parse the request-selected terminal decoder. Missing, null, empty, and `native` all preserve the
@@ -321,10 +302,7 @@ fn parse_prompt_enhancement_fields(
     Ok((enabled, temperature, max_tokens))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn prompt_enhancement_has_edit_input(request: &ImageRequest) -> bool {
     request
         .source_asset_id
@@ -337,10 +315,7 @@ fn prompt_enhancement_has_edit_input(request: &ImageRequest) -> bool {
         || !request.reference_asset_ids.is_empty()
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
     request
         .reference_asset_id
@@ -362,10 +337,7 @@ fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
 /// singular `referenceAssetId` or `sourceAssetId` is largest); a model with no declared envelope
 /// never consults this, so it costs nothing on those routes.
 fn reference_image_count(request: &ImageRequest) -> u32 {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     if sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return u32::try_from(qwen_image_2_1_reference_ids(request).len()).unwrap_or(u32::MAX);
     }
@@ -420,10 +392,7 @@ fn validate_prompt_enhancement_route(
         }
     }
 
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         let _ = (mode, settings, flux3);
         Err(WorkerError::InvalidPayload(
@@ -431,10 +400,7 @@ fn validate_prompt_enhancement_route(
         ))
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         if flux3 {
             // The renderer receives the same immutable original references as PUP. Validate the
@@ -528,7 +494,7 @@ where
 
 // Backend-neutral filesystem part of the actual canonical package resolution. Never infer
 // revision from cache HEAD or a directory name; use the worker-owned immutable receipt.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 fn resolve_pinned_native_package(
     data_dir: &std::path::Path,
     repo: &str,
@@ -652,10 +618,7 @@ async fn run_image_generate_job_unexplained(
         return Err(WorkerError::InvalidPayload(refusal));
     }
     if let Some(decoder_id) = requested_decoder_id(&request.advanced)? {
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
+        #[cfg(native_lane)]
         {
             let backend = if cfg!(target_os = "macos") {
                 "mlx"
@@ -670,10 +633,7 @@ async fn run_image_generate_job_unexplained(
             .unwrap_or_else(|| request.model.clone());
             validate_selected_decoder_request(&provider_id, decoder_id, &request.advanced)?;
         }
-        #[cfg(not(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        )))]
+        #[cfg(not(native_lane))]
         {
             return Err(WorkerError::InvalidPayload(format!(
                 "decoder '{decoder_id}' is unavailable because this worker has no compatible image backend"
@@ -689,15 +649,9 @@ async fn run_image_generate_job_unexplained(
     // second "(Nx upscaled)" asset, so the generation set expects twice as many images. The inline
     // upscale post-pass only runs where the upscaler engines compile (macOS / candle); the
     // stub-only build keeps the base count.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     let upscale_mult: u32 = if request.upscale.enabled { 2 } else { 1 };
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     let upscale_mult: u32 = 1;
 
     // Resolve the MLX dispatch branch once, then bake that branch's real total into
@@ -756,10 +710,7 @@ async fn run_image_generate_job_unexplained(
             .map_or(STUB_ADAPTER, |route| route.kind().adapter_label(&request)),
         workflow_source,
     );
-    #[cfg(all(
-        not(target_os = "macos"),
-        not(all(not(target_os = "macos"), feature = "backend-candle"))
-    ))]
+    #[cfg(not(native_lane))]
     let plan = ImagePlan::with_count(&request, request.count * upscale_mult, workflow_source);
 
     let mut plan = plan;
@@ -781,10 +732,7 @@ async fn run_image_generate_job_unexplained(
     )
     .map_err(WorkerError::InvalidPayload)?;
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         let route_applies_loras = {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -1776,10 +1724,7 @@ async fn run_image_generate_job_unexplained(
         // Candle disabled (default) or no candle engine matched → stub exactly as before.
         None => false,
     };
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     let handled = false;
 
     // An MLX-routed model id whose weights/snapshot didn't resolve must fail
@@ -1833,10 +1778,7 @@ async fn run_image_generate_job_unexplained(
     // path, so the UI's `upscale` request was silently dropped (images came out at the base size). Mirror
     // Python: after the base images land, upscale each with the selected engine and append a second
     // "(Nx upscaled)" asset. Gated to where the upscaler engines compile (macOS / candle).
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     if request.upscale.enabled {
         apply_inline_upscale(
             api,
@@ -1867,15 +1809,9 @@ async fn run_image_generate_job_unexplained(
     // A render's non-fatal engine warnings (sc-25681, e.g. Iris's `caption_truncated`) are on each
     // asset's provenance; the completion message names them too, so the user sees them on the job
     // without opening an asset.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     let warnings = lane_controls::job_warning_messages(&asset_writes);
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     let warnings: Vec<String> = Vec::new();
     let mut message = format!("Generated {} output(s).", plan.image_count);
     if !warnings.is_empty() {
@@ -2069,32 +2005,20 @@ fn cached_model_hash_for_file(file: &Path, marker: &JsonObject) -> Option<String
 }
 
 /// First non-empty of installedPath/sourcePath/path/source.path on a LoRA spec.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
     sceneworks_core::lora_family::adapter_record_path(lora)
 }
 
 /// The exact adapter filename a manifest declares when its LoRA path is a directory.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
     sceneworks_core::lora_family::declared_adapter_file(lora)
 }
 
 /// Resolve the exact adapter file inference will load. Attribution calls this same function before
 /// hashing, so the digest cannot drift onto a sibling checkpoint or an unconfined client path.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 fn resolve_adapter_file(lora: &Value, settings: &Settings, model: &str) -> WorkerResult<PathBuf> {
     let raw = lora_path(lora)
         .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
@@ -2122,10 +2046,7 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings, model: &str) -> Worke
 /// Resolve and pin the exact adapter entry inference will load. Directory-valued imports are first
 /// confined as directories, then their selected child is independently pinned and confined so a
 /// child symlink cannot inherit trust from its parent.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_prepared_adapter_file(
     lora: &Value,
     settings: &Settings,
@@ -2158,13 +2079,7 @@ fn resolve_prepared_adapter_file(
 
 /// Opt-in test access to the exact prepared resolver used by MOSS. Keep both
 /// specs and source pins alive; this does not relax official model validation.
-#[cfg(all(
-    feature = "test-support",
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(feature = "test-support", native_lane))]
 pub(crate) fn prepared_adapter_selection_for_test(
     request: &ImageRequest,
     settings: &Settings,
@@ -2174,11 +2089,7 @@ pub(crate) fn prepared_adapter_selection_for_test(
 }
 
 /// The exact weight parser used by every adapter lane and by the gallery attribution renderer.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 fn lora_weight(lora: &Value) -> f64 {
     lora.get("weight")
         .and_then(|value| {
@@ -2192,11 +2103,7 @@ fn lora_weight(lora: &Value) -> f64 {
         .unwrap_or(1.0)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 fn existing_lora_install_marker(lora: &Value, settings: &Settings, file: &Path) -> Option<PathBuf> {
     // Explicit HF catalog downloads execute from the shared hub cache, while their durable receipt
     // lives under data/loras/<catalog-id>. Prefer that trusted app-owned receipt when it names the
@@ -2209,17 +2116,9 @@ fn existing_lora_install_marker(lora: &Value, settings: &Settings, file: &Path) 
     let repo = source
         .and_then(|source| source.get("repo"))
         .or_else(|| lora.get("repo"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .and_then(crate::payload::trimmed_value_str);
     if provider == Some("huggingface") {
-        if let (Some(id), Some(repo)) = (
-            lora.get("id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-            repo,
-        ) {
+        if let (Some(id), Some(repo)) = (crate::payload::trimmed_string(lora.get("id")), repo) {
             let candidate = settings
                 .data_dir
                 .join("loras")
@@ -2247,11 +2146,7 @@ fn existing_lora_install_marker(lora: &Value, settings: &Settings, file: &Path) 
         .find(|candidate| candidate.is_file())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 fn cached_lora_hash_for_file(file: &Path, marker: &JsonObject) -> Option<String> {
     let identity = model_file_identity(file)?;
     (marker.get("loraFileName").and_then(Value::as_str) == Some(identity.name.as_str())
@@ -2267,11 +2162,7 @@ fn cached_lora_hash_for_file(file: &Path, marker: &JsonObject) -> Option<String>
     .flatten()
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 fn civitai_lora_key(file: &Path, used: &mut std::collections::HashSet<String>) -> String {
     let stem = file
         .file_stem()
@@ -2302,11 +2193,7 @@ fn civitai_lora_key(file: &Path, used: &mut std::collections::HashSet<String>) -
 /// Hash the exact resolved adapter bytes, using an existing install marker as a cheap cache when
 /// available. A missing/malformed marker or a hashing failure loses attribution only; it never
 /// turns a successful generation into an error.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 async fn trusted_lora_hash(
     api: &ApiClient,
     settings: &Settings,
@@ -2369,11 +2256,7 @@ async fn trusted_lora_hash(
     Some(hash)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 #[cfg_attr(test, allow(dead_code))]
 async fn trusted_loras_for_share(
     api: &ApiClient,
@@ -2517,11 +2400,7 @@ pub(crate) fn workflow_source(
 ///
 /// Compiled under `test` on every platform (unlike `write_upscaled_asset`, which needs an upscaler
 /// backend) so the lineage contract is tested on every build, not only where candle or MLX compiles.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 pub(crate) fn upscaled_workflow_share(
     request: &ImageRequest,
     base_fact: &JsonObject,
@@ -2569,11 +2448,7 @@ pub(crate) fn upscaled_workflow_share(
 /// Compiled under `test` everywhere for the same reason as [`upscaled_workflow_share`]:
 /// `image_jobs/detail.rs` compiles on macOS only, and the lineage contract should not go untested on
 /// every other platform.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 pub(crate) fn detail_workflow_share(
     job_payload: &JsonObject,
     model: &str,
@@ -2623,11 +2498,7 @@ pub(crate) fn detail_workflow_share(
 ///
 /// Compiled under `test` on every platform (unlike `upscale_jobs.rs`, which needs an upscaler
 /// backend) so the contract is tested on every build rather than only where candle or MLX compiles.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 pub(crate) fn standalone_upscale_workflow_share(
     job_payload: &JsonObject,
     engine_id: &str,
@@ -2667,10 +2538,7 @@ pub(crate) fn standalone_upscale_workflow_share(
 /// nothing is inherited from whatever generated the source — with the Iris controls in place of the
 /// factor: the APPLIED scale, input sizing and colour fix the engine ran (`plan`), never the requested
 /// ones. Geometry is the SOURCE image's, so the recipe reads "this image, restored at N×".
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn standalone_restore_workflow_share(
     job_payload: &JsonObject,
     plan: &gen_core_iris::restoration::RestorationPlan,
@@ -2699,10 +2567,7 @@ pub(crate) fn standalone_restore_workflow_share(
 
 /// The envelope's `upscale` record for an applied Iris restoration: exactly the reopenable controls
 /// (incl. `irisModel` when a trained restoration model ran).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn iris_upscale_overlay(
     plan: &gen_core_iris::restoration::RestorationPlan,
     trained_model: Option<&str>,
@@ -2904,11 +2769,7 @@ impl GeneratedPixels {
 /// path it was on — the `Rgb` arm of [`GeneratedPixels`], byte-identical output.
 // Every caller (upscale, detail refine, the reference alpha reader) is a backend lane, so a
 // no-backend build compiles this only for its tests.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn split_alpha(
     decoded: &image::DynamicImage,
 ) -> (image::RgbImage, Option<image::GrayImage>) {
@@ -2936,11 +2797,7 @@ pub(crate) fn split_alpha(
 ///   the plane matches what the model is doing to the colour beside it. A fully transparent or
 ///   fully opaque REGION stays fully transparent or opaque because bilinear is interpolating
 ///   between equal values there; only the ramp is resampled.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn reattach_alpha(
     rgb: image::RgbImage,
     alpha: Option<&image::GrayImage>,
@@ -3244,10 +3101,7 @@ pub(crate) fn write_image_asset(
 /// Normalise the UI's upscale engine id to the canonical worker id. SeedVR2 stays itself;
 /// everything else (`real-esrgan` / `realesrgan` / the dropped `aura-sr` / unknown) maps to
 /// Real-ESRGAN, so a bad engine string never hard-fails a whole generation.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn normalize_upscale_engine(engine: &str) -> &'static str {
     match engine.trim().to_ascii_lowercase().as_str() {
         "seedvr2" => "seedvr2",
@@ -3261,10 +3115,7 @@ fn normalize_upscale_engine(engine: &str) -> &'static str {
 /// which now RESOLVE already-installed weights instead of provisioning them on first use (sc-17633 /
 /// sc-17632), which is why this pass needs no HTTP client. Runs after the base images have already been
 /// streamed (so they persist even if a late upscale step errors and fails the job).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn apply_inline_upscale(
     api: &ApiClient,
@@ -3395,10 +3246,7 @@ async fn apply_inline_upscale(
 /// every base image the generation produced into a second, lineage-linked asset. Same placement and
 /// lifetime as the other engines' inline pass (the base images are already streamed, so they persist
 /// if a late restore refuses or is canceled; a canceled restore writes nothing for its image).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_inline_iris_restore(
     api: &ApiClient,
@@ -3518,10 +3366,7 @@ pub(crate) async fn apply_inline_iris_restore(
 /// Write the upscaled variant of a base image as its own asset (sc-8091): same metadata as the base
 /// fact, but a fresh `assetId`, the `_up{factor}x` file, the upscaled dimensions, a "(Nx upscaled)"
 /// display-name suffix, and a `rawAdapterSettings.upscale` record (so preset-restore reads it back).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 fn write_upscaled_asset(
     plan: &ImagePlan,
@@ -3733,10 +3578,7 @@ fn job_prefix_kv_cache_records(asset_writes: &[Value]) -> Vec<Value> {
 ///
 /// Gated like its only callers (the `include!`d `base.rs` step arm, reached on macOS and the
 /// candle lane) so the default lane never dead-code warns.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn slim_step_result(plan: &ImagePlan) -> JsonObject {
     json!({
         "generationSetId": plan.genset_id,
@@ -3781,12 +3623,7 @@ fn stub_raw_settings(request: &ImageRequest) -> JsonObject {
 /// The asset `family`: the resolved model manifest entry wins (the UI sends it), else
 /// the linked mlx-gen descriptor's family on macOS, else empty.
 fn resolve_family(request: &ImageRequest) -> String {
-    if let Some(family) = request
-        .model_manifest_entry
-        .get("family")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    if let Some(family) = crate::payload::trimmed_string(request.model_manifest_entry.get("family"))
     {
         return family.to_owned();
     }
@@ -3835,21 +3672,7 @@ pub(crate) fn image_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        // Stamped by update_job before posting (sc-4172).
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 pub(crate) fn backend_label(gpu_id: &str) -> &str {
@@ -3872,10 +3695,7 @@ pub(crate) fn backend_label(gpu_id: &str) -> &str {
 // Gated to where `consume_gen_events` (its only caller) and the `CancelFlag` import live — the
 // `include!`d `base.rs` block — so it isn't compiled (referencing the cfg-gated `CancelFlag`) on
 // non-macOS / non-candle builds.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn begin_image_cancel(
     api: &ApiClient,
     job_id: &str,
@@ -3936,37 +3756,25 @@ fn lerp(a: u8, t: f32) -> u8 {
 // Windows candle lane (sc-3675); the MLX-coupled fns inside (`generate_stream`, the `ResolvedModel`
 // resolvers) carry their own `#[cfg(target_os = "macos")]`. So these two includes compile on macOS
 // AND on the Windows candle build.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // MLX/candle generator stream helpers.
 include!("image_jobs/stream.rs");
 
 // Iris-3B generation-task wiring (sc-25679 MLX / sc-25680 Candle / sc-25681 controls): its tests
 // drive the MLX `generate_stream` arm and the Candle `generate_candle_stream` arm end to end.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod iris;
 
 // Supra2-IMG (sc-24213 MLX / sc-24214 Candle): pins the generic image lane's wiring for
 // `supra2_img` (bundle + co-requisite staging) on whichever backend the build links, and carries the
 // real-weight worker renders (the MLX arm on macOS, the production Candle job on CUDA).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod supra2;
 
 // The generic image lane's request controls beyond the positional knobs (CFG interval,
 // caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine
 // warnings, adapter apply reports), resolved identically by both arms (sc-25681).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod lane_controls;
 // The Candle shared-ladder selector reads the declared activation term so it never prices the same
 // batch and area twice (sc-25690, `candle_memory_strategy::law_geometry`).
@@ -3975,37 +3783,31 @@ pub(crate) use lane_controls::{
     declared_activation_gb_per_megapixel, DECLARED_ACTIVATION_FLOOR_PIXELS,
 };
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 mod tier_resolver;
 #[cfg(target_os = "macos")]
 use tier_resolver::resolved_tier_is_complete;
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 use tier_resolver::standard_tier_subdir_gated;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) use tier_resolver::INT8_CONVROT_TIER;
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) use tier_resolver::NVFP4_TIER;
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 use tier_resolver::{
     is_dense_te_tier, min_quality_floor, nvfp4_host_eligible, nvfp4_requested, nvfp4_selected,
     pick_loadable_tier, preferred_tier, standard_tier_subdir, tier_components_present,
     tier_quality_rank, tier_static_name, uses_standard_tier_layout,
 };
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // base image routing (MLX) + neutral txt2img generation harness + the candle execution path.
 include!("image_jobs/base.rs");
 // Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849). The
 // weight-resolution helper (`resolve_pid_weights`) is backend-neutral, so it compiles on BOTH face
 // backends: the generic MLX lanes (base.rs/qwen.rs `generate*`, macOS-only) AND the candle InstantID
 // Angles/Poses lane (instantid.rs, sc-8373), which now decodes through the `sdxl` PiD student off-Mac.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 include!("image_jobs/pid.rs");
 // Shared strict-control driver (epic 8236, sc-8243): the `(engine_id, control_repo, supported_kinds)`
 // single source of truth + the preprocess (pose/canny/depth/user-passthrough) → `Conditioning::Control`
@@ -4013,17 +3815,11 @@ include!("image_jobs/pid.rs");
 // candle strict-control trio (`candle_strict_control.rs`, sc-8304) reuses the SAME table +
 // `preprocess_control_entry` (pose/canny/depth), so this is gated to either platform (the candle build
 // off-Mac, MLX on macOS) rather than macOS-only.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 include!("image_jobs/strict_control.rs");
 // Generic SDXL OpenPose ControlNet. One backend-neutral route drives the registered `sdxl`
 // provider on both MLX and Candle; platform bundles select the implementation behind the registry.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 include!("image_jobs/sdxl_control.rs");
 #[cfg(target_os = "macos")]
 // Z-Image strict-pose and prompt augmentation helpers.
@@ -4047,10 +3843,7 @@ include!("image_jobs/krea_edit.rs");
 // `start_cached_gen_stream`) both backends use, so no `_candle.rs` sibling is needed. The candle
 // engine (inference PR #204) keys the turbo regime on the `krea_2_turbo` descriptor id exactly like
 // MLX.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 include!("image_jobs/krea_turbo_raw.rs");
 // Krea 2 multi-phase denoise routing (epic 13879 S4, sc-13884): a `krea_2_raw` t2i job carrying an
 // explicit `advanced.phases` list → the multi-phase driver (one Raw trajectory / global schedule,
@@ -4058,42 +3851,27 @@ include!("image_jobs/krea_turbo_raw.rs");
 // MLX path AND the candle lane (sc-13887): the multi-phase primitive consumes the backend-agnostic
 // `GenerationRequest::phases` contract, which the candle Krea engine also honors (inference PR #204),
 // so the shape-detection + `advanced.phases` parse/validate + engine invocation are all backend-neutral.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 include!("image_jobs/krea_multiphase.rs");
 #[cfg(target_os = "macos")]
 // Krea 2 pose-ControlNet (MLX) strict-pose routing (sc-8465, epic 8459 S5).
 include!("image_jobs/krea_control.rs");
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // Imported single-file Krea 2 checkpoint routing (epic 14015 S0c, sc-14018/sc-14023): a user-imported
 // `krea_2`-family DiT single file → paired with a resident base tier (shared TE/VAE/tokenizer) and
 // loaded through the selected runtime's native single-file entrypoint, bypassing the registry
 // snapshot-dir path. Shared by MLX and Candle so global import acceptance always has a real route.
 include!("image_jobs/krea_imported.rs");
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // Plan-driven checkpoint routing (epic 20398, sc-20634): a user model bound to a persisted
 // `ImportPlanV1` (`importPlan.checkpointId` on its manifest entry) is resolved and re-verified
 // through the checkpoint plan store, its provider selected by family + source shape + operation
 // through the registry's imported-model authority, and rendered through the shared cached-generator
 // seam. Backend-neutral: the same file serves MLX and Candle.
 include!("image_jobs/checkpoint_plan.rs");
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 include!("image_jobs/sdxl_imported.rs");
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // Fine-tuned Mage-Flow base checkpoint routing (sc-15036, epic 14034 F6): the `transformer/`-shaped
 // artifact a FULL base fine-tune writes, paired at load with the installed base's shared text
 // encoder + VAE and rendered through the `load_finetuned` entrypoint that skips the pinned-
@@ -4108,10 +3886,7 @@ include!("image_jobs/sensenova.rs");
 // generate-one helpers); each item inside is cfg-gated to its backend, so the neither build pulls in
 // nothing. (Unlike the other macOS-only routing files above, whose candle siblings live in dedicated
 // `*_candle.rs` files, Bernini keeps both lanes in one file to share the neutral still-image helpers.)
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 include!("image_jobs/bernini.rs");
 #[cfg(target_os = "macos")]
 // SDXL advanced routing.
@@ -4122,10 +3897,7 @@ include!("image_jobs/kolors.rs");
 // InstantID native routing — macOS (MLX) + the Windows/CUDA candle lane (sc-5491). The two engines'
 // `InstantId` APIs differ only at the load boundary (with_face dir-vs-Weights, quantize, largest_face
 // signature), cfg-split inside; the per-item generate/restore loop is backend-neutral over `gen_core`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 include!("image_jobs/instantid.rs");
 // SDXL IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS keeps
 // the MLX SDXL IP path (sdxl.rs `SdxlSubMode::Ip`); there is no MLX `IpAdapterSdxl`, so this is
@@ -4293,14 +4065,11 @@ use pulid_candle::{generate_candle_pulid_stream, pulid_candle_available};
 #[cfg(target_os = "macos")]
 // PuLID-FLUX native routing.
 include!("image_jobs/pulid.rs");
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // image detail tile-ControlNet routing.
 include!("image_jobs/detail.rs");
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_image_detail_job(
     _api: &ApiClient,
     _settings: &Settings,

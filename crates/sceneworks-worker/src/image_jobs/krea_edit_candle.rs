@@ -383,12 +383,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
     .await?;
     strategy_spec = strategy_spec.with_offload_policy(offload_policy);
     // Telemetry `repo` — the manifest `repo` else the Krea 2 Raw default.
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model).unwrap_or("SceneWorks/krea-2-raw-mlx")
         })
@@ -405,10 +400,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
     let raw_settings =
         krea_edit_candle_raw_settings(request, &repo, steps, guidance, references.len());
 
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
     let budget =
         raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));

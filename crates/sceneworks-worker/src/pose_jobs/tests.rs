@@ -797,12 +797,14 @@ fn shared_resolve_env_file_pin_errors_on_missing_env_path() {
 /// can't escape `project_path`. Plain `Normal` segments still resolve under the project.
 #[test]
 fn join_project_relative_rejects_parent_escape() {
-    let proj = Path::new("/data/projects/p1");
+    let temp = tempfile::tempdir().expect("project fixture");
+    let project = temp.path().canonicalize().expect("canonical project");
+    let proj = project.as_path();
 
     // A benign relative path resolves under the project root.
     assert_eq!(
         join_project_relative(proj, "assets/img.png"),
-        Some(PathBuf::from("/data/projects/p1/assets/img.png")),
+        Some(proj.join("assets/img.png")),
         "a plain relative path must resolve under the project"
     );
 

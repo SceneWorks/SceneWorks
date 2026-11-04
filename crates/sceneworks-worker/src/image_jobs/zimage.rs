@@ -54,9 +54,7 @@ fn resolve_control_weights_for(
     let str_field = |key: &str, default: &'static str| -> String {
         control
             .and_then(|control| control.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(default)
             .to_owned()
     };
