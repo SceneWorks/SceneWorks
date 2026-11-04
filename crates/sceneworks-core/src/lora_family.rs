@@ -3708,6 +3708,43 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn recorded_base_metadata_precedes_later_family_aliases() {
+        for (base, alias, family) in [
+            ("black-forest-labs/FLUX.2-klein-9B", "flux", "flux2"),
+            ("lodestones/Chroma1-HD", "flux", "chroma"),
+            ("Qwen/Qwen-Image-2.1", "qwen_image", "qwen-image-2-1"),
+        ] {
+            for base_key in ["baseModel", "base_model"] {
+                for alias_key in [
+                    "ss_base_model_version",
+                    "modelspec.architecture",
+                    "modelspec.implementation",
+                ] {
+                    let mut header =
+                        header_from_keys(&["transformer_blocks.0.attn.to_q.lora_A.weight"]);
+                    header["__metadata__"] = json!({base_key: base, alias_key: alias});
+                    assert_eq!(
+                        detect_lora_family(&header).as_deref(),
+                        Some(family),
+                        "{base_key}={base} must precede {alias_key}={alias}"
+                    );
+                }
+            }
+        }
+        let native = json!({"__metadata__": {
+            "family": "flux", "baseModel": "black-forest-labs/FLUX.2-klein-9B"
+        }});
+        assert_eq!(detect_lora_family(&native).as_deref(), Some("flux"));
+        let fallback = json!({"__metadata__": {
+            "baseModel": "community/unclassified", "modelspec.architecture": "krea-realtime"
+        }});
+        assert_eq!(
+            detect_lora_family(&fallback).as_deref(),
+            Some("krea-realtime")
+        );
+    }
+
+    #[test]
     fn versioned_qwen_repository_metadata_outweighs_generic_trainer_label() {
         for version in ["Qwen/Qwen-Image-2.1", "qwen_image_2_1"] {
             for key in ["baseModel", "base_model"] {
