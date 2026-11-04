@@ -1,15 +1,10 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RefinePromptControl } from "./RefinePromptControl.jsx";
 
-async function settle() {
-  await act(async () => {
-    for (let index = 0; index < 8; index += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 function refineButton(container) {
   return [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Refine my prompt"));
@@ -63,7 +58,7 @@ describe("RefinePromptControl", () => {
     await act(async () => {
       refineButton(container).click();
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     // Sent the prompt + model + workflow + fetched guide; original not yet applied.
     expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
@@ -91,7 +86,7 @@ describe("RefinePromptControl", () => {
     await act(async () => {
       refineButton(container).click();
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     await act(async () => {
       buttonByText(container, "Keep original").click();
@@ -110,7 +105,7 @@ describe("RefinePromptControl", () => {
     await act(async () => {
       refineButton(container).click();
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(container.querySelector(".refine-error").textContent).toContain("not configured");
     expect(onApply).not.toHaveBeenCalled();
@@ -127,7 +122,7 @@ describe("RefinePromptControl", () => {
     await act(async () => {
       refineButton(container).click();
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
       prompt: "dog",
@@ -160,7 +155,7 @@ describe("RefinePromptControl", () => {
     await act(async () => {
       refineButton(container).click();
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     // The raw worker error is replaced by a download affordance with a size hint.
     expect(container.querySelector(".refine-missing-model").textContent).toContain("isn’t installed");
@@ -171,7 +166,7 @@ describe("RefinePromptControl", () => {
     await act(async () => {
       downloadButton.click();
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(onDownloadRefineModel).toHaveBeenCalledTimes(1);
     expect(container.querySelector(".refine-missing-model").textContent).toContain("Downloading");
@@ -197,7 +192,7 @@ describe("RefinePromptControl", () => {
     await act(async () => {
       refineButton(container).click();
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(container.querySelector(".refine-missing-model")).toBeNull();
     expect(container.querySelector(".refine-error").textContent).toContain("Prompt refinement failed.");

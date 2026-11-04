@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,13 +10,7 @@ import { QwenRewritePromptControl } from "./QwenRewritePromptControl.jsx";
 // the rewrite is EDITABLE, it carries an aspect suggestion the user accepts or ignores SEPARATELY,
 // and the user's own prompt is never replaced until they press Apply.
 
-async function settle() {
-  await act(async () => {
-    for (let index = 0; index < 8; index += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 function buttonByText(container, text) {
   return [...container.querySelectorAll("button")].find(
@@ -77,7 +72,7 @@ describe("QwenRewritePromptControl (sc-24113)", () => {
         rewritePrompt={rewritePrompt}
       />,
     );
-    await settle();
+    await settle({ microtasks: 8 });
     // Unlike the generic refiner's prompt-tool tile, there is no autoStart. Mounting the panel must
     // not call the model: an automatic rewrite is exactly what the story forbids.
     expect(rewritePrompt).not.toHaveBeenCalled();
@@ -96,7 +91,7 @@ describe("QwenRewritePromptControl (sc-24113)", () => {
       />,
     );
     await act(async () => buttonContaining(container, "Rewrite prompt").click());
-    await settle();
+    await settle({ microtasks: 8 });
 
     // A TEXTAREA, not a paragraph. This is the difference from `RefinePromptControl`, whose
     // suggestion is read-only take-it-or-leave-it.
@@ -132,7 +127,7 @@ describe("QwenRewritePromptControl (sc-24113)", () => {
       />,
     );
     await act(async () => buttonContaining(container, "Rewrite prompt").click());
-    await settle();
+    await settle({ microtasks: 8 });
     await act(async () => buttonByText(container, "Keep original").click());
     expect(onApply).not.toHaveBeenCalled();
     expect(draft()).toBeNull();
@@ -151,7 +146,7 @@ describe("QwenRewritePromptControl (sc-24113)", () => {
       />,
     );
     await act(async () => buttonContaining(container, "Rewrite prompt").click());
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(container.textContent).toContain("16:9");
     // It names a LEGAL PRESET — one of the model's own seven — so accepting it is the same as
@@ -188,7 +183,7 @@ describe("QwenRewritePromptControl (sc-24113)", () => {
     // The button copy says so before anything runs.
     expect(buttonContaining(container, "Rewrite edit instruction")).toBeTruthy();
     await act(async () => buttonContaining(container, "Rewrite edit instruction").click());
-    await settle();
+    await settle({ microtasks: 8 });
 
     // The ordered list is sent verbatim: the rewrite's `<imageN>` numbering only means anything
     // against the list the render will condition on.
@@ -218,7 +213,7 @@ describe("QwenRewritePromptControl (sc-24113)", () => {
       />,
     );
     await act(async () => buttonContaining(container, "Rewrite prompt").click());
-    await settle();
+    await settle({ microtasks: 8 });
 
     // The copy has to say the image model is unaffected — "no degraded path" means the user is
     // never led to believe generation needs this.
@@ -240,7 +235,7 @@ describe("QwenRewritePromptControl (sc-24113)", () => {
       />,
     );
     await act(async () => buttonContaining(container, "Rewrite prompt").click());
-    await settle();
+    await settle({ microtasks: 8 });
     expect(container.textContent).toContain("empty prompt");
     expect(draft()).toBeNull();
     expect(onApply).not.toHaveBeenCalled();

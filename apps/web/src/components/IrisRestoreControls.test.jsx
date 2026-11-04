@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,7 +10,7 @@ function setValue(el, value) {
   el.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-const settle = () => act(async () => new Promise((resolve) => setTimeout(resolve, 260)));
+
 
 function planResponse(items) {
   return { ok: true, status: 200, json: async () => ({ items }) };
@@ -47,7 +48,7 @@ describe("IrisRestoreControls (sc-25683)", () => {
     );
     const onStatus = vi.fn();
     await act(async () => root.render(<Harness onStatus={onStatus} planBody={{ width: 4032, height: 3024 }} />));
-    await settle();
+    await settle({ microtasks: 0, delayMs: 260 });
     expect(container.querySelector(".iris-restore-preview").textContent).toContain(
       "budgeted: 683x512 input → 2732x2048",
     );
@@ -77,7 +78,7 @@ describe("IrisRestoreControls (sc-25683)", () => {
         />,
       ),
     );
-    await settle();
+    await settle({ microtasks: 0, delayMs: 260 });
     expect(JSON.parse(fetchMock.mock.calls.at(-1)[1].body)).toEqual({
       sizes: [{ width: 512, height: 384 }, { width: 768, height: 1344 }],
       scale: 8,
@@ -102,7 +103,7 @@ describe("IrisRestoreControls (sc-25683)", () => {
     await act(async () => root.render(<Host models={[{ id: "iris_3b_restore", installState: "missing" }]} />));
     expect(latest.irisModel).toBeUndefined();
     await act(async () => root.render(<Host models={[{ id: "iris_3b_restore", installState: "missing" }, trained]} />));
-    await settle();
+    await settle({ microtasks: 0, delayMs: 260 });
     expect(latest.irisModel).toBe("my_restore");
     expect(JSON.parse(fetchMock.mock.calls.at(-1)[1].body).irisModel).toBe("my_restore");
     // The release installed: nothing is substituted.
@@ -117,14 +118,14 @@ describe("IrisRestoreControls (sc-25683)", () => {
       planResponse([{ assetId: null, plan: { summary: "1× restore: 512x384 → 512x384 (processed at 1376x1024 in 2 tiles)" }, error: null }]),
     );
     await act(async () => root.render(<Harness planBody={{ width: 512, height: 384 }} />));
-    await settle();
+    await settle({ microtasks: 0, delayMs: 260 });
     const oneX = [...container.querySelectorAll("button")].find((b) => b.textContent === "1×");
     await act(async () => oneX.click());
     const original = [...container.querySelectorAll("label")].find((l) => l.textContent.includes("Original input")).querySelector("input");
     await act(async () => original.click());
     const colour = [...container.querySelectorAll("label")].find((l) => l.textContent.includes("Colour correction")).querySelector("input");
     await act(async () => colour.click());
-    await settle();
+    await settle({ microtasks: 0, delayMs: 260 });
     const last = JSON.parse(fetchMock.mock.calls.at(-1)[1].body);
     expect(last).toEqual({ width: 512, height: 384, scale: 1, inputSizing: "original", colorFix: false });
     expect(container.querySelector(".iris-restore-preview").textContent).toContain("1× restore: 512x384 → 512x384");
@@ -136,13 +137,13 @@ describe("IrisRestoreControls (sc-25683)", () => {
     );
     const onStatus = vi.fn();
     await act(async () => root.render(<Harness onStatus={onStatus} planBody={{ width: 4032, height: 3024 }} />));
-    await settle();
+    await settle({ microtasks: 0, delayMs: 260 });
     expect(container.querySelector(".iris-restore-refused").textContent).toContain("Cannot restore");
     expect(onStatus).toHaveBeenLastCalledWith(expect.objectContaining({ ready: false, blocked: true }));
 
     const calls = fetchMock.mock.calls.length;
     await act(async () => setValue(container.querySelector("input[type=number]"), "0"));
-    await settle();
+    await settle({ microtasks: 0, delayMs: 260 });
     expect(fetchMock.mock.calls.length).toBe(calls);
     expect(container.textContent).toContain("Enter a scale greater than 0.");
     expect(onStatus).toHaveBeenLastCalledWith(expect.objectContaining({ ready: false, blocked: true }));

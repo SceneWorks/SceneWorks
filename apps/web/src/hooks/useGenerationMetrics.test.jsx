@@ -1,3 +1,4 @@
+import { deferred } from "../testUtils/async.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,13 +11,7 @@ vi.mock("../api.js", () => ({
   isAbortError: (error) => error?.name === "AbortError",
 }));
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((accept) => {
-    resolve = accept;
-  });
-  return { promise, resolve };
-}
+
 
 function Probe({ params, onValue }) {
   const value = useGenerationMetrics({ token: "token", params });

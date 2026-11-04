@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,13 +23,7 @@ function buttonByText(container, text) {
   return [...document.body.querySelectorAll("button")].find((button) => button.textContent.trim() === text);
 }
 
-async function settle() {
-  await act(async () => {
-    for (let index = 0; index < 8; index += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 describe("DatasetCaptionDialog", () => {
   let container;
@@ -78,7 +73,7 @@ describe("DatasetCaptionDialog", () => {
     await act(async () => {
       download.click();
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(onDownloadModel).toHaveBeenCalledTimes(1);
     expect(document.body.querySelector(".caption-missing-model").textContent).toContain("Downloading");
@@ -120,12 +115,12 @@ describe("DatasetCaptionDialog", () => {
     );
 
     await act(async () => buttonByText(container, "Download captioning model").click());
-    await settle();
+    await settle({ microtasks: 8 });
     expect(document.body.querySelector(".caption-missing-model").textContent).toContain("Models service is offline");
     expect(buttonByText(container, "Download captioning model")).toBeTruthy();
 
     await act(async () => buttonByText(container, "Download captioning model").click());
-    await settle();
+    await settle({ microtasks: 8 });
     expect(document.body.querySelector(".caption-missing-model").textContent).toContain("Downloading");
     expect(onDownloadModel).toHaveBeenCalledTimes(2);
   });
