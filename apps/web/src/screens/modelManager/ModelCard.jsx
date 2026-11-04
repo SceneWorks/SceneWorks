@@ -1,8 +1,78 @@
+import { equalItemProps } from "./memo.js";
 import { LinkedLibraryStatus } from "./LinkedLibraryStatus.jsx";
 import React from "react";
 
-export function ModelCard({ model, RETIRED_MODEL_CAPABILITIES, audioCapabilityChips, availabilityBadge, blanketFloorGb, cacheBusyKey, cacheConvergenceStalled, cacheEligibilityBadge, canHoldLocalCopy, capabilityLabel, convertJobsFor, createModelDownloadJob, credentials, deleteModel, deleteModelVariant, deletingItem, describeEntryState, describeMissingLocalCopy, downloadJobsFor, downloadSizeText, entriesForModel, formatBytes, gatedRepoUrl, handleUpdateModel, hasPresentCredential, isRecommendedModel, isTransitionalEntry, licenseAcks, licenseComponentForModel, lightestInstallableTier, linkedCorrection, linkedStatuses, localCopiesEnabled, macCapabilities, macModelBlock, memoryBackend, mlxStatusText, modelCache, modelLinkedStatus, modelProvenance, onCancelJob, onConvertModel, onDeleteModel, onDownloadModel, onDownloadVariant, onFreshDownloadJob, onOpenQueue, onResumeDownloadJob, orderedMatrixVariants, pendingUpdate, refreshModelCache, relinkLinkedModel, removeLocalCopy, requiresLicenseAcknowledgment, rescanLinkedModel, setActiveTab, setActiveView, setCheckpointRepairRequest, setLicenseAck, terminalStatuses, tierLabel, toggleKeepLocalCopy, unifiedMemoryGb, ConvertedTierList, ImportedCheckpointSurface, LicenseGateNotice, ModelComponentDetails, ModelLicenseSummary, ModelTierDownloadPanel, WorkerProgressCard }) {
-    const downloadJobs = downloadJobsFor(model);
+export const ModelCard = React.memo(function ModelCard({
+  model,
+  RETIRED_MODEL_CAPABILITIES,
+  audioCapabilityChips,
+  availabilityBadge,
+  blanketFloorGb,
+  cacheBusyKey,
+  cacheConvergenceStalled,
+  cacheEligibilityBadge,
+  canHoldLocalCopy,
+  capabilityLabel,
+  convertJobs,
+  createModelDownloadJob,
+  credentials,
+  deleteModel,
+  deleteModelVariant,
+  deletingItem,
+  describeEntryState,
+  describeMissingLocalCopy,
+  downloadJobs,
+  downloadSizeText,
+  formatBytes,
+  gatedRepoUrl,
+  handleUpdateModel,
+  hasPresentCredential,
+  isRecommendedModel,
+  isTransitionalEntry,
+  licenseAcknowledged,
+  licenseComponentForModel,
+  lightestInstallableTier,
+  linkedCorrection,
+  linkedStatus,
+  localCopiesEnabled,
+  macCapabilities,
+  macModelBlock,
+  memoryBackend,
+  mlxStatusText,
+  localCopies,
+  cacheKnown,
+  modelProvenance,
+  onCancelJob,
+  onConvertModel,
+  onDeleteModel,
+  onDownloadModel,
+  onDownloadVariant,
+  onFreshDownloadJob,
+  onOpenQueue,
+  onResumeDownloadJob,
+  orderedMatrixVariants,
+  pendingUpdate,
+  refreshModelCache,
+  relinkLinkedModel,
+  removeLocalCopy,
+  requiresLicenseAcknowledgment,
+  rescanLinkedModel,
+  setActiveTab,
+  setActiveView,
+  setCheckpointRepairRequest,
+  setLicenseAck,
+  terminalStatuses,
+  tierLabel,
+  toggleKeepLocalCopy,
+  unifiedMemoryGb,
+  ConvertedTierList,
+  ImportedCheckpointSurface,
+  LicenseGateNotice,
+  ModelComponentDetails,
+  ModelLicenseSummary,
+  ModelTierDownloadPanel,
+  WorkerProgressCard,
+ }) {
     const downloadJob = downloadJobs.find((job) => !terminalStatuses.has(job.status));
     const installed = model.installState === "installed";
     const cleanupOnly = model.platformCleanupOnly === true;
@@ -27,7 +97,6 @@ export function ModelCard({ model, RETIRED_MODEL_CAPABILITIES, audioCapabilityCh
     const mlxState = cleanupOnly ? null : model.mlxConversionState;
     const mlxMinGb = memoryBackend === "mlx" ? blanketFloorGb(model, "mlx", lightestInstallableTier(model)) : null;
     const mlxEnoughMemory = unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
-    const convertJobs = convertJobsFor(model);
     const convertJob = convertJobs.find((job) => !terminalStatuses.has(job.status));
     const failedConvert = convertJobs.find((job) => terminalStatuses.has(job.status) && job.status !== "completed");
     const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
@@ -68,7 +137,6 @@ export function ModelCard({ model, RETIRED_MODEL_CAPABILITIES, audioCapabilityCh
       model.updateAvailable === true ||
       (hasTierMatrix && matrixVariants.some((variant) => variant.installState !== "installed"));
     const licenseGateApplies = licenseGated && downloadOnOffer;
-    const licenseAcknowledged = licenseAcks[model.id] === true;
     const licenseAckRequired = licenseGateApplies && !licenseAcknowledged;
     const firstCapability = capabilities.length ? capabilityLabel(capabilities[0]) : null;
     const familyMeta = [model.family ?? "unassociated", firstCapability].filter(Boolean).join(" · ");
@@ -78,7 +146,6 @@ export function ModelCard({ model, RETIRED_MODEL_CAPABILITIES, audioCapabilityCh
     // A linked checkpoint whose library is detached, or whose file drifted, is NOT missing: the
     // plans are intact and there is exactly one button to press (AC2, epic 20398). Rendering it as
     // "missing" invites the user to re-download bytes they already own.
-    const linkedStatus = modelLinkedStatus(model, linkedStatuses);
     const linkedFix = linkedCorrection(linkedStatus);
     const provenance = modelProvenance(model);
     const statusClass = linkedFix
@@ -110,13 +177,11 @@ export function ModelCard({ model, RETIRED_MODEL_CAPABILITIES, audioCapabilityCh
     // external requirement closure; a badge whenever the local-copy affordance would over-promise.
     const cacheCoverage = localCopiesEnabled ? cacheEligibilityBadge(model) : null;
     // Local copies of THIS model, joined by the backend.
-    const localCopies = localCopiesEnabled ? entriesForModel(modelCache, model.id) : [];
     // The block renders ONLY when the cache state is actually known. `modelCache` is null when the
     // status read failed outright, and a returned snapshot carries `error` when the store exists
     // but could not be listed — in both cases the entry list is empty for want of an answer, not
     // because there are no copies. Gating on `cacheKnown` is what stops "No local copy yet." from
     // being rendered as a confident claim over a read that never succeeded.
-    const cacheKnown = Boolean(modelCache) && !modelCache.error;
     const showLocalCopySection =
       localCopiesEnabled && cacheKnown && (localCopies.length > 0 || canHoldLocalCopy(model));
     return (
@@ -329,7 +394,7 @@ export function ModelCard({ model, RETIRED_MODEL_CAPABILITIES, audioCapabilityCh
                   disabled={
                     Boolean(downloadJob) ||
                     Boolean(convertJob) ||
-                    Boolean(pendingUpdate[model.id]) ||
+                    Boolean(pendingUpdate) ||
                     !mlxEnoughMemory ||
                     licenseAckRequired
                   }
@@ -339,7 +404,7 @@ export function ModelCard({ model, RETIRED_MODEL_CAPABILITIES, audioCapabilityCh
                 >
                   {convertJob
                     ? convertJob.status
-                    : downloadJob || pendingUpdate[model.id]
+                    : downloadJob || pendingUpdate
                       ? "Updating…"
                       : "Update"}
                 </button>
@@ -524,4 +589,4 @@ export function ModelCard({ model, RETIRED_MODEL_CAPABILITIES, audioCapabilityCh
         </div>
       </article>
     );
-  }
+  }, equalItemProps);

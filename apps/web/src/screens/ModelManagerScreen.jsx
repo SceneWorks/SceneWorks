@@ -1,7 +1,8 @@
+import { useStableActions } from "./modelManager/memo.js";
 import { ModelCard } from "./modelManager/ModelCard.jsx";
 import { LoraRow } from "./modelManager/LoraRow.jsx";
 import { LoraImportPanel } from "./modelManager/LoraImportPanel.jsx";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { installJobStatusLabel } from "../yue2Policy.js";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
@@ -33,14 +34,13 @@ import {
   describeMissingLocalCopy,
   describeRemovalPreview,
   entriesForModel,
-  fetchModelCache,
   isTransitionalEntry,
   previewCacheRemoval,
   removalIsAllowed,
   removeCacheEntry,
   setCacheEntryPin,
 } from "../modelCache.js";
-import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
+import { useModelCacheStatus } from "../hooks/useModelCacheStatus.js";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { useLicenseAcknowledgments } from "../hooks/useLicenseAcknowledgments.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
@@ -666,7 +666,7 @@ export function ModelManagerScreen() {
   // entry — on a bounded cadence, so a copy in flight visibly converges instead of freezing at
   // whatever state the screen happened to open on. A settled cache costs exactly the one mount
   // read it always did, which is what keeps the per-row cost sc-19708 removed from coming back.
-  const [modelCache, setModelCache] = useState(null);
+  const { cache: modelCache, error: cacheError, refresh: refreshModelCache, stalled: cacheConvergenceStalled } = useModelCacheStatus(token, { pollWhenDisabled: false, reportSnapshotError: true });
   // Linked-library state for the catalog rows (epic 20398, sc-20650). ONE scan per approved root,
   // read on mount, indexed by checkpoint id. A card whose linked checkpoint is Needs Relink /
   // Needs Rescan must show the corrective ACTION — the state comes from this seam and is never
@@ -676,7 +676,6 @@ export function ModelManagerScreen() {
   const [cacheBusyKey, setCacheBusyKey] = useState("");
   // Why the local-copy controls are absent, when they are. Held apart from `deleteMessage` so an
   // action outcome cannot clobber a standing explanation, and vice versa.
-  const [cacheError, setCacheError] = useState("");
   // Tabbed interface (epic 10309): the active tab, the tab to restore when a search
   // clears, and the persistent search query. Every model now renders as an always-open
   // card, so the old per-row expand state is gone. Tabs: image | video | utility | lora,
@@ -816,42 +815,8 @@ export function ModelManagerScreen() {
     }
   }, [jobs, pendingUpdate, createModelConvertJob]);
 
-  // One resolved-cache status read for the whole screen. A failure leaves `modelCache` null, which
-  // renders no local-copy blocks at all — never an empty-but-confident "no local copies". The
-  // reason is kept separately so the screen can say ONCE why the controls are missing: the failure
-  // is global, so repeating it on every model card would be noise, and staying silent would leave
-  // the user to guess whether they have no local copies or no answer.
-  const refreshModelCache = useCallback(async () => {
-    try {
-      const snapshot = await fetchModelCache();
-      setModelCache(snapshot);
-      // A 200 can still carry `error`: the store exists but could not be listed.
-      setCacheError(snapshot?.error ? String(snapshot.error) : "");
-    } catch (error) {
-      setModelCache(null);
-      setCacheError(String(error?.message ?? error));
-    }
-  }, []);
-
-  useEffect(() => {
-    refreshModelCache();
-  }, [refreshModelCache]);
-
-  // The cache endpoint is also the cross-platform source of truth for whether this feature is on.
-  // Keep every local-copy surface hidden until the policy is both known and explicitly enabled:
-  // the feature is off by default, and an unavailable status read must not make an opt-in feature
-  // appear enabled. A disabled cache can still contain entries left from an earlier session, but
-  // those should not advertise an opt-in feature across every model card.
+  // Local-copy controls are visible only when the running policy enables them.
   const localCopiesEnabled = modelCache?.policy?.enabled === true;
-
-  // Bounded convergence refresh. It runs ONLY while the enabled cache snapshot actually holds an
-  // entry the store is still moving (queued, copying, being removed) and stops the moment every
-  // entry is terminal, so an all-settled cache is read exactly once. A disabled cache never arms a
-  // hidden polling loop for old entries that may remain on disk.
-  const { stalled: cacheConvergenceStalled } = useCacheConvergence(
-    localCopiesEnabled ? modelCache : null,
-    refreshModelCache,
-  );
 
   // "Keep locally" / "Allow automatic removal" — the artifact pin. Re-reads the authoritative
   // status afterwards rather than optimistically flipping the row: the UI must not claim a state
@@ -997,6 +962,21 @@ export function ModelManagerScreen() {
     }
   }
 
+  async function performDeletion(key, action, successMessage) {
+    setDeletingItem(key);
+    setDeleteMessage({ tone: "neutral", text: "" });
+    try {
+      const result = await action();
+      setDeleteMessage(result?.cancelled
+        ? { tone: "neutral", text: "" }
+        : { tone: "success", text: successMessage(result) });
+    } catch (err) {
+      setDeleteMessage({ tone: "error", text: err.message });
+    } finally {
+      setDeletingItem("");
+    }
+  }
+
   async function deleteModel(model) {
     if (!onDeleteModel || model.removable === false) {
       return;
@@ -1029,20 +1009,8 @@ export function ModelManagerScreen() {
     ) {
       return;
     }
-    setDeletingItem(`model:${model.id}`);
-    setDeleteMessage({ tone: "neutral", text: "" });
-    try {
-      const result = await onDeleteModel(model);
-      if (result?.cancelled) {
-        setDeleteMessage({ tone: "neutral", text: "" });
-      } else {
-        setDeleteMessage({ tone: "success", text: deleteResultText(result, model.name ?? model.id) });
-      }
-    } catch (err) {
-      setDeleteMessage({ tone: "error", text: err.message });
-    } finally {
-      setDeletingItem("");
-    }
+    await performDeletion(`model:${model.id}`, () => onDeleteModel(model),
+      (result) => deleteResultText(result, model.name ?? model.id));
   }
 
   // Delete ONE installed quant tier of a model to reclaim its disk (sc-12024/sc-12025). Unlike
@@ -1076,24 +1044,10 @@ export function ModelManagerScreen() {
     ) {
       return;
     }
-    setDeletingItem(`variant:${model.id}:${tier}`);
-    setDeleteMessage({ tone: "neutral", text: "" });
-    try {
-      const result = await deleteModelVariantAction(model, tier);
-      if (result?.cancelled) {
-        setDeleteMessage({ tone: "neutral", text: "" });
-      } else {
-        const freed = result?.reclaimedLabel ?? "";
-        setDeleteMessage({
-          tone: "success",
-          text: `Deleted the ${tierName} tier of ${model.name ?? model.id}${freed ? ` and reclaimed ${freed}` : ""}.`,
-        });
-      }
-    } catch (err) {
-      setDeleteMessage({ tone: "error", text: err.message });
-    } finally {
-      setDeletingItem("");
-    }
+    await performDeletion(`variant:${model.id}:${tier}`, () => deleteModelVariantAction(model, tier), (result) => {
+      const freed = result?.reclaimedLabel ?? "";
+      return `Deleted the ${tierName} tier of ${model.name ?? model.id}${freed ? ` and reclaimed ${freed}` : ""}.`;
+    });
   }
 
   async function deleteLora(lora) {
@@ -1112,20 +1066,8 @@ export function ModelManagerScreen() {
     ) {
       return;
     }
-    setDeletingItem(`lora:${lora.scope ?? "global"}:${lora.id}`);
-    setDeleteMessage({ tone: "neutral", text: "" });
-    try {
-      const result = await onDeleteLora(lora);
-      if (result?.cancelled) {
-        setDeleteMessage({ tone: "neutral", text: "" });
-      } else {
-        setDeleteMessage({ tone: "success", text: deleteResultText(result, lora.name ?? lora.id) });
-      }
-    } catch (err) {
-      setDeleteMessage({ tone: "error", text: err.message });
-    } finally {
-      setDeletingItem("");
-    }
+    await performDeletion(`lora:${lora.scope ?? "global"}:${lora.id}`, () => onDeleteLora(lora),
+      (result) => deleteResultText(result, lora.name ?? lora.id));
   }
 
   const completedImportTimes = completedLoraImportTimes(jobs);
@@ -1165,28 +1107,32 @@ export function ModelManagerScreen() {
     .sort(([a], [b]) => (a === "compatible" ? 1 : b === "compatible" ? -1 : a.localeCompare(b)))
     .map(([family, items]) => ({ family, items }));
 
-  // Re-read every approved root's scan. Called after a relink or a rescan so the card's verdict is
-  // the seam's fresh answer rather than an optimistic local flip.
-  const refreshLinkedStatuses = useCallback(async () => {
+  const linkedOwner = useRef(null);
+  // Both initial enrichment and corrective actions share the same token-bound scan.
+  const loadLinkedStatuses = useCallback(async (signal) => {
     try {
-      const response = await fetchLibraryRoots(token);
+      const response = await fetchLibraryRoots(token, { signal });
       const roots = Array.isArray(response?.roots) ? response.roots : [];
-      if (roots.length === 0) {
-        setLinkedStatuses(new Map());
-        return;
-      }
-      const scans = await Promise.all(roots.map((root) => scanLibraryRoot(token, root.rootId).catch(() => null)));
-      setLinkedStatuses(linkedStatusIndex(scans.filter(Boolean)));
+      const scans = await Promise.all(roots.map((root) => scanLibraryRoot(token, root.rootId, { signal }).catch(() => null)));
+      if (!signal?.aborted) setLinkedStatuses(linkedStatusIndex(scans.filter(Boolean)));
     } catch {
-      // See the mount effect: an enrichment read, silent by design.
+      // Enrichment is best effort; preserve the last known state on failure.
     }
   }, [token]);
+  const refreshLinkedStatuses = useCallback(() => {
+    const owner = linkedOwner.current;
+    if (owner?.token !== token || owner.controller.signal.aborted) return;
+    return loadLinkedStatuses(owner.controller.signal);
+  }, [loadLinkedStatuses, token]);
 
   // The two corrective actions a non-Ready linked card offers. Both surface the store's own typed
   // refusal on failure — `describeRefusal` has no generic branch, so a rejection the user has to
   // act on can never arrive as "something went wrong".
   async function relinkLinkedModel(status) {
+    const owner = linkedOwner.current;
+    const isCurrent = () => Boolean(owner) && owner === linkedOwner.current && !owner.controller.signal.aborted;
     const picked = isDesktop ? await tauriInvoke("choose_folder").catch(() => null) : null;
+    if (!isCurrent()) return;
     if (!picked) {
       setDeleteMessage({
         tone: "error",
@@ -1200,55 +1146,118 @@ export function ModelManagerScreen() {
     try {
       await updateLibraryRoot(token, status.rootId, { path: String(picked) });
       await refreshLinkedStatuses();
-      setDeleteMessage({ tone: "success", text: "Library relinked. Its models are selectable again." });
+      if (isCurrent()) setDeleteMessage({ tone: "success", text: "Library relinked. Its models are selectable again." });
     } catch (error) {
-      setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
+      if (isCurrent()) setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
     } finally {
-      setDeletingItem("");
+      if (isCurrent()) setDeletingItem("");
     }
   }
 
   async function rescanLinkedModel(status) {
+    const owner = linkedOwner.current;
+    const isCurrent = () => Boolean(owner) && owner === linkedOwner.current && !owner.controller.signal.aborted;
     setDeletingItem(`rescan:${status.checkpointId}`);
     try {
       const next = await rescanLibraryCheckpoint(token, status.rootId, status.relativePath);
       await refreshLinkedStatuses();
-      setDeleteMessage(
+      if (isCurrent()) setDeleteMessage(
         next?.state === "ready"
           ? { tone: "success", text: `${status.relativePath} is usable again.` }
           : { tone: "error", text: next?.detail || `${status.relativePath} still cannot be used.` },
       );
     } catch (error) {
-      setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
+      if (isCurrent()) setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
     } finally {
-      setDeletingItem("");
+      if (isCurrent()) setDeletingItem("");
     }
   }
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const response = await fetchLibraryRoots(token);
-        const roots = Array.isArray(response?.roots) ? response.roots : [];
-        if (roots.length === 0 || cancelled) return;
-        const scans = await Promise.all(
-          roots.map((root) => scanLibraryRoot(token, root.rootId).catch(() => null)),
-        );
-        if (!cancelled) setLinkedStatuses(linkedStatusIndex(scans.filter(Boolean)));
-      } catch {
-        // A deployment with no linked libraries answers here; the cards simply keep their ordinary
-        // install-state rendering. Deliberately silent: this is an enrichment read, and a banner
-        // for it would fire on every install that has never used a linked library.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [token]);
+    const controller = new AbortController();
+    linkedOwner.current = { controller, token };
+    setLinkedStatuses(new Map());
+    setDeletingItem((item) => item.startsWith("relink:") || item.startsWith("rescan:") ? "" : item);
+    loadLinkedStatuses(controller.signal);
+    return () => controller.abort();
+  }, [loadLinkedStatuses, token]);
 
   function renderModelCard(model) {
-    return <ModelCard key={model.id ?? model.name} model={model} RETIRED_MODEL_CAPABILITIES={RETIRED_MODEL_CAPABILITIES} audioCapabilityChips={audioCapabilityChips} availabilityBadge={availabilityBadge} blanketFloorGb={blanketFloorGb} cacheBusyKey={cacheBusyKey} cacheConvergenceStalled={cacheConvergenceStalled} cacheEligibilityBadge={cacheEligibilityBadge} canHoldLocalCopy={canHoldLocalCopy} capabilityLabel={capabilityLabel} convertJobsFor={convertJobsFor} createModelDownloadJob={createModelDownloadJob} credentials={credentials} deleteModel={deleteModel} deleteModelVariant={deleteModelVariant} deletingItem={deletingItem} describeEntryState={describeEntryState} describeMissingLocalCopy={describeMissingLocalCopy} downloadJobsFor={downloadJobsFor} downloadSizeText={downloadSizeText} entriesForModel={entriesForModel} formatBytes={formatBytes} gatedRepoUrl={gatedRepoUrl} handleUpdateModel={handleUpdateModel} hasPresentCredential={hasPresentCredential} isRecommendedModel={isRecommendedModel} isTransitionalEntry={isTransitionalEntry} licenseAcks={licenseAcks} licenseComponentForModel={licenseComponentForModel} lightestInstallableTier={lightestInstallableTier} linkedCorrection={linkedCorrection} linkedStatuses={linkedStatuses} localCopiesEnabled={localCopiesEnabled} macCapabilities={macCapabilities} macModelBlock={macModelBlock} memoryBackend={memoryBackend} mlxStatusText={mlxStatusText} modelCache={modelCache} modelLinkedStatus={modelLinkedStatus} modelProvenance={modelProvenance} onCancelJob={onCancelJob} onConvertModel={onConvertModel} onDeleteModel={onDeleteModel} onDownloadModel={onDownloadModel} onDownloadVariant={onDownloadVariant} onFreshDownloadJob={onFreshDownloadJob} onOpenQueue={onOpenQueue} onResumeDownloadJob={onResumeDownloadJob} orderedMatrixVariants={orderedMatrixVariants} pendingUpdate={pendingUpdate} refreshModelCache={refreshModelCache} relinkLinkedModel={relinkLinkedModel} removeLocalCopy={removeLocalCopy} requiresLicenseAcknowledgment={requiresLicenseAcknowledgment} rescanLinkedModel={rescanLinkedModel} setActiveTab={setActiveTab} setActiveView={setActiveView} setCheckpointRepairRequest={setCheckpointRepairRequest} setLicenseAck={setLicenseAck} terminalStatuses={terminalStatuses} tierLabel={tierLabel} toggleKeepLocalCopy={toggleKeepLocalCopy} unifiedMemoryGb={unifiedMemoryGb} ConvertedTierList={ConvertedTierList} ImportedCheckpointSurface={ImportedCheckpointSurface} LicenseGateNotice={LicenseGateNotice} ModelComponentDetails={ModelComponentDetails} ModelLicenseSummary={ModelLicenseSummary} ModelTierDownloadPanel={ModelTierDownloadPanel} WorkerProgressCard={WorkerProgressCard} />;
+    const linkedStatus = modelLinkedStatus(model, linkedStatuses);
+    const localCopies = localCopiesEnabled ? entriesForModel(modelCache, model.id) : [];
+    const cardDeletingItem = deletingItem === `model:${model.id}` || deletingItem.startsWith(`variant:${model.id}:`) || (linkedStatus && (deletingItem === `relink:${linkedStatus.checkpointId}` || deletingItem === `rescan:${linkedStatus.checkpointId}`)) ? deletingItem : "";
+    return <ModelCard
+      key={model.id ?? model.name}
+      model={model}
+      RETIRED_MODEL_CAPABILITIES={RETIRED_MODEL_CAPABILITIES}
+      audioCapabilityChips={audioCapabilityChips}
+      availabilityBadge={availabilityBadge}
+      blanketFloorGb={blanketFloorGb}
+      cacheBusyKey={localCopies.some((entry) => entry.cacheKey === cacheBusyKey) ? cacheBusyKey : ""}
+      cacheConvergenceStalled={cacheConvergenceStalled && localCopies.some(isTransitionalEntry)}
+      cacheEligibilityBadge={cacheEligibilityBadge}
+      canHoldLocalCopy={canHoldLocalCopy}
+      capabilityLabel={capabilityLabel}
+      convertJobs={convertJobsFor(model)}
+      createModelDownloadJob={createModelDownloadJob}
+      credentials={credentials}
+      deleteModel={stable.deleteModel}
+      deleteModelVariant={stable.deleteModelVariant}
+      deletingItem={cardDeletingItem}
+      describeEntryState={describeEntryState}
+      describeMissingLocalCopy={describeMissingLocalCopy}
+      downloadJobs={downloadJobsFor(model)}
+      downloadSizeText={downloadSizeText}
+      formatBytes={formatBytes}
+      gatedRepoUrl={gatedRepoUrl}
+      handleUpdateModel={stable.handleUpdateModel}
+      hasPresentCredential={hasPresentCredential}
+      isRecommendedModel={isRecommendedModel}
+      isTransitionalEntry={isTransitionalEntry}
+      licenseAcknowledged={licenseAcks[model.id] === true}
+      licenseComponentForModel={licenseComponentForModel}
+      lightestInstallableTier={lightestInstallableTier}
+      linkedCorrection={linkedCorrection}
+      linkedStatus={linkedStatus}
+      localCopiesEnabled={localCopiesEnabled}
+      macCapabilities={macCapabilities}
+      macModelBlock={macModelBlock}
+      memoryBackend={memoryBackend}
+      mlxStatusText={mlxStatusText}
+      localCopies={localCopies}
+      cacheKnown={Boolean(modelCache) && !modelCache.error}
+      modelProvenance={modelProvenance}
+      onCancelJob={stable.onCancelJob}
+      onConvertModel={onConvertModel}
+      onDeleteModel={onDeleteModel}
+      onDownloadModel={onDownloadModel}
+      onDownloadVariant={stable.onDownloadVariant}
+      onFreshDownloadJob={stable.onFreshDownloadJob}
+      onOpenQueue={stable.onOpenQueue}
+      onResumeDownloadJob={stable.onResumeDownloadJob}
+      orderedMatrixVariants={orderedMatrixVariants}
+      pendingUpdate={Boolean(pendingUpdate[model.id])}
+      refreshModelCache={refreshModelCache}
+      relinkLinkedModel={stable.relinkLinkedModel}
+      removeLocalCopy={stable.removeLocalCopy}
+      requiresLicenseAcknowledgment={requiresLicenseAcknowledgment}
+      rescanLinkedModel={stable.rescanLinkedModel}
+      setActiveTab={setActiveTab}
+      setActiveView={setActiveView}
+      setCheckpointRepairRequest={setCheckpointRepairRequest}
+      setLicenseAck={setLicenseAck}
+      terminalStatuses={terminalStatuses}
+      tierLabel={tierLabel}
+      toggleKeepLocalCopy={stable.toggleKeepLocalCopy}
+      unifiedMemoryGb={unifiedMemoryGb}
+      ConvertedTierList={ConvertedTierList}
+      ImportedCheckpointSurface={ImportedCheckpointSurface}
+      LicenseGateNotice={LicenseGateNotice}
+      ModelComponentDetails={ModelComponentDetails}
+      ModelLicenseSummary={ModelLicenseSummary}
+      ModelTierDownloadPanel={ModelTierDownloadPanel}
+      WorkerProgressCard={WorkerProgressCard}
+    />;
   }
 
   const loraEditKey = (lora) => `${lora.scope ?? "global"}:${lora.id}`;
@@ -1298,8 +1307,40 @@ export function ModelManagerScreen() {
   }
 
   function renderLoraRow(lora) {
-    return <LoraRow key={lora.id ?? lora.name} lora={lora} cancelEditLora={cancelEditLora} deleteLora={deleteLora} deletingItem={deletingItem} editingLora={editingLora} families={families} loraDownloadJobsFor={loraDownloadJobsFor} loraEditDraft={loraEditDraft} loraEditError={loraEditError} loraEditKey={loraEditKey} loraEditSuggestions={loraEditSuggestions} loraHasResolvableFamily={loraHasResolvableFamily} onCancelJob={onCancelJob} onDeleteLora={onDeleteLora} onDownloadLora={onDownloadLora} onOpenQueue={onOpenQueue} onUpdateLora={onUpdateLora} saveEditLora={saveEditLora} savingLora={savingLora} setLoraEditDraft={setLoraEditDraft} startEditLora={startEditLora} terminalStatuses={terminalStatuses} KeywordTagEditor={KeywordTagEditor} WorkerProgressCard={WorkerProgressCard} />;
+    const isEditing = editingLora === loraEditKey(lora);
+    const ownDeleteKey = `lora:${lora.scope ?? "global"}:${lora.id}`;
+    return <LoraRow
+      key={lora.id ?? lora.name}
+      lora={lora}
+      cancelEditLora={stable.cancelEditLora}
+      deleteLora={stable.deleteLora}
+      deletingItem={deletingItem === ownDeleteKey ? deletingItem : ""}
+      isEditing={isEditing}
+      families={families}
+      downloadJob={loraDownloadJobsFor(lora).find((job) => !terminalStatuses.has(job.status))}
+      loraEditDraft={isEditing ? loraEditDraft : null}
+      loraEditError={isEditing ? loraEditError : ""}
+      loraEditSuggestions={isEditing ? loraEditSuggestions : null}
+      loraHasResolvableFamily={loraHasResolvableFamily}
+      onCancelJob={stable.onCancelJob}
+      onDeleteLora={onDeleteLora}
+      onDownloadLora={onDownloadLora}
+      onOpenQueue={stable.onOpenQueue}
+      onUpdateLora={onUpdateLora}
+      saveEditLora={stable.saveEditLora}
+      savingLora={isEditing && savingLora}
+      setLoraEditDraft={setLoraEditDraft}
+      startEditLora={stable.startEditLora}
+      KeywordTagEditor={KeywordTagEditor}
+      WorkerProgressCard={WorkerProgressCard}
+    />;
   }
+
+  const stable = useStableActions({
+    onCancelJob, onResumeDownloadJob, onFreshDownloadJob, onDownloadVariant, onOpenQueue,
+    deleteModel, deleteModelVariant, deleteLora, handleUpdateModel, relinkLinkedModel, rescanLinkedModel,
+    removeLocalCopy, toggleKeepLocalCopy, startEditLora, cancelEditLora, saveEditLora, importLora,
+  });
 
   // --- Tabbed interface derivation (epic 10309) ---
   const query = search.trim().toLowerCase();
@@ -1426,9 +1467,9 @@ export function ModelManagerScreen() {
           families={families}
           macCapabilities={macCapabilities}
           models={models}
-          onCancelJob={onCancelJob}
+          onCancelJob={stable.onCancelJob}
           onImportModel={onImportModel}
-          onOpenQueue={onOpenQueue}
+          onOpenQueue={stable.onOpenQueue}
           // Relink / forget / rescan from inside the panel change the SAME linked statuses the
           // catalog cards render; without this the cards keep saying "Needs relink" after the
           // panel has already fixed it.
@@ -1579,13 +1620,30 @@ export function ModelManagerScreen() {
       {isLoraTab ? (
         <div className="models-tab-panel">
           {/* Import LoRA — same accent-band treatment as the Recommended band. */}
-          <LoraImportPanel importLora={importLora} importForm={importForm} setImportForm={setImportForm} importingLora={importingLora} activeProject={activeProject} families={families} showBaseModelSelect={showBaseModelSelect} ltxBaseModelRequired={ltxBaseModelRequired} baseModelOptions={baseModelOptions} isFileImport={isFileImport} fileInputKey={fileInputKey} showSecondaryFileSlot={showSecondaryFileSlot} importDisabled={importDisabled} moeMissingSecondary={moeMissingSecondary} importMessage={importMessage} KeywordTagEditor={KeywordTagEditor} />
+          <LoraImportPanel
+            importLora={stable.importLora}
+            importForm={importForm}
+            setImportForm={setImportForm}
+            importingLora={importingLora}
+            activeProject={activeProject}
+            families={families}
+            showBaseModelSelect={showBaseModelSelect}
+            ltxBaseModelRequired={ltxBaseModelRequired}
+            baseModelOptions={baseModelOptions}
+            isFileImport={isFileImport}
+            fileInputKey={fileInputKey}
+            showSecondaryFileSlot={showSecondaryFileSlot}
+            importDisabled={importDisabled}
+            moeMissingSecondary={moeMissingSecondary}
+            importMessage={importMessage}
+            KeywordTagEditor={KeywordTagEditor}
+          />
           {localLoraImportJobs.length ? (
             <div className="lora-import-progress">
               <strong>LoRA imports in progress</strong>
               <div className="local-job-stack">
                 {localLoraImportJobs.map((job) => (
-                  <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                  <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={stable.onOpenQueue} />
                 ))}
               </div>
             </div>

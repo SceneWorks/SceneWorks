@@ -1,6 +1,6 @@
 import React from "react";
 
-export function LinkedLibraryStatus({ model, linkedFix, linkedStatus, deletingItem, relinkLinkedModel, rescanLinkedModel }) {
+export const LinkedLibraryStatus = React.memo(function LinkedLibraryStatus({ model, linkedFix, linkedStatus, deletingItem, relinkLinkedModel, rescanLinkedModel }) {
   return (
           <div
             aria-label={`${model.name ?? model.id} ${linkedFix.headline}`}
@@ -19,4 +19,4 @@ export function LinkedLibraryStatus({ model, linkedFix, linkedStatus, deletingIt
             </button>
           </div>
   );
-}
+});
