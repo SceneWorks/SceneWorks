@@ -151,10 +151,7 @@ const TRANSFORM_SEAM_MESSAGES: SeamMessages = SeamMessages {
 /// the transform thread (its own eviction of a resident transform runs from async code), so this
 /// cannot deadlock.
 fn evict_resident_generator_before_transform_load() -> WorkerResult<()> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         let evicted = crate::generator_cache::evict_cached_generator_blocking()?;
         if evicted {

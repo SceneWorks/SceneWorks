@@ -17,10 +17,7 @@
 //! the result is scale-free and round-trips through `generate_with_kps` (which draws
 //! `kps_norm · side` on a square canvas after letterboxing the reference the same way).
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -368,10 +365,7 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
 /// Run a `kps_extract` job: SCRFD landmark extraction from one image → normalized 5-point
 /// preset (or an explicit `detected: false` result on no face). Native-MLX SCRFD on Mac (sc-4433);
 /// the candle SCRFD/ArcFace stack off-Mac (sc-5497, epic 5482) — the result is backend-identical.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_kps_extract_job(
     api: &ApiClient,
     settings: &Settings,

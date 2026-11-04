@@ -21,10 +21,7 @@ fn ort_upscaler_cache_key_includes_factor_and_resolved_path() {
 }
 // `Rgb`/`RgbImage` back the Real-ESRGAN tiling/crop tests + the off-Mac ort smoke (the `ort` path,
 // macOS + the candle lane) AND the SeedVR2 real-weight smoke (Mac MLX + the candle lane).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use image::{Rgb, RgbImage};
 use serde_json::json;
 
@@ -53,10 +50,7 @@ fn image_upscale_factor_accepts_2_and_4_rejects_others() {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn manifest_onnx_resource_extracts_repo_file() {
     let entry = json!({
@@ -114,10 +108,7 @@ fn upscale_target_dimensions_are_bounded_before_allocation() {
 
 /// Resolve the locally-cached `numz/SeedVR2_comfyUI` checkpoint dir (env override or the HF cache),
 /// so the smoke below can run on real weights without a download. `None` ⇒ skip.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn cached_seedvr2_checkpoint() -> Option<std::path::PathBuf> {
     if let Ok(pinned) = std::env::var("SCENEWORKS_SEEDVR2_CHECKPOINT") {
         let dir = std::path::PathBuf::from(pinned);
@@ -140,10 +131,7 @@ fn cached_seedvr2_checkpoint() -> Option<std::path::PathBuf> {
 /// end). Gated on the checkpoint being present (skips in CI, which has no weights), mirroring the
 /// family worker E2E smokes. Set `SCENEWORKS_SEEDVR2_CHECKPOINT` to the ckpt dir and run with
 /// `cargo test -p sceneworks-worker --features backend-candle -- --ignored seedvr2_upscale_real_weight_smoke`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test]
 #[ignore = "real-weight: needs the cached numz/SeedVR2_comfyUI checkpoint (~7 GB) + the seedvr2 backend (MLX on Mac / candle on Windows)"]
 async fn seedvr2_upscale_real_weight_smoke() {
@@ -383,6 +371,7 @@ fn parse_dataset_upscale_items_reject_missing_dataset_root() {
 fn dataset_upscale_output_path_rejects_traversal_ids() {
     let dir = tempfile::tempdir().expect("tempdir");
     let project_path = dir.path().join("project");
+    std::fs::create_dir(&project_path).expect("project root exists before dataset output");
     // itemId traversal
     let rel = format!("training/datasets/ds-1/upscaled/{}.png", "../../escaped");
     let error =
@@ -402,7 +391,8 @@ fn dataset_upscale_output_path_rejects_traversal_ids() {
     // valid ids resolve inside the project tree
     let rel = "training/datasets/ds-1/upscaled/item_1.png";
     let abs = crate::safe_project_path(&project_path, rel).expect("valid path resolves");
-    assert!(abs.starts_with(&project_path), "{abs:?}");
+    let canonical_project = project_path.canonicalize().expect("project root resolves");
+    assert_eq!(abs, canonical_project.join(rel));
     assert!(
         abs.ends_with("training/datasets/ds-1/upscaled/item_1.png"),
         "{abs:?}"
@@ -617,10 +607,7 @@ fn dataset_repoint_body_maps_records_with_a_null_asset_id() {
 /// sc-17633 (epic 17625) — the Real-ESRGAN ONNX resolves from the HF cache and can no longer
 /// download. Before this, `ensure_onnx` fetched ~67 MB per factor mid-upscale into
 /// `<data_dir>/cache/upscale/`, a destination the Models screen can neither size nor delete.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod resolve_onnx_tests {
     use super::*;
 
@@ -754,10 +741,7 @@ mod resolve_onnx_tests {
 /// Neither legacy destination exists on the machine this was written on, so the AC10 fallbacks are
 /// exercised against STAGED fixtures (`stage_legacy`) rather than real bytes; what they pin is the
 /// resolution ORDER and the whole-pair-per-root rule, which is what an upgrade depends on.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod resolve_seedvr2_tests {
     use super::*;
 

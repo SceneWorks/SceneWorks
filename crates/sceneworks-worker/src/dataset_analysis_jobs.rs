@@ -8,41 +8,20 @@
 
 use super::*;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CLIP_TEXT_EMBEDDER_ID: &str = "clip_vit_l14_text";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CLIP_EMBEDDER_MODEL: &str = "openai/clip-vit-large-patch14";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const EMBEDDING_SPACE: &str = "clip-vit-l14";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CANCEL_MESSAGE: &str = "Dataset analysis canceled by user.";
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{CancelFlag, Image, LoadSpec, WeightsSource};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct AnalysisItem {
     image_path: PathBuf,
@@ -51,10 +30,7 @@ struct AnalysisItem {
     caption_hash: String,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct AnalysisEmbeddingRecord {
     content_hash: String,
@@ -63,10 +39,7 @@ struct AnalysisEmbeddingRecord {
     text_embedding: Option<Vec<f32>>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_dataset_analysis_job(
     api: &ApiClient,
     settings: &Settings,
@@ -243,10 +216,7 @@ pub(crate) async fn run_dataset_analysis_job(
     Ok(())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn analysis_embedding_records_payload(records: &[AnalysisEmbeddingRecord]) -> Vec<Value> {
     records
         .iter()
@@ -261,10 +231,7 @@ fn analysis_embedding_records_payload(records: &[AnalysisEmbeddingRecord]) -> Ve
         .collect()
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn analysis_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<AnalysisItem>> {
     parse_dataset_items(
         settings,
@@ -293,10 +260,7 @@ fn analysis_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec
     )
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn load_analysis_image(path: &Path) -> WorkerResult<Image> {
     let decoded = crate::image_decode::decode_image_any(path)
         .map_err(|error| {
@@ -310,10 +274,7 @@ fn load_analysis_image(path: &Path) -> WorkerResult<Image> {
     })
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn analysis_result(dataset_id: &str, embedded_count: usize, stored: Value) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("embedder".to_owned(), json!(CLIP_EMBEDDER_ID));
@@ -327,7 +288,7 @@ fn analysis_result(dataset_id: &str, embedded_count: usize, stored: Value) -> Js
     result
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_dataset_analysis_job(
     _api: &ApiClient,
     _settings: &Settings,

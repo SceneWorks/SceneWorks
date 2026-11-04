@@ -7,11 +7,11 @@ publish = false
 autobins = false
 
 [dependencies]
-serde_json = "1.0"
+serde_json = { workspace = true }
 # Shared by both lanes: the PuLID identity bundle is named by content digest in every record, and
 # sc-22729's InstantID artifact digest is the worker's own sha256 over the ordered artifact paths,
 # which BOTH adapters compute. Neither is macOS-only.
-sha2 = "0.10"
+sha2 = { workspace = true }
 # sc-22738: the MLX LTX-2.3 arm admits through the worker's OWN projection — the shared floor
 # weights arithmetic, the generic activation allowance and the unified-memory reserve are declared
 # once in `sceneworks_core::memory_anchor` and read by both the worker's fit gate and this adapter,

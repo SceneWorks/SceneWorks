@@ -1341,27 +1341,7 @@ pub(crate) fn cpu_worker_id(base_worker_id: &str) -> String {
     format!("{base}-cpu")
 }
 
-pub(crate) fn slugify_worker_id_part(value: &str, fallback: &str) -> String {
-    let mut output = String::new();
-    let mut previous_dash = false;
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
-            output.push(character);
-            previous_dash = false;
-        } else if !previous_dash && !output.is_empty() {
-            output.push('-');
-            previous_dash = true;
-        }
-    }
-    while output.ends_with('-') {
-        output.pop();
-    }
-    if output.is_empty() {
-        fallback.to_owned()
-    } else {
-        output
-    }
-}
+pub(crate) use sceneworks_core::slug::slugify_worker_id_part;
 
 #[cfg(all(test, target_os = "macos"))]
 mod mlx_utilization_tests {

@@ -11,10 +11,7 @@ use std::sync::OnceLock;
 use gen_core::core_llm::TextLlmRegistration;
 use gen_core::core_llm::{LoadSpec as TextLoadSpec, ModelRequirements, TextLlm, TextLlmRegistry};
 use gen_core::{AudioTransform, Generator, LoadSpec, ProviderRegistry, VoiceEmbedder};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{Captioner, ImageEmbedder, ModelRegistration, TextEmbedder, Trainer};
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -22,13 +19,10 @@ use runtime_cuda as platform_runtime;
 #[cfg(target_os = "macos")]
 use runtime_macos as platform_runtime;
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) use platform_runtime::audio_providers;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn catalog() -> &'static platform_runtime::RuntimeCatalog {
     static CATALOG: OnceLock<platform_runtime::RuntimeCatalog> = OnceLock::new();
     CATALOG.get_or_init(|| {
@@ -40,7 +34,7 @@ fn catalog() -> &'static platform_runtime::RuntimeCatalog {
 
 /// The bundled audio preparer used by CPU-only consumer fixtures. The production audio registry
 /// and this preparer come from the same pinned platform catalog.
-#[cfg(all(test, unix, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, unix, native_lane))]
 pub(crate) fn audio_preparers() -> &'static gen_core::core_llm::SnapshotPreparerRegistry {
     catalog()
         .audio_preparers()
@@ -53,36 +47,24 @@ pub(crate) fn audio_preparers() -> &'static gen_core::core_llm::SnapshotPreparer
 /// worker-side artifact schema identical to `runtime-catalog::RuntimeCatalogSnapshot::to_json`
 /// without defining a second copy of the inference contract in SceneWorks.
 pub(crate) fn capability_snapshot_json() -> Option<serde_json::Value> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         Some(catalog().snapshot().to_json())
     }
 
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         None
     }
 }
 
 pub(crate) fn media() -> &'static ProviderRegistry {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         catalog().media()
     }
 
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         static EMPTY: OnceLock<ProviderRegistry> = OnceLock::new();
         EMPTY.get_or_init(|| {
@@ -97,18 +79,12 @@ pub(crate) fn media() -> &'static ProviderRegistry {
 /// Kept separate from the process catalog so each platform dumper can construct its contract-only
 /// inventory without loading model weights.
 pub(crate) fn memory_contract_surface_registry() -> gen_core::Result<ProviderRegistry> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         platform_runtime::memory_contract_surface_registry()
     }
 
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         gen_core::ProviderRegistryBuilder::new().build()
     }
@@ -130,18 +106,12 @@ pub(crate) fn trainer_descriptor(id: &str) -> Option<gen_core::TrainerDescriptor
 /// links it without any feature wiring here. The non-native desktop build has no catalog at all, so
 /// it returns `None` (an audio job never routes there — the capability is never advertised).
 pub(crate) fn audio() -> Option<&'static ProviderRegistry> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         catalog().audio()
     }
 
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         None
     }
@@ -200,10 +170,7 @@ pub(crate) fn audio_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
 
 /// `candle_audio_yue2`'s public API beyond the registry (sc-22999): run verification, the run layout
 /// constants. Present exactly when this build links the audio lane.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) use platform_runtime::audio_providers::candle_audio_yue2;
 
 /// Verify a published YuE2 run directory — every artifact's size and SHA-256, and, when
@@ -213,17 +180,11 @@ pub(crate) fn verify_yue2_run(
     dir: &std::path::Path,
     expected: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         candle_audio_yue2::run::verify_run(dir, expected).map_err(|error| error.to_string())
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         let _ = (dir, expected);
         Err("no audio lane is linked in this runtime build; a YuE2 run cannot be verified".into())
@@ -235,10 +196,7 @@ pub(crate) fn verify_yue2_run(
 pub(crate) fn prepare_audio_snapshot(
     spec: &gen_core::core_llm::PrepareSpec,
 ) -> Result<gen_core::core_llm::PrepareReport, String> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         catalog()
             .audio_preparers()
@@ -246,10 +204,7 @@ pub(crate) fn prepare_audio_snapshot(
             .prepare_snapshot(spec)
             .map_err(|error| error.to_string())
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         let _ = spec;
         Err("no audio lane is linked in this runtime build; the tier cannot be derived".into())
@@ -297,18 +252,12 @@ pub(crate) fn load_voice_embedder(
 }
 
 pub(crate) fn text() -> &'static TextLlmRegistry {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         catalog().text()
     }
 
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         static EMPTY: OnceLock<TextLlmRegistry> = OnceLock::new();
         EMPTY.get_or_init(|| {
@@ -319,10 +268,7 @@ pub(crate) fn text() -> &'static TextLlmRegistry {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn generators() -> impl ExactSizeIterator<Item = &'static ModelRegistration> {
     media().generators()
 }
@@ -332,10 +278,7 @@ pub(crate) fn generators() -> impl ExactSizeIterator<Item = &'static ModelRegist
 /// so the generation harness can resolve a model's coRequisite-provisioned components before building
 /// its `LoadSpec`. Dormant until an image provider advertises `required_components` (SDXL, sc-13682);
 /// every current media descriptor advertises `&[]`, so the seam that reads this is a no-op today.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn media_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
     media()
         .generators()
@@ -343,13 +286,7 @@ pub(crate) fn media_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
         .find(|descriptor| descriptor.id == id)
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 std::thread_local! {
     static TEST_MEDIA_ENCODER_CONTRACT: std::cell::Cell<
         Option<(&'static [&'static str], gen_core::EncoderContract)>
@@ -358,37 +295,19 @@ std::thread_local! {
 
 /// Scoped compact contract override for tests that exercise the production sealed-source path.
 /// Production builds cannot install an override, and the guard restores a nested predecessor.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 pub(crate) struct TestMediaEncoderContractGuard {
     previous: Option<(&'static [&'static str], gen_core::EncoderContract)>,
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 impl Drop for TestMediaEncoderContractGuard {
     fn drop(&mut self) {
         TEST_MEDIA_ENCODER_CONTRACT.set(self.previous);
     }
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 pub(crate) fn scoped_test_media_encoder_contract(
     ids: &'static [&'static str],
     contract: gen_core::EncoderContract,
@@ -401,10 +320,7 @@ pub(crate) fn scoped_test_media_encoder_contract(
 /// Resolve the provider-owned text-encoder contract for an ordinary generator or an explicitly
 /// registered bespoke/composed route. Missing is fail-closed: consumers must never infer a sibling
 /// base id or hardcode a family contract.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn media_encoder_contract(id: &str) -> Option<gen_core::EncoderContract> {
     let production_contract = media().provider_encoder_contract(id)?;
     #[cfg(test)]
@@ -438,13 +354,7 @@ pub(crate) fn load_transform(
 }
 
 /// The registered descriptor of a media transform, if this build links one.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 pub(crate) fn transform_descriptor(id: &str) -> Option<gen_core::TransformDescriptor> {
     media()
         .transforms()
@@ -455,10 +365,7 @@ pub(crate) fn transform_descriptor(id: &str) -> Option<gen_core::TransformDescri
 /// Resolve one validated imported source shape and operation to the ordinary provider descriptor
 /// that will load it. Missing is an explicit unsupported answer; callers must not union sibling
 /// routes by family.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn imported_model_descriptor(
     family: &str,
     source: gen_core::ImportedModelSource,
@@ -479,10 +386,7 @@ pub(crate) fn imported_model_descriptor(
 ///
 /// This is what makes a family's eligible backends, dialect source shapes, component topology and
 /// capability policy PLAN truth rather than a per-lane constant in this repository (E2/E5).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn checkpoint_adapter(
     plan_family: &str,
 ) -> Option<&'static gen_core::CheckpointAdapterRegistration> {
@@ -504,26 +408,17 @@ pub(crate) const CHECKPOINT_BACKEND: gen_core::CheckpointBackend = gen_core::Che
 pub(crate) const CHECKPOINT_BACKEND: gen_core::CheckpointBackend =
     gen_core::CheckpointBackend::Candle;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn load_trainer(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Trainer>> {
     media().load_trainer(id, spec)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn load_captioner(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Captioner>> {
     media().load_captioner(id, spec)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn load_image_embedder(
     id: &str,
     spec: &LoadSpec,
@@ -531,10 +426,7 @@ pub(crate) fn load_image_embedder(
     media().load_image_embedder(id, spec)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn load_text_embedder(
     id: &str,
     spec: &LoadSpec,
@@ -572,13 +464,7 @@ pub(crate) fn load_for_model_with(
 /// own `rung` when it states one, else the lane default. That default is not respelled here
 /// (sc-22738) — both sides read `config/anchor-lane-default-strategy.json`, so a change to either
 /// side that this does not follow is a red here.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementing_its_rung(
     lane: &str,
     expected_backend: gen_core::MemoryBackend,
@@ -863,7 +749,7 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn every_shipped_partial_component_floor_table_uses_the_provider_entry_rule() {
         use gen_core::Quant;
@@ -913,10 +799,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn test_encoder_contract_override_cannot_advertise_a_missing_route() {
         let contract = super::media_encoder_contract("qwen_image")
@@ -932,10 +815,7 @@ mod tests {
 
         // The admitted text-LLM roster is an inference-pin fact: assert the exact id set rather
         // than a bare count so the next roster move names itself in the failure output.
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
+        #[cfg(native_lane)]
         let text_ids: Vec<String> = {
             let mut ids: Vec<String> = super::text()
                 .registrations()
@@ -973,10 +853,7 @@ mod tests {
             );
         }
 
-        #[cfg(not(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        )))]
+        #[cfg(not(native_lane))]
         {
             assert_eq!(media_count, 0);
             assert_eq!(super::text().registrations().len(), 0);

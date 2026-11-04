@@ -179,20 +179,11 @@ pub(crate) fn relative_string(root: &Path, path: &Path) -> ProjectStoreResult<St
         .replace('\\', "/"))
 }
 
-pub(crate) fn is_safe_relative_path(relative_path: &str) -> bool {
-    !relative_path.trim().is_empty()
-        && !relative_path.contains('\\')
-        && Path::new(relative_path)
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
+pub fn is_safe_relative_path(relative_path: &str) -> bool {
+    crate::safe_path::relative_normal_components(relative_path).is_ok()
 }
 
-pub(crate) fn is_safe_id(value: &str) -> bool {
-    !value.trim().is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-}
+pub use crate::ids::{is_safe_id, is_safe_id_with_max};
 
 /// Required string field; whitespace and empty strings are validated by each store's domain rules.
 pub(crate) fn required_str<'a>(value: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
@@ -231,16 +222,8 @@ pub(crate) fn optional_f64(value: &Value, key: &str) -> Option<f64> {
 /// `getrandom` and hex-encodes in Rust — no connection, no SQLite failure
 /// surface.
 pub(crate) fn random_hex(bytes: usize) -> ProjectStoreResult<String> {
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut buffer = vec![0u8; bytes];
-    getrandom::fill(&mut buffer)
-        .map_err(|error| ProjectStoreError::Io(std::io::Error::other(error.to_string())))?;
-    let mut hex = String::with_capacity(bytes * 2);
-    for byte in buffer {
-        hex.push(HEX_DIGITS[(byte >> 4) as usize] as char);
-        hex.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    Ok(hex)
+    crate::hashing::random_hex(bytes)
+        .map_err(|error| ProjectStoreError::Io(std::io::Error::other(error.to_string())))
 }
 
 /// Deserialize a single string into one of the crate's [`StringEnum`] types.

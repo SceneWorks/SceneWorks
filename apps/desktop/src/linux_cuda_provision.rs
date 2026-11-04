@@ -7,6 +7,7 @@
 
 use std::fs;
 #[cfg(test)]
+#[cfg(test)]
 use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -190,19 +191,10 @@ fn invalidate_markers(root: &Path) {
 }
 
 #[cfg(test)]
-fn hash_reader(mut reader: impl Read) -> Result<String, String> {
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| format!("read for sha256: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+fn hash_reader(reader: impl Read) -> Result<String, String> {
+    sceneworks_core::hashing::sha256_reader(reader)
+        .map(|(digest, _)| digest)
+        .map_err(|error| format!("read for sha256: {error}"))
 }
 
 fn extract_shared_objects(

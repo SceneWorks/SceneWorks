@@ -27,7 +27,6 @@ use serde_json::{json, Value};
 
 use crate::contracts::{string_enum, ContractNumber, ExtraFields, JsonObject};
 use crate::dataset_quality::{CachedTier0Scalars, QualityAck};
-use crate::store_util::is_safe_relative_path;
 
 pub mod flux3;
 pub mod iris;
@@ -3994,16 +3993,23 @@ fn resolve_item_path(
     dataset_root: &Path,
     relative_path: &str,
 ) -> Result<String, TrainingPlanError> {
-    if !is_safe_relative_path(relative_path) {
+    // Dataset items are portable strings; native export filenames use a separate policy.
+    if crate::safe_path::relative_normal_components(relative_path).is_err() {
         return Err(TrainingPlanError::InvalidConfig(
             "Dataset item path must be relative to the dataset root.".to_owned(),
         ));
     }
-    let mut path = dataset_root.to_path_buf();
-    for component in Path::new(relative_path).components() {
-        path.push(component);
-    }
-    Ok(path.display().to_string())
+    crate::safe_path::confine_under(
+        dataset_root,
+        relative_path,
+        crate::safe_path::Confinement::Lexical,
+    )
+    .map(|path| path.display().to_string())
+    .map_err(|_| {
+        TrainingPlanError::InvalidConfig(
+            "Dataset item path must be relative to the dataset root.".to_owned(),
+        )
+    })
 }
 
 /// The target limit naming how many ORDERED reference images one instruction-edit item may carry
@@ -5307,6 +5313,10 @@ mod tests {
             resolve_item_path(root, "/absolute.png"),
             Err(TrainingPlanError::InvalidConfig(_))
         ));
+        assert!(
+            resolve_item_path(root, "images\\photo.png").is_err(),
+            "persisted dataset items use portable separators"
+        );
         // A safe relative path resolves under the dataset root using the host separator (the plan is
         // built + consumed on the same machine). Build the expectation the same way so the assertion
         // holds on Windows too — a hardcoded `/dataset/images/photo.png` only matches on `/`-sep hosts.

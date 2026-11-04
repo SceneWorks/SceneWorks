@@ -829,17 +829,14 @@ pub(crate) fn bind_ideogram_cache_execution(
     Ok(())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn declared_component_floors(engine_id: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
     crate::inference_runtime::media_descriptor(engine_id)
         .map(|descriptor| descriptor.capabilities.component_precision_floors)
         .unwrap_or(&[])
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 fn declared_component_floors(_: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
     &[]
 }
@@ -6282,10 +6279,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn mage_numeric_tiers_bind_only_the_active_q4_precision_floors() {
         for engine_id in [

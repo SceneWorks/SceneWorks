@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path as FsPath, PathBuf};
+use std::path::{Path as FsPath, PathBuf};
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, State};
@@ -33,7 +33,6 @@ use sceneworks_worker::catalog_parquet_scanner::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -1011,19 +1010,9 @@ fn verified_cached_source(
     relative: &str,
     record: &CatalogRecord,
 ) -> Result<AcquiredMaterializationSource, ApiError> {
-    let path = FsPath::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(ApiError::conflict("Catalog cache path was invalid"));
-    }
-    let canonical = fs::canonicalize(catalog_root.join(path))
-        .map_err(|_| ApiError::conflict("Catalog cache image was unavailable"))?;
-    if !canonical.starts_with(catalog_root) || !canonical.is_file() {
-        return Err(ApiError::conflict("Catalog cache path escaped its catalog"));
-    }
+    let canonical = Catalog::resolve_local_image_under(catalog_root, relative).map_err(|_| {
+        ApiError::conflict("Catalog cache image was unavailable or escaped its catalog")
+    })?;
     let byte_count = fs::metadata(&canonical)
         .map_err(|_| ApiError::conflict("Catalog cache image was unavailable"))?
         .len();
@@ -1556,10 +1545,7 @@ fn canonical_json(value: Value) -> Value {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 pub(crate) async fn review_catalog_record(
@@ -1660,19 +1646,14 @@ pub(crate) async fn catalog_record_thumbnail(
                     .and_then(Value::as_str)
             })
             .ok_or_else(|| CatalogError::NotFound("Catalog thumbnail was not found".to_owned()))?;
-        let root = std::fs::canonicalize(catalog.root())?;
-        let path = std::fs::canonicalize(catalog.root().join(relative)).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                CatalogError::NotFound("Catalog thumbnail was not found".to_owned())
-            } else {
-                CatalogError::Io(error)
-            }
-        })?;
-        if !path.starts_with(&root) || !path.is_file() {
-            return Err(CatalogError::InvalidCatalog(
-                "Catalog thumbnail escapes its catalog".to_owned(),
-            ));
-        }
+        let path =
+            Catalog::resolve_local_image_under(catalog.root(), relative).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    CatalogError::NotFound("Catalog thumbnail was not found".to_owned())
+                } else {
+                    CatalogError::Io(error)
+                }
+            })?;
         let metadata = std::fs::metadata(&path)?;
         if metadata.len() > MAX_THUMBNAIL_BYTES {
             return Err(CatalogError::InvalidCatalog(

@@ -2,7 +2,6 @@ use super::*;
 use crate::model_artifacts::{ArtifactFile, ResolvedBundleClosure, ResolvedBundleFileLocation};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
-use std::path::Component;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -509,11 +508,7 @@ fn confined_parent(
     use rustix::fs::{mkdirat, openat, Mode, OFlags};
     use std::os::unix::fs::OpenOptionsExt;
 
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
+    if crate::safe_path::path_normal_components(relative).is_err() {
         return Err(ResolvedCacheError::new(
             "materialized output path is not a confined relative path",
         ));
@@ -643,11 +638,7 @@ fn hard_link_confined(
 
 #[cfg(windows)]
 fn validate_confined_relative_path(relative: &Path) -> Result<(), ResolvedCacheError> {
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
+    if crate::safe_path::path_normal_components(relative).is_err() {
         return Err(ResolvedCacheError::new(
             "materialized output path is not a confined relative path",
         ));
