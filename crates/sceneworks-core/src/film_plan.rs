@@ -3261,47 +3261,21 @@ fn parse_plan_loras(contents: &str) -> Vec<PlanLoraEntry> {
 /// which makes [`lora_family_matches_model`] permissive there rather than refusing a pairing this
 /// side cannot judge. The video route's own compatibility gate still judges it at enqueue.
 ///
-/// Parsed ONCE ([`builtin_plan_loras`] does the same for the LoRA catalog): the embedded model
-/// manifest is a compile-time constant, and re-parsing it per call put a whole-catalog JSON parse
-/// inside [`plan_loras_for_partition`], which every shot's compile and every envelope offer runs.
+/// Reads the shared parsed builtin catalog; no per-shot JSON parse or independent model cache.
 pub fn model_lora_families(model_id: &str) -> Vec<String> {
-    static MODEL_LORA_FAMILIES: std::sync::OnceLock<BTreeMap<String, Vec<String>>> =
-        std::sync::OnceLock::new();
-    MODEL_LORA_FAMILIES
-        .get_or_init(|| {
-            let stripped = strip_jsonc_comments(embedded_manifest("builtin.models.jsonc"));
-            let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
-                return BTreeMap::new();
-            };
-            manifest
-                .get("models")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|model| {
-                    let id = model.get("id").and_then(Value::as_str)?.to_owned();
-                    let families = model
-                        .get("loraCompatibility")?
-                        .get("families")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect();
-                    Some((id, families))
-                })
-                .collect()
-        })
-        .get(model_id)
-        .cloned()
+    crate::builtin_manifests::builtin_model_entry(model_id)
+        .map(crate::lora_family::declared_model_lora_families)
         .unwrap_or_default()
 }
 
-/// Whether `lora`'s family is one catalog model `model_id` declares it can load. Permissive for a
-/// model the embedded catalog does not hold; see [`model_lora_families`].
+/// Apply the enqueue accepted-family gate over canonical families. The embedded catalog cannot
+/// judge custom/user-installed IDs, so those retain the established permissive planning behavior.
 pub fn lora_family_matches_model(lora: &PlanLoraEntry, model_id: &str) -> bool {
-    let families = model_lora_families(model_id);
-    families.is_empty() || families.contains(&lora.family)
+    let Some(model) = crate::builtin_manifests::builtin_model_entry(model_id) else {
+        return true;
+    };
+    let accepted = crate::lora_family::accepted_model_lora_families(model);
+    accepted.contains(&crate::lora_family::canonical_lora_family(&lora.family))
 }
 
 /// The partitions a plan declaring `plan_model_id` may ever dispatch as: the declared model, plus
@@ -3389,7 +3363,7 @@ fn validate_plan_loras(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
             ));
             continue;
         };
-        if !families.is_empty() && !families.contains(&lora.family) {
+        if !lora_family_matches_model(lora, &plan.model.id) {
             findings.push(PlanDiagnostic::plan(
                 "model.loras",
                 format!(
@@ -3397,7 +3371,11 @@ fn validate_plan_loras(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
                     lora.id,
                     lora.family,
                     plan.model.id,
-                    families.join(", ")
+                    if families.is_empty() {
+                        "no LoRA families".to_owned()
+                    } else {
+                        families.join(", ")
+                    }
                 ),
             ));
         }

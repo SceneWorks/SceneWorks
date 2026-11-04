@@ -163,16 +163,10 @@ pub(crate) async fn current_license_acknowledgment(
 }
 
 async fn catalog_entry(state: &AppState, model_id: &str) -> Result<Value, ApiError> {
-    model_catalog_snapshot(state)
+    crate::models::find_model_by_id(state, model_id)
         .await?
-        .iter()
-        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
-        .cloned()
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: format!("Model '{model_id}' is not in this catalog."),
-            context: None,
-            code: None,
+        .ok_or_else(|| {
+            crate::models::model_not_found(format!("Model '{model_id}' is not in this catalog."))
         })
 }
 

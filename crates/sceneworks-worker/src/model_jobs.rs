@@ -89,6 +89,7 @@ pub(crate) async fn run_model_download_job(
     // Hugging Face path before it reaches `HuggingFaceSnapshot::resolve`'s URL builder or the
     // `download_snapshot_into_cache` refs/snapshot joins below — the on-demand tier fetches already
     // gate this in `ensure_hf_files_cached`, but this user-facing entry point did not (sc-13583).
+    let repo = validate_hf_repo_id(repo)?;
     validate_hf_download_inputs(repo, revision, &files)?;
     // The worker is the trust boundary (jobs API is unauthenticated for local use), so a
     // client-supplied targetDir must be constrained to app-managed data/models the same way
@@ -388,6 +389,7 @@ pub(crate) async fn run_lora_download_job(
     // Trust-boundary validation for the LAN-exposed jobs API (epic 4484), mirroring
     // `run_model_download_job`: reject a path-escaping repo/revision/pattern before the URL builder
     // and the `download_snapshot_into_cache` refs/snapshot joins downstream (sc-13583).
+    let repo = validate_hf_repo_id(repo)?;
     validate_hf_download_inputs(repo, revision, &files)?;
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -5096,6 +5098,7 @@ pub(crate) async fn ensure_hf_files_cached(
     revision: &str,
     files: &[String],
 ) -> WorkerResult<Option<PathBuf>> {
+    let repo = validate_hf_repo_id(repo)?;
     validate_hf_download_inputs(repo, revision, files)?;
     let repo_dir = huggingface_repo_cache_path(&settings.data_dir, repo).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -5151,37 +5154,9 @@ pub(crate) fn validate_hf_download_inputs(
     Ok(())
 }
 
-fn validate_hf_repo_id(repo: &str) -> WorkerResult<()> {
-    let parts = safe_hf_path_parts(repo, "Hugging Face repo")?;
-    if parts.len() > 2 {
-        return Err(WorkerError::InvalidPayload(
-            "Hugging Face repo must be `name` or `namespace/name`.".to_owned(),
-        ));
-    }
-    for part in parts {
-        if !part.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        }) {
-            return Err(WorkerError::InvalidPayload(format!(
-                "Invalid Hugging Face repo `{repo}`: only letters, numbers, `.`, `_`, `-`, and one `/` separator are allowed."
-            )));
-        }
-        if part.starts_with('-')
-            || part.starts_with('.')
-            || part.ends_with('-')
-            || part.ends_with('.')
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "Invalid Hugging Face repo `{repo}`: path components cannot start or end with `-` or `.`."
-            )));
-        }
-        if part.contains("--") || part.contains("..") {
-            return Err(WorkerError::InvalidPayload(format!(
-                "Invalid Hugging Face repo `{repo}`: path components cannot contain `--` or `..`."
-            )));
-        }
-    }
-    Ok(())
+fn validate_hf_repo_id(repo: &str) -> WorkerResult<&str> {
+    sceneworks_core::hf_repo_id::parse(repo)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_owned()))
 }
 
 fn validate_hf_revision(revision: &str) -> WorkerResult<()> {
@@ -5296,7 +5271,9 @@ pub(crate) async fn run_lora_import_job(
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     validate_lora_import_digest_contract(&job.payload)?;
-    let repo = optional_payload_string(&job.payload, "repo");
+    let repo = optional_payload_string(&job.payload, "repo")
+        .map(validate_hf_repo_id)
+        .transpose()?;
     let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
     let target_name = optional_payload_string(&job.payload, "loraId")
@@ -5349,6 +5326,7 @@ pub(crate) async fn run_lora_import_job(
         // Trust-boundary validation for the LAN-exposed jobs API (epic 4484): a LoRA HF import takes a
         // caller-supplied repo/revision/files and resolves them into download URLs and on-disk paths,
         // so reject anything that could escape the intended Hugging Face path (sc-13583).
+        let repo = validate_hf_repo_id(repo)?;
         validate_hf_download_inputs(repo, revision, &files)?;
         let snapshot =
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
@@ -6807,7 +6785,9 @@ pub(crate) async fn run_model_import_job(
         return run_linked_checkpoint_import_job(api, settings, job, &root_id, &relative_path)
             .await;
     }
-    let repo = optional_payload_string(&job.payload, "repo");
+    let repo = optional_payload_string(&job.payload, "repo")
+        .map(validate_hf_repo_id)
+        .transpose()?;
     let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
     let target_name = optional_payload_string(&job.payload, "modelId")
@@ -6879,6 +6859,7 @@ pub(crate) async fn run_model_import_job(
         // Trust-boundary validation for the LAN-exposed jobs API (epic 4484): a model HF import takes a
         // caller-supplied repo/revision/files and resolves them into download URLs and on-disk paths,
         // so reject anything that could escape the intended Hugging Face path (sc-13583).
+        let repo = validate_hf_repo_id(repo)?;
         validate_hf_download_inputs(repo, revision, &files)?;
         let snapshot =
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
