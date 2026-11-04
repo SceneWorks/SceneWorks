@@ -15,6 +15,8 @@ fs2 = { workspace = true }
 futures-util = { workspace = true, default-features = true }
 glob = { workspace = true }
 httpdate = "1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["service", "tokio"] }
 image = { workspace = true }
 parking_lot = { workspace = true }
 mime_guess = { workspace = true, optional = true }
@@ -43,7 +45,7 @@ tracing = { workspace = true }
 trash = { workspace = true }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors"] }
-tower = { workspace = true }
+tower = { workspace = true, features = ["limit"] }
 uuid = { workspace = true }
 
 # Unix-only: parent-death watchdog liveness probe (safe kill(pid, None) wrapper).

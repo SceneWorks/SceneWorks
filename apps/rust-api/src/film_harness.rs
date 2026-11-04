@@ -2144,27 +2144,9 @@ fn persist_record(
 /// controller killed during a write must leave the PREVIOUS record intact rather than a truncated
 /// file no resume can parse.
 ///
-/// The temp file is `sync_all`'d before the rename, so the rename cannot be ordered ahead of the
-/// data it publishes: without it a power loss can leave the record's NAME pointing at a file whose
-/// contents never reached the disk. The directory entry itself is not fsynced, so a power loss can
-/// still lose the rename and leave the previous record in place — which is the safe direction, and
-/// what a resume reconciles against the API anyway.
+/// The shared writer syncs both staged bytes and the published directory entry.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), HarnessError> {
-    use std::io::Write;
-    let temp = path.with_extension(format!(
-        "{}tmp",
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .map(|extension| format!("{extension}."))
-            .unwrap_or_default()
-    ));
-    {
-        let mut file = std::fs::File::create(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&temp, path)?;
-    Ok(())
+    Ok(sceneworks_core::fsutil::write_atomic(path, bytes)?)
 }
 
 /// Read, validate and (optionally) check the documents against the live catalog without creating

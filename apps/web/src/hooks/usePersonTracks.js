@@ -1,7 +1,6 @@
+import { useProjectScopedList } from "./useProjectScopedList.js";
+import { personTracksApi } from "../api/personTracksResources.js";
 import { useCallback, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
-import { isCurrentProjectRequest } from "../appStateHelpers.js";
-import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 
 // Owns the project's person-track state plus detection/track job creation and manual
 // track corrections. Extracted from App.jsx (sc-1651). personTracks is project-scoped
@@ -13,37 +12,12 @@ export function usePersonTracks({ token, activeProject, activeProjectRef, setErr
 
   // sc-4194: every action is wrapped in useCallback so its identity is stable
   // across the SSE-driven re-renders of App, letting appContextValue memoize.
-  const refreshPersonTracks = useCallback(
-    async (projectId = activeProject?.id, { signal } = {}) => {
-      if (!projectId) {
-        return refreshFailure("missing-project");
-      }
-      if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
-        return refreshFailure("stale");
-      }
-      try {
-        const items = await apiFetch(`/api/v1/projects/${projectId}/person-tracks`, token, { signal });
-        // sc-8858: an SSE-triggered refresh for the just-active project can resolve
-        // after the user switches away; committing then would clobber the new
-        // project's tracks with the old one's. Drop the stale response — mirrors
-        // refreshTimelines' guard (useTimelines.js).
-        if (!isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)) {
-          return refreshFailure("stale");
-        }
-        setPersonTracks(items);
-        setError("");
-        return refreshSuccess(items);
-      } catch (err) {
-        if (!isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)) {
-          return refreshFailure("stale", err);
-        }
-        if (isAbortError(err)) return refreshFailure("aborted", err);
-        setError(err.message);
-        return refreshFailure("error", err);
-      }
-    },
-    [token, activeProject, activeProjectRef, setError],
-  );
+  const refreshPersonTracks = useProjectScopedList({
+    token, activeProject, activeProjectRef,
+    load: personTracksApi.list,
+    setItems: setPersonTracks,
+    setError: setError,
+  });
 
   const createPersonDetectionJob = useCallback(
     async (payload, options = {}) => {
@@ -53,7 +27,7 @@ export function usePersonTracks({ token, activeProject, activeProjectRef, setErr
         return null;
       }
       try {
-        const job = await apiFetch(`/api/v1/projects/${activeProject.id}/person-tracks/detections`, token, {
+        const job = await personTracksApi.detect(activeProject.id, token, {
           method: "POST",
           body: JSON.stringify({ ...payload, requestedGpu }),
         });
@@ -78,7 +52,7 @@ export function usePersonTracks({ token, activeProject, activeProjectRef, setErr
         return null;
       }
       try {
-        const job = await apiFetch(`/api/v1/projects/${activeProject.id}/person-tracks/jobs`, token, {
+        const job = await personTracksApi.jobs(activeProject.id, token, {
           method: "POST",
           body: JSON.stringify({ ...payload, requestedGpu }),
         });
@@ -102,14 +76,10 @@ export function usePersonTracks({ token, activeProject, activeProjectRef, setErr
         return null;
       }
       try {
-        const track = await apiFetch(
-          `/api/v1/projects/${activeProject.id}/person-tracks/${trackId}/corrections`,
-          token,
-          {
+        const track = await personTracksApi.corrections(activeProject.id, trackId, token, {
             method: "POST",
             body: JSON.stringify({ corrections }),
-          },
-        );
+          });
         setPersonTracks((items) => items.map((item) => (item.id === track.id ? track : item)));
         setError("");
         return track;
