@@ -112,20 +112,13 @@ pub(super) fn resolve_zimage_control_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Z-Image control modelPath")
             .map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| zimage_control_base_default_repo(&request.model));
     let snapshot = if is_zimage_base_model(&request.model) && repo == super::ZIMAGE_MLX_TURNKEY_REPO
     {
@@ -196,9 +189,7 @@ pub(super) fn zimage_control_repo_file(request: &ImageRequest) -> WorkerResult<(
         .and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(default)
             .to_owned()
     };
@@ -530,12 +521,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
         ZIMAGE_CTRL_DEFAULT_SCALE,
         0.0..=2.0,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| zimage_control_base_default_repo(&request.model))
         .to_owned();
     // Base-mode real-CFG surface (sc-8680): resolve the guidance scale + negative prompt for the
@@ -611,10 +597,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
             Path::new(&control_file),
             &controlnet,
         );
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,

@@ -299,7 +299,7 @@ fn write_log(name: &str, text: &str) -> PathBuf {
     path
 }
 
-const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 pub(crate) fn gib(bytes: u64) -> f64 {
     bytes as f64 / GIB

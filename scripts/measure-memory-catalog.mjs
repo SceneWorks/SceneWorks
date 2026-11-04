@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { inferenceRevision } from "./lib/inference-provenance.mjs";
 // Measure every memory anchor the plan declares for ONE backend on THIS host, committing each
 // measurement as it lands so a crash or a cancel loses at most the anchor in flight.
 //
@@ -1917,10 +1918,7 @@ export async function readExceededBounds(root = ROOT) {
 }
 
 export async function compiledInferencePin(root = ROOT) {
-  const source = await readFile(path.join(root, ADAPTER_LIB_PATH), "utf8");
-  const match = /^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/m.exec(source);
-  if (!match) fail(`${ADAPTER_LIB_PATH} declares no INFERENCE_PIN`);
-  return match[1];
+  return inferenceRevision(root);
 }
 
 /** The manifest download that ships `tier` of `repo` for `modelId` — its revision names the snapshot. */

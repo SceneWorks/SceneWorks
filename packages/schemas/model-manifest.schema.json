@@ -1226,6 +1226,9 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+              "generation": { "type": "string", "minLength": 1, "description": "Adapter architecture generation. Different LTX generations cannot exchange adapters." },
+              "sizeClass": { "type": "string", "minLength": 1, "description": "Backbone size class for base-model compatibility; not a memory estimate." },
+              "imageConditionedBackbone": { "type": "boolean", "description": "Image-conditioned adapter-backbone class (I2V or TI2V). Admission still gates size class and adapter lineage; this does not promise optional tensor targets or advertise user-visible input capabilities." },
               "families": { "type": "array", "items": { "type": "string" } },
               "types": { "type": "array", "items": { "type": "string" } },
               "baseModel": { "type": "string", "minLength": 1, "description": "Exact training-base identity required by this model's adapter contract; FLUX3 uses the canonical upstream repository, not a SceneWorks model-id alias." },

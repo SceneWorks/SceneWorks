@@ -1,46 +1,131 @@
-//! Shared scaffold for the batched dataset-analysis jobs (sc-8836, F-034).
-//!
-//! Both `dataset_analysis` (CLIP embeddings, [`dataset_analysis_jobs`]) and `dataset_face_analysis`
-//! (SCRFD + ArcFace, [`face_analysis_jobs`]) embed every image of a training dataset, stream per-item
-//! progress off a `spawn_blocking` model loop, then POST the resulting records to a rust-api sidecar.
-//! The orchestration around that — the `CancelJoinGuard` bound to the blocking task, the `select!`
-//! stream loop that scales per-item progress into `0.12..0.90` while polling cancel on the interval
-//! tick, the saving update, and the sidecar POST — was a byte-for-byte structural clone in both
-//! modules. This module owns it once, parameterized by the two things that legitimately differ: the
-//! per-run [`AnalysisJobConfig`] strings/messages and the caller-spawned blocking task that produces
-//! the records.
-//!
-//! Each module keeps its own item parsing (the item shape differs), its own model loading (CLIP loads
-//! through the `gen_core` registry inside the blocking task; the face stack stages a weights bundle
-//! first), and its own record → sidecar-payload fold (the record fields differ) supplied as
-//! `records_payload`. Everything else — the cancel/heartbeat handling reconciled in sc-8835 (F-035) —
-//! lives here so a future analysis job re-stamps a config, not ~400 lines of scaffold, and the cancel
-//! handling can only ever be fixed in one place.
-//!
-//! **Training is intentionally out of scope** (sc-9541, F-034 follow-up). `training_jobs`'
-//! `consume_training_events` supervises a `spawn_blocking` producer with the same `CancelJoinGuard` +
-//! bounded-join teardown, but its channel carries a rich `TrainEvent`/`TrainingProgress` variant tree
-//! (not the bare per-item `usize` this scaffold streams), its progress spans five kernel bands (not the
-//! single `item_progress` ramp), its `Sample` events have file-persistence side effects, and it ends in
-//! an in-place `Done` result with NO sidecar POST. Folding it here would force this seam generic over an
-//! event type + an event→progress mapper + a stateful side-effect hook + a no-op sidecar branch, hurting
-//! clarity more than the duplication removed — see the no-fold rationale on `consume_training_events`.
-
+//! Shared dataset parsing, analysis progress and sidecar scaffold.
 use super::*;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::CancelFlag;
+
+/// Strict analysis jobs reject malformed items and normalize text. Upscale historically skips
+/// malformed entries and preserves their raw strings; keep that supported contract explicit.
+pub(crate) enum DatasetItemPolicy {
+    #[cfg(native_lane)]
+    Strict,
+    SkipMalformed,
+}
+
+pub(crate) struct DatasetItem<'a> {
+    pub object: &'a JsonObject,
+    pub item_id: &'a str,
+    settings: &'a Settings,
+    dataset_root: &'a str,
+    label: &'a str,
+    normalize: bool,
+}
+
+impl DatasetItem<'_> {
+    #[cfg(native_lane)]
+    pub(crate) fn required(&self, field: &str) -> WorkerResult<&str> {
+        payload::required_trimmed_str(
+            self.object,
+            field,
+            &format!("{} item {} is missing {field}.", self.label, self.item_id),
+        )
+    }
+
+    pub(crate) fn image_path(&self) -> WorkerResult<PathBuf> {
+        let path = if self.normalize {
+            payload::required_trimmed_str(
+                self.object,
+                "imagePath",
+                &format!("{} item {} is missing imagePath.", self.label, self.item_id),
+            )?
+        } else {
+            self.object
+                .get("imagePath")
+                .and_then(Value::as_str)
+                .expect("validated upscale path")
+        };
+        resolve_dataset_item_path(
+            self.settings,
+            self.dataset_root,
+            path,
+            &format!("{} item {} imagePath", self.label, self.item_id),
+        )
+    }
+}
+
+/// Single owner for datasetRoot/items/object/itemId validation and iteration. The mapper retains
+/// each lane's additional fields and validation order, including content hashes and captions.
+pub(crate) fn parse_dataset_items<T>(
+    settings: &Settings,
+    payload: &JsonObject,
+    label: &str,
+    policy: DatasetItemPolicy,
+    mut parse: impl FnMut(DatasetItem<'_>) -> WorkerResult<T>,
+) -> WorkerResult<Vec<T>> {
+    let root = payload::required_trimmed_str(
+        payload,
+        "datasetRoot",
+        &format!("{label} payload.datasetRoot must be an app-managed dataset path."),
+    )?;
+    let normalize = !matches!(policy, DatasetItemPolicy::SkipMalformed);
+    let items = match payload.get("items").and_then(Value::as_array) {
+        Some(items) => items,
+        None if !normalize => return Ok(Vec::new()),
+        None => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{label} payload.items must be an array."
+            )))
+        }
+    };
+    dataset_items(items, label, normalize)
+        .map(|entry| {
+            let (object, item_id) = entry?;
+            parse(DatasetItem {
+                object,
+                item_id,
+                settings,
+                dataset_root: root,
+                label,
+                normalize,
+            })
+        })
+        .collect()
+}
+
+fn dataset_items<'a>(
+    items: &'a [Value],
+    label: &'a str,
+    normalize: bool,
+) -> impl Iterator<Item = WorkerResult<(&'a JsonObject, &'a str)>> {
+    items.iter().filter_map(move |item| {
+        let Some(object) = item.as_object() else {
+            return normalize.then(|| {
+                Err(WorkerError::InvalidPayload(format!(
+                    "{label} item must be an object."
+                )))
+            });
+        };
+        if normalize {
+            Some(
+                payload::required_trimmed_str(
+                    object,
+                    "itemId",
+                    &format!("{label} item is missing itemId."),
+                )
+                .map(|id| (object, id)),
+            )
+        } else {
+            let id = object.get("itemId").and_then(Value::as_str)?;
+            let path = object.get("imagePath").and_then(Value::as_str)?;
+            (!id.is_empty() && !path.is_empty()).then_some(Ok((object, id)))
+        }
+    })
+}
 
 /// Per-item progress scaling shared by every batched analysis job: item `index` (0-based) of `total`
 /// maps to `0.12 + 0.78 * ((index + 1) / total)`, leaving `0.04/0.08` for prepare/load and `0.94/1.0`
 /// for save/complete. Extracted so the one magic ramp is defined (and unit-tested) once (sc-8836).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn item_progress(index: usize, total: usize) -> f64 {
     0.12 + 0.78 * ((index + 1) as f64 / total.max(1) as f64)
 }
@@ -48,10 +133,7 @@ pub(crate) fn item_progress(index: usize, total: usize) -> f64 {
 /// Build a batched-analysis-job [`ProgressRequest`] with the shared field defaults. Every stage of both
 /// analysis jobs stamped these identical constructors (`analysis_progress` / `face_progress`); this is
 /// the one copy (sc-8836).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn analysis_progress(
     status: JobStatus,
     stage: ProgressStage,
@@ -60,30 +142,14 @@ pub(crate) fn analysis_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 /// The per-run knobs the shared [`run_batched_analysis_job`] scaffold needs: the sidecar endpoint +
 /// embedding space, the cancel message, the saving-stage message, and the per-item progress-message
 /// builder. Everything that differs between the CLIP and face analysis jobs (beyond the item shape,
 /// the model loading, and the record fold) is expressed here.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct AnalysisJobConfig<'a> {
     /// The `.../training/datasets/{dataset_id}/<endpoint_suffix>` sidecar path segment
     /// (`analysis-embeddings` for CLIP, `face-embeddings` for the face stack).
@@ -112,10 +178,7 @@ pub(crate) struct AnalysisJobConfig<'a> {
 /// Split `items` into consecutive POST chunks whose JSON-encoded items total at most `max_bytes`
 /// (see [`AnalysisJobConfig::post_chunk_bytes`]); `None` → one chunk. Always at least one chunk,
 /// so an empty batch still makes its (empty) POST.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn chunk_post_items(items: Vec<Value>, max_bytes: Option<usize>) -> Vec<Vec<Value>> {
     let Some(max_bytes) = max_bytes else {
         return vec![items];
@@ -140,7 +203,7 @@ pub(crate) fn chunk_post_items(items: Vec<Value>, max_bytes: Option<usize>) -> V
 }
 
 /// Drive one batched dataset-analysis job to completion once its records-producing blocking task is
-/// spawned. Owns the shared scaffold (sc-8836): binds `blocking` to `cancel` via a [`CancelJoinGuard`],
+/// spawned. Owns the shared scaffold (sc-8836): binds `blocking` to `cancel` through [`StreamSupervisor`],
 /// runs the `select!` stream loop that scales per-item progress into `0.12..0.90` and polls cancel on
 /// each heartbeat tick, joins the records on clean exit, POSTs them (folded through `records_payload`)
 /// to the sidecar (in [`AnalysisJobConfig::post_chunk_bytes`] chunks when set), and emits the completed
@@ -150,10 +213,7 @@ pub(crate) fn chunk_post_items(items: Vec<Value>, max_bytes: Option<usize>) -> V
 ///
 /// The per-item `index` a producer sends (0-based) is reported through [`item_progress`]. Returns the
 /// joined records so the caller can derive its completed-result fields (e.g. a with-face count).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_batched_analysis_job<R, P, C>(
     api: &ApiClient,
@@ -228,10 +288,7 @@ where
 /// `{ space, items }` bodies — in [`AnalysisJobConfig::post_chunk_bytes`]-style chunks when
 /// `post_chunk_bytes` is set — returning every response in POST order. Shared by the batched
 /// analysis jobs and the training run's subject-mask prepass (sc-2124).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn post_dataset_sidecar(
     api: &ApiClient,
     project_id: &str,
@@ -254,10 +311,7 @@ pub(crate) async fn post_dataset_sidecar(
 }
 
 /// The cancel copy and join-error label of one [`stream_batched_records`] run.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct BatchedStream<'a> {
     pub cancel_message: &'a str,
     pub join_error_label: &'a str,
@@ -265,14 +319,11 @@ pub(crate) struct BatchedStream<'a> {
 
 /// Supervise a records-producing blocking task until it finishes (sc-8836; extracted for the
 /// training subject-mask prepass, sc-2124): binds `blocking` to `cancel` via a
-/// [`CancelJoinGuard`], posts `progress_for(index)` for each per-item `index` the producer sends on
+/// [`StreamSupervisor`], posts `progress_for(index)` for each per-item `index` the producer sends on
 /// `rx`, heartbeats and polls cancel on each tick, and joins the records once the channel closes. A
 /// cancel trips the flag, waits for the task to stop, then posts the terminal `Canceled` and
 /// returns [`WorkerError::Canceled`].
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_batched_records<R, F>(
     api: &ApiClient,
@@ -287,69 +338,31 @@ pub(crate) async fn stream_batched_records<R, F>(
 where
     F: Fn(usize) -> ProgressRequest,
 {
-    // Bind the blocking analysis task to its cancel flag (sc-8804, F-003): every `update_job`/
-    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep reclaim);
-    // on that early return this guard trips `cancel` and aborts the analysis thread instead of leaving
-    // it running on a job nobody is consuming. `cancel` is kept alongside (it's `Clone`) for the
-    // in-loop cancel poll; the guard drives only the drop-time teardown.
-    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // A cancel poll must NOT post the terminal `Canceled` at acknowledgement time while the blocking
-    // embed loop is still running: doing so frees the worker row (`jobs_store::update_job_progress`)
-    // so the scheduler hands the "free" worker a new job while the current embed finishes on the GPU
-    // (sc-8917, F-115 — the pattern the training path already replaced). Instead poll with
-    // `cancel_requested_peek` (no terminal write), trip the engine flag, and defer the terminal
-    // `Canceled` until AFTER the task stops (mirrors `consume_training_events`).
-    let mut canceled = false;
-    // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
-    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
-    let loop_result: WorkerResult<()> = async {
+    let mut supervisor =
+        StreamSupervisor::new(cancel, blocking, progress_report_interval(settings), None);
+    let handling = async {
         loop {
-            tokio::select! {
-                event = rx.recv() => {
-                    match event {
-                        Some(index) => {
-                            update_job(api, &job.id, progress_for(index)).await?;
-                        }
-                        None => break,
-                    }
+            match supervisor
+                .next(api, settings, &job.id, Some(&mut rx))
+                .await?
+            {
+                StreamSignal::Event(index) => {
+                    update_job(api, &job.id, progress_for(index)).await?;
                 }
-                _ = interval.tick() => {
-                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
-                    // poll (a local flag read) so a quit stops the embed loop at its next per-item check.
-                    if !canceled && (shutdown_requested() || cancel_requested_peek(api, &job.id).await) {
-                        // Trip the flag so the blocking loop bails at its next per-item check; the
-                        // terminal `Canceled` is posted below once the task has actually stopped.
-                        cancel.cancel();
-                        canceled = true;
-                    }
-                }
+                StreamSignal::Finished => break,
+                StreamSignal::CancelRequested | StreamSignal::ProgressTick => {}
             }
         }
         Ok(())
     }
     .await;
-    if let Err(error) = loop_result {
-        guard.cancel_and_join().await;
-        return Err(error);
-    }
-
-    // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
-    let join_result = guard
-        .into_handle()
-        .await
-        .map_err(|error| task_join_error(stream.join_error_label, error))?;
+    let (canceled, result) = supervisor.finish_stream(handling, &mut rx).await?;
+    let result = result.map_err(|error| task_join_error(stream.join_error_label, error))?;
     if canceled {
-        // The embed loop has actually stopped now, so post the TERMINAL `Canceled` here (not at the
-        // earlier cancel poll, which only tripped the flag) — this terminal write frees the worker row
-        // as the worker returns to its claim loop, so the next queued job waits only until the GPU is
-        // genuinely free (sc-8917, F-115; mirrors the training path sc-5516).
         mark_job_canceled(api, &job.id, stream.cancel_message).await?;
         return Err(WorkerError::Canceled(stream.cancel_message.to_owned()));
     }
-    join_result
+    result
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -410,5 +423,84 @@ mod tests {
         assert_eq!(request.message, "half");
         assert_eq!(request.backend.as_deref(), Some("mlx"));
         assert!(request.result.is_none());
+    }
+}
+
+#[cfg(test)]
+mod parsing_tests {
+    use super::*;
+
+    #[test]
+    fn dataset_items_preserve_strict_and_skip_malformed_contracts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut settings = crate::tests::test_settings(String::new(), None);
+        settings.data_dir = dir.path().to_owned();
+        let root = dir.path().join("datasets/ds-1");
+        let payload = json!({"datasetRoot": root, "items": [null, {},
+            {"itemId": "", "imagePath": "one.png"},
+            {"itemId": " raw-id ", "imagePath": "one.png"}]})
+        .as_object()
+        .cloned()
+        .expect("payload");
+        let items = parse_dataset_items(
+            &settings,
+            &payload,
+            "Dataset upscale",
+            DatasetItemPolicy::SkipMalformed,
+            |item| Ok((item.item_id.to_owned(), item.image_path()?)),
+        )
+        .expect("upscale skips malformed");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0, " raw-id ");
+        assert_eq!(
+            items[0].1,
+            dir.path()
+                .canonicalize()
+                .expect("root")
+                .join("datasets/ds-1/one.png")
+        );
+        #[cfg(native_lane)]
+        {
+            assert!(parse_dataset_items(
+                &settings,
+                &payload,
+                "Caption",
+                DatasetItemPolicy::Strict,
+                |item| Ok(item.item_id.to_owned())
+            )
+            .is_err());
+            let valid = json!({"datasetRoot": root, "items": [{"itemId": " id ", "imagePath": "one.png", "contentHash": " hash "}]}).as_object().cloned().expect("payload");
+            let items = parse_dataset_items(
+                &settings,
+                &valid,
+                "Dataset analysis",
+                DatasetItemPolicy::Strict,
+                |item| {
+                    Ok((
+                        item.item_id.to_owned(),
+                        item.required("contentHash")?.to_owned(),
+                        item.image_path()?,
+                    ))
+                },
+            )
+            .expect("strict item");
+            assert_eq!((&*items[0].0, &*items[0].1), ("id", "hash"));
+        }
+        let escaped =
+            json!({"datasetRoot": root, "items": [{"itemId": "id", "imagePath": "../escape.png"}]})
+                .as_object()
+                .cloned()
+                .expect("payload");
+        assert!(
+            parse_dataset_items(
+                &settings,
+                &escaped,
+                "Dataset upscale",
+                DatasetItemPolicy::SkipMalformed,
+                |item| item.image_path()
+            )
+            .is_err(),
+            "malformed-skip policy never skips path confinement failures"
+        );
     }
 }

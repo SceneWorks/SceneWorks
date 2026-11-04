@@ -205,12 +205,7 @@ fn checkpoint_plan_operation(request: &ImageRequest) -> gen_core::ImportedModelO
 /// conservative answer there is "the plan route owns it" — it then refuses with the plan's own
 /// family, which is strictly better than handing a mislabelled entry to a family lane.
 fn checkpoint_plan_binds_request_operation(request: &ImageRequest) -> bool {
-    let Some(family) = request
-        .model_manifest_entry
-        .get("family")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|family| !family.is_empty())
+    let Some(family) = crate::payload::trimmed_string(request.model_manifest_entry.get("family"))
     else {
         return true;
     };
@@ -1212,11 +1207,7 @@ fn prepare_checkpoint_plan_sources(
 /// An entry with NO declared family is offered to every lane, exactly as it is today: the plan is
 /// then the only authority, and [`checkpoint_plan_family_matches`] is what decides.
 fn checkpoint_plan_entry_routes_to(entry: &JsonObject, family: &str) -> bool {
-    entry
-        .get("family")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|declared| !declared.is_empty())
+    crate::payload::trimmed_string(entry.get("family"))
         .is_none_or(|declared| declared == family)
 }
 

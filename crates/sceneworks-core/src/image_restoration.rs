@@ -28,11 +28,7 @@ pub const IRIS_MODEL_KEY: &str = "irisModel";
 
 /// Whether `id` is a well-formed catalog model id (the worker joins it as one directory component).
 pub fn is_plain_model_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    crate::ids::is_safe_id_with_max(id, 128)
 }
 
 /// The trained restoration model a payload names (`irisModel`), validated; `None` for the release

@@ -27,10 +27,13 @@ new job kind does not get silently unsupported.
   `match` over every known `JobType`, so adding a variant forces an explicit
   routing decision.
 - **Dispatch site:** `crates/sceneworks-worker/src/lib.rs::run_utility_job`.
-- **Drift guard:** `crates/sceneworks-worker/src/architecture_tests.rs` extracts
-  the canonical `JobType` declarations and fails unless this matrix has exactly
-  one row for every known kind and `run_utility_job` has an explicit dispatch
-  arm for every variant.
+- **Documentation drift:** `architecture_tests.rs` compares this matrix with the parsed
+  canonical `JobType` declaration.
+- **Structural rules:** `architecture_structural_tests.rs` parses Rust ASTs and Cargo manifests
+  to check every known dispatch/routing arm, job/capability vocabulary and exceptional aliases,
+  allowed crate edges and API-to-worker entry points, native cfg ownership, and new copies of
+  shared core helpers. The build-script alias is checked against its full OS/feature truth table.
+  These tests execute no learned inference and run in the existing worker test lane.
 
 ## How a job reaches a worker
 
@@ -136,5 +139,5 @@ conditional/partial.
 When adding a `JobType` variant, the routing-oracle matches force an explicit
 backend decision. Also update the dispatch arm in `lib.rs::run_utility_job`, the
 capability mirrors in `contracts.rs`, and this matrix. The
-`architecture_matrix_covers_every_known_job_type_and_dispatch_arm` test guards
-the enum/dispatch/documentation boundary against silent drift.
+`architecture_documentation_matrix_covers_every_known_job_type` test guards the Markdown
+matrix; the separate structural tests guard the implementation, including code behind inactive cfgs.

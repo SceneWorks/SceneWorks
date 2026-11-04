@@ -2670,15 +2670,8 @@ fn sidecar_pidfile() -> PathBuf {
 /// Persist the current sidecar PIDs (best effort, atomic via temp+rename).
 fn write_sidecar_pidfile(pids: &SidecarPids) {
     let path = sidecar_pidfile();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let Ok(json) = serde_json::to_vec_pretty(pids) else {
-        return;
-    };
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, &json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+    if let Ok(json) = serde_json::to_vec_pretty(pids) {
+        let _ = sceneworks_core::fsutil::write_atomic(&path, &json);
     }
 }
 

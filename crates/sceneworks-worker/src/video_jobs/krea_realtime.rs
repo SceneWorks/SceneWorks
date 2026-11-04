@@ -3,7 +3,7 @@ use super::ltx::extract_clip_frames;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[cfg(target_os = "macos")]
-use super::wan::{generate_video_using, local_mlx_dir, VideoGenInput};
+use super::wan::{generate_video_using, resolve_mlx_family_dir, VideoGenInput};
 
 // ---------------------------------------------------------------------------
 // Real MLX Krea Realtime 14B generation (macOS, via mlx-gen-krea-realtime, epic 8431 / sc-8443 S10):
@@ -413,27 +413,12 @@ pub(super) async fn ensure_krea_realtime_tier_present(
 /// installed tier.
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_krea_realtime_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
-    if let Some(dir) = local_mlx_dir(
+    resolve_mlx_family_dir(
         settings,
         "SCENEWORKS_MLX_KREA_REALTIME_DIR",
         "krea_realtime",
-    ) {
-        return Ok(dir);
-    }
-    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, KREA_REALTIME_REPO) {
-        return Ok(dir);
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "krea_realtime_14b: no MLX weights found. Download the turnkey {KREA_REALTIME_REPO} snapshot \
-         via the Model Manager, set $SCENEWORKS_MLX_KREA_REALTIME_DIR, or place a converted snapshot \
-         at {}.",
-        settings
-            .data_dir
-            .join("models")
-            .join("mlx")
-            .join("krea_realtime")
-            .display(),
-    )))
+        KREA_REALTIME_REPO,
+    )
 }
 
 // ---------------------------------------------------------------------------

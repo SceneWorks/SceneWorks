@@ -17,10 +17,7 @@
 //! the result is scale-free and round-trips through `generate_with_kps` (which draws
 //! `kps_norm · side` on a square canvas after letterboxing the reference the same way).
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -315,12 +312,7 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
         .and_then(Value::as_str)
         .or(job.project_id.as_deref());
 
-    if let Some(asset_id) = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
+    if let Some(asset_id) = crate::payload::trimmed_string(payload.get("sourceAssetId")) {
         let project_id = project_id.ok_or_else(|| {
             WorkerError::InvalidPayload("kps extraction sourceAssetId needs a projectId".to_owned())
         })?;
@@ -334,12 +326,7 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
         return load_reference_image(&settings.data_dir, project_id, asset_id, &project_path);
     }
 
-    if let Some(path) = payload
-        .get("sourcePath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
+    if let Some(path) = crate::payload::trimmed_string(payload.get("sourcePath")) {
         // Decode by CONTENT, not file extension: staged uploads land as `upload-<uuid>.tmp`
         // (the API's generic temp-file writer keeps no extension), so `image::open` — which
         // picks the codec from the extension — would reject a perfectly valid JPEG/PNG. Read
@@ -378,10 +365,7 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
 /// Run a `kps_extract` job: SCRFD landmark extraction from one image → normalized 5-point
 /// preset (or an explicit `detected: false` result on no face). Native-MLX SCRFD on Mac (sc-4433);
 /// the candle SCRFD/ArcFace stack off-Mac (sc-5497, epic 5482) — the result is backend-identical.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_kps_extract_job(
     api: &ApiClient,
     settings: &Settings,
@@ -543,12 +527,14 @@ mod tests {
         let staged = uploads.join("upload-abc123.tmp");
         write_png(&staged, 3, 2);
 
-        let image = load_source_image(
-            &settings,
-            &kps_job(json!({ "sourcePath": staged.to_str().unwrap() })),
-        )
-        .expect("staged keypoint-uploads source accepted");
-        assert_eq!((image.width, image.height), (3, 2));
+        for path in [
+            staged.display().to_string(),
+            format!("  {}  ", staged.display()),
+        ] {
+            let image = load_source_image(&settings, &kps_job(json!({ "sourcePath": path })))
+                .expect("staged keypoint-uploads source accepted with normalized whitespace");
+            assert_eq!((image.width, image.height), (3, 2));
+        }
     }
 
     /// The confinement itself must survive the sc-13713 fix: a readable file outside the

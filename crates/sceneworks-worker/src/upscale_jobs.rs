@@ -1,43 +1,12 @@
-//! Real-ESRGAN image upscaling on the Rust worker (epic 3482, sc-3489; off-Mac sc-5499).
+//! Image and dataset upscaling orchestration.
 //!
-//! Runs the `image_upscale` job natively in Rust (ported from the retired Python
-//! worker's `upscalers.py` + `image_adapters.run_image_upscale`) so the Image Editor
-//! upscale tool (epic 2427) keeps working Python-free. The upscaler is Real-ESRGAN (RRDBNet x2/x4) run via `ort`
-//! (onnxruntime): the **CoreML** execution provider on macOS (sc-3489, the same `ort`
-//! stack + bundled `libonnxruntime.dylib` sc-3487 ships for DWPose) and the **CUDA**
-//! execution provider off-Mac on the candle GPU-worker lane (sc-5499, the Windows/Linux
-//! sibling — the same `ort`/CUDA pattern sc-5496 brought off-Mac for DWPose). Both fall
-//! back to a plain CPU session if the hardware EP can't initialise (reported honestly as
-//! `device = "cpu"`). The path-selection spike (`docs/sc-3489/spike-findings.md`)
-//! validated pixel parity vs the shipped torch upscaler (CoreML PSNR ~72–74 dB, visually
-//! identical) at ~9× the CPU-EP speed; the ONNX graph is identical off-Mac.
-//! Historical exporter/spike retrieval: `docs/archive/historical-artifacts.md`.
+//! Real-ESRGAN x2/x4 execution and numeric tiling belong to the pinned runtime's CV
+//! engine. The worker retains model resolution, its factor/path cache, job progress,
+//! persistence and cancellation. Both CoreML (Mac) and CUDA (off-Mac) use the
+//! shared instrumented ORT loader and preserve the existing CPU fallback.
 //!
-//! Backend split: the Real-ESRGAN `ort` path compiles on macOS (the MLX worker) and on
-//! the candle lane (`backend-candle`, off-Mac) — the same gate as the module. The tiling
-//! math (`tile_slices`, crop/place) is pure and unit-tested without the onnx weights;
-//! only the execution provider (`build_session`) is cfg-split. Off-Mac, Real-ESRGAN is
-//! served by the candle worker.
-//!
-//! Engine scope: `engine=real-esrgan` (the default, the `ort` path above) and
-//! `engine=seedvr2` (epic 4811 / sc-4815 — the one-step diffusion super-resolution upscaler) are
-//! served here. Both are **resolve-only**: their weights arrive from the Model Manager
-//! (`real_esrgan` sc-17633, `seedvr2_upscaler` sc-17632) and neither resolver can reach the
-//! network, so nothing downloads mid-render. SeedVR2 runs in-process via the registry generator
-//! (native MLX on Mac / `candle-gen-seedvr2` off-Mac, sc-5157), driven through the shared
-//! `with_cached_generator` seam
-//! (single-resident engine cache — it evicts any cached image-gen engine, bounding peak memory,
-//! which matters because the SeedVR2 image path has no spatial tiling yet). It takes a target
-//! resolution (factor → `round_to_16(src × factor)`) and an optional `--softness` pre-blur.
-//! `aura-sr` (a 617M-param legacy GigaGAN) was dropped on Mac after the sc-3668 port-or-drop
-//! spike and is now dropped as an offered engine off-Mac too (sc-5499): it is refused by the routing
-//! oracle (`upscale_job_is_mlx_eligible` / `upscale_job_is_candle_eligible`) and hidden in the UI,
-//! so an explicit defensive submission is refused and remains queued.
-//!
-//! Tiling parity (matched to `upscalers.py:_run_tiled`):
-//!  - tile grid `tile_slices(w,h,512)`; per-tile crop padded by `tile_pad=16`
-//!    (clamped to image bounds); inner (unpadded) region copied back at factor scale.
-//!  - input RGB f32 CHW in `[0,1]`; output clamp `[0,1]` → round → u8.
+//! SeedVR2 and Iris continue through their existing generator/runtime interfaces.
+//! Model resolution remains cache-only: no weights download during rendering.
 
 // `HashMap`/`Mutex`/`OnceLock` back the Real-ESRGAN per-factor session cache (the `ort` path,
 // macOS + the off-Mac candle lane).
@@ -46,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::asset_media::resolve_asset_media;
+use crate::cv::upscale::Upscaler;
 use crate::generator_cache::with_cached_generator;
 use crate::single_child_asset::{write_single_child_asset, SingleChildAssetSpec};
 use crate::util::resolve_env_file_pin;
@@ -54,40 +24,18 @@ use gen_core::{
     WeightsSource,
 };
 use image::RgbImage;
-// Real-ESRGAN runs via `ort`: the CoreML EP on macOS (sc-3489) and the CUDA EP off-Mac on the
-// candle GPU-worker lane (sc-5499, the same pattern sc-5496 brought off-Mac for DWPose). `Session` /
-// `Tensor` are shared; only the execution provider is cfg-split in `build_session`.
-#[cfg(target_os = "macos")]
-use ort::ep::CoreML;
-#[cfg(not(target_os = "macos"))]
-use ort::ep::CUDA;
-use ort::session::Session;
-use ort::value::Tensor;
 use serde_json::{json, Value};
 
 use crate::{
-    heartbeat, progress_payload, resolve_dataset_item_path, safe_project_path, task_join_error,
-    update_job, ApiClient, Settings, WorkerError, WorkerResult,
+    heartbeat, parse_dataset_items, progress_payload, safe_project_path, task_join_error,
+    update_job, ApiClient, DatasetItemPolicy, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
 
-// Real-ESRGAN tiling (the `ort` path, macOS + the off-Mac candle lane).
-const TILE_SIZE: usize = 512;
-const TILE_PAD: usize = 16;
-/// The hardware execution provider this build registers before the CPU fallback for the
-/// Real-ESRGAN `ort` session: CoreML on macOS (sc-3489), CUDA off-Mac on the candle GPU-worker
-/// lane (sc-5499). Stored as `Upscaler.device` for observability.
-#[cfg(target_os = "macos")]
-const ACCEL_DEVICE: &str = "coreml";
-#[cfg(not(target_os = "macos"))]
-const ACCEL_DEVICE: &str = "cuda";
-const MAX_UPSCALE_TARGET_DIMENSION: u32 = 8192;
-const MAX_UPSCALE_TARGET_PIXELS: u64 =
-    MAX_UPSCALE_TARGET_DIMENSION as u64 * MAX_UPSCALE_TARGET_DIMENSION as u64;
 /// SeedVR2's engine-enforced per-side output cap (the registry descriptor's `max_size`; the engine
 /// errors `"size … outside supported range 16..=4096"` past it). Tighter than the generic
-/// [`MAX_UPSCALE_TARGET_DIMENSION`], so a >2048px source at ×2 (or >1024 at ×4) must be rejected with a
+/// 8192-pixel CV output limit, so a >2048px source at ×2 (or >1024 at ×4) must be rejected with a
 /// clear, actionable message here rather than failing deep in the engine as a raw "Image upscale failed"
 /// (sc-8228 secondary gap).
 const SEEDVR2_MAX_OUTPUT_DIMENSION: u32 = 4096;
@@ -116,305 +64,14 @@ fn onnx_file(factor: u8) -> String {
 // pure tiling math (ported from upscalers.py; unit-tested without weights) — Real-ESRGAN
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Tile {
-    x0: usize,
-    y0: usize,
-    x1: usize,
-    y1: usize,
-}
-
-/// `upscalers.py:tile_slices` — single tile if the image fits, else a row-major grid.
-fn tile_slices(w: usize, h: usize, tile: usize) -> Vec<Tile> {
-    if tile == 0 || tile >= w.max(h) {
-        return vec![Tile {
-            x0: 0,
-            y0: 0,
-            x1: w,
-            y1: h,
-        }];
-    }
-    let mut out = Vec::new();
-    let mut y0 = 0;
-    while y0 < h {
-        let mut x0 = 0;
-        while x0 < w {
-            out.push(Tile {
-                x0,
-                y0,
-                x1: (x0 + tile).min(w),
-                y1: (y0 + tile).min(h),
-            });
-            x0 += tile;
-        }
-        y0 += tile;
-    }
-    out
-}
-
-/// CHW f32 `[0,1]` for the crop region `[x0,x1) × [y0,y1)` of an RGB image.
-fn crop_to_chw(
-    img: &RgbImage,
-    x0: usize,
-    y0: usize,
-    x1: usize,
-    y1: usize,
-) -> (Vec<f32>, usize, usize) {
-    let cw = x1 - x0;
-    let ch = y1 - y0;
-    let mut data = vec![0.0f32; 3 * ch * cw];
-    for c in 0..3 {
-        let plane = c * ch * cw;
-        for yy in 0..ch {
-            for xx in 0..cw {
-                let p = img.get_pixel((x0 + xx) as u32, (y0 + yy) as u32);
-                data[plane + yy * cw + xx] = p[c] as f32 / 255.0;
-            }
-        }
-    }
-    (data, cw, ch)
-}
-
-/// Real-ESRGAN's x2 model begins with `pixel_unshuffle(x, 2)` (see the RRDBNet port in
-/// `scripts/spikes/sc3489_export_reference.py:88`), which reshapes the spatial dims
-/// `(H, W) -> (H/2, 2, W/2, 2)` and therefore **requires even input height and width**. A
-/// library/dataset image (or edge tile) with an odd dimension — e.g. 528×323 — otherwise blows
-/// up the onnx `Reshape` node (`input_shape % requested_shape != 0`). Pad the CHW crop up to
-/// even dims by **replicating** the last column/row, so no dark seam bleeds into the readable
-/// region through the conv receptive field. The extra `factor` output px on the padded edge fall
-/// outside the inner (unpadded) region the caller copies back, so they are simply discarded.
-/// Harmless for x4 (its RRDBNet has no `pixel_unshuffle`, so odd dims already work) — applied
-/// unconditionally to keep the call site simple.
-fn pad_chw_even(data: Vec<f32>, cw: usize, ch: usize) -> (Vec<f32>, usize, usize) {
-    let pw = cw + (cw & 1);
-    let ph = ch + (ch & 1);
-    if pw == cw && ph == ch {
-        return (data, cw, ch);
-    }
-    let mut out = vec![0.0f32; 3 * ph * pw];
-    for c in 0..3 {
-        let src_plane = c * ch * cw;
-        let dst_plane = c * ph * pw;
-        for yy in 0..ph {
-            let sy = yy.min(ch - 1);
-            for xx in 0..pw {
-                let sx = xx.min(cw - 1);
-                out[dst_plane + yy * pw + xx] = data[src_plane + sy * cw + sx];
-            }
-        }
-    }
-    (out, pw, ph)
-}
-
-fn validate_upscale_target_dimensions(width: u32, height: u32) -> WorkerResult<()> {
-    let pixels = u64::from(width) * u64::from(height);
-    if width > MAX_UPSCALE_TARGET_DIMENSION
-        || height > MAX_UPSCALE_TARGET_DIMENSION
-        || pixels > MAX_UPSCALE_TARGET_PIXELS
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Upscale target {width}x{height} exceeds the {MAX_UPSCALE_TARGET_DIMENSION}px side / {MAX_UPSCALE_TARGET_PIXELS} pixel limit."
-        )));
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// onnxruntime upscaler (cached per-factor process-wide, like pose_jobs::DETECTOR) — Real-ESRGAN
-// via `ort`: CoreML on macOS, CUDA off-Mac on the candle GPU-worker lane (both fall back to CPU).
-// ---------------------------------------------------------------------------
-
-struct Upscaler {
-    session: Session,
-    /// The session's actual execution device — the hardware EP ([`ACCEL_DEVICE`]: CoreML on macOS,
-    /// CUDA off-Mac) when it initialised, else `"cpu"` after the fallback. Surfaced on the upscale
-    /// result's `rawAdapterSettings` for observability (sc-8923).
-    device: &'static str,
-}
-
 static UPSCALERS: OnceLock<Mutex<HashMap<(u8, PathBuf), Upscaler>>> = OnceLock::new();
 
 fn upscaler_cache_key(factor: u8, onnx_path: &Path) -> (u8, PathBuf) {
     (factor, onnx_path.to_path_buf())
 }
 
-fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
-    WorkerError::Engine(format!("onnxruntime: {e}"))
-}
-
-/// Build a session, optionally registering the platform hardware EP (CoreML on macOS,
-/// CUDA off-Mac on the candle lane). `accel == false` builds a plain CPU session (the fallback).
-fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
-    let mut b = Session::builder().map_err(ort_err)?;
-    if accel {
-        #[cfg(target_os = "macos")]
-        {
-            b = b
-                .with_execution_providers([CoreML::default().build()])
-                .map_err(ort_err)?;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            // Preload the CUDA-12 runtime + cuDNN-9 DLLs the loaded onnxruntime-gpu's CUDA
-            // provider depends on, before registering the EP — with the Python/torch stack
-            // retired off-Mac nothing else puts them on the loader path. Without this, an
-            // upscale that is the process's *first* `ort` CUDA surface (no prior pose/person
-            // job to preload) fails to initialise the CUDA EP and silently caches a CPU
-            // session in `UPSCALERS` for the process lifetime — ~9× slower and stuck on CPU
-            // even after a later pose job preloads the DLLs (sc-5499). Shared helper (runs
-            // once per process, also used by `pose_jobs`/`person_jobs`); best-effort, see
-            // `ort_cuda`.
-            crate::ort_cuda::preload_cuda_dylibs();
-            // `error_on_failure` so a CUDA provider that can't initialise (no GPU, or a
-            // cuDNN/CUDA mismatch in the loaded onnxruntime) surfaces as an error here —
-            // `Upscaler::load` then falls back to a CPU session and reports `device = "cpu"`
-            // honestly, instead of onnxruntime silently CPU-executing while we claim CUDA
-            // (mirrors `pose_jobs::build_session`, sc-5496).
-            b = b
-                .with_execution_providers([CUDA::default().build().error_on_failure()])
-                .map_err(ort_err)?;
-        }
-    }
-    crate::model_io::ort_session(b, path)
-}
-
-impl Upscaler {
-    /// Load the session, preferring the hardware EP (CoreML on Mac / CUDA off-Mac) and
-    /// falling back to CPU if the provider can't initialise (mirrors `pose_jobs::Detector::load`).
-    fn load(path: &Path) -> WorkerResult<Self> {
-        match build_session(path, true) {
-            Ok(session) => Ok(Self {
-                session,
-                device: ACCEL_DEVICE,
-            }),
-            // Log WHY the hardware-EP session build failed before silently rebuilding on
-            // CPU (F-099) — otherwise a CoreML/CUDA init failure just presents as an
-            // unexplained "device = cpu" with no breadcrumb (sc-8901).
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    provider = ACCEL_DEVICE,
-                    "Real-ESRGAN {ACCEL_DEVICE} session build failed; falling back to CPU"
-                );
-                Ok(Self {
-                    session: build_session(path, false)?,
-                    device: "cpu",
-                })
-            }
-        }
-    }
-
-    /// Tiled x`factor` upscale of one RGB image → an upscaled RGB image. Tiling +
-    /// crop/place is a verbatim port of `upscalers.py:_run_tiled`.
-    fn upscale(
-        &mut self,
-        img: &RgbImage,
-        factor: usize,
-        cancel: &CancelFlag,
-    ) -> WorkerResult<RgbImage> {
-        let (w, h) = (img.width() as usize, img.height() as usize);
-        let ow = w
-            .checked_mul(factor)
-            .ok_or_else(|| WorkerError::InvalidPayload("upscale width overflow".to_owned()))?;
-        let oh = h
-            .checked_mul(factor)
-            .ok_or_else(|| WorkerError::InvalidPayload("upscale height overflow".to_owned()))?;
-        let ow_u32 = u32::try_from(ow)
-            .map_err(|_| WorkerError::InvalidPayload("upscale width overflow".to_owned()))?;
-        let oh_u32 = u32::try_from(oh)
-            .map_err(|_| WorkerError::InvalidPayload("upscale height overflow".to_owned()))?;
-        validate_upscale_target_dimensions(ow_u32, oh_u32)?;
-        let mut output = vec![0u8; ow * oh * 3];
-        for tl in tile_slices(w, h, TILE_SIZE) {
-            if cancel.is_cancelled() {
-                return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-            }
-            let cx0 = tl.x0.saturating_sub(TILE_PAD);
-            let cy0 = tl.y0.saturating_sub(TILE_PAD);
-            let cx1 = (tl.x1 + TILE_PAD).min(w);
-            let cy1 = (tl.y1 + TILE_PAD).min(h);
-            let (data, cw, ch) = crop_to_chw(img, cx0, cy0, cx1, cy1);
-            // Pad to even dims for the x2 model's `pixel_unshuffle(2)` (odd W/H else fails the
-            // onnx Reshape, e.g. a 323px-wide image); padded edge px are discarded below.
-            let (data, cw, ch) = pad_chw_even(data, cw, ch);
-
-            let tensor =
-                Tensor::from_array((vec![1i64, 3, ch as i64, cw as i64], data)).map_err(ort_err)?;
-            let outputs = self.session.run(ort::inputs![tensor]).map_err(ort_err)?;
-            let (oshape, odata) = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
-            // Validate the reported output shape/length against the `(1, 3, ch*factor,
-            // cw*factor)` contract before indexing `odata` (sc-11175/F-010) so a mis-scaled
-            // pinned export can't slice out of bounds and panic inside `spawn_blocking`.
-            let (och, ocw) = validate_upscale_output(oshape, odata.len(), cw, ch, factor)?;
-
-            // inner (unpadded) region within the upscaled crop → destination
-            let ix0 = (tl.x0 - cx0) * factor;
-            let iy0 = (tl.y0 - cy0) * factor;
-            let iw = (tl.x1 - tl.x0) * factor;
-            let ih = (tl.y1 - tl.y0) * factor;
-            let (dst_x0, dst_y0) = (tl.x0 * factor, tl.y0 * factor);
-            for yy in 0..ih {
-                for xx in 0..iw {
-                    let (sy, sx) = (iy0 + yy, ix0 + xx);
-                    let di = ((dst_y0 + yy) * ow + dst_x0 + xx) * 3;
-                    for c in 0..3 {
-                        let v = odata[c * och * ocw + sy * ocw + sx];
-                        output[di + c] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                    }
-                }
-            }
-        }
-        RgbImage::from_raw(ow as u32, oh as u32, output)
-            .ok_or_else(|| WorkerError::InvalidPayload("upscale buffer size mismatch".to_owned()))
-    }
-}
-
-/// Validate the Real-ESRGAN ONNX output shape/length before indexing `odata` (sc-11175/F-010).
-///
-/// The generic `SCENEWORKS_REALESRGAN_ONNX` pin serves both the x2 and x4 exports, so an
-/// operator can pin an x2 export and run a 4× job (or any mismatched export). The output
-/// dims would then be half (or otherwise not `input × factor`) the assumed size and the
-/// `odata[c * och * ocw + sy * ocw + sx]` reads below would slice out of bounds → panic
-/// inside `spawn_blocking`, killing the job as a join error and poisoning the `UPSCALERS`
-/// lock for every subsequent job. Validate the `(1, 3, ch·factor, cw·factor)` contract and
-/// return a `WorkerError::Engine` with expected-vs-actual dims instead — mirroring the
-/// sc-8904/F-102 sibling decode-path guards in `person_jobs::decode` / `pose_jobs`.
-///
-/// `cw`/`ch` are the (even-padded) per-tile model *input* width/height; a valid export
-/// returns `(1, 3, ch·factor, cw·factor)`. Returns the validated `(och, ocw)`.
-fn validate_upscale_output(
-    oshape: &[i64],
-    odata_len: usize,
-    cw: usize,
-    ch: usize,
-    factor: usize,
-) -> WorkerResult<(usize, usize)> {
-    if oshape.len() != 4 {
-        return Err(WorkerError::Engine(format!(
-            "real-esrgan output rank {} != 4 (expected (1, 3, H·factor, W·factor)); is the \
-             pinned SCENEWORKS_REALESRGAN_ONNX export the right model?",
-            oshape.len()
-        )));
-    }
-    let och = oshape[2].max(0) as usize;
-    let ocw = oshape[3].max(0) as usize;
-    let exp_h = ch.saturating_mul(factor);
-    let exp_w = cw.saturating_mul(factor);
-    if och != exp_h || ocw != exp_w {
-        return Err(WorkerError::Engine(format!(
-            "real-esrgan output dims {och}×{ocw} != expected {exp_h}×{exp_w} \
-             (input {ch}×{cw} × factor {factor}); is the pinned SCENEWORKS_REALESRGAN_ONNX \
-             export the wrong scale (e.g. an x2 export run as a {factor}× job)?"
-        )));
-    }
-    let needed = 3usize.saturating_mul(och).saturating_mul(ocw);
-    if odata_len < needed {
-        return Err(WorkerError::Engine(format!(
-            "real-esrgan output has {odata_len} values but the (3 × {och} × {ocw}) contract \
-             needs {needed}"
-        )));
-    }
-    Ok((och, ocw))
+fn validate_upscale_target_dimensions(width: u32, height: u32) -> WorkerResult<()> {
+    crate::cv::upscale::validate_upscale_target_dimensions(width, height).map_err(Into::into)
 }
 
 /// Blocking upscale: load+cache the factor's session (amortising the CoreML/CUDA graph
@@ -442,7 +99,7 @@ fn upscale_blocking(
     });
     let upscaler = match guard.entry(upscaler_cache_key(factor, &onnx_path)) {
         Entry::Occupied(e) => e.into_mut(),
-        Entry::Vacant(e) => e.insert(Upscaler::load(&onnx_path)?),
+        Entry::Vacant(e) => e.insert(Upscaler::load(&onnx_path, &mut crate::cv::ModelIoLoader)?),
     };
     let device = upscaler.device;
     let out = upscaler.upscale(&img, factor as usize, &cancel)?;
@@ -1017,11 +674,7 @@ pub(crate) async fn run_image_upscale_job(
     // mirroring the video path). A missing factor still defaults to 2x.
     let factor: u8 =
         resolve_image_upscale_factor(payload.get("factor").and_then(Value::as_u64).unwrap_or(2))?;
-    let engine = payload
-        .get("engine")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    let engine = crate::payload::trimmed_string(payload.get("engine"))
         .unwrap_or("real-esrgan")
         .to_lowercase();
     // Canonical engine id. The Rust upscaler serves Real-ESRGAN (`ort`: CoreML on Mac / CUDA off-Mac,
@@ -1678,40 +1331,18 @@ fn parse_dataset_upscale_items(
     settings: &Settings,
     payload: &JsonObject,
 ) -> WorkerResult<Vec<DatasetUpscaleItem>> {
-    let dataset_root = payload
-        .get("datasetRoot")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Dataset upscale payload.datasetRoot must be an app-managed dataset path."
-                    .to_owned(),
-            )
-        })?;
-    let Some(items) = payload.get("items").and_then(Value::as_array) else {
-        return Ok(Vec::new());
-    };
-    items
-        .iter()
-        .filter_map(|item| {
-            let item_id = item.get("itemId").and_then(Value::as_str)?;
-            let image_path = item.get("imagePath").and_then(Value::as_str)?;
-            if item_id.is_empty() || image_path.is_empty() {
-                return None;
-            }
-            let resolved = resolve_dataset_item_path(
-                settings,
-                dataset_root,
-                image_path,
-                &format!("Dataset upscale item {item_id} imagePath"),
-            );
-            Some(resolved.map(|image_path| DatasetUpscaleItem {
-                item_id: item_id.to_owned(),
-                image_path,
-            }))
-        })
-        .collect()
+    parse_dataset_items(
+        settings,
+        payload,
+        "Dataset upscale",
+        DatasetItemPolicy::SkipMalformed,
+        |item| {
+            Ok(DatasetUpscaleItem {
+                item_id: item.item_id.to_owned(),
+                image_path: item.image_path()?,
+            })
+        },
+    )
 }
 
 /// Build the `/repoint` request body from `(item_id, project-relative source path)` results (pure).

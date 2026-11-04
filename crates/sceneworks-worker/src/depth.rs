@@ -65,10 +65,7 @@ use runtime_macos::providers::depth as depth_backend;
 /// off-Mac + `backend-candle` runs the candle/CUDA port on the build's default device (CUDA when
 /// built+available, else CPU), replacing the prior "automatic depth estimation is macOS-only"
 /// error so the candle strict-control driver (sc-8304) can auto-estimate `ControlKind::Depth`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub fn depth_control_image(
     img: &image::RgbImage,
     weights_dir: &std::path::Path,

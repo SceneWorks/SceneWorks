@@ -395,22 +395,13 @@ fn write_connections(
         connections: connections.to_vec(),
     })
     .map_err(|error| ApiError::internal(error.to_string()))?;
-    let temp = path.with_extension(format!("json.{}.tmp", Uuid::new_v4().simple()));
-    std::fs::write(&temp, body).map_err(|error| {
-        ApiError::internal(format!("Failed to save planning connections: {error}"))
-    })?;
-    std::fs::rename(&temp, &path).map_err(|error| {
+    sceneworks_core::fsutil::write_atomic(&path, &body).map_err(|error| {
         ApiError::internal(format!("Failed to install planning connections: {error}"))
     })
 }
 
 fn validate_id(id: &str) -> Result<(), ApiError> {
-    if id.is_empty()
-        || id.len() > 80
-        || !id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-    {
+    if !sceneworks_core::ids::is_safe_id_with_max(id, 80) {
         return Err(ApiError::bad_request("Invalid planning connection ID"));
     }
     Ok(())

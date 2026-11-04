@@ -18,7 +18,6 @@ use std::fmt;
 use std::ops::{Add, Mul, Sub};
 
 use serde::{Serialize, Serializer};
-use sha2::{Digest, Sha256};
 
 /// The two native voices, in the order every group lists them.
 pub const VOICE_NAMES: [&str; 2] = ["Vocal", "Ins"];
@@ -659,8 +658,7 @@ impl Score {
 }
 
 pub fn sha256_hex(text: &str) -> String {
-    let digest = Sha256::digest(text.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::hashing::sha256_bytes(text.as_bytes())
 }
 
 /// Mutable per-voice interpretation state (the upstream `Voice` dataclass).
