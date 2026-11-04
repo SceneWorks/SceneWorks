@@ -1,11 +1,7 @@
 //! Typed accessors for job-payload JSON fields.
 use super::*;
 
-pub(crate) fn json_size_to_u64(value: &Value) -> Option<u64> {
-    value
-        .as_u64()
-        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-}
+pub(crate) use sceneworks_core::payload_util::json_size_to_u64;
 
 /// Parse a JSON integer from either a number or a trimmed numeric string.
 /// Booleans are deliberately rejected even though some dynamic languages treat

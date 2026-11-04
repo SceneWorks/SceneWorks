@@ -337,23 +337,9 @@ pub(crate) async fn write_lora_install_marker(
     Ok(())
 }
 
-pub fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return true;
-    }
-    patterns
-        .iter()
-        .any(|pattern| pattern_matches(pattern, path))
-}
+pub use sceneworks_core::model_artifacts::artifact_selection::allow_pattern_matches;
 
-pub(crate) fn pattern_matches(pattern: &str, value: &str) -> bool {
-    let (pattern, value) = if cfg!(windows) {
-        (pattern.to_ascii_lowercase(), value.to_ascii_lowercase())
-    } else {
-        (pattern.to_owned(), value.to_owned())
-    };
-    glob::Pattern::new(&pattern).is_ok_and(|pattern| pattern.matches(&value))
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::pattern_matches;
 
 pub(crate) async fn cleanup_uploaded_import_source(
     settings: &Settings,

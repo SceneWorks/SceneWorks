@@ -197,13 +197,7 @@ fn production_fingerprint(arm: Arm, tier: &str) -> Result<String, String> {
     })
 }
 
-/// The declared geometry, read as real values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Geometry {
-    width: u32,
-    height: u32,
-    frames: u32,
-}
+use protocol::Geometry;
 
 /// Resolve the arm from the planned `(provider, modelId)` pair and refuse any other by name.
 ///
@@ -211,18 +205,9 @@ struct Geometry {
 /// family, so a row that pairs one route's provider with another's catalog id would otherwise
 /// measure one checkpoint and file the record against the other.
 fn arm(request: &Value) -> Result<Arm, String> {
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let provider = target
-        .get("provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let model_id = target
-        .get("modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let target = protocol::planned_object(request, "/target")?;
+    let provider = protocol::target_str(target, "provider")?;
+    let model_id = protocol::target_str(target, "modelId")?;
     ARMS.into_iter()
         .find(|arm| arm.provider == provider && arm.model_id == model_id)
         .ok_or_else(|| {
@@ -311,46 +296,14 @@ fn engine_vae(arm: Arm) -> Result<VaeTiling, String> {
         })
 }
 
-/// Read the four declared geometry axes and validate them against the engine.
 fn target_geometry(request: &Value, arm: Arm) -> Result<Geometry, String> {
-    let geometry = protocol::planned(request)?
-        .pointer("/target/geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
-    if axis("batch")? != 1 {
-        return Err(format!(
-            "{LABEL} requires geometry.batch == 1 (these engines render one clip per request)"
-        ));
-    }
-    let resolved = Geometry {
-        width: axis("width")?,
-        height: axis("height")?,
-        frames: axis("frames")?,
-    };
+    let resolved = protocol::wan_target_geometry(request, LABEL)?;
     validate_geometry(arm, resolved)?;
     Ok(resolved)
 }
 
-/// The planned mode must be the one public mode this route is admitted under.
 fn validate_mode(request: &Value, arm: Arm) -> Result<(), String> {
-    let mode = protocol::planned(request)?
-        .pointer("/target/mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
-    if mode != arm.mode {
-        return Err(format!(
-            "{} is captured under {:?}; the plan declares {mode:?}",
-            arm.provider, arm.mode
-        ));
-    }
-    Ok(())
+    protocol::validate_captured_mode(request, arm.provider, arm.mode)
 }
 
 /// Bind the fixture to the member, lane, tier, full geometry and cadence, so a bf16 record can
@@ -361,10 +314,7 @@ fn validate_fixture(
     tier: &str,
     geometry: Geometry,
 ) -> Result<(), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let expected = format!(
         "{}-mlx-{tier}-{}x{}-f{}-fps{}-seed{SEED}",
         arm.slug, geometry.width, geometry.height, geometry.frames, arm.fps
@@ -511,28 +461,7 @@ fn receipt_publishes_the_identity(
     }
 }
 
-/// A deterministic, non-degenerate RGB8 plane. Every carrier byte a capture presents is generated
-/// here rather than staged, so the record's request identity is reproducible from this source
-/// alone — the same choice the PuLID and LTX arms make for their synthetic carriers.
-fn plane(width: u32, height: u32, salt: u32) -> Image {
-    let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 3);
-    for y in 0..height {
-        for x in 0..width {
-            let base = x
-                .wrapping_mul(7)
-                .wrapping_add(y.wrapping_mul(13))
-                .wrapping_add(salt);
-            pixels.push((base % 251) as u8);
-            pixels.push((base.wrapping_mul(3) % 241) as u8);
-            pixels.push((base.wrapping_mul(5) % 239) as u8);
-        }
-    }
-    Image {
-        width,
-        height,
-        pixels,
-    }
-}
+use protocol::wan_reference_plane as plane;
 
 /// The one fresh planned request every capture of this family renders.
 fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
@@ -798,11 +727,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     }
     let selection = planned_selection(request)?;
     let expected_fingerprint = production_fingerprint(arm, tier)?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
-        .to_owned();
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?.to_owned();
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \

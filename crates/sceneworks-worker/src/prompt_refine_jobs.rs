@@ -1751,7 +1751,8 @@ mod tests {
 
         // The task classifies from the discriminator, emits JSON (so it takes the cleanup above
         // rather than the prose one), and reads reference images when they are present.
-        let task = RefineTask::from_payload(Some("qwen_image_rewrite"));
+        let task =
+            RefineTask::from_payload(Some(sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK));
         assert_eq!(task, RefineTask::QwenImageRewrite);
         assert!(task.emits_json(), "the rewrite must take the JSON cleanup");
         assert!(task.takes_reference_images());
@@ -3354,7 +3355,7 @@ mod tests {
         // A path INSIDE `data_dir` is accepted; a sibling path OUTSIDE it, and a `..`-traversal escape,
         // are rejected with a clear error — mirroring the JoyCaption `resolve_dataset_item_path` guard.
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut settings = crate::Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = dir.path().to_path_buf();
 
         // In-root: accepted (the on-disk file need not exist — confinement is path-structural).

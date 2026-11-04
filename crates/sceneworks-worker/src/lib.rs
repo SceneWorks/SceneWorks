@@ -37,7 +37,6 @@ use sceneworks_core::lora_url::{
 };
 use sceneworks_core::project_store::{ProjectStore, ProjectStoreError};
 use sceneworks_core::slug::slugify;
-use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
 use sha2::{Digest, Sha256};
@@ -2808,6 +2807,8 @@ fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
 }
 
 #[cfg(test)]
+pub(crate) use tests::test_api_stub;
+#[cfg(test)]
 mod test_env;
 
 #[cfg(test)]
@@ -2899,3 +2900,6 @@ mod weights_source;
 
 #[cfg(any(test, native_lane))]
 mod adapter_resolution;
+
+#[cfg(test)]
+mod source_tests;
