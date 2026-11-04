@@ -760,6 +760,7 @@ enum VideoEncodeProfile {
     /// The request VAE-encodes nothing before denoise.
     Nothing,
     /// The provider's calibrated conservative encode working set.
+    #[cfg(any(test, target_os = "macos"))]
     Calibrated(VideoDecodeMemoryProfile),
     /// The request encodes conditioning the provider publishes no calibrated encode cost for
     /// (LTX on MLX, every CUDA provider): priced at the provider's conservative single-pass VAE
@@ -1021,6 +1022,7 @@ fn packaged_video_encode_profile(
 }
 
 /// Evidence revision a candidate carries when the conditioning encode is its binding phase.
+#[cfg(any(test, target_os = "macos"))]
 const ENCODE_PROFILE_EVIDENCE_REVISION: &str = "video-provider-conservative-encode-profile-v1";
 /// Evidence revision a candidate carries when an uncalibrated conditioning encode, priced at the
 /// provider's conservative single-pass VAE profile, is its binding phase (sc-20688).
@@ -1732,6 +1734,7 @@ fn profiled_floor_phase_peaks(
             // below. This classification is not "encodes nothing" and grants no free encode.
             None
         }
+        #[cfg(any(test, target_os = "macos"))]
         Ok(VideoEncodeProfile::Calibrated(profile)) => {
             Some((profile, ENCODE_PROFILE_EVIDENCE_REVISION))
         }

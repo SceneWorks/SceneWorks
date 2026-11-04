@@ -1,5 +1,6 @@
+import { legacyUtf16Json as stable } from "./lib/canonical-json.mjs";
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 // Historical evidence is copied into quarantine, never into current tuple inputs.
-import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
@@ -8,8 +9,8 @@ import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { normalizeStarVectorRejection, PARITY_SOURCE_INDICES, UPSTREAM_REVISION } from "./lib/starvector-terminal-upstream-reference.mjs";
 
 const execFile = promisify(execFileCallback);
-export const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
-const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+export { stable };
+
 const fail = (message) => { throw new Error(`terminal recovery: ${message}`); };
 const python = () => process.platform === "win32" ? process.env.STARVECTOR_TERMINAL_METRICS_PYTHON : "python3";
 export function safeRecoveryPath(relative) {

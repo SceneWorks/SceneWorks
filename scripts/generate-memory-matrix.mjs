@@ -1,6 +1,6 @@
 #!/usr/bin/env node
+import { sha256 } from "./lib/file-sha256.mjs";
 
-import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -820,9 +820,6 @@ export function assertVideoOwnership(allModels, videoFamilyStories = VIDEO_FAMIL
   }
 }
 
-function sha256(body) {
-  return createHash("sha256").update(body).digest("hex");
-}
 
 function sortedUnique(values) {
   return [...new Set(values)].sort();

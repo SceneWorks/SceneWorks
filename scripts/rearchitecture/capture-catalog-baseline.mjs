@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { sha256 } from "../lib/file-sha256.mjs";
 
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { stripJsoncComments } from "../lib/jsonc.mjs";
 import path from "node:path";
 import process from "node:process";
 
@@ -9,62 +10,6 @@ const root = process.cwd();
 const manifestPath = path.join(root, "config/manifests/builtin.models.jsonc");
 const enginesPath = path.join(root, "crates/sceneworks-worker/src/engines.rs");
 
-function stripJsoncComments(body) {
-  let result = "";
-  let inString = false;
-  let escaped = false;
-
-  for (let index = 0; index < body.length; index += 1) {
-    const char = body[index];
-    const next = body[index + 1];
-
-    if (inString) {
-      result += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      result += char;
-      continue;
-    }
-
-    if (char === "/" && next === "/") {
-      while (index < body.length && body[index] !== "\n") {
-        index += 1;
-      }
-      result += "\n";
-      continue;
-    }
-
-    if (char === "/" && next === "*") {
-      index += 2;
-      while (
-        index < body.length &&
-        !(body[index] === "*" && body[index + 1] === "/")
-      ) {
-        index += 1;
-      }
-      index += 1;
-      continue;
-    }
-
-    result += char;
-  }
-
-  return result;
-}
-
-function sha256(body) {
-  return createHash("sha256").update(body).digest("hex");
-}
 
 function modelSnapshot(model) {
   const downloads = Array.isArray(model.downloads) ? model.downloads : [];
