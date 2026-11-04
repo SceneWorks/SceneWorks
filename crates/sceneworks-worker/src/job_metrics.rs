@@ -199,10 +199,7 @@ impl JobMetricsProbe {
 /// shared verbatim by the image and video stream consumers:
 /// load = start→first step, sample = step→decoding, decode = decoding→item-done,
 /// summed across a batch's items (the model loads once, so load is one-time).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct PhaseTimer {
     start: Instant,
     load_ms: Option<u64>,
@@ -212,10 +209,7 @@ pub(crate) struct PhaseTimer {
     decode_started: Option<Instant>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl PhaseTimer {
     pub(crate) fn new(start: Instant) -> Self {
         Self {
@@ -313,10 +307,7 @@ mod tests {
         assert_eq!(normalize_backend("0"), "cuda");
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn phase_timer_splits_load_sample_decode_and_sums_items() {
         let t0 = Instant::now();
@@ -342,10 +333,7 @@ mod tests {
         assert_eq!(metrics.decode_ms, Some(150), "decode sums across items");
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn phase_timer_folds_into_sample_without_decoding_event() {
         let t0 = Instant::now();
@@ -360,10 +348,7 @@ mod tests {
         assert_eq!(metrics.decode_ms, None);
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn phase_timer_reports_nothing_without_events() {
         let t0 = Instant::now();

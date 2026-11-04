@@ -105,7 +105,7 @@ use instantid_memory::{InstantIdMemoryIdentity, InstantIdRoute};
 /// Bytes per binary gigabyte — the currency the GB-denominated worker probes
 /// (`gpu::total_unified_memory_gb`, `vram_gate::VramBudget`) are converted into for
 /// [`gen_core::MemoryBudget`], which is byte-denominated.
-const INSTANTID_BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const INSTANTID_BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 /// GB → bytes. The float→int cast saturates (a negative reading lands on 0, an absurd one on
 /// `u64::MAX`), so a nonsense probe can never become a giant budget.
@@ -308,10 +308,7 @@ async fn instantid_memory_budget(
     settings: &Settings,
     predicted_peak_bytes: u64,
 ) -> gen_core::MemoryBudget {
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     match budget {
         Some(budget) => gen_core::MemoryBudget {
             total_bytes: instantid_gib_bytes(budget.total_gb),
@@ -507,20 +504,13 @@ fn resolve_instantid_sdxl_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "InstantID SDXL modelPath")
             .map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(INSTANTID_SDXL_REPO);
     Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
         .map(|root| instantid_tier_subdir(&root, request)))
@@ -668,10 +658,7 @@ fn instantid_guidance(request: &ImageRequest) -> f32 {
 /// manifest opt-in (identity drops to ~0.64 @512² and full-res quant is unvalidated). Returns
 /// the engine `bits` (`Some(4)`/`Some(8)`/`None`) + the recipe bit count.
 fn instantid_quant(request: &ImageRequest) -> (Option<i32>, Option<i64>) {
-    let raw = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(quant_int)
+    let raw = request.quant_bits()
         .or_else(|| {
             request
                 .model_manifest_entry
@@ -799,10 +786,7 @@ pub(crate) async fn ensure_scrfd_weights(
 /// app cache, and download-on-first-use with [`ensure_instantid_weights`], so a prior
 /// InstantID/PuLID/extraction run leaves it already cached. Returns the bundle dir (which IS the candle
 /// face stack's load dir, exactly the `face_dir` the candle InstantID path resolves).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_face_stack_dir(
     api: &ApiClient,
     settings: &Settings,
@@ -1037,12 +1021,7 @@ async fn generate_instantid_stream(
         controlnet_default,
         0.0..=2.0,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(INSTANTID_SDXL_REPO)
         .to_owned();
     // The active Key Point Library collection drives the angle set (sc-4450): per-generation
@@ -1062,9 +1041,9 @@ async fn generate_instantid_stream(
     // InstantID composes the SDXL VAE, so BOTH the mlx and candle engines share the one `sdxl` student
     // via `with_pid` — the candle lane (sc-8373) now carries the same `InstantId::with_pid` +
     // `InstantIdRequest.use_pid` seam as macOS, so this resolves on either face backend.
-    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+    #[cfg(native_lane)]
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
-    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+    #[cfg(native_lane)]
     let use_pid = pid_weights.is_some();
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
     // branch; identity/angle modes don't need it).
@@ -1093,7 +1072,7 @@ async fn generate_instantid_stream(
     }
     // Mark PiD output on the asset sidecar (epic 7840): the NSCLv1 non-commercial restriction flows
     // to PiD-decoded output, distinct from the rest of the pipeline. Only set when PiD actually ran.
-    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+    #[cfg(native_lane)]
     if use_pid {
         raw_settings.insert("usePid".to_owned(), Value::Bool(true));
     }
@@ -1123,10 +1102,10 @@ async fn generate_instantid_stream(
     // ~2048 (default 4K/native leaves the requested dims untouched). The skeleton/keypoints render at
     // this same base, so control + latent stay aligned. Gated to the PiD-capable face backends (where
     // `use_pid` + the helpers exist); the no-face build keeps the requested dims verbatim.
-    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+    #[cfg(native_lane)]
     let (width, height) =
         pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
-    #[cfg(not(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle"))))]
+    #[cfg(not(native_lane))]
     let (width, height) = (request.width, request.height);
     let work: Vec<(i64, String, InstantIdAction)> = match &mode {
         InstantIdMode::PoseSet(_) => {
@@ -1206,10 +1185,7 @@ async fn generate_instantid_stream(
     // mode now (single identity / angle / pose all score, sc-4411); allow it unused on the
     // non-face-backend build.
     #[cfg_attr(
-        not(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        )),
+        not(native_lane),
         allow(unused_variables)
     )]
     let face_likeness_source_ref = reference_id.to_owned();
@@ -1451,7 +1427,7 @@ async fn generate_instantid_stream(
             // `prepare_conditioning_phase()` / `release_conditioning_components()`, so the call
             // stages the conditioning components in and back out rather than assuming them
             // resident — inference epic sc-20762's staged memory lifecycle.
-            #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+            #[cfg(native_lane)]
             let mut model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
                     WorkerError::Engine(format!("InstantID PiD decoder load failed: {error}"))
@@ -1499,18 +1475,12 @@ async fn generate_instantid_stream(
             // scorer is always built — the plain identity case is the general With-Character scoring
             // sc-4411 wires. Construction is non-fatal (weights / no source face → `None` → scores
             // omitted; generation still renders).
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
+            #[cfg(native_lane)]
             let scorer: Option<crate::face_likeness::FaceLikenessScorer> = {
                 let face_weights_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
                 crate::face_likeness::build_face_likeness_scorer(face_weights_dir, &reference)
             };
-            #[cfg(not(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            )))]
+            #[cfg(not(native_lane))]
             let scorer: Option<()> = None;
             Ok((model, reference, restore_embedding, scorer))
         },
@@ -1550,7 +1520,7 @@ async fn generate_instantid_stream(
                         // PiD opt-in (sc-8371 mlx / sc-8373 candle): both engines' `InstantIdRequest`
                         // carry this field; the engine errors if set without a `with_pid` load, so the
                         // two stay in lockstep — `use_pid` is `pid_weights.is_some()`.
-                        #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+                        #[cfg(native_lane)]
                         use_pid,
                         sampler: sampler.clone(),
                         scheduler: scheduler.clone(),
@@ -1618,7 +1588,7 @@ async fn generate_instantid_stream(
                             // sc-8373 candle): the engine forces this internally too (its paste-back
                             // assumes a side×side crop a 4× PiD decode would corrupt), but be explicit
                             // at the seam.
-                            #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+                            #[cfg(native_lane)]
                             use_pid: false,
                             sampler: sampler.clone(),
                             scheduler: scheduler.clone(),
@@ -1666,10 +1636,7 @@ async fn generate_instantid_stream(
                     // face records an honest `detected:false` N/A — never a misleading low number. `None`
                     // scorer (a failed construction) ⇒ no block ⇒ the field is omitted. The Image build +
                     // pixel clone is paid ONLY when a scorer exists.
-                    #[cfg(any(
-                        target_os = "macos",
-                        all(not(target_os = "macos"), feature = "backend-candle")
-                    ))]
+                    #[cfg(native_lane)]
                     let face_likeness = scorer.as_ref().and_then(|scorer| {
                         crate::face_likeness::score_generated_image(
                             Some(scorer),
@@ -1681,10 +1648,7 @@ async fn generate_instantid_stream(
                             Some(face_likeness_source_ref.as_str()),
                         )
                     });
-                    #[cfg(not(any(
-                        target_os = "macos",
-                        all(not(target_os = "macos"), feature = "backend-candle")
-                    )))]
+                    #[cfg(not(native_lane))]
                     let face_likeness: Option<JsonObject> = {
                         let _ = (&scorer, &face_likeness_source_ref);
                         None

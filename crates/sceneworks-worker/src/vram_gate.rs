@@ -120,14 +120,37 @@ pub(crate) fn ladder_reserve_gb(budget: VramBudget) -> f64 {
     (idle_baseline_gb + LADDER_RESERVE_MARGIN_GB).min(HEADROOM_GB)
 }
 
-/// A live (or capped) VRAM budget for the selected GPU, in GB.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct VramBudget {
-    pub free_gb: f64,
-    pub total_gb: f64,
+/// Fold this process's RECLAIMABLE VRAM into the live budget (sc-11023): add `reclaimable_gb` to
+/// `free_gb`, clamped to the physical `total_gb`. The candle generator cache is a single exclusive slot
+/// that evicts its current occupant BEFORE loading the incoming model. This budget is read while that
+/// occupant is still resident (so raw `free` still counts the model it is about to replace); crediting
+/// the reclaimable pool predicts the `free` the imminent evict will PRODUCE, so a warm same-model
+/// re-gate or a swap-in isn't falsely rejected. That prediction holds whether evicting returns the VRAM
+/// to the driver (GPU-measured sc-13960: a full generator drop frees most of it back — `nvidia-smi`
+/// `free` rises) or a within-device component free keeps it pooled in-process — and the clamp to
+/// `total_gb` is the safety net that keeps it honest against a stale high-water. A no-op when
+/// `reclaimable_gb == 0` (nothing loaded yet), so a genuine cold first-load is gated exactly as before.
+pub(crate) use crate::fit_gate::{with_reclaimable, VramBudget};
+
+/// Read the selected card and apply the emulation cap exactly once. Reclaim credit is a
+/// separate, caller-owned decision; fresh post-eviction probes must bypass the cached reading.
+pub(crate) async fn live_capped_budget(gpu_id: &str) -> Option<VramBudget> {
+    apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(gpu_id).await,
+        cuda_vram_cap_gb(),
+    )
 }
 
-/// Read the small-card cap from the environment. `Some(gb)` only for a positive number.
+/// Fresh post-eviction device reading: deliberately bypasses the heartbeat cache.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn live_capped_budget_fresh_blocking(gpu_id: &str) -> Option<VramBudget> {
+    apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb_fresh_blocking(gpu_id),
+        cuda_vram_cap_gb(),
+    )
+}
+
+/// Read the positive small-card emulation cap from the environment.
 pub(crate) fn cuda_vram_cap_gb() -> Option<f64> {
     parse_vram_cap(std::env::var(CUDA_VRAM_CAP_ENV).ok().as_deref())
 }
@@ -152,23 +175,6 @@ pub(crate) fn apply_vram_cap(real: Option<VramBudget>, cap: Option<f64>) -> Opti
             })
         }
         None => real,
-    }
-}
-
-/// Fold this process's RECLAIMABLE VRAM into the live budget (sc-11023): add `reclaimable_gb` to
-/// `free_gb`, clamped to the physical `total_gb`. The candle generator cache is a single exclusive slot
-/// that evicts its current occupant BEFORE loading the incoming model. This budget is read while that
-/// occupant is still resident (so raw `free` still counts the model it is about to replace); crediting
-/// the reclaimable pool predicts the `free` the imminent evict will PRODUCE, so a warm same-model
-/// re-gate or a swap-in isn't falsely rejected. That prediction holds whether evicting returns the VRAM
-/// to the driver (GPU-measured sc-13960: a full generator drop frees most of it back — `nvidia-smi`
-/// `free` rises) or a within-device component free keeps it pooled in-process — and the clamp to
-/// `total_gb` is the safety net that keeps it honest against a stale high-water. A no-op when
-/// `reclaimable_gb == 0` (nothing loaded yet), so a genuine cold first-load is gated exactly as before.
-pub(crate) fn with_reclaimable(budget: VramBudget, reclaimable_gb: f64) -> VramBudget {
-    VramBudget {
-        free_gb: (budget.free_gb + reclaimable_gb.max(0.0)).min(budget.total_gb),
-        total_gb: budget.total_gb,
     }
 }
 
@@ -244,12 +250,7 @@ pub(crate) fn requested_tier_key(
             .and_then(|mlx| mlx.get("quantize"))
             .and_then(quant_int)
     });
-    match raw {
-        None => "q8",
-        Some(bits) if bits <= 0 => "bf16",
-        Some(bits) if bits <= 4 => "q4",
-        Some(_) => "q8",
-    }
+    crate::payload::tier_for_bits(raw, "q8")
 }
 
 /// Predicted peak VRAM (GB) for `tier_key` from the manifest `candle` block:
@@ -398,17 +399,7 @@ pub(crate) fn flux3_source_activation_allowance_bytes(
 }
 
 pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<VramBudget>) -> FitDecision {
-    let (Some(needed_gb), Some(budget)) = (needed_gb, budget) else {
-        return FitDecision::Unknown;
-    };
-    if budget.free_gb + f64::EPSILON < needed_gb {
-        FitDecision::TooBig {
-            needed_gb,
-            available_gb: budget.free_gb,
-        }
-    } else {
-        FitDecision::Fits
-    }
+    crate::fit_gate::fit_decision(needed_gb, budget.map(|budget| budget.free_gb))
 }
 
 /// Second-stage gate for an [`FitDecision::Offload`] (epic 10765, sc-10856): sequential residency was
@@ -421,8 +412,10 @@ pub(crate) fn sequential_overflow_gb(
     sequential_needed_gb: Option<f64>,
     budget: Option<VramBudget>,
 ) -> Option<f64> {
-    let (needed_gb, budget) = (sequential_needed_gb?, budget?);
-    (budget.free_gb + f64::EPSILON < needed_gb).then_some(needed_gb)
+    crate::fit_gate::sequential_overflow_gb(
+        sequential_needed_gb,
+        budget.map(|budget| budget.free_gb),
+    )
 }
 
 /// The resolved residency PLAN for a sequential-capable candle image lane: the pure composition of
@@ -654,16 +647,8 @@ impl KreaTurboFit {
 }
 
 pub(crate) const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
-// sc-17097: the inference revision the shipped Krea phase curves are declared COMPATIBLE with. It must
-// stay equal to the manifest's `turboFit.inferenceRevision` - `candidate_exclusion` compares the two and
-// stales every optimized rung when they diverge.
-//
-// The curves were captured against `277f4238`; each evidence record keeps
-// that exact commit in its own `inferenceCommit` receipt, which is never rewritten (sc-16482: a receipt
-// testifies to its own run). This constant moved to the sc-15819 closeout pin only after verifying the
-// range is a single commit whose diff against BOTH `candle-gen-krea` and `gen-core/src/memory_strategy.rs`
-// is empty - the measured path and the calibration identity (ABI 3, fingerprint, deferred load shape) are
-// byte-for-byte unchanged, so the captures remain valid rather than merely re-stamped.
+// Krea curves retain their captured producer revision. New derived estimates instead use the
+// linked inference provenance; neither stamp is a runtime currency gate (sc-22738).
 
 #[derive(Clone, Debug)]
 pub(crate) struct KreaRuntimeEvidenceContext {
@@ -1821,8 +1806,8 @@ fn krea_turbo_fit_priced(
             ));
             anchor_derived.push((
                 selection,
-                MemoryEvidence {
-                    key: MemoryEvidenceKey {
+                sceneworks_core::memory_contracts::unverified_estimate(
+                    MemoryEvidenceKey {
                         model_family: "krea_2_turbo".to_owned(),
                         resolved_route: "krea_2_turbo".to_owned(),
                         backend: gen_core::MemoryBackend::Candle,
@@ -1837,25 +1822,11 @@ fn krea_turbo_fit_priced(
                         engaged_composition: engaged,
                         parameters,
                     },
-                    conformance: MemoryConformanceState::ImplementedUnverified,
-                    dimensions: MemoryEvidenceDimensions {
-                        static_implementation: MemoryEvidenceVerdict::Satisfied,
-                        declared_calibration: MemoryEvidenceVerdict::Missing,
-                        historical_verification: MemoryEvidenceVerdict::Missing,
-                        current_environment_verification: MemoryEvidenceVerdict::Missing,
-                        canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-                        exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-                    },
                     calibration_abi,
-                    calibration_fingerprint: calibration_fingerprint.to_owned(),
-                    sceneworks_revision: scene_works_revision.to_owned(),
-                    inference_revision: inference_revision.to_owned(),
-                    harness_version: String::new(),
+                    calibration_fingerprint.to_owned(),
+                    scene_works_revision.to_owned(),
                     predicted_peak_bytes,
-                    observed_peak_bytes: None,
-                    parity: MemoryParityContract::Exact,
-                    parity_result: MemoryParityResult::NotRun,
-                },
+                ),
             ));
             continue;
         };
@@ -2011,8 +1982,8 @@ fn krea_turbo_fit_priced(
         );
         estimates.push((
             *selection,
-            MemoryEvidence {
-                key: MemoryEvidenceKey {
+            sceneworks_core::memory_contracts::unverified_estimate(
+                MemoryEvidenceKey {
                     model_family: "krea_2_turbo".to_owned(),
                     resolved_route: "krea_2_turbo".to_owned(),
                     backend: gen_core::MemoryBackend::Candle,
@@ -2027,25 +1998,11 @@ fn krea_turbo_fit_priced(
                     engaged_composition: provider_contract.engaged_composition(selection.strategy),
                     parameters: selection.parameters,
                 },
-                conformance: MemoryConformanceState::ImplementedUnverified,
-                dimensions: MemoryEvidenceDimensions {
-                    static_implementation: MemoryEvidenceVerdict::Satisfied,
-                    declared_calibration: MemoryEvidenceVerdict::Missing,
-                    historical_verification: MemoryEvidenceVerdict::Missing,
-                    current_environment_verification: MemoryEvidenceVerdict::Missing,
-                    canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-                    exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-                },
                 calibration_abi,
-                calibration_fingerprint: calibration_fingerprint.to_owned(),
-                sceneworks_revision: scene_works_revision.to_owned(),
-                inference_revision: inference_revision.to_owned(),
-                harness_version: String::new(),
+                calibration_fingerprint.to_owned(),
+                scene_works_revision.to_owned(),
                 predicted_peak_bytes,
-                observed_peak_bytes: None,
-                parity: MemoryParityContract::Exact,
-                parity_result: MemoryParityResult::NotRun,
-            },
+            ),
         ));
     }
     let mut candidates = selections
@@ -2377,7 +2334,7 @@ pub(crate) fn mochi_fit_error(
         crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, HEADROOM_GB)?,
         budget?,
     );
-    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+    crate::fit_gate::exceeds_budget(needed_gb, budget.free_gb).then(|| {
         mochi_too_big_error(
             model_label,
             needed_gb,
@@ -2677,7 +2634,7 @@ pub(crate) fn video_weights_fit_error(
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
     let (needed_gb, budget) = (video_weights_needed_gb(weight_bytes)?, budget?);
-    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+    crate::fit_gate::exceeds_budget(needed_gb, budget.free_gb).then(|| {
         video_weights_too_big_error(
             model_label,
             needed_gb,
@@ -2763,7 +2720,7 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
     };
     let needed_gb = needed_gb + adapter_bytes as f64 / BYTES_PER_GIB;
     let budget = budget?;
-    (budget.free_gb + f64::EPSILON < needed_gb)
+    crate::fit_gate::exceeds_budget(needed_gb, budget.free_gb)
         .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
 }
 
@@ -2838,7 +2795,7 @@ pub(crate) fn minimax_h3_fit_error_with_sparse(
     } else {
         ""
     };
-    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+    crate::fit_gate::exceeds_budget(needed_gb, budget.free_gb).then(|| {
         WorkerError::InvalidPayload(format!(
             "MiniMax-H3 needs ~{needed} GB of free GPU VRAM for its measured {tier_key} render \
              peak plus CUDA reserve{sparse_reason}, but GPU {gpu_id} has ~{available} GB available. Select a \
@@ -2919,7 +2876,7 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
             ),
         ));
     };
-    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+    crate::fit_gate::exceeds_budget(needed_gb, budget.free_gb).then(|| {
         WorkerError::InvalidPayload(format!(
             "SCAIL-2 shared {tier_key} needs ~{needed} GB of free GPU VRAM (the measured 832x480, \
              81-frame render peak plus CUDA reserve), but GPU {gpu_id} has ~{available} GB \

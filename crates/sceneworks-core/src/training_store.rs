@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
@@ -1496,22 +1495,8 @@ struct PreparedBundleReceipt {
 }
 
 fn prepared_bundle_receipt(path: &Path) -> ProjectStoreResult<PreparedBundleReceipt> {
-    let mut file = fs::File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut size = 0_u64;
-    let mut chunk = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut chunk)?;
-        if read == 0 {
-            break;
-        }
-        size = size.saturating_add(read as u64);
-        hash.update(&chunk[..read]);
-    }
-    Ok(PreparedBundleReceipt {
-        size,
-        sha256: format!("{:x}", hash.finalize()),
-    })
+    let (sha256, size) = crate::hashing::sha256_reader(fs::File::open(path)?)?;
+    Ok(PreparedBundleReceipt { size, sha256 })
 }
 
 #[derive(Debug, Clone)]
@@ -2687,11 +2672,7 @@ pub(crate) fn dataset_item_path(
 
 fn is_safe_file_stem(value: &str) -> bool {
     let value = value.trim();
-    !value.is_empty()
-        && value.chars().count() <= 96
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    crate::ids::is_safe_id_with_max(value, 96)
 }
 
 fn display_name_for_rename(

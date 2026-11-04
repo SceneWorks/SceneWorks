@@ -1765,7 +1765,7 @@ mod tests {
             .find("crate::transform_cache::evict_resident_transform().await?")
             .expect("the candle arm evicts a resident transform");
         let probe = body
-            .find("crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await")
+            .find("crate::vram_gate::live_capped_budget(&settings.gpu_id).await")
             .expect("the candle arm probes VRAM");
         assert!(evict < probe, "evict before the probe");
     }

@@ -49,18 +49,16 @@ use sceneworks_core::training_subject_masks::{
     lookup_subject_mask_for_image, read_subject_mask_index_at, subject_mask_relative_path,
     SubjectMaskLookup,
 };
+#[cfg(any(native_lane, test))]
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 
 // epic 3720 (sc-3724): the backend-neutral training contract types come from `gen_core`, which is
 // tensor-free and links on every target. The import is gated to the backends that actually run a
 // trainer — macOS (mlx-gen) OR the candle Windows/CUDA + Linux/NVIDIA lane (sc-7817) — only so the
 // non-training default build doesn't carry an unused-import warning.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{
     CancelFlag, LoadSpec, LrSchedule, NetworkType, Precision, TrainingConfig, TrainingItem,
     TrainingOutput, TrainingProgress, TrainingRequest, WeightsSource,
@@ -69,12 +67,12 @@ use gen_core::{
 /// Model-less terminal witness. Uses the exact production config mapper and pure contracts;
 /// reads ONLY the frozen config JSON, never weights, tensors, registries or devices.
 pub fn flux3_training_config_witness(plan: &TrainingPlan) -> Result<Value, String> {
-    #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+    #[cfg(not(native_lane))]
     {
         let _ = plan;
         Err("unsupported: native training contracts are not enabled".to_owned())
     }
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     {
         use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION, KERNELS};
         if plan.schema_version != 1
@@ -111,7 +109,7 @@ pub fn flux3_training_config_witness(plan: &TrainingPlan) -> Result<Value, Strin
             .map_err(|_| "witness release format refused".to_owned())?;
         gen_core_flux3::training::identity::validate_release_config(&cfg)
             .map_err(|_| "witness requires canonical undistilled graph".to_owned())?;
-        let mut normalized = engine_training_config(plan);
+        let mut normalized = engine_training_config(plan).map_err(|error| error.to_string())?;
         normalized.resume = false;
         // Byte-identical to gen_core_flux3::training::identity::build; not a JS approximation.
         let config_sha256 = format!(
@@ -739,13 +737,7 @@ impl PreparedTrainingInputs {
         }
     }
 
-    #[cfg(all(
-        test,
-        any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        )
-    ))]
+    #[cfg(all(test, native_lane))]
     fn with_after_publish(
         hook: impl FnMut(&Path, &Path) -> std::io::Result<()> + Send + 'static,
     ) -> Self {
@@ -790,42 +782,44 @@ fn copy_and_verify_prepared_bundle(
             ),
         ))
     })?;
-    let mut hash = Sha256::new();
-    let mut size = 0_u64;
-    let mut chunk = [0_u8; 64 * 1024];
-    loop {
-        let read = source.read(&mut chunk).map_err(|error| {
+    let (actual_sha256, size) = sceneworks_core::hashing::try_sha256_reader_with(
+        &mut source,
+        |size, event| {
+            if let sceneworks_core::hashing::ReadEvent::After(chunk) = event {
+                if chunk.is_empty() {
+                    return Ok(());
+                }
+                let next = size.checked_add(chunk.len() as u64).ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "Training item LTX prepared bundle byte count overflowed: {}.",
+                        key.source_path.display()
+                    ))
+                })?;
+                if next > key.expected_size {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "Training item LTX prepared bundle failed its stored size/SHA-256 integrity check: {}.",
+                        key.source_path.display()
+                    )));
+                }
+                snapshot.write_all(chunk).map_err(|error| {
+                    WorkerError::Io(std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "Could not write staged LTX prepared bundle {}: {error}",
+                            staged_path.display()
+                        ),
+                    ))
+                })?;
+            }
+            Ok(())
+        },
+        |error| {
             WorkerError::InvalidPayload(format!(
                 "Could not read LTX prepared bundle {}: {error}.",
                 key.source_path.display()
             ))
-        })?;
-        if read == 0 {
-            break;
-        }
-        size = size.checked_add(read as u64).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "Training item LTX prepared bundle byte count overflowed: {}.",
-                key.source_path.display()
-            ))
-        })?;
-        if size > key.expected_size {
-            return Err(WorkerError::InvalidPayload(format!(
-                "Training item LTX prepared bundle failed its stored size/SHA-256 integrity check: {}.",
-                key.source_path.display()
-            )));
-        }
-        snapshot.write_all(&chunk[..read]).map_err(|error| {
-            WorkerError::Io(std::io::Error::new(
-                error.kind(),
-                format!(
-                    "Could not write staged LTX prepared bundle {}: {error}",
-                    staged_path.display()
-                ),
-            ))
-        })?;
-        hash.update(&chunk[..read]);
-    }
+        },
+    )?;
     snapshot.sync_all().map_err(|error| {
         WorkerError::Io(std::io::Error::new(
             error.kind(),
@@ -835,7 +829,6 @@ fn copy_and_verify_prepared_bundle(
             ),
         ))
     })?;
-    let actual_sha256 = format!("{:x}", hash.finalize());
     if size != key.expected_size || actual_sha256 != key.expected_sha256 {
         return Err(WorkerError::InvalidPayload(format!(
             "Training item LTX prepared bundle failed its stored size/SHA-256 integrity check: {}.",
@@ -897,10 +890,7 @@ pub(crate) fn finish_prepared_input_operation<T>(
 
 /// A fully mapped, weights-free training request. Both dry-run and real execution obtain this from
 /// [`preflight_training_run`], so path resolution and plan-to-engine config mapping cannot drift.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Debug)]
 pub(crate) struct PreparedTrainingRun {
     pub(crate) engine_id: &'static str,
@@ -908,10 +898,7 @@ pub(crate) struct PreparedTrainingRun {
     pub(crate) prepared_inputs: PreparedTrainingInputs,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl PreparedTrainingRun {
     /// Explicit dry-run cleanup so a Windows deletion failure is surfaced instead of being hidden
     /// by `TempDir`'s best-effort `Drop` cleanup.
@@ -935,10 +922,7 @@ impl PreparedTrainingRun {
 /// Weights-free preflight shared by dry and real execution. It binds the serialized plan's exact
 /// kernel/base identity to an active trainer descriptor, constructs the same typed request the real
 /// path will submit, and validates its complete config/item surface without loading model weights.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn preflight_training_run(
     settings: &Settings,
     plan: &TrainingPlan,
@@ -966,10 +950,7 @@ pub(crate) fn preflight_training_run(
 /// The default neither-backend build never claims a native training job. Keep its plan validator
 /// available for compilation/tests without pretending an absent runtime registry can validate an
 /// engine request.
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 fn preflight_training_run(
     settings: &Settings,
     plan: &TrainingPlan,
@@ -995,6 +976,32 @@ fn preflight_training_run(
 }
 
 fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static str> {
+    let advanced = &plan.config.advanced;
+    for key in [
+        "networkType",
+        "lrScheduler",
+        "timestepType",
+        "timestepBias",
+        "lossType",
+        "mixedPrecision",
+    ] {
+        preflight_string(advanced, key, "")?;
+    }
+    for key in [
+        "gradientCheckpointing",
+        "resume",
+        "cacheLatents",
+        "cacheTextEmbeddings",
+    ] {
+        preflight_bool(advanced, key, false)?;
+    }
+    for key in ["lrWarmupSteps", "sampleEvery", "sampleSteps", "sampleCount"] {
+        preflight_u32(advanced, key, 0)?;
+    }
+    for key in ["weightDecay", "sampleGuidanceScale"] {
+        preflight_f32(advanced, key, 0.0)?;
+    }
+    preflight_i32(advanced, "decomposeFactor", -1)?;
     // Keep the f64 JSON contract and native f32 execution boundary explicit: values
     // that would overflow or underflow during conversion refuse before a request is built.
     sceneworks_core::training::training_alpha_f32(&plan.config.alpha)
@@ -1294,10 +1301,7 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     Ok(engine_id)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn training_request_from_plan(
     settings: &Settings,
     plan: &TrainingPlan,
@@ -1336,7 +1340,7 @@ fn training_request_from_plan(
         return Ok(TrainingRequest {
             items,
             config: crate::iris_task_training::shape_task_config(
-                finalize_training_config(map_training_config(&plan.config), plan),
+                finalize_training_config(map_training_config(&plan.config)?, plan),
                 objective,
             ),
             output_dir: resolve_training_output_dir(
@@ -1402,7 +1406,7 @@ fn training_request_from_plan(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
-    let mut config = engine_training_config(plan);
+    let mut config = engine_training_config(plan)?;
     if let Some(seed) = moss_seed {
         config.seed = seed;
         match settings.requested_gpu_memory_limit()? {
@@ -1450,10 +1454,7 @@ fn training_request_from_plan(
 /// and it is an engine failure (`Engine`, as `train` maps it), never a rejected plan. Only the
 /// plan-refusal variants (`Unsupported`, `GeometryRefused`, and the floors' contextual `Msg`) are
 /// `InvalidPayload`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn trainer_validate_error(engine_id: &str, error: gen_core::Error) -> WorkerError {
     match error {
         gen_core::Error::Unsupported(_)
@@ -1470,10 +1471,7 @@ fn trainer_validate_error(engine_id: &str, error: gen_core::Error) -> WorkerErro
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn validate_weights_free_training_request(
     plan: &TrainingPlan,
     engine_id: &str,
@@ -1530,10 +1528,7 @@ fn validate_weights_free_training_request(
 /// normalized timestep-bias/loss aliases. SD3 deliberately extends only the timestep-type set with
 /// `default`/`logit_normal`; all other flow families use the shared four-value set. This runs for
 /// both MLX and Candle before their backend-specific load path.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn validate_new_family_request(
     plan: &TrainingPlan,
     engine_id: &str,
@@ -1623,8 +1618,8 @@ fn preflight_bool(advanced: &JsonObject, key: &str, default: bool) -> WorkerResu
     match advanced.get(key) {
         None => Ok(default),
         Some(Value::Bool(value)) => Ok(*value),
-        Some(Value::String(value)) if value.eq_ignore_ascii_case("true") => Ok(true),
-        Some(Value::String(value)) if value.eq_ignore_ascii_case("false") => Ok(false),
+        Some(Value::String(value)) if value.trim().eq_ignore_ascii_case("true") => Ok(true),
+        Some(Value::String(value)) if value.trim().eq_ignore_ascii_case("false") => Ok(false),
         Some(_) => Err(WorkerError::InvalidPayload(format!(
             "Training config field '{key}' must be a boolean."
         ))),
@@ -1653,6 +1648,39 @@ fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult
     }
 }
 
+fn preflight_f32(advanced: &JsonObject, key: &str, default: f32) -> WorkerResult<f32> {
+    let Some(value) = advanced.get(key) else {
+        return Ok(default);
+    };
+    let value = value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse::<f64>().ok());
+    value
+        .filter(|value| value.is_finite())
+        .and_then(|value| {
+            let converted = value as f32;
+            (converted.is_finite() && (value == 0.0 || converted != 0.0)).then_some(converted)
+        })
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Training config field '{key}' must be a finite f32 number."
+            ))
+        })
+}
+
+fn preflight_i32(advanced: &JsonObject, key: &str, default: i32) -> WorkerResult<i32> {
+    let Some(value) = advanced.get(key) else {
+        return Ok(default);
+    };
+    sceneworks_core::payload_util::json_integer(value)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Training config field '{key}' must be a signed 32-bit integer."
+            ))
+        })
+}
+
 /// Epic 2123 depth anchoring (sc-2125): map the strictly parsed `advanced.depthAnchoring*` keys onto
 /// the engine's typed [`gen_core::DepthAnchoringConfig`] and resolve the two auxiliary checkpoints
 /// it loads — the trainer family's x0 decoder (its cataloged tiny decoder, e.g. TAEF1 for Z-Image,
@@ -1661,10 +1689,7 @@ fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult
 /// from the installed model library. A missing checkpoint is refused, naming the catalog model to
 /// install; nothing is downloaded mid-job. Off (the default) leaves the config untouched, so a
 /// legacy plan maps exactly as before.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn apply_depth_anchoring(
     settings: &Settings,
     plan: &TrainingPlan,
@@ -1712,10 +1737,7 @@ fn apply_depth_anchoring(
 /// loss's person detector), and the shape/normal loss's own model — from the installed model
 /// library. A missing or uncataloged checkpoint is refused naming the model; nothing is downloaded
 /// mid-job. All off (the default) leaves the config untouched.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn apply_body_losses(
     settings: &Settings,
     plan: &TrainingPlan,
@@ -1783,10 +1805,7 @@ fn apply_body_losses(
 /// a trainer that decodes through its own base-model VAE ([`X0DecoderSource::BaseModelVae`],
 /// Mage-Flow): its descriptor declares `techniques.builtin_x0_decoder`, so the engine floor does not
 /// ask for a directory and the trainer never reads one. `technique` labels the refusal.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn perceptual_decoder_dir(
     settings: &Settings,
     engine_id: &str,
@@ -1869,10 +1888,7 @@ fn preflight_latent_perceptual(
 /// same pinned revision), E-LatentLPIPS's family weights. A missing checkpoint is refused naming
 /// the catalog model to install; nothing is downloaded mid-job. Off (the default) leaves the
 /// config untouched.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn apply_latent_perceptual(
     settings: &Settings,
     plan: &TrainingPlan,
@@ -1947,10 +1963,7 @@ fn apply_latent_perceptual(
 /// weight file present), installed through the Model Manager into the app-managed Hugging Face
 /// cache — never a job-time side cache (epic 17625 AC9). Otherwise a typed refusal naming the
 /// model and the `technique` that needs it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn installed_aux_model_dir(
     settings: &Settings,
     model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
@@ -1974,10 +1987,7 @@ pub fn installed_aux_training_model_dir(
 
 /// The typed refusal for an auxiliary training model that is not installed, naming the catalog
 /// entry to install and the `technique` that needs it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn not_installed(
     model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
     technique: &str,
@@ -1994,10 +2004,7 @@ fn not_installed(
 /// `.safetensors` and hand the trainer its path (`TrainingConfig::training_adapter`). A missing file
 /// is refused naming the catalog model to install — never a silent bare-base run; nothing is
 /// downloaded mid-job. No adapter keys (the default) leaves the config untouched.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn apply_training_adapter(
     settings: &Settings,
     plan: &TrainingPlan,
@@ -2022,10 +2029,7 @@ fn apply_training_adapter(
 /// identity loss — the shipped ArcFace, in place of upstream's buffalo_l `w600k_r50`, see
 /// `sceneworks_core::training::face_losses`) and, for the landmark loss, the rehosted FaceMesh-v2.
 /// A missing checkpoint is refused naming the catalog model; off leaves the config untouched.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn apply_face_losses(
     settings: &Settings,
     plan: &TrainingPlan,
@@ -2219,7 +2223,11 @@ fn preflight_bounded_f64(
     };
     value
         .as_f64()
-        .filter(|number| number.is_finite() && (0.0..=max).contains(number))
+        .filter(|number| {
+            number.is_finite()
+                && (0.0..=max).contains(number)
+                && (*number == 0.0 || (*number as f32).is_finite() && *number as f32 != 0.0)
+        })
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
                 "Training config field '{key}' must be a number between 0 and {max}."
@@ -2254,15 +2262,9 @@ async fn run_training_dry_run(
         ),
     )
     .await?;
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     preflight_training_run(settings, plan, masks_pending)?.close()?;
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     preflight_training_run(settings, plan, masks_pending)?;
     let item_count = plan.dataset.items.len();
     update_job(
@@ -2346,21 +2348,7 @@ pub(crate) fn training_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        // Stamped by update_job before posting (sc-4172).
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 // --------------------------------------------------------------------------- #
@@ -2380,10 +2368,7 @@ pub(crate) fn training_progress(
 /// the identity check here so a forged or stale plan cannot load a sibling trainer. Both native
 /// registries serve the advertised product targets at the pinned inference revision; Candle also
 /// preserves the Krea ControlNet and Wan T2V LoKr lanes.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[cfg(test)]
 fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
     engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
@@ -2504,80 +2489,11 @@ fn ltx_2_5_trainer_id() -> &'static str {
     }
 }
 
-/// Read an `advanced` field as a string, trimmed and non-empty, else `default`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn advanced_str(advanced: &JsonObject, key: &str, default: &str) -> String {
-    advanced
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(default)
-        .to_owned()
-}
-
-/// Read an `advanced` field as an f32, else `default`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn advanced_f32(advanced: &JsonObject, key: &str, default: f32) -> f32 {
-    advanced
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(default)
-}
-
-/// Read an `advanced` field as a u32, else `default`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn advanced_u32(advanced: &JsonObject, key: &str, default: u32) -> u32 {
-    advanced
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as u32)
-        .unwrap_or(default)
-}
-
-/// Read an `advanced` field as a bool (accepting a JSON bool or a `"true"`/`"false"`
-/// string), else `default`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn advanced_bool(advanced: &JsonObject, key: &str, default: bool) -> bool {
-    advanced
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_bool()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .unwrap_or(default)
-}
-
 /// Source-load precision, separate from the requested training compute dtype. Qwen Image 2.1
 /// and MOSS Base/SFT authenticate their official BF16 source and use `TrainingConfig.train_dtype`
 /// for FP32 compute after loading; sending Fp32 to those factories rejects an otherwise valid run.
 /// Other trainers (e.g. Lens) still load directly at their requested compute precision.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn training_load_precision(engine_id: &str, train_dtype: &str) -> Precision {
     if !matches!(
         engine_id,
@@ -2596,10 +2512,7 @@ fn training_load_precision(engine_id: &str, train_dtype: &str) -> Precision {
 /// anything unrecognized — falls back to full-precision `"f32"`, matching the
 /// engine's own "unrecognized ⇒ f32" rule. The *absent*-key default is applied by
 /// the caller (`"bf16"`), so a plan that omits the key keeps the OOM fix on.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn normalize_train_dtype(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "bf16" => "bf16".to_owned(),
@@ -2612,11 +2525,10 @@ fn normalize_train_dtype(value: &str) -> String {
 /// passed verbatim — the engine normalizes aliases (`adamw8bit`→`adamw`,
 /// `prodigyopt`→`prodigy`). An empty `loraTargetModules` lets the family trainer use
 /// its default target set.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> TrainingConfig {
+#[cfg(native_lane)]
+fn map_training_config(
+    config: &sceneworks_core::training::TrainingConfig,
+) -> WorkerResult<TrainingConfig> {
     let advanced = &config.advanced;
     // sc-14056 — the FULL base fine-tune selector. `networkType` carries three values on the product
     // surface (`lora` / `lokr` / `full`), but the engine models the third one as a separate boolean
@@ -2626,9 +2538,8 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
     // Without this the flag never reaches the engine and a user asking for a full tune silently gets a
     // LoRA (the F-055 class; gen-core's `validate_full_finetune_request` floor is the engine-side twin
     // of this mapping).
-    let full_finetune = advanced_str(advanced, "networkType", "lora")
-        .trim()
-        .eq_ignore_ascii_case("full");
+    let full_finetune =
+        preflight_string(advanced, "networkType", "lora")?.eq_ignore_ascii_case("full");
     let lora_target_modules = advanced
         .get("loraTargetModules")
         .and_then(Value::as_array)
@@ -2639,10 +2550,10 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    TrainingConfig {
+    Ok(TrainingConfig {
         rank: config.rank,
         alpha: sceneworks_core::training::training_alpha_f32(&config.alpha)
-            .expect("training target preflight validates alpha before native mapping"),
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?,
         learning_rate: config.learning_rate.as_f64().unwrap_or(1e-4) as f32,
         steps: config.steps,
         batch_size: config.batch_size,
@@ -2651,19 +2562,15 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         save_every: config.save_every,
         seed: config.seed.max(0) as u64,
         optimizer: config.optimizer.clone(),
-        weight_decay: advanced_f32(advanced, "weightDecay", 0.0),
-        lr_scheduler: LrSchedule::parse(&advanced_str(advanced, "lrScheduler", "constant")),
-        lr_warmup_steps: advanced_u32(advanced, "lrWarmupSteps", 0),
-        network_type: NetworkType::parse(&advanced_str(advanced, "networkType", "lora")),
-        decompose_factor: advanced
-            .get("decomposeFactor")
-            .and_then(Value::as_i64)
-            .map(|value| value as i32)
-            .unwrap_or(-1),
+        weight_decay: preflight_f32(advanced, "weightDecay", 0.0)?,
+        lr_scheduler: LrSchedule::parse(&preflight_string(advanced, "lrScheduler", "constant")?),
+        lr_warmup_steps: preflight_u32(advanced, "lrWarmupSteps", 0)?,
+        network_type: NetworkType::parse(&preflight_string(advanced, "networkType", "lora")?),
+        decompose_factor: preflight_i32(advanced, "decomposeFactor", -1)?,
         lora_target_modules,
-        timestep_type: advanced_str(advanced, "timestepType", "sigmoid"),
-        timestep_bias: advanced_str(advanced, "timestepBias", "balanced"),
-        loss_type: advanced_str(advanced, "lossType", "mse"),
+        timestep_type: preflight_string(advanced, "timestepType", "sigmoid")?,
+        timestep_bias: preflight_string(advanced, "timestepBias", "balanced")?,
+        loss_type: preflight_string(advanced, "lossType", "mse")?,
         // Training compute dtype — the primary OOM fix (sc-4887). bf16 halves the
         // activation working set and drops the 1024² z-image first-step peak 135 → ~44 GB,
         // so the run survives. This mapping builds the engine config field-by-field (no
@@ -2671,7 +2578,7 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // MUST be set explicitly. Sourced from the advanced `mixedPrecision` key (presets
         // already carry "bf16"); the engine only supports bf16/f32, so anything else
         // (incl. "fp16", "no", empty) normalizes to "f32". Absent → "bf16" (keep the fix on).
-        train_dtype: normalize_train_dtype(&advanced_str(advanced, "mixedPrecision", "bf16")),
+        train_dtype: normalize_train_dtype(&preflight_string(advanced, "mixedPrecision", "bf16")?),
         // Honor the "Gradient Checkpointing" UI checkbox on the Rust path (sc-4881) — an
         // extra lever for smaller machines / higher resolution on top of the bf16 fix.
         // Previously dropped here, so the engine always ran at its `false` default. Absent
@@ -2679,7 +2586,7 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         //
         // Full fine-tunes do not silently clear this value. Platform-effective metadata seeds
         // `false`, and the shared dry/real preflight rejects a forged `true` plan before load.
-        gradient_checkpointing: advanced_bool(advanced, "gradientCheckpointing", false),
+        gradient_checkpointing: preflight_bool(advanced, "gradientCheckpointing", false)?,
         full_finetune,
         trigger_word: config.trigger_word.clone(),
         // sc-5637 — preview-sample cadence. The SceneWorks config + UI always supply these (presets
@@ -2687,33 +2594,44 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // from the trigger word), but the engine config is built field-by-field (no `..Default`), so
         // they must be mapped explicitly or the family trainer never samples. Absent `sampleEvery`
         // (legacy payloads) → 0 → sampling stays off, exactly as before this fix.
-        sample_every: advanced_u32(advanced, "sampleEvery", 0),
-        sample_steps: advanced_u32(advanced, "sampleSteps", 20),
-        sample_guidance_scale: advanced_f32(advanced, "sampleGuidanceScale", 1.0),
+        sample_every: preflight_u32(advanced, "sampleEvery", 0)?,
+        sample_steps: preflight_u32(advanced, "sampleSteps", 20)?,
+        sample_guidance_scale: preflight_f32(advanced, "sampleGuidanceScale", 1.0)?,
         // Preserve family-specific options instead of collapsing them into the common scalar
         // fields above. Native trainers parse only the keys they own and reject unsupported modes.
         model_options: advanced.clone(),
         // Preserve submitted resume intent. Each backend either implements it or the shared
         // dry/real preflight rejects it before any model load.
-        resume: advanced_bool(advanced, "resume", false),
+        resume: preflight_bool(advanced, "resume", false)?,
         // Epic 2123 weight noising (sc-24826). Absent ⇒ 0 ⇒ off, so legacy plans train exactly as
         // before. A malformed / out-of-range value never reaches here: the shared dry/real
         // preflight (`preflight_weight_noise_sigma`) refuses it first.
-        weight_noise_sigma: advanced_f32(advanced, WEIGHT_NOISE_SIGMA_KEY, 0.0),
+        weight_noise_sigma: preflight_bounded_f64(
+            advanced,
+            WEIGHT_NOISE_SIGMA_KEY,
+            WEIGHT_NOISE_SIGMA_MAX,
+            0.0,
+        )? as f32,
         // Epic 2123 gradient noise (sc-24827). Absent eta ⇒ 0 ⇒ off; absent gamma ⇒ the upstream
         // 0.55. Malformed / out-of-range values are refused by the shared preflight first.
-        gradient_noise_eta: advanced_f32(advanced, GRADIENT_NOISE_ETA_KEY, 0.0),
-        gradient_noise_gamma: advanced_f32(
+        gradient_noise_eta: preflight_bounded_f64(
+            advanced,
+            GRADIENT_NOISE_ETA_KEY,
+            GRADIENT_NOISE_ETA_MAX,
+            0.0,
+        )? as f32,
+        gradient_noise_gamma: preflight_bounded_f64(
             advanced,
             GRADIENT_NOISE_GAMMA_KEY,
-            GRADIENT_NOISE_GAMMA_DEFAULT as f32,
-        ),
+            GRADIENT_NOISE_GAMMA_MAX,
+            GRADIENT_NOISE_GAMMA_DEFAULT,
+        )? as f32,
         // Epic 2123 multi-resolution buckets (sc-2127). Absent ⇒ empty ⇒ off (one bucket at
         // `resolution`, exactly as before).
         resolution_buckets: map_resolution_buckets(advanced),
         aspect_ratio_buckets: map_aspect_ratio_buckets(advanced),
-        cache_latents: advanced_bool(advanced, "cacheLatents", true),
-        cache_text_embeddings: advanced_bool(advanced, "cacheTextEmbeddings", true),
+        cache_latents: preflight_bool(advanced, "cacheLatents", true)?,
+        cache_text_embeddings: preflight_bool(advanced, "cacheTextEmbeddings", true)?,
         // Preserve explicit caps, including invalid present values for the engine's validation:
         // zero bytes and a non-finite fraction refuse rather than silently disabling a caller cap.
         memory_limit_bytes: technique_value(advanced, "memoryLimitBytes").map(|value| {
@@ -2782,10 +2700,10 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 .unwrap_or_default();
             resolve_sample_prompts(
                 pool,
-                advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
+                preflight_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT)?,
             )
         },
-    }
+    })
 }
 
 /// Map `advanced.resolutionBuckets` onto the engine's typed list (absent ⇒ empty ⇒ off). The shared
@@ -2793,10 +2711,7 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
 /// it maps **fail-closed** to a zero bucket, which the engine's technique floor refuses
 /// (`resolution_buckets[0] needs a resolution and a repeat count >= 1`) instead of silently
 /// training at one resolution.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBucket> {
     match parse_resolution_bucket_config(advanced) {
         Ok(None | Some(ResolutionBucketConfig::AspectRatio(_))) => Vec::new(),
@@ -2816,10 +2731,7 @@ fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBuck
 
 /// Keep the additive rectangular list separate from the legacy square list. Invalid
 /// data fails closed even if a caller bypasses the shared plan preflight.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn map_aspect_ratio_buckets(advanced: &JsonObject) -> Vec<gen_core::AspectRatioBucket> {
     // Preserve main's explicit rectangular key alongside the canonical product key. Two present
     // forms are ambiguous, so refuse rather than silently discarding either caller's geometry.
@@ -2860,18 +2772,12 @@ fn map_aspect_ratio_buckets(advanced: &JsonObject) -> Vec<gen_core::AspectRatioB
 /// Default number of preview images rendered per sample step when the plan doesn't set
 /// `advanced.sampleCount`. Matches the four default prompts the UI prefills, so legacy payloads
 /// preview exactly as before this knob existed (sc-8671).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const DEFAULT_SAMPLE_COUNT: u32 = 4;
 
 /// Cap a prompt pool at `count` (one preview per prompt, truncated — never padded). An empty pool or
 /// `count == 0` yields no samples (sampling stays off). The UI owns the default prompts (sc-8671).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_sample_prompts(pool: Vec<String>, count: u32) -> Vec<String> {
     pool.into_iter().take(count as usize).collect()
 }
@@ -2922,10 +2828,7 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
 /// force. Forcing it here makes a real off-Mac Z-Image / Krea Raw / Wan A14B run impossible to configure
 /// into a dense-backward OOM. Those safety overrides are Candle-only. Both backends receive the
 /// same strict MOSS options bag and adapter-training sampler default.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> TrainingConfig {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
@@ -2971,24 +2874,18 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
 
 /// The shared plan-to-engine config mapping of a bare SceneWorks config (no backend finalization):
 /// the Iris pre-launch plan check (sc-25689) resolves exactly what [`map_training_config`] sends.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn map_engine_config(
     config: &sceneworks_core::training::TrainingConfig,
-) -> TrainingConfig {
+) -> WorkerResult<TrainingConfig> {
     map_training_config(config)
 }
 
 /// The engine [`TrainingConfig`] a plan trains with: the shared mapping, the backend finalization
 /// and the Iris dtype passthrough. The one source for the real request, the Iris plan resolution and
 /// every rank process (sc-25689).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-pub(crate) fn engine_training_config(plan: &TrainingPlan) -> TrainingConfig {
+#[cfg(native_lane)]
+pub(crate) fn engine_training_config(plan: &TrainingPlan) -> WorkerResult<TrainingConfig> {
     let flux3 = sceneworks_core::training::flux3::KERNELS.contains(&plan.target.kernel.as_str());
     let mapped = if flux3 {
         // Legacy clients may omit advanced fields. Seed this family's actual source profile,
@@ -3000,9 +2897,9 @@ pub(crate) fn engine_training_config(plan: &TrainingPlan) -> TrainingConfig {
                 .advanced;
         defaults.extend(source.advanced);
         source.advanced = defaults;
-        map_training_config(&source)
+        map_training_config(&source)?
     } else {
-        map_training_config(&plan.config)
+        map_training_config(&plan.config)?
     };
     let mut config =
         crate::iris_curricula::apply_iris_train_dtype(finalize_training_config(mapped, plan), plan);
@@ -3013,14 +2910,11 @@ pub(crate) fn engine_training_config(plan: &TrainingPlan) -> TrainingConfig {
         // intent belongs in this namespace; product/provenance keys must not strand checkpoints.
         config.model_options.retain(|key, _| key == "flux3");
     }
-    config
+    Ok(config)
 }
 
 /// One progress event streamed from the blocking training thread to the async side.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) enum TrainEvent {
     Progress(TrainingProgress),
     Done(TrainingOutput),
@@ -3034,10 +2928,7 @@ pub(crate) enum TrainEvent {
 /// lives inside the weights dir) and for a legacy LTX conversion with no sibling or an operator
 /// `$LTX_GEMMA_DIR`. LTX-2.5 self-contains Gemma-4 in the selected tier, so it deliberately keeps
 /// the engine's own resolution. The same resolver is used by MLX and candle.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Option<WeightsSource> {
     if engine_id == "ltx_2_3" {
         return crate::video_jobs::ltx::resolve_bundled_ltx_gemma_dir(weights_dir)
@@ -3108,10 +2999,7 @@ pub(crate) fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json:
 /// verbatim it is not a file and a correctly-installed component reports missing) and the `subdir`
 /// narrowing (the shared components mirror hosts every tier AND both components in ONE repo, so the
 /// provider must be handed `<snapshot>/bf16/text_encoder`, not the snapshot root).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_trainer_components(
     engine_id: &str,
     base_model_id: &str,
@@ -3142,20 +3030,14 @@ fn resolve_trainer_components(
 /// components (the base model's pinned `coRequisite`s and, for an Iris REPA run, the integrity-checked
 /// DINOv2 teacher TRAINING resource). Shared by the in-process trainer and every Iris rank process
 /// (sc-25689), so they can never load different inputs.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct TrainerLoadInputs {
     weights_dir: PathBuf,
     text_encoder: Option<WeightsSource>,
     components: std::collections::BTreeMap<String, WeightsSource>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl TrainerLoadInputs {
     pub(crate) fn resolve(
         settings: &Settings,
@@ -3248,10 +3130,7 @@ impl TrainerLoadInputs {
 /// The tier a training run resolves its base + shared components from. Dense by definition: the
 /// gradient path needs unpacked projections, and the app's `TrainingTierMissing` pre-flight plus the
 /// engine's own packed-weight refusal both key off this same tier.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const TRAINING_COMPONENT_TIER: &str = "bf16";
 
 /// Execute a real training run on the in-process native engine (mlx-gen on macOS, candle-gen
@@ -3267,10 +3146,7 @@ const TRAINING_COMPONENT_TIER: &str = "bf16";
 /// moves forward; then the strict preflight against the masks now stored. `make_segmenter` is the
 /// prepass's segmenter factory ([`crate::subject_mask_jobs::installed_sam3_segmenter`] in
 /// production).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn prepare_training_run<M>(
     api: &ApiClient,
     settings: &Settings,
@@ -3304,10 +3180,7 @@ where
     preflight_training_run(settings, plan, false)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_training_execution(
     api: &ApiClient,
     settings: &Settings,
@@ -3329,10 +3202,7 @@ pub(crate) async fn run_training_execution(
 /// memory floor + data walk, base/component resolution), the blocking drive, the progress/cancel
 /// consumer and the completion result are the production code; only the engine is injectable, so a
 /// test pins exactly what reaches `Trainer::train` and what the job API sees, without weights.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_training_execution_using(
     api: &ApiClient,
     settings: &Settings,
@@ -3357,10 +3227,7 @@ pub(crate) async fn run_training_execution_using(
 /// run that asks for more than one rank never loads a trainer in this process — the worker becomes
 /// the coordinator of `world_size` rank processes ([`crate::iris_dist::drive_rank_fleet`]) whose
 /// rank-0 events feed the very same consumer below. Tests inject fake rank processes here.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_training_execution_drive(
     api: &ApiClient,
     settings: &Settings,
@@ -3383,10 +3250,7 @@ pub(crate) async fn run_training_execution_drive(
     .await
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_training_execution_drive_observing_cancel(
     api: &ApiClient,
     settings: &Settings,
@@ -3615,10 +3479,7 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
 /// The Iris-only pre-load gate of [`run_training_execution_using`]: refuse a host under the
 /// declared memory floor (never admitted unbounded), and report the trainer's unused-tail condition.
 /// Returns the notes folded into the completion result (`dataWalk`, `warnings`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn iris_training_preflight(
     api: &ApiClient,
     settings: &Settings,
@@ -3750,10 +3611,7 @@ async fn iris_training_preflight(
 /// until the GPU is genuinely idle, and the UI honestly shows "Cancelling…" until completion.
 /// Best-effort: a failed status update here is non-fatal because the post-run terminal write is
 /// what ultimately frees the worker. Mirrors the image path's `begin_image_cancel` (sc-5515).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn begin_training_cancel(
     api: &ApiClient,
     job_id: &str,
@@ -3784,10 +3642,7 @@ pub(crate) async fn begin_training_cancel(
 /// best-effort — a persistence hiccup logs and is skipped, never failing the run. Owning this state
 /// here shrinks the event loop to `persister.persist(...)` and keeps the Done handler's final-result
 /// fold reading the same accumulated samples.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct SamplePersister {
     cfg: TrainingConfig,
     /// Directory holding this run's `step-NNNNNN/` preview folders — NOT always under
@@ -3800,10 +3655,7 @@ struct SamplePersister {
     latest_samples: Vec<Value>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl SamplePersister {
     /// Resolve the sample config + destination paths for a run. `output_dir`/`project_root` are
     /// resolved leniently (already validated upstream in `run_training_execution`); if either is
@@ -3957,10 +3809,7 @@ impl SamplePersister {
 /// `<project>/training/samples/<lora_id>/`. `delete_lora` sweeps that directory when the LoRA is
 /// deleted (see `lora_preview_sample_paths` in apps/rust-api/src/loras.rs) so the relocation doesn't
 /// orphan them.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_sample_root(
     output_dir: Option<&Path>,
     project_root: Option<&Path>,
@@ -4003,10 +3852,7 @@ fn resolve_sample_root(
 
 /// Bundle verification reads tensor hashes, so keep it off the async executor. This
 /// is also used after cancellation has drained and joined the owned trainer task.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn verified_moss_resume_step(
     settings: &Settings,
     plan: &TrainingPlan,
@@ -4026,24 +3872,9 @@ async fn verified_moss_resume_step(
 /// and on the final `Done` event report completion with the result the UI shows.
 /// Mirrors `image_jobs::consume_gen_events`.
 ///
-/// sc-9541 (F-034 follow-up): this deliberately does NOT fold into the shared
-/// [`analysis_jobs_common::run_batched_analysis_job`] scaffold (which the CLIP + face analysis jobs
-/// share). That scaffold abstracts "N homogeneous items, each a bare `usize` index → one record `R`,
-/// all ending in ONE sidecar POST"; training shares none of those axes — its channel carries a rich
-/// `TrainEvent`/`TrainingProgress` variant tree (not a `usize`), its progress spans five kernel bands
-/// via [`map_training_progress`] (not the analysis single-ramp `item_progress`), its `Sample` events
-/// have file-persistence side effects (`SamplePersister`), its cancel posts an interim non-terminal
-/// "Cancelling…" update (`begin_training_cancel`, the analysis loop trips a bare flag), and it emits an
-/// in-place `Done` result with NO sidecar POST (the engine writes the adapter; the API registers it
-/// separately). Forcing training through the analysis scaffold would require making it generic over an
-/// event type + an event→progress mapper + a stateful side-effect hook + a no-op sidecar branch —
-/// distorting the clean analysis-only seam for more complexity than the duplication it removes. The
-/// only genuinely shared machinery (the `CancelJoinGuard` + bounded-join teardown + deferred-terminal
-/// cancel, sc-8804/8917) is already reconciled across both by convention, not code sharing.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+/// Lane-specific training event handling on the shared stream supervisor. Preview persistence,
+/// checkpoint verification, non-terminal cancellation and durable Iris exports stay here.
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn consume_training_events(
     api: &ApiClient,
@@ -4059,13 +3890,12 @@ pub(crate) async fn consume_training_events(
     blocking: tokio::task::JoinHandle<WorkerResult<()>>,
     run_notes: JsonObject,
 ) -> WorkerResult<()> {
-    // Bind the blocking training task to its cancel flag (sc-8804, F-003): every `update_job`/
-    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
-    // reclaim); on that early return this guard trips the engine `CancelFlag` and aborts the
-    // still-running training thread instead of leaving it burning GPU memory alongside the next
-    // claimed job. `cancel` is kept alongside (it's `Clone`) for the in-loop `begin_training_cancel`
-    // pollers; the guard drives only the drop-time teardown.
-    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
+    let mut supervisor = StreamSupervisor::new(
+        cancel.clone(),
+        blocking,
+        progress_report_interval(settings),
+        None,
+    );
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
@@ -4082,33 +3912,15 @@ pub(crate) async fn consume_training_events(
     // `samples.all_samples` / `samples.cfg` for the final result fold.
     let mut samples = SamplePersister::new(settings, job, plan, sample_config);
 
-    let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
-    heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
-    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
-    let loop_result: WorkerResult<()> = async {
+    let handling: WorkerResult<()> = async {
         loop {
-            let event = tokio::select! {
-                maybe_event = rx.recv() => match maybe_event {
-                    Some(event) => event,
-                    None => break,
-                },
-                _ = heartbeat_interval.tick() => {
-                    // Keep the worker's heartbeat alive during long silent gaps between engine events
-                    // — e.g. a slow checkpoint disk-write + preview-sampling pass for a large model
-                    // (Krea2). Heartbeats otherwise ride only on incoming progress events (below), so a
-                    // quiet stretch past the API's 90s worker-timeout lets the stale-sweep mark this
-                    // still-running job `interrupted`, and the next progress post is then 409'd
-                    // (sc-8390; same class as the inline-upscale sc-8200). Also poll cancel here so a
-                    // cancel requested during such a gap is honored without awaiting the next event.
-                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
-                    // poll (a local flag read) so a quit stops training at the next step / event gap.
-                    if !canceled && (shutdown_requested() || cancel_requested_peek(api, &job.id).await)
-                    {
-                        begin_training_cancel(api, &job.id, &cancel, backend).await;
-                        canceled = true;
-                    }
+            let event = match supervisor.next(api, settings, &job.id, Some(&mut rx)).await? {
+                StreamSignal::Event(event) => event,
+                StreamSignal::Finished => break,
+                StreamSignal::ProgressTick => continue,
+                StreamSignal::CancelRequested => {
+                    begin_training_cancel(api, &job.id, &cancel, backend).await;
+                    canceled = true;
                     continue;
                 }
             };
@@ -4130,12 +3942,14 @@ pub(crate) async fn consume_training_events(
                     // shutdown (sc-9618) short-circuits the throttle + API poll so a quit stops on the
                     // very next training step, not just at the heartbeat-tick gap above.
                     if matches!(progress, TrainingProgress::Training { .. })
-                        && (shutdown_requested()
+                        && (crate::progress::shutdown_requested()
+                            || shutdown_requested()
                             || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
                                 last_cancel_check = Instant::now();
                                 cancel_requested_peek(api, &job.id).await
                             }))
                     {
+                        supervisor.request_cancel();
                         begin_training_cancel(api, &job.id, &cancel, backend).await;
                         canceled = true;
                         continue;
@@ -4205,11 +4019,9 @@ pub(crate) async fn consume_training_events(
                         training_progress(status, stage, fraction, &message, result, backend),
                     )
                     .await?;
-                    // No per-event heartbeat here: the `heartbeat_interval.tick()` arm above already
-                    // pings `Busy` on the shared 5–15 s interval, keeping `last_seen` fresh independent of
-                    // event cadence (posting progress does not refresh it). A heartbeat per progress event
-                    // just doubled the API round-trips, throttling GPU stepping to API latency (sc-8917,
-                    // F-115) with no keepalive benefit.
+                    // The shared supervisor heartbeats on its independent 5–15 s interval. Posting
+                    // progress does not refresh last_seen; a heartbeat per event would double API
+                    // round-trips and throttle stepping to API latency (sc-8917, F-115).
                 }
                 TrainEvent::Done(output) => {
                     let mut result = training_result(
@@ -4257,17 +4069,8 @@ pub(crate) async fn consume_training_events(
         Ok(())
     }
     .await;
-    if let Err(error) = loop_result {
-        guard.cancel_and_join().await;
-        return Err(error);
-    }
-
-    // The event loop exited cleanly (channel closed after `Done`/cancel-drain), so the blocking
-    // task is finished or finishing — reclaim its handle (disarming the drop-guard) and join it.
-    let task_result = guard
-        .into_handle()
-        .await
-        .map_err(|error| task_join_error("training task join", error))?;
+    let (_, task_result) = supervisor.finish_stream(handling, &mut rx).await?;
+    let task_result = task_result.map_err(|error| task_join_error("training task join", error))?;
     if canceled {
         // Training has actually stopped now, so post the TERMINAL Canceled here (not at the
         // earlier cancel poll, which only tripped the flag + showed "Cancelling…"). This terminal
@@ -4337,10 +4140,7 @@ pub(crate) async fn consume_training_events(
 /// message)`. The fractions follow the kernel's bands (prepare 0–.08, load .08–.18,
 /// cache .18–.32, train/checkpoint .32–.92, save .92–1.0) so the UI's existing
 /// `caching_latents`/`training`/`checkpointing`/`saving` stages light up unchanged.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn map_training_progress(
     progress: TrainingProgress,
     total_steps: u32,
@@ -4399,10 +4199,7 @@ pub(crate) fn map_training_progress(
 }
 
 /// Scale a training micro-step into the 0.32–0.92 training band.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn train_fraction(step: u32, total: u32) -> f64 {
     if total == 0 {
         return 0.32;
@@ -4419,10 +4216,7 @@ fn train_fraction(step: u32, total: u32) -> f64 {
 /// Studio reads: `trainingSamples` (cumulative), `latestTrainingSamples` (this cadence),
 /// `samplePrompts` (for labels), and `sampleSettings` (steps + guidance + source). Mirrors the
 /// Python trainer's `_result` sample keys.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn training_samples_result(
     all_samples: &[Value],
     latest_samples: &[Value],
@@ -4454,10 +4248,7 @@ fn training_samples_result(
 /// `/api/v1/projects/<id>/files/<relativePath>`); it is omitted when the project root is unknown (the
 /// absolute `path` is still recorded for debugging). PNG encoding + the atomic temp-then-rename
 /// mirror `image_jobs::write_image_asset`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 fn write_training_sample(
     sample_root: Option<&Path>,
@@ -4507,10 +4298,7 @@ fn write_training_sample(
     Ok(record)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 fn training_result(
     plan: &TrainingPlan,
@@ -4528,7 +4316,7 @@ fn training_result(
     result.insert("outputKind".to_owned(), json!(plan.target.output_kind));
     result.insert(
         "networkType".to_owned(),
-        json!(advanced_str(&plan.config.advanced, "networkType", "lora")),
+        json!(optional_payload_string(&plan.config.advanced, "networkType").unwrap_or("lora")),
     );
     result.insert("loraId".to_owned(), json!(plan.output.lora_id));
     result.insert("outputId".to_owned(), json!(plan.output.lora_id));
@@ -4597,7 +4385,7 @@ fn training_result(
 /// `lora_train_execute` capability is never advertised, so a real run can never be claimed here.
 /// Fail loudly if one is. Off-Mac with `backend-candle` the real `run_training_execution` above is
 /// compiled instead (sc-7817).
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 async fn run_training_execution(
     _api: &ApiClient,
     _settings: &Settings,
@@ -4615,18 +4403,136 @@ async fn run_training_execution(
 mod tests {
     use super::*;
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
+    #[test]
+    fn strict_training_readers_refuse_malformed_and_overflow_without_coercion() {
+        for value in [
+            json!(true),
+            json!(null),
+            json!(-1),
+            json!(1.5),
+            json!(2.0),
+            json!(u64::MAX),
+            json!("4294967296"),
+            json!("1.5"),
+        ] {
+            let advanced = JsonObject::from_iter([("key".into(), value)]);
+            assert!(preflight_u32(&advanced, "key", 7).is_err());
+        }
+        for value in [
+            json!(false),
+            json!(null),
+            json!(2147483648_i64),
+            json!(-2147483649_i64),
+            json!(2.5),
+        ] {
+            let advanced = JsonObject::from_iter([("key".into(), value)]);
+            assert!(preflight_i32(&advanced, "key", -1).is_err());
+        }
+        for value in [
+            json!(true),
+            json!(null),
+            json!("NaN"),
+            json!("inf"),
+            json!(1e100),
+            json!(1e-100),
+            json!("not-a-number"),
+        ] {
+            let advanced = JsonObject::from_iter([("key".into(), value)]);
+            assert!(preflight_f32(&advanced, "key", 7.0).is_err());
+        }
+        let advanced = json!({"count":" 4294967295 ","signed":" -2147483648 ","fraction":" 0.125 ","flag":" TRUE ","name":" value "}).as_object().unwrap().clone();
+        assert_eq!(preflight_u32(&advanced, "count", 7).unwrap(), u32::MAX);
+        assert_eq!(preflight_i32(&advanced, "signed", 7).unwrap(), i32::MIN);
+        assert_eq!(preflight_f32(&advanced, "fraction", 7.0).unwrap(), 0.125);
+        assert!(preflight_bool(&advanced, "flag", false).unwrap());
+        assert_eq!(
+            preflight_string(&advanced, "name", "default").unwrap(),
+            "value"
+        );
+        assert_eq!(preflight_u32(&advanced, "absent", 7).unwrap(), 7);
+        assert_eq!(
+            preflight_string(&advanced, "absent", "default").unwrap(),
+            "default"
+        );
+        assert!(preflight_string(&advanced, "count", "default").is_ok());
+        assert!(preflight_bool(&advanced, "count", false).is_err());
+    }
+
+    #[cfg(native_lane)]
+    #[test]
+    fn strict_training_mapper_uses_preflight_types_and_preserves_valid_fractions() {
+        let mut config = sceneworks_core::training::flux3::target(false).defaults;
+        config.advanced.clear();
+        config.alpha = serde_json::Number::from_f64(0.5).unwrap();
+        config.seed = 9_007_199_254_740_993;
+        config
+            .advanced
+            .insert("sampleGuidanceScale".into(), json!(0.125));
+        config.advanced.insert("weightDecay".into(), json!(0.03125));
+        config.advanced.insert("sampleSteps".into(), json!(" 20 "));
+        let mapped = map_training_config(&config).unwrap();
+        assert_eq!(mapped.sample_guidance_scale, 0.125);
+        assert_eq!(mapped.weight_decay, 0.03125);
+        assert_eq!(mapped.sample_steps, 20);
+        assert_eq!(mapped.alpha, 0.5);
+        assert_eq!(mapped.seed, 9_007_199_254_740_993);
+        for (key, value) in [
+            ("sampleSteps", json!(4294967296_u64)),
+            ("weightDecay", json!(false)),
+            ("networkType", json!(7)),
+            ("resume", json!("yes")),
+            ("decomposeFactor", json!(2147483648_i64)),
+        ] {
+            let mut invalid = config.clone();
+            invalid.advanced.insert(key.into(), value);
+            assert!(map_training_config(&invalid).is_err(), "{key}");
+        }
+        for key in [
+            WEIGHT_NOISE_SIGMA_KEY,
+            GRADIENT_NOISE_ETA_KEY,
+            GRADIENT_NOISE_GAMMA_KEY,
+        ] {
+            config.advanced.insert(key.into(), Value::Null);
+        }
+        assert!(
+            map_training_config(&config).is_ok(),
+            "technique nulls retain absence semantics"
+        );
+    }
+
     #[test]
     fn moss_field_shapes_worker_and_submission_have_identical_refusals() {
         let targets = sceneworks_core::training::builtin_training_targets();
-        for target in targets
+        let targets: Vec<_> = targets
             .targets
             .iter()
             .filter(|t| t.kernel == "moss_image_lora")
-        {
+            .collect();
+        assert_eq!(targets.len(), 2, "both MOSS checkpoints must be covered");
+        let native_runtime = cfg!(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ));
+        for target in targets {
+            let engine_id = engine_trainer_id_for(&target.kernel, &target.base_model).unwrap();
+            assert_eq!(
+                crate::inference_runtime::trainer_descriptor(engine_id).is_some(),
+                native_runtime,
+                "MOSS registration must match this runtime's backend availability"
+            );
+            let unavailable =
+                format!("Native trainer '{engine_id}' is not registered in this worker runtime.");
+            let assert_worker_acceptance = |plan: &TrainingPlan| {
+                let worker = validate_training_target_config(plan);
+                if native_runtime {
+                    assert_eq!(worker.unwrap(), engine_id);
+                } else {
+                    assert!(
+                        matches!(worker, Err(WorkerError::InvalidPayload(message)) if message == unavailable)
+                    );
+                }
+            };
             for network in ["lora", "lokr"] {
                 let mut value = plan_json(
                     Path::new("/unused-moss-shape-test"),
@@ -4643,13 +4549,21 @@ mod tests {
                     &plan.config,
                 )
                 .unwrap();
-                validate_training_target_config(&plan).unwrap();
-                for (field, invalid) in [
-                    ("cacheLatents", json!("false")),
-                    ("cacheTextEmbeddings", json!(0)),
-                    ("loraTargetModules", json!([7])),
-                    ("modelOptions", json!({"vae_posterior":"sample"})),
-                    ("decomposeFactor", json!(0)),
+                sceneworks_core::training::validate_moss_training_field_shapes(
+                    &plan.config.advanced,
+                )
+                .unwrap();
+                assert_worker_acceptance(&plan);
+                for (field, invalid, early_worker_refusal) in [
+                    ("cacheLatents", json!("false"), None),
+                    (
+                        "cacheTextEmbeddings",
+                        json!(0),
+                        Some("Training config field 'cacheTextEmbeddings' must be a boolean."),
+                    ),
+                    ("loraTargetModules", json!([7]), None),
+                    ("modelOptions", json!({"vae_posterior":"sample"}), None),
+                    ("decomposeFactor", json!(0), None),
                 ] {
                     let mut refused = value.clone();
                     refused["config"]["advanced"][field] = invalid;
@@ -4660,9 +4574,23 @@ mod tests {
                             &plan.config,
                         )
                         .unwrap_err();
+                    let shape = sceneworks_core::training::validate_moss_training_field_shapes(
+                        &plan.config.advanced,
+                    )
+                    .unwrap_err();
+                    assert_eq!(shape.to_string(), submission.to_string(), "{field}");
                     let worker = validate_training_target_config(&plan).unwrap_err();
+                    // Generic type refusals precede registration; MOSS-specific checks follow it.
+                    // Neither-backend builds still exercise every pure field-shape assertion.
+                    let expected = early_worker_refusal.map(str::to_owned).unwrap_or_else(|| {
+                        if native_runtime {
+                            submission.to_string()
+                        } else {
+                            unavailable.clone()
+                        }
+                    });
                     assert!(
-                        matches!(worker, WorkerError::InvalidPayload(message) if message == submission.to_string()),
+                        matches!(worker, WorkerError::InvalidPayload(message) if message == expected),
                         "{field}"
                     );
                 }
@@ -4693,7 +4621,11 @@ mod tests {
                         &plan.config,
                     )
                     .unwrap();
-                    validate_training_target_config(&plan).unwrap();
+                    sceneworks_core::training::validate_moss_training_field_shapes(
+                        &plan.config.advanced,
+                    )
+                    .unwrap();
+                    assert_worker_acceptance(&plan);
                 }
             }
         }
@@ -4711,10 +4643,7 @@ mod tests {
     /// A lazily loaded base can fail from `validate`: those load-class errors are `Engine`, while
     /// the plan-refusal variants stay `InvalidPayload`. Mutation: map `Backend | MissingTensor |
     /// Io` back to `InvalidPayload` (the pre-lazy mapping) ⇒ the first loop fails.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn trainer_validate_error_maps_load_failures_to_engine() {
         let load_failures = [
@@ -4753,10 +4682,7 @@ mod tests {
     /// complete bundled sibling `gemma/` (the self-contained turnkey install). Every other family's
     /// TE lives inside the weights dir → `None`. A complete operator `$LTX_GEMMA_DIR` override wins
     /// and is threaded onto the spec by the shared resolver.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn training_text_encoder_gates_on_engine_and_bundle() {
         let root_guard = tempfile::Builder::new()
@@ -5061,10 +4987,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn prepared_bundle_snapshot_survives_same_size_source_swap_deduplicates_and_cleans() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5187,10 +5110,7 @@ mod tests {
     /// `reference_image_paths` carry the references IN PLAN ORDER (resolved under the dataset root,
     /// target = item image, instruction = caption), and a plain plan still builds items with no
     /// references at all. A reference escaping the dataset root is refused, like the target.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn training_request_carries_edit_references_in_order_and_plain_items_carry_none() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5405,7 +5325,7 @@ mod tests {
         serde_json::from_value(value).expect("plan deserializes")
     }
 
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn flux3_pure_config_witness_needs_no_weights_and_binds_mapper_options() {
         use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
@@ -5484,7 +5404,7 @@ mod tests {
                     subject_mask_path: None,
                     model_options: Default::default(),
                 }],
-                config: engine_training_config(&plan),
+                config: engine_training_config(&plan).expect("valid mapped training config"),
                 output_dir: temp.path().join("never-written"),
                 file_name: "never-written.safetensors".into(),
                 trigger_words: plan.output.trigger_words.clone(),
@@ -5531,7 +5451,7 @@ mod tests {
         assert!(flux3_training_config_witness(&plan).is_err());
     }
 
-    #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+    #[cfg(not(native_lane))]
     #[test]
     fn flux3_witness_neither_backend_is_typed_unsupported_without_io() {
         let plan = parse(plan_json(
@@ -5661,10 +5581,7 @@ mod tests {
     }
 
     /// What the stub API saw during a training run's subject-mask prepass (sc-2124).
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[derive(Clone, Default)]
     struct PrepassApi {
         progress: std::sync::Arc<std::sync::Mutex<Vec<f64>>>,
@@ -5672,10 +5589,7 @@ mod tests {
         dataset_root: std::sync::Arc<std::sync::Mutex<PathBuf>>,
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn prepass_job_value(payload: Value) -> Value {
         json!({
             "id": "train-job", "type": "lora_train", "status": "running",
@@ -5692,10 +5606,7 @@ mod tests {
     /// A stub rust-api: progress/heartbeat/job routes, and a `/subject-masks` route that stores
     /// each POSTed mask the way the store does (PNG at its content-hash path + an index record), so
     /// the preflight that follows the prepass reads them.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     async fn spawn_prepass_api(dataset_root: PathBuf) -> (String, PrepassApi) {
         use axum::{
             extract::{Path as AxumPath, State},
@@ -5780,10 +5691,7 @@ mod tests {
     }
 
     /// A stub segmenter: a full-white mask per image, counting the images it was asked to segment.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn white_mask_segmenter(
         seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     ) -> impl FnOnce(gen_core::CancelFlag) -> WorkerResult<crate::subject_mask_jobs::SegmentBatch>
@@ -5803,10 +5711,7 @@ mod tests {
     }
 
     /// The `subjectMaskPrepass` the API stamps for `images` (every image, as at submit time).
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn prepass_payload(data_dir: &Path, images: &[String]) -> Value {
         let root = data_dir.join("datasets").join("ds-1");
         json!({ "subjectMaskPrepass": {
@@ -5826,10 +5731,7 @@ mod tests {
     /// a mask path on every item — and progress only moves forward (prepass in 0.01..=0.04, then
     /// 0.05). Mutation: skip the prepass in `prepare_training_run` ⇒ the preflight refuses ⇒ red;
     /// post 0.05 first ⇒ the progress check ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[tokio::test]
     async fn real_run_preparation_generates_missing_masks_before_the_strict_preflight() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5873,10 +5775,7 @@ mod tests {
     /// that STILL have no mask are segmented, so an existing mask — here a user upload — is never
     /// re-segmented nor overwritten (and a fully masked dataset segments nothing). Mutation: drop the
     /// run-time re-read ⇒ the uploaded image is segmented and POSTed ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[tokio::test]
     async fn prepass_segments_only_images_still_without_a_mask_and_never_overwrites_an_upload() {
         use sceneworks_core::training_subject_masks::{
@@ -6024,10 +5923,7 @@ mod tests {
     /// active trainer declares it (Z-Image, on either backend) and refuses it where it does not
     /// (LTX-2.5 trains from prepared latent bundles, which no image mask can align with) — and a
     /// malformed weight is refused rather than defaulted.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn preflight_refuses_subject_mask_loss_the_trainer_cannot_honor() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6077,10 +5973,7 @@ mod tests {
     /// validation uses, so a plan that bypassed the API never reaches a load. The same section on a
     /// Mage LoRA run is admitted, so the refusal is the combination. Mutation: drop any one
     /// section's `*_combination_refusal` call from `validate_training_target_config` ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn preflight_refuses_aux_losses_on_engine_refused_combinations() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6148,10 +6041,7 @@ mod tests {
     /// Epic 2123 JSON-null policy: the worker preflight reads a JSON `null` on every technique key as
     /// absent — exactly what submit-time validation admitted. Mutation: read the noise keys with
     /// `advanced.get` in `preflight_bounded_f64` ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn preflight_treats_null_technique_keys_as_absent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6199,10 +6089,7 @@ mod tests {
 
     /// sc-24828: the typed request carries the engine `subject_mask_loss` weights and each item's
     /// mask path when on — and neither when off, so a legacy plan maps exactly as before.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn training_request_carries_subject_mask_loss_and_paths() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6261,10 +6148,7 @@ mod tests {
 
     /// sc-4887: only an explicit bf16 selects bf16; every other value (incl. the
     /// engine-unsupported fp16, "no", empty) falls back to full-precision f32.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn normalize_train_dtype_only_bf16_selects_bf16() {
         assert_eq!(normalize_train_dtype("bf16"), "bf16");
@@ -6278,10 +6162,7 @@ mod tests {
     /// sc-4881 / sc-4887: the two OOM-fix levers must reach the engine config. The
     /// mapping builds it field-by-field (no `..Default::default()`), so a dropped
     /// field silently reverts to the wrong value — exactly the bug this story fixes.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn map_training_config_wires_train_dtype_and_gradient_checkpointing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6297,7 +6178,8 @@ mod tests {
             "lora",
             &[&image],
         ));
-        let mapped = map_training_config(&default_plan.config);
+        let mapped =
+            map_training_config(&default_plan.config).expect("valid mapped training config");
         assert_eq!(mapped.train_dtype, "bf16");
         assert!(!mapped.gradient_checkpointing);
 
@@ -6311,7 +6193,8 @@ mod tests {
         );
         value["config"]["advanced"]["mixedPrecision"] = json!("fp16");
         value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
-        let mapped = map_training_config(&parse(value).config);
+        let mapped =
+            map_training_config(&parse(value).config).expect("valid mapped training config");
         assert_eq!(mapped.train_dtype, "f32");
         assert!(mapped.gradient_checkpointing);
     }
@@ -6321,10 +6204,7 @@ mod tests {
     /// `techniques.subject_mask_loss` for every target this runtime can train — MLX on macOS,
     /// Candle off-Mac, with no projection on either. The targets that do not support it are pinned
     /// exactly, so a trainer gaining or losing the technique without the catalog following fails.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn catalog_subject_mask_loss_flag_matches_the_linked_trainer_descriptors() {
         let mut checked = 0;
@@ -6384,10 +6264,7 @@ mod tests {
     /// platforms (every LoRA/LoKr trainer declares both techniques on MLX and Candle), so this runs
     /// against the MLX descriptors on macOS and the Candle descriptors off-Mac. Flip either side and
     /// this fails.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn catalog_technique_flags_match_the_linked_trainer_descriptors() {
         let mut checked = 0;
@@ -6435,10 +6312,7 @@ mod tests {
     /// (served identically on both platforms) against the MLX descriptors on macOS and the Candle
     /// descriptors off-Mac — and every declaring trainer must have an x0 decoder source. Mutation:
     /// drop the flag from one target (or mark the Krea ControlNet target) ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn catalog_depth_anchoring_flag_matches_the_linked_trainer_descriptors() {
         let mut checked = 0;
@@ -6479,10 +6353,7 @@ mod tests {
     /// for every target this
     /// runtime can train (the flags are static per target, identical on both platforms).
     /// Mutation: drop `supportsBodyProportionLoss` from the Z-Image target ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn catalog_body_loss_flags_match_the_linked_trainer_descriptors() {
         use sceneworks_core::training::body_losses::{target_supports, BodyLoss};
@@ -6524,10 +6395,7 @@ mod tests {
     /// `techniques.resolution_buckets` for every target this runtime can train — the builtin
     /// catalog (served unprojected on both platforms since sc-24827) against the MLX descriptors on
     /// macOS and the Candle descriptors off-Mac. Flip either side and this fails.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn catalog_resolution_buckets_flag_matches_the_linked_trainer_descriptors() {
         let mut checked = 0;
@@ -6572,10 +6440,7 @@ mod tests {
     /// sc-24826/sc-24827 (epic 2123): `advanced.weightNoiseSigma` / `gradientNoiseEta` /
     /// `gradientNoiseGamma` reach the engine's typed fields; absent stays off (eta 0, sigma 0, gamma
     /// the upstream 0.55), so a legacy plan maps exactly as before.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn map_training_config_wires_adapter_noise_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6588,7 +6453,8 @@ mod tests {
             "lora",
             &[&image],
         );
-        let legacy = map_training_config(&parse(value.clone()).config);
+        let legacy = map_training_config(&parse(value.clone()).config)
+            .expect("valid mapped training config");
         assert_eq!(legacy.weight_noise_sigma, 0.0);
         assert_eq!(legacy.gradient_noise_eta, 0.0);
         assert_eq!(legacy.gradient_noise_gamma, 0.55);
@@ -6597,17 +6463,15 @@ mod tests {
         noisy["config"]["advanced"]["weightNoiseSigma"] = json!(0.0125);
         noisy["config"]["advanced"]["gradientNoiseEta"] = json!(0.02);
         noisy["config"]["advanced"]["gradientNoiseGamma"] = json!(0.75);
-        let mapped = map_training_config(&parse(noisy).config);
+        let mapped =
+            map_training_config(&parse(noisy).config).expect("valid mapped training config");
         assert_eq!(mapped.weight_noise_sigma, 0.0125);
         assert_eq!(mapped.gradient_noise_eta, 0.02);
         assert_eq!(mapped.gradient_noise_gamma, 0.75);
     }
 
     /// Every SceneWorks training kernel the worker can route, with a base model it accepts.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     const ROUTED_TRAINING_TARGETS: &[(&str, &str)] = &[
         ("z_image_lora", "z_image_turbo"),
         ("sdxl_lora", "sdxl"),
@@ -6631,10 +6495,7 @@ mod tests {
     /// trainer, both backends), refuses them on a trainer that does not declare them (the Krea
     /// control-branch trainer), refuses them with a full base fine-tune, and refuses out-of-range /
     /// malformed values.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn preflight_gates_adapter_noise_on_the_trainer_descriptor() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6745,10 +6606,7 @@ mod tests {
     /// sc-2127 (epic 2123): `advanced.resolutionBuckets` reaches the engine's typed
     /// `resolution_buckets` row-for-row; absent stays empty (off), so a legacy plan maps exactly as
     /// before; a malformed list maps fail-closed to a bucket the engine floor refuses.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn map_training_config_wires_resolution_buckets() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6762,6 +6620,7 @@ mod tests {
             &[&image],
         );
         assert!(map_training_config(&parse(value.clone()).config)
+            .expect("valid mapped training config")
             .resolution_buckets
             .is_empty());
 
@@ -6776,7 +6635,9 @@ mod tests {
             repeats,
         };
         assert_eq!(
-            map_training_config(&parse(bucketed.clone()).config).resolution_buckets,
+            map_training_config(&parse(bucketed.clone()).config)
+                .expect("valid mapped training config")
+                .resolution_buckets,
             vec![rb(512, 16), rb(768, 4), rb(1024, 1)]
         );
 
@@ -6784,7 +6645,9 @@ mod tests {
         malformed["config"]["advanced"]["resolutionBuckets"] =
             json!([{ "resolution": 512, "repeats": 0 }]);
         assert_eq!(
-            map_training_config(&parse(malformed).config).resolution_buckets,
+            map_training_config(&parse(malformed).config)
+                .expect("valid mapped training config")
+                .resolution_buckets,
             vec![rb(0, 0)]
         );
         // The worker cap is the engine cap.
@@ -6795,10 +6658,7 @@ mod tests {
     }
 
     // CI_IMPACT: pure plan-to-config mapping, with no files, model load, training, or device work.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn map_training_config_preserves_cache_geometry_and_memory_limits() {
         let mut config = parse(plan_json(
@@ -6809,7 +6669,7 @@ mod tests {
             &[],
         ))
         .config;
-        let defaults = map_training_config(&config);
+        let defaults = map_training_config(&config).expect("valid mapped training config");
         assert!(defaults.aspect_ratio_buckets.is_empty());
         assert!(defaults.cache_latents);
         assert!(defaults.cache_text_embeddings);
@@ -6831,7 +6691,7 @@ mod tests {
             .unwrap()
             .clone(),
         );
-        let explicit = map_training_config(&config);
+        let explicit = map_training_config(&config).expect("valid mapped training config");
         assert_eq!(
             explicit.aspect_ratio_buckets,
             vec![
@@ -6860,7 +6720,10 @@ mod tests {
             json!([{ "width": 512, "height": 768, "repeats": 1 }]),
         );
         assert_eq!(
-            map_training_config(&config).aspect_ratio_buckets[0].width,
+            map_training_config(&config)
+                .expect("valid mapped training config")
+                .aspect_ratio_buckets[0]
+                .width,
             0
         );
         config.advanced.remove("resolutionBuckets");
@@ -6869,12 +6732,15 @@ mod tests {
             .advanced
             .insert("memoryLimitFraction".into(), json!("0.75"));
         assert_eq!(
-            map_training_config(&config).memory_limit_fraction,
+            map_training_config(&config)
+                .expect("valid mapped training config")
+                .memory_limit_fraction,
             Some(0.75)
         );
         for value in [json!(1.00000001), json!("1.00000001")] {
             config.advanced.insert("memoryLimitFraction".into(), value);
             assert!(map_training_config(&config)
+                .expect("valid mapped training config")
                 .memory_limit_fraction
                 .unwrap()
                 .is_nan());
@@ -6884,7 +6750,9 @@ mod tests {
             .advanced
             .insert("memoryLimitBytes".into(), json!("9876543210"));
         assert_eq!(
-            map_training_config(&config).memory_limit_bytes,
+            map_training_config(&config)
+                .expect("valid mapped training config")
+                .memory_limit_bytes,
             Some(9_876_543_210)
         );
         config
@@ -6894,7 +6762,7 @@ mod tests {
         config
             .advanced
             .insert("memoryLimitFraction".into(), json!("invalid"));
-        let invalid = map_training_config(&config);
+        let invalid = map_training_config(&config).expect("valid mapped training config");
         assert_eq!(invalid.aspect_ratio_buckets[0].width, 0);
         assert_eq!(invalid.memory_limit_bytes, Some(0));
         assert!(invalid.memory_limit_fraction.unwrap().is_nan());
@@ -6903,10 +6771,7 @@ mod tests {
     /// sc-2127 (epic 2123 E3): the shared dry/real preflight refuses a malformed bucket list, and
     /// refuses a well-formed one exactly when the active trainer's descriptor does not declare
     /// `techniques.resolution_buckets` (admitted where it does).
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn preflight_refuses_resolution_buckets_the_trainer_cannot_honor() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6972,10 +6837,7 @@ mod tests {
     /// values naming the key, and admits it where the active runtime's trainer declares it — SDXL,
     /// Z-Image and Mage on both backends. Mutation: drop the `descriptor.techniques.depth_anchoring`
     /// check ⇒ the Krea ControlNet refusal no longer names unsupported depth anchoring ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn preflight_refuses_depth_anchoring_the_trainer_cannot_honor() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7051,10 +6913,7 @@ mod tests {
 
     /// Lay down a fake installed HF snapshot file (`models--<org>--<name>/snapshots/<rev>/<file>`)
     /// under `hub` and return the snapshot directory.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn fake_snapshot(hub: &Path, repo: &str, revision: &str, file: &str) -> PathBuf {
         let snapshot = hub
             .join(format!("models--{}", repo.replace('/', "--")))
@@ -7070,10 +6929,7 @@ mod tests {
     /// repo subdirectory included), or, for Mage-Flow (no tiny decoder, decodes through its own
     /// VAE), no directory at all. A missing decoder is refused naming it.
     /// Mutation: map every trainer to TAEF1 in `x0_decoder_for_trainer` ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn depth_anchoring_resolves_each_familys_x0_decoder() {
         use sceneworks_core::training::depth_anchoring::{
@@ -7103,7 +6959,8 @@ mod tests {
             ("qwen_image_2_1_lora", "qwen_image_2_1", &TAEQI2_1_MODEL),
         ] {
             let plan = plan(kernel, base);
-            let mut config = map_training_config(&plan.config);
+            let mut config =
+                map_training_config(&plan.config).expect("valid mapped training config");
             match apply_depth_anchoring(&settings, &plan, &mut config) {
                 Err(WorkerError::InvalidPayload(message)) => {
                     assert!(message.contains(model.id), "{kernel}: {message}")
@@ -7111,7 +6968,8 @@ mod tests {
                 other => panic!("{kernel}: expected a not-installed refusal, got {other:?}"),
             }
             let snapshot = fake_snapshot(&hub, model.repo, model.revision, model.file);
-            let mut config = map_training_config(&plan.config);
+            let mut config =
+                map_training_config(&plan.config).expect("valid mapped training config");
             apply_depth_anchoring(&settings, &plan, &mut config).unwrap();
             assert_eq!(
                 canon(config.perceptual_decoder_dir.as_ref().unwrap()),
@@ -7121,7 +6979,7 @@ mod tests {
         }
         // Mage-Flow decodes through its own VAE (`builtin_x0_decoder`): no decoder directory.
         let mage = plan("mage_flow_lora", "mage_flow_base");
-        let mut config = map_training_config(&mage.config);
+        let mut config = map_training_config(&mage.config).expect("valid mapped training config");
         apply_depth_anchoring(&settings, &mage, &mut config).unwrap();
         assert_eq!(config.perceptual_decoder_dir, None);
     }
@@ -7132,10 +6990,7 @@ mod tests {
     /// model to install; an unknown version is refused naming the field; no adapter keys leave
     /// the config untouched. Mutations: map `v2-default` to v1 ⇒ red; resolve the directory without
     /// the file check ⇒ the missing-file case resolves ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn training_adapter_version_maps_to_the_installed_file() {
         use sceneworks_core::training::training_adapter::{
@@ -7163,7 +7018,8 @@ mod tests {
             parse(value)
         };
         let resolve = |plan: &TrainingPlan| {
-            let mut config = map_training_config(&plan.config);
+            let mut config =
+                map_training_config(&plan.config).expect("valid mapped training config");
             apply_training_adapter(&settings, plan, &mut config).map(|()| config.training_adapter)
         };
 
@@ -7222,10 +7078,7 @@ mod tests {
     /// through their own VAE: `x0_decoder_for_trainer(id) == BaseModelVae` exactly when the
     /// active platform's descriptor declares `techniques.builtin_x0_decoder`. Mutation: map
     /// `mage_flow_base` to a cataloged decoder (or drop `BaseModelVae`) ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn base_model_vae_decoder_matches_builtin_x0_decoder_descriptors() {
         use sceneworks_core::training::depth_anchoring::X0DecoderSource;
@@ -7259,10 +7112,7 @@ mod tests {
     /// refused naming the catalog model to install; off leaves the config untouched. Mutation:
     /// resolve with the unpinned `huggingface_snapshot_dir` ⇒ the wrong-revision case resolves ⇒
     /// red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn depth_anchoring_maps_the_schedule_and_resolves_installed_aux_models() {
         use sceneworks_core::training::depth_anchoring::{DEPTH_ANYTHING_V2_MODELS, TAEF1_MODEL};
@@ -7291,7 +7141,8 @@ mod tests {
         }
         let plan = parse(value);
         let refusal = |plan: &TrainingPlan| {
-            let mut config = map_training_config(&plan.config);
+            let mut config =
+                map_training_config(&plan.config).expect("valid mapped training config");
             match apply_depth_anchoring(&settings, plan, &mut config) {
                 Err(WorkerError::InvalidPayload(message)) => message,
                 other => panic!("expected a not-installed refusal, got {other:?}"),
@@ -7299,7 +7150,8 @@ mod tests {
         };
 
         // Off: untouched, and nothing needs to be installed.
-        let mut config = map_training_config(&off_plan.config);
+        let mut config =
+            map_training_config(&off_plan.config).expect("valid mapped training config");
         apply_depth_anchoring(&settings, &off_plan, &mut config).unwrap();
         assert!(!config.depth_anchoring.schedule.is_enabled());
         assert_eq!(config.perceptual_decoder_dir, None);
@@ -7325,7 +7177,7 @@ mod tests {
         assert!(refusal(&plan).contains(base.id));
         let da2 = fake_snapshot(&hub, base.repo, base.revision, base.file);
 
-        let mut config = map_training_config(&plan.config);
+        let mut config = map_training_config(&plan.config).expect("valid mapped training config");
         apply_depth_anchoring(&settings, &plan, &mut config).unwrap();
         let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
         assert_eq!(
@@ -7364,7 +7216,7 @@ mod tests {
             small_model.revision,
             small_model.file,
         );
-        let mut config = map_training_config(&small.config);
+        let mut config = map_training_config(&small.config).expect("valid mapped training config");
         apply_depth_anchoring(&settings, &small, &mut config).unwrap();
         assert_eq!(
             canon(config.depth_anchoring.model_dir.as_ref().unwrap()),
@@ -7377,10 +7229,7 @@ mod tests {
     /// (naming the key); it admits the proportion loss where the active runtime's trainer declares
     /// it (Z-Image on MLX). Mutation: drop the per-loss `declared` check ⇒ the SDXL case is
     /// admitted ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn preflight_refuses_body_losses_the_trainer_cannot_honor() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7448,10 +7297,7 @@ mod tests {
     /// catalog against the active platform's descriptors — and a declaring trainer always resolves
     /// an x0 decoder source. Mutations: stop deriving either flag from depth anchoring ⇒ red; set it
     /// on a target whose trainer does not declare it ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn catalog_face_loss_flags_match_the_linked_trainer_descriptors() {
         use sceneworks_core::training::face_losses::{
@@ -7499,10 +7345,7 @@ mod tests {
     /// flags, identical on both platforms, compared with the active platform's descriptors); and a
     /// target advertising the decoded-x0 VAE anchor must have an x0 decoder. Mutation: drop a target
     /// from `VAE_ANCHOR_TARGETS` / `LATENT_LPIPS_TARGETS` (or add `krea_2_control`) ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn catalog_latent_perceptual_flags_match_the_linked_trainer_descriptors() {
         use sceneworks_core::training::latent_perceptual::target_supports;
@@ -7546,10 +7389,7 @@ mod tests {
     /// malformed values naming the key, and admits both losses on every LoRA trainer the active
     /// runtime registers (SDXL, Z-Image, Mage). Mutation: drop the `declared` check ⇒ the control
     /// case is admitted ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn preflight_refuses_face_losses_the_trainer_cannot_honor() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7622,10 +7462,7 @@ mod tests {
     /// checkpoint is refused naming the catalog model; an enabled loss whose model is not cataloged
     /// is refused; off leaves the config untouched. Mutation: drop `pose_model_dir` resolution
     /// (`None`) ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn body_losses_map_the_schedules_and_resolve_installed_aux_models() {
         use sceneworks_core::training::body_losses::VITPOSE_PLUS_BASE_MODEL;
@@ -7653,14 +7490,16 @@ mod tests {
         }
         let plan = parse(value);
         let refusal = |plan: &TrainingPlan| {
-            let mut config = map_training_config(&plan.config);
+            let mut config =
+                map_training_config(&plan.config).expect("valid mapped training config");
             match apply_body_losses(&settings, plan, &mut config) {
                 Err(WorkerError::InvalidPayload(message)) => message,
                 other => panic!("expected a refusal, got {other:?}"),
             }
         };
 
-        let mut config = map_training_config(&off_plan.config);
+        let mut config =
+            map_training_config(&off_plan.config).expect("valid mapped training config");
         apply_body_losses(&settings, &off_plan, &mut config).unwrap();
         assert!(!config.body_losses.any_enabled());
         assert_eq!(config.body_losses.pose_model_dir, None);
@@ -7688,7 +7527,7 @@ mod tests {
             VITPOSE_PLUS_BASE_MODEL.file,
         );
 
-        let mut config = map_training_config(&plan.config);
+        let mut config = map_training_config(&plan.config).expect("valid mapped training config");
         apply_body_losses(&settings, &plan, &mut config).unwrap();
         let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
         assert_eq!(
@@ -7741,7 +7580,7 @@ mod tests {
             SAPIENS_NORMAL_0_3B_MODEL.revision,
             SAPIENS_NORMAL_0_3B_MODEL.file,
         );
-        let mut config = map_training_config(&all.config);
+        let mut config = map_training_config(&all.config).expect("valid mapped training config");
         apply_body_losses(&settings, &all, &mut config).unwrap();
         let body = &config.body_losses;
         assert_eq!(
@@ -7768,10 +7607,7 @@ mod tests {
     /// the config untouched. Mutations: skip the ArcFace file check ⇒ the half-installed case
     /// resolves ⇒ red; drop the `min_cos` mapping ⇒ red; resolve the landmark model from the face
     /// stack ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn identity_loss_maps_the_schedule_and_resolves_the_installed_face_stack() {
         use sceneworks_core::training::depth_anchoring::TAEF1_MODEL;
@@ -7802,14 +7638,16 @@ mod tests {
         }
         let plan = parse(value.clone());
         let refusal = |plan: &TrainingPlan| {
-            let mut config = map_training_config(&plan.config);
+            let mut config =
+                map_training_config(&plan.config).expect("valid mapped training config");
             match apply_face_losses(&settings, plan, &mut config) {
                 Err(WorkerError::InvalidPayload(message)) => message,
                 other => panic!("expected a refusal, got {other:?}"),
             }
         };
 
-        let mut config = map_training_config(&off_plan.config);
+        let mut config =
+            map_training_config(&off_plan.config).expect("valid mapped training config");
         apply_face_losses(&settings, &off_plan, &mut config).unwrap();
         assert!(!config.identity_loss.schedule.is_enabled());
         assert_eq!(config.face_analysis_dir, None);
@@ -7839,7 +7677,7 @@ mod tests {
         assert!(refusal(&plan).contains(FACE_STACK_ARCFACE.id));
         std::fs::write(stack.join(FACE_STACK_ARCFACE.file), b"weights").unwrap();
 
-        let mut config = map_training_config(&plan.config);
+        let mut config = map_training_config(&plan.config).expect("valid mapped training config");
         apply_face_losses(&settings, &plan, &mut config).unwrap();
         let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
         assert_eq!(
@@ -7873,7 +7711,7 @@ mod tests {
             FACEMESH_V2_MODEL.revision,
             FACEMESH_V2_MODEL.file,
         );
-        let mut config = map_training_config(&both.config);
+        let mut config = map_training_config(&both.config).expect("valid mapped training config");
         apply_face_losses(&settings, &both, &mut config).unwrap();
         assert_eq!(
             canon(config.face_landmark_loss.model_dir.as_ref().unwrap()),
@@ -7898,10 +7736,7 @@ mod tests {
     /// admits it where the trainer declares it (Z-Image both; Krea-2 the VAE anchor only, having no
     /// E-LatentLPIPS weights). Mutation: drop the `techniques.latent_lpips_loss` check ⇒ the Krea
     /// E-LatentLPIPS case is admitted ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn preflight_refuses_latent_perceptual_losses_the_trainer_cannot_honor() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7969,10 +7804,7 @@ mod tests {
     /// checkpoints are refused naming the model; off leaves the config untouched. Mutations: resolve
     /// the VAE with the unpinned revision ⇒ the wrong-revision case resolves ⇒ red; map Z-Image to
     /// the SDXL weights ⇒ the resolution names the wrong model ⇒ red.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn latent_perceptual_losses_map_schedules_and_resolve_installed_aux_models() {
         use sceneworks_core::training::depth_anchoring::TAEF1_MODEL;
@@ -8001,14 +7833,16 @@ mod tests {
         }
         let plan = parse(value);
         let refusal = |plan: &TrainingPlan| {
-            let mut config = map_training_config(&plan.config);
+            let mut config =
+                map_training_config(&plan.config).expect("valid mapped training config");
             match apply_latent_perceptual(&settings, plan, &mut config) {
                 Err(WorkerError::InvalidPayload(message)) => message,
                 other => panic!("expected a not-installed refusal, got {other:?}"),
             }
         };
 
-        let mut config = map_training_config(&off_plan.config);
+        let mut config =
+            map_training_config(&off_plan.config).expect("valid mapped training config");
         apply_latent_perceptual(&settings, &off_plan, &mut config).unwrap();
         assert!(!config.vae_anchor.schedule.is_enabled());
         assert!(!config.latent_lpips.schedule.is_enabled());
@@ -8050,7 +7884,7 @@ mod tests {
         );
         let lpips = fake_snapshot(&hub, flux.repo, flux.revision, flux.file);
 
-        let mut config = map_training_config(&plan.config);
+        let mut config = map_training_config(&plan.config).expect("valid mapped training config");
         apply_latent_perceptual(&settings, &plan, &mut config).unwrap();
         let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
         assert_eq!(
@@ -8086,7 +7920,7 @@ mod tests {
         // The bf16 component install is preferred when present.
         std::fs::create_dir_all(flux2.join("bf16").join("vae")).unwrap();
         std::fs::write(flux2.join(FLUX2_VAE_MODEL.file), b"weights").unwrap();
-        let mut config = map_training_config(&plan.config);
+        let mut config = map_training_config(&plan.config).expect("valid mapped training config");
         apply_latent_perceptual(&settings, &plan, &mut config).unwrap();
         assert_eq!(
             canon(config.vae_anchor.model_dir.as_ref().unwrap()),
@@ -8114,8 +7948,11 @@ mod tests {
             let mut value = plan_json(dir.path(), kernel, base_model, "lora", &[&image]);
             value["config"]["advanced"]["gradientCheckpointing"] = json!(false);
             let plan = parse(value);
-            finalize_training_config(map_training_config(&plan.config), &plan)
-                .gradient_checkpointing
+            finalize_training_config(
+                map_training_config(&plan.config).expect("valid mapped training config"),
+                &plan,
+            )
+            .gradient_checkpointing
         };
 
         // The candle-eligible big DiTs are forced on despite the plan's `false`, so a real off-Mac
@@ -8151,7 +7988,10 @@ mod tests {
             "lora",
             &[&image],
         ));
-        let ltx = finalize_training_config(map_training_config(&ltx_plan.config), &ltx_plan);
+        let ltx = finalize_training_config(
+            map_training_config(&ltx_plan.config).expect("valid mapped training config"),
+            &ltx_plan,
+        );
         assert_eq!(ltx.train_dtype, "f32", "candle LTX training requires f32");
         // sc-24160: Qwen Image 2.1 is a big dense MMDiT trained on its bf16 base — the same
         // dense-backward OOM class, so both adapter kinds are forced on. Its bf16 compute dtype is
@@ -8173,7 +8013,10 @@ mod tests {
             value["config"]["advanced"]["gradientCheckpointing"] = json!(false);
             value["config"]["advanced"]["mixedPrecision"] = json!("bf16");
             let plan = parse(value);
-            let config = finalize_training_config(map_training_config(&plan.config), &plan);
+            let config = finalize_training_config(
+                map_training_config(&plan.config).expect("valid mapped training config"),
+                &plan,
+            );
             assert!(
                 config.gradient_checkpointing,
                 "{kernel} {network_type} forces gradient checkpointing on candle"
@@ -8197,8 +8040,11 @@ mod tests {
         value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
         let plan = parse(value);
         assert!(
-            finalize_training_config(map_training_config(&plan.config), &plan)
-                .gradient_checkpointing,
+            finalize_training_config(
+                map_training_config(&plan.config).expect("valid mapped training config"),
+                &plan
+            )
+            .gradient_checkpointing,
             "an explicit gradientCheckpointing=true is preserved"
         );
     }
@@ -8513,10 +8359,7 @@ mod tests {
         assert_eq!(summary.get("baseModelInstalled").unwrap(), false);
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn moss_shared_finalization_defaults_strict_options_and_preserves_explicit_sampler() {
         let dir = tempfile::tempdir().unwrap();
@@ -8534,7 +8377,8 @@ mod tests {
             let advanced = value["config"]["advanced"].as_object_mut().unwrap();
             advanced.remove("timestepType");
             advanced.remove("modelOptions");
-            let config = engine_training_config(&parse(value.clone()));
+            let config = engine_training_config(&parse(value.clone()))
+                .expect("valid mapped training config");
             assert_eq!(config.timestep_type, "moss_stage3_v1");
             assert_eq!(
                 json!(config.model_options),
@@ -8545,13 +8389,15 @@ mod tests {
             for blank in ["", "   "] {
                 let mut unspecified = value.clone();
                 unspecified["config"]["advanced"]["timestepType"] = json!(blank);
-                let config = engine_training_config(&parse(unspecified));
+                let config = engine_training_config(&parse(unspecified))
+                    .expect("valid mapped training config");
                 assert_eq!(config.timestep_type, "moss_stage3_v1", "{base}: {blank:?}");
             }
             value["config"]["advanced"]["timestepType"] = json!("uniform");
             value["config"]["advanced"]["modelOptions"] =
                 json!({"vae_posterior":"posterior_mean_v1"});
-            let config = engine_training_config(&parse(value));
+            let config =
+                engine_training_config(&parse(value)).expect("valid mapped training config");
             assert_eq!(config.timestep_type, "uniform");
             assert_eq!(
                 json!(config.model_options),
@@ -8560,10 +8406,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn moss_request_reads_live_global_budget_with_one_immutable_worker_settings() {
         let dir = tempfile::tempdir().unwrap();
@@ -8653,10 +8496,7 @@ mod tests {
         .is_err());
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn moss_requests_preserve_independent_caches_rectangles_and_global_cap() {
         let dir = tempfile::tempdir().unwrap();
@@ -8723,10 +8563,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn moss_native_requests_keep_official_bf16_source_and_requested_compute_for_both_methods() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8766,10 +8603,16 @@ mod tests {
                     value["dataset"]["items"][0]["caption"] =
                         json!("日本語 caption {\"layout\":\"left\"}");
                     value["output"]["triggerWords"] = json!(["sksmoss"]);
+                    // Generic signed-i32 parsing precedes MOSS field-domain validation.
+                    // Overflow refuses there; zero and numeric strings reach MOSS-specific checks.
                     for (field, invalid, expected) in [
                         ("loraTargetModules", json!("q"), "must be an array"),
                         ("loraTargetModules", json!(["q", 7]), "only strings"),
-                        ("decomposeFactor", json!(4_294_967_295_i64), "positive i32"),
+                        (
+                            "decomposeFactor",
+                            json!(4_294_967_295_i64),
+                            "must be a signed 32-bit integer",
+                        ),
                         ("decomposeFactor", json!(0), "positive i32"),
                         ("decomposeFactor", json!("4"), "must be an integer"),
                     ] {
@@ -8869,10 +8712,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn training_load_precision_keeps_qwen_image_2_1_at_bf16() {
         // sc-24159: the 2.1 trainer refuses any LoadSpec precision but Bf16; f32 compute rides on
@@ -8897,10 +8737,7 @@ mod tests {
         ));
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn engine_trainer_id_maps_native_families_and_rejects_the_rest() {
         let ltx_2_5_trainer = if cfg!(target_os = "macos") {
@@ -9399,10 +9236,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn shared_dry_and_real_preflight_covers_native_recipe_enums_and_item_sources() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -9542,10 +9376,7 @@ mod tests {
     /// The second half is what keeps the first half honest: a routed kernel that no built-in target
     /// uses would make the derivation vacuous, so every routed kernel must be reachable from at
     /// least one target.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn every_mlx_routed_training_kernel_resolves_to_a_trainer_for_every_offered_network_type() {
         use sceneworks_core::jobs_store::MLX_ROUTED_TRAINING_KERNELS;
@@ -9610,10 +9441,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn map_training_config_reads_advanced_and_passes_optimizer_verbatim() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -9634,7 +9462,7 @@ mod tests {
             "steps": 30
         });
         let plan = parse(value);
-        let cfg = map_training_config(&plan.config);
+        let cfg = map_training_config(&plan.config).expect("valid mapped training config");
         assert_eq!(cfg.rank, 16);
         assert_eq!(cfg.alpha, 32.0, "legacy integral alpha must map exactly");
         assert_eq!(cfg.steps, 1000);
@@ -9666,10 +9494,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn flux3_native_request_keeps_options_paths_resume_and_exact_base() {
         use gen_core_flux3::training::{
@@ -9796,7 +9621,7 @@ mod tests {
             for key in ["timestepType", "weightDecay", "flux3"] {
                 omitted.config.advanced.remove(key);
             }
-            let legacy = engine_training_config(&omitted);
+            let legacy = engine_training_config(&omitted).expect("valid mapped training config");
             assert_eq!(legacy.timestep_type, "uniform");
             assert!((legacy.weight_decay - 0.0001).abs() < f32::EPSILON);
             assert_eq!(
@@ -10131,10 +9956,7 @@ mod tests {
     ///
     /// It discriminates in both directions: the LoRA plan maps to `full_finetune == false`, while
     /// the full plan differs only in `networkType` and maps to `full_finetune == true`.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn map_training_config_threads_full_finetune_and_checkpointing_without_override() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10148,7 +9970,7 @@ mod tests {
                 &[&image.display().to_string()],
             );
             value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
-            map_training_config(&parse(value).config)
+            map_training_config(&parse(value).config).expect("valid mapped training config")
         };
 
         let lora = mapped("lora");
@@ -10203,10 +10025,7 @@ mod tests {
         assert!(matches!(lora.network_type, NetworkType::Lora));
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn training_result_preserves_full_checkpoint_identity_and_network_type() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10249,10 +10068,7 @@ mod tests {
         assert_eq!(result["resolution"], json!(bucketed.config.resolution));
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn map_training_config_defaults_when_advanced_is_empty() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10266,7 +10082,7 @@ mod tests {
         );
         value["config"]["advanced"] = json!({});
         let plan = parse(value);
-        let cfg = map_training_config(&plan.config);
+        let cfg = map_training_config(&plan.config).expect("valid mapped training config");
         assert!(matches!(cfg.network_type, NetworkType::Lora));
         assert!(matches!(cfg.lr_scheduler, LrSchedule::Constant));
         assert_eq!(cfg.lr_warmup_steps, 0);
@@ -10280,10 +10096,7 @@ mod tests {
         assert!(cfg.sample_prompts.is_empty());
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn map_training_config_preserves_explicit_resume_intent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10297,7 +10110,9 @@ mod tests {
         );
         value["config"]["advanced"]["resume"] = json!(true);
         assert!(
-            map_training_config(&parse(value).config).resume,
+            map_training_config(&parse(value).config)
+                .expect("valid mapped training config")
+                .resume,
             "the worker must not hardcode resume=false; provider preflight decides support"
         );
     }
@@ -10306,10 +10121,7 @@ mod tests {
     /// field-by-field (no `..Default`), so a dropped sample field silently disables previews — exactly
     /// the gap this story fixes. Asserts `sampleEvery`/`sampleSteps`/`sampleGuidanceScale`/`samplePrompts`
     /// flow through from the plan's `advanced` bag.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn map_training_config_wires_sample_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10326,7 +10138,7 @@ mod tests {
         value["config"]["advanced"]["sampleGuidanceScale"] = json!(1.5);
         value["config"]["advanced"]["samplePrompts"] =
             json!(["mychar, studio portrait", "mychar, full body"]);
-        let cfg = map_training_config(&parse(value).config);
+        let cfg = map_training_config(&parse(value).config).expect("valid mapped training config");
         assert_eq!(cfg.sample_every, 250);
         assert_eq!(cfg.sample_steps, 8);
         assert!((cfg.sample_guidance_scale - 1.5).abs() < 1e-6);
@@ -10341,10 +10153,7 @@ mod tests {
 
     /// sc-8671 — `sampleCount` caps how many previews render (one per prompt, truncated, never padded).
     /// A count below the pool size truncates; a count at/above it leaves the pool intact.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn map_training_config_caps_sample_prompts_at_count() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10358,7 +10167,8 @@ mod tests {
         );
         value["config"]["advanced"]["samplePrompts"] = json!(["p1", "p2", "p3"]);
         value["config"]["advanced"]["sampleCount"] = json!(2);
-        let capped = map_training_config(&parse(value.clone()).config);
+        let capped = map_training_config(&parse(value.clone()).config)
+            .expect("valid mapped training config");
         assert_eq!(
             capped.sample_prompts,
             vec!["p1".to_owned(), "p2".to_owned()]
@@ -10366,7 +10176,8 @@ mod tests {
 
         // Count >= pool size leaves every prompt (no padding/duplication).
         value["config"]["advanced"]["sampleCount"] = json!(9);
-        let uncapped = map_training_config(&parse(value).config);
+        let uncapped =
+            map_training_config(&parse(value).config).expect("valid mapped training config");
         assert_eq!(
             uncapped.sample_prompts,
             vec!["p1".to_owned(), "p2".to_owned(), "p3".to_owned()]
@@ -10379,10 +10190,7 @@ mod tests {
     /// `guidanceScale`/`sampleSource`), with `relativePath` resolved against the project root. Validates
     /// the worker persistence deterministically (no model weights), so the chain engine→worker→UI shape
     /// is covered without a real-weight run.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn write_training_sample_writes_png_and_project_relative_record() {
         let project_root = tempfile::tempdir().expect("project root tempdir");
@@ -10444,10 +10252,7 @@ mod tests {
     /// project root the way `project_store` does (a real `create_project`), NOT a hand-matched
     /// lexical pair, and assert the record's `relativePath` is populated and correct. This FAILS
     /// before the `SamplePersister::new` canonicalization and PASSES after.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn sample_persister_populates_relative_path_for_project_store_provisioned_root() {
         let data_dir = tempfile::tempdir().expect("data dir tempdir");
@@ -10508,8 +10313,10 @@ mod tests {
         .expect("job snapshot deserializes");
 
         // Drive the REAL provenance — this is where the two operands are resolved.
-        let mut finalized_config =
-            finalize_training_config(map_training_config(&plan.config), &plan);
+        let mut finalized_config = finalize_training_config(
+            map_training_config(&plan.config).expect("valid mapped training config"),
+            &plan,
+        );
         // Deliberately differ from the raw-plan mapping to model a backend finalize override.
         // The persister must receive the exact config handed to the trainer, not remap the plan.
         finalized_config.sample_steps = 37;
@@ -10575,10 +10382,7 @@ mod tests {
     /// accumulated on disk. Drives the REAL provenance (`SamplePersister::new` against a
     /// store-provisioned project) and asserts previews land under the owning project with a
     /// populated, correct `relativePath`.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn sample_persister_parks_global_scope_previews_under_the_owning_project() {
         let data_dir = tempfile::tempdir().expect("data dir tempdir");
@@ -10634,7 +10438,10 @@ mod tests {
         }))
         .expect("job snapshot deserializes");
 
-        let finalized_config = finalize_training_config(map_training_config(&plan.config), &plan);
+        let finalized_config = finalize_training_config(
+            map_training_config(&plan.config).expect("valid mapped training config"),
+            &plan,
+        );
         let persister = SamplePersister::new(&settings, &job, &plan, finalized_config);
         let sample_root = persister
             .sample_root
@@ -10693,10 +10500,7 @@ mod tests {
     /// A forged `output.loraId` must not walk previews out of the project tree. `lora_id` is joined
     /// as a directory component by `resolve_sample_root`, so a `../…` id is rejected and the run
     /// falls back to the (unservable) adapter-side directory rather than escaping.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn resolve_sample_root_rejects_traversing_lora_id() {
         let project_root = PathBuf::from("/data/projects/char.sceneworks");
@@ -11360,7 +11164,8 @@ mod tests {
         value["config"]["advanced"]["sampleCount"] = json!(2);
         value["config"]["advanced"]["samplePrompts"] = json!(pool);
         value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
-        let mut config = map_training_config(&parse(value).config);
+        let mut config =
+            map_training_config(&parse(value).config).expect("valid mapped training config");
         assert_eq!(
             config.sample_prompts,
             vec!["alpha portrait".to_owned(), "beta full body".to_owned()],
@@ -11601,7 +11406,10 @@ mod tests {
 
         let engine_id = engine_trainer_id(&plan).expect("worker maps LTX trainer id");
         assert_eq!(engine_id, "ltx_2_3");
-        let config = finalize_training_config(map_training_config(&plan.config), &plan);
+        let config = finalize_training_config(
+            map_training_config(&plan.config).expect("valid mapped training config"),
+            &plan,
+        );
         assert!(
             config.gradient_checkpointing,
             "22B LTX must checkpoint on candle"

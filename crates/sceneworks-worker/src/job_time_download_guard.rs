@@ -21,7 +21,7 @@
 //!    Job-time sites build it as an inline literal. Removing a parameter from one seam does not
 //!    remove the ability to construct the context at another.
 //! 3. Decisively: the download helpers and all of their call sites are gated
-//!    `any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle"))`. The
+//!    `native_lane`. The
 //!    required `parity` CI lane is ubuntu-latest with default features, so **none of that code is
 //!    even compiled there**, and the `candle` lane runs `cargo check`/clippy but never `cargo test`.
 //!    A gate that inherits those cfgs never fires on any required check.
