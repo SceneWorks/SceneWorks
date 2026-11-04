@@ -2768,7 +2768,7 @@ mod base_model_gating_tests {
             &incompatible,
             &[],
             "ltx_2_3",
-            &[lora.clone()],
+            std::slice::from_ref(&lora),
             true,
             "LoRA"
         )
