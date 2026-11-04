@@ -14,7 +14,9 @@ export const isDesktop = typeof window !== "undefined" && !!window.__TAURI__;
 // Invoke a Tauri command. Only valid when `isDesktop` is true — callers MUST gate on
 // it, since `window.__TAURI__` is undefined in a remote browser.
 export function tauriInvoke(command, args, options) {
-  return window.__TAURI__.core.invoke(command, args, options);
+  return options === undefined
+    ? window.__TAURI__.core.invoke(command, args)
+    : window.__TAURI__.core.invoke(command, args, options);
 }
 
 // True when the page itself is in browser (HTML5) fullscreen. Only meaningful on the
