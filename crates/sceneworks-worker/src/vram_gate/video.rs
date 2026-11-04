@@ -35,9 +35,10 @@ use super::*;
 /// never blocks without evidence, exactly like [`fit_decision`].
 ///
 /// Budgets against `free_gb` (what is allocatable now), like [`fit_decision`] and unlike the MLX gate,
-/// which has only a unified `total_gb`. Reserves [`HEADROOM_GB`] rather than the MLX gate's
-/// the MLX unified reserve: the OS does not draw from discrete VRAM, so the term covers allocator slack and
-/// CUDA context overhead instead. The two constants agree at 2.0 today but mean different things.
+/// which has only a unified `total_gb`. [`HEADROOM_GB`] comes from
+/// [`crate::fit_gate::dedicated_vram_reserve`]: it covers allocator slack and CUDA context
+/// overhead because the OS does not draw from dedicated VRAM. The MLX gate instead uses
+/// [`crate::fit_gate::legacy_unified_reserve`] for its unified-memory reserve.
 ///
 /// Pure (no GPU probe, no env) so the whole decision is unit-testable without CUDA; the caller resolves
 /// the budget.

@@ -4444,9 +4444,7 @@ fn krea_packaged_q4_anchor() -> &'static sceneworks_core::memory_anchor::MemoryA
 }
 
 /// The ladder reserve a fixture budget produces, as production derives it from the raw probe.
-fn reserve_for(budget: Option<VramBudget>) -> f64 {
-    budget.map_or(0.0, ladder_reserve_gb)
-}
+use crate::vram_gate::test_fixtures::reserve_for;
 
 /// One rung's derived phase peaks for a geometry, straight from the packaged anchor through
 /// the law with the rung's OWN regime (the manifest's `strategyParameters`) and the given

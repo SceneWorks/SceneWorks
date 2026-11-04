@@ -221,3 +221,6 @@ pub(crate) struct KreaRuntimeEvidenceContext {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod test_fixtures;
