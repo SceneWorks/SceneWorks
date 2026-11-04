@@ -7804,8 +7804,6 @@ mod supra2_convert_tests {
         }
     }
 
-    use crate::test_env::isolate_hf_cache;
-
     /// The payload `POST /models/supra2_img/convert` builds from the shipped catalog row.
     fn supra2_job(source_file: &str) -> JobSnapshot {
         serde_json::from_value(json!({
@@ -7968,7 +7966,7 @@ mod supra2_convert_tests {
     /// of another revision does not satisfy the convert, and the refusal names the install to make.
     #[tokio::test]
     async fn supra2_plan_resolves_only_the_pinned_component_snapshots() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let tmp = tempfile::tempdir().expect("temp dir");
         let data_dir = tmp.path().join("data");
         let settings = settings_at(data_dir.clone());
@@ -8593,10 +8591,6 @@ mod co_requisite_tests {
         path
     }
 
-    /// Neutralize the ambient HF cache env so `huggingface_repo_cache_path` resolves under the
-    /// supplied `data_dir` (else a developer's real `HF_HOME` would win — sc-13679 traps).
-    use crate::test_env::isolate_hf_cache;
-
     /// The optional, on-demand `sft_cover` component seam (sc-13821): acestep's Cover snapshot is a
     /// `coRequisite` deliberately kept OUT of `required_components`, so [`resolve_co_requisites`] never
     /// stages it. [`resolve_optional_component`] resolves it on demand — `Some(Dir)` when installed,
@@ -8604,7 +8598,7 @@ mod co_requisite_tests {
     /// install-gating (a `soft` co-requisite keeps text2music + the region edits usable).
     #[test]
     fn resolve_optional_component_resolves_sft_cover_only_when_declared_and_installed() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let repo = "ACE-Step/acestep-v15-xl-sft-diffusers";
         let revision = "4bf7b60a63b27144f539f980927eeb89f5f912b0";
@@ -8651,7 +8645,7 @@ mod co_requisite_tests {
     #[test]
     fn optional_predictor_load_rejects_same_size_wrong_digest_and_ignores_main() {
         use sha2::{Digest, Sha256};
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let settings = settings_at(data.path().into());
         let repo = "test/predictor";
@@ -8680,7 +8674,7 @@ mod co_requisite_tests {
     /// as an unconditional component and attach it to every ordinary job.
     #[test]
     fn resolve_co_requisites_rejects_soft_components_on_both_backends() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let repo = "xinsir/controlnet-openpose-sdxl-1.0";
         let revision = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
@@ -8733,7 +8727,7 @@ mod co_requisite_tests {
     /// on disk (it would pass `is_dir()` and, on Windows, get its symlinks rewritten to hardlinks).
     #[test]
     fn huggingface_pinned_snapshot_dir_confines_a_traversal_revision() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let repo = "ResembleAI/chatterbox";
 
@@ -8772,7 +8766,7 @@ mod co_requisite_tests {
 
     #[test]
     fn resolve_co_requisites_rejects_a_torn_multi_file_component() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let repo = "owner/multi-component";
         let revision = "0123456789abcdef0123456789abcdef01234567";
@@ -8825,7 +8819,7 @@ mod co_requisite_tests {
     /// required component's weights — `resolve_co_requisites` must reject it via `safe_join`.
     #[test]
     fn resolve_co_requisites_confines_a_traversal_component_file() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let repo = "ResembleAI/chatterbox";
         let revision = "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18";
@@ -8870,7 +8864,7 @@ mod co_requisite_tests {
     /// entry resolves to `None` (component simply not staged), never an out-of-snapshot host file.
     #[test]
     fn resolve_optional_component_confines_a_traversal_component_file() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let repo = "ACE-Step/acestep-v15-xl-sft-diffusers";
         let revision = "4bf7b60a63b27144f539f980927eeb89f5f912b0";
@@ -8902,7 +8896,7 @@ mod co_requisite_tests {
         // shape) must NOT strand the model on that empty dir; the resolver falls back to the
         // most-populated cached sibling instead. Regression guard for the old "first dir wins" scan,
         // which happily returned an empty snapshot the moment `refs/main` pointed at one.
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let repo = "SceneWorks/krea-2-raw-mlx";
         let repo_dir =
@@ -8960,7 +8954,7 @@ mod co_requisite_tests {
     /// nothing even though the populated snapshot was sitting right there.
     #[test]
     fn snapshot_resolution_accepts_a_snapshot_named_by_a_mutable_revision() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let repo = "SceneWorks/krea-2-raw-mlx";
         let repo_dir =
@@ -9013,7 +9007,7 @@ mod co_requisite_tests {
     /// model that cannot load.
     #[test]
     fn snapshot_resolution_finds_a_pinned_install_that_has_no_refs_main() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let repo = "TheDrummer/Anubis-Mini-8B-v1";
         let revision = "696f5b956f0511168d98cd32106299cebc3cc12b";
@@ -9053,7 +9047,7 @@ mod co_requisite_tests {
 
     #[test]
     fn present_co_requisites_resolve_to_a_component_map_matching_the_descriptor() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let ve = stage_snapshot_file(
             data_dir.path(),
@@ -9108,7 +9102,7 @@ mod co_requisite_tests {
 
     #[test]
     fn a_missing_co_requisite_fails_with_an_actionable_error_before_the_engine() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         // Stage ONLY voice_embedding; perth's snapshot is absent.
         stage_snapshot_file(
@@ -9139,7 +9133,7 @@ mod co_requisite_tests {
 
     #[test]
     fn a_required_component_with_no_matching_component_id_is_a_manifest_error() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         // A manifest entry whose co-requisites carry NO componentId → the perth id can't be mapped.
         let manifest_entry = json!({
@@ -9167,7 +9161,7 @@ mod co_requisite_tests {
 
     #[test]
     fn an_empty_required_components_set_is_a_no_op() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         // Every current image/video model + single-file audio model advertises no components: the
         // resolver must return an empty map WITHOUT touching the filesystem (a nonexistent data_dir).
         let descriptor = gen_core::ModelDescriptor {
@@ -9277,7 +9271,7 @@ mod co_requisite_tests {
 
     #[test]
     fn sdxl_co_requisites_resolve_all_three_from_every_live_candle_sdxl_entry() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         for (repo, revision, file) in SDXL_COMPONENT_SNAPSHOTS {
             stage_snapshot_file(data_dir.path(), repo, revision, file);
@@ -9325,7 +9319,7 @@ mod co_requisite_tests {
 
     #[test]
     fn a_missing_sdxl_component_fails_with_an_actionable_error_naming_id_and_repo() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         // Stage only the two tokenizers; the fp16-fix VAE snapshot is ABSENT.
         for (repo, revision, file) in &SDXL_COMPONENT_SNAPSHOTS[..2] {
@@ -9447,7 +9441,7 @@ mod co_requisite_tests {
     #[test]
     fn mage_per_tier_co_requisites_resolve_to_the_matching_tier_component_dir() {
         for &model_id in MAGE_MODEL_IDS {
-            let _env = isolate_hf_cache();
+            let _env = crate::test_env::isolate_hf_cache();
             let data_dir = tempfile::tempdir().expect("temp data dir");
             let manifest = builtin_manifest_entry(model_id);
             stage_mage_components(data_dir.path(), &manifest, "q4");
@@ -9480,7 +9474,7 @@ mod co_requisite_tests {
     /// rather than silently handing back another tier's text encoder.
     #[test]
     fn mage_co_requisites_refuse_a_tier_that_is_not_installed() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let manifest = builtin_manifest_entry("mage_flow_base");
         stage_mage_components(data_dir.path(), &manifest, "q4");
@@ -9503,7 +9497,7 @@ mod co_requisite_tests {
     /// matching row would silently serve a bf16 text encoder to a q4 render.
     #[test]
     fn mage_co_requisites_refuse_to_guess_a_tier_when_none_is_resolved() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let manifest = builtin_manifest_entry("mage_flow_base");
         stage_mage_components(data_dir.path(), &manifest, "q4");
@@ -9524,7 +9518,7 @@ mod co_requisite_tests {
     #[test]
     fn moss_codec_co_requisite_resolves_from_every_live_moss_tts_entry() {
         for &(model_id, family, repo, revision, file) in MOSS_CODEC_SNAPSHOTS {
-            let _env = isolate_hf_cache();
+            let _env = crate::test_env::isolate_hf_cache();
             let data_dir = tempfile::tempdir().expect("temp data dir");
             let manifest = builtin_manifest_entry(model_id);
             let codec_download = manifest["downloads"]
@@ -9576,7 +9570,7 @@ mod co_requisite_tests {
     #[test]
     fn a_missing_moss_codec_fails_with_an_actionable_error_naming_codec_and_repo() {
         for &(model_id, family, repo, _revision, _file) in MOSS_CODEC_SNAPSHOTS {
-            let _env = isolate_hf_cache();
+            let _env = crate::test_env::isolate_hf_cache();
             let data_dir = tempfile::tempdir().expect("temp data dir");
             // The codec snapshot is ABSENT — install-state gates on the hard codec coRequisite, so the
             // job must fail HERE (before the engine load), not with a mid-render hub fetch.
@@ -9700,7 +9694,7 @@ mod co_requisite_tests {
     #[test]
     fn mmaudio_co_requisites_resolve_all_five_components_from_every_live_tier() {
         for (model_id, components) in mmaudio_component_snapshots() {
-            let _env = isolate_hf_cache();
+            let _env = crate::test_env::isolate_hf_cache();
             let data_dir = tempfile::tempdir().expect("temp data dir");
             for (_id, repo, revision, file) in &components {
                 stage_snapshot_file(data_dir.path(), repo, revision, file);
@@ -9747,7 +9741,7 @@ mod co_requisite_tests {
             .into_iter()
             .next()
             .expect("MMAudio tier fixture");
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let (_, canonical_clip_repo, clip_revision, clip_file) = *components
             .iter()
@@ -9815,7 +9809,7 @@ mod co_requisite_tests {
             .into_iter()
             .next()
             .expect("MMAudio tier fixture");
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let current_repo =
             huggingface_repo_cache_path(data_dir.path(), rename.current_repo).unwrap();
@@ -9858,7 +9852,7 @@ mod co_requisite_tests {
 
     #[test]
     fn renamed_snapshot_migration_uses_validated_legacy_when_hardlinks_are_unavailable() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let temp = tempfile::tempdir().expect("temporary cache");
         let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
         let legacy_file = stage_snapshot_file(
@@ -9909,7 +9903,7 @@ mod co_requisite_tests {
     fn renamed_single_file_symlink_source_bypasses_reparse_when_hardlinks_are_unavailable() {
         use std::os::unix::fs::symlink;
 
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let temp = tempfile::tempdir().expect("temporary cache");
         let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
         let legacy_repo = huggingface_repo_cache_path(temp.path(), rename.legacy_repo).unwrap();
@@ -10002,7 +9996,7 @@ mod co_requisite_tests {
 
     #[test]
     fn renamed_snapshot_migration_is_race_safe_and_rejects_wrong_revision() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let temp = tempfile::tempdir().expect("temporary cache");
         let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
         stage_snapshot_file(
@@ -10051,7 +10045,7 @@ mod co_requisite_tests {
     fn renamed_snapshot_migration_rejects_a_legacy_file_escaping_its_repo_cache() {
         use std::os::unix::fs::symlink;
 
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let temp = tempfile::tempdir().expect("temporary cache");
         let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
         let legacy_snapshot = huggingface_repo_cache_path(temp.path(), rename.legacy_repo)
@@ -10082,7 +10076,7 @@ mod co_requisite_tests {
     fn renamed_snapshot_migration_falls_back_to_validated_legacy_for_destination_escapes() {
         use std::os::unix::fs::symlink;
 
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let temp = tempfile::tempdir().expect("temporary cache");
         let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
         let legacy_file = stage_snapshot_file(
@@ -10169,7 +10163,7 @@ mod co_requisite_tests {
     #[test]
     fn a_missing_mmaudio_component_fails_with_an_actionable_error_naming_id_and_repo() {
         for (model_id, components) in mmaudio_component_snapshots() {
-            let _env = isolate_hf_cache();
+            let _env = crate::test_env::isolate_hf_cache();
             let data_dir = tempfile::tempdir().expect("temp data dir");
             // Stage every component EXCEPT the vocoder, whose snapshot is ABSENT — install-state gates on
             // the hard component coRequisites, so the job must fail HERE (before the engine load), naming
@@ -10216,7 +10210,7 @@ mod co_requisite_tests {
     #[test]
     fn superseded_revision_migration_builds_the_new_snapshot_from_the_legacy_cache() {
         use std::os::unix::fs::MetadataExt as _;
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let supersession =
             sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q8_NOTICE_SUPERSESSION;
@@ -10282,7 +10276,7 @@ mod co_requisite_tests {
     #[cfg(unix)]
     #[test]
     fn superseded_revision_migration_is_idempotent_and_completes_an_interrupted_run() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let supersession =
             sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q4_NOTICE_SUPERSESSION;
@@ -10338,7 +10332,7 @@ mod co_requisite_tests {
     #[cfg(unix)]
     #[test]
     fn superseded_revision_migration_refuses_a_partial_legacy_snapshot() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let supersession =
             sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q8_NOTICE_SUPERSESSION;
         let files = vec!["q8/*".to_owned()];
@@ -10383,7 +10377,7 @@ mod co_requisite_tests {
     #[test]
     fn superseded_revision_migration_hard_links_plain_legacy_entries() {
         use std::os::unix::fs::MetadataExt as _;
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let supersession =
             sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q8_NOTICE_SUPERSESSION;
