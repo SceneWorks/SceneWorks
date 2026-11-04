@@ -121,15 +121,6 @@ pub(crate) fn install_tracing_interest_floor() {
     });
 }
 
-/// Pin all HF cache selectors under the shared environment lock.
-pub(crate) fn isolate_hf_cache() -> crate::test_env::EnvVars {
-    crate::test_env::EnvVars::set(&[
-        ("HF_HUB_CACHE", ""),
-        ("HUGGINGFACE_HUB_CACHE", ""),
-        ("HF_HOME", ""),
-    ])
-}
-
 /// The embedded shipped catalog; no filesystem, network or model execution.
 pub(crate) fn shipped_catalog_entry(model_id: &str) -> sceneworks_core::contracts::JsonObject {
     sceneworks_core::builtin_manifests::builtin_model_entry(model_id)
