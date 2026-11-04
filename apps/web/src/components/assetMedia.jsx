@@ -1,5 +1,6 @@
+import { projectFileUrl } from "../api/media.js";
 import React from "react";
-import { API_BASE_URL, withMediaTicket } from "../api.js";
+import { API_BASE_URL, getMediaTicket, subscribeMediaTicket, withMediaTicket } from "../api.js";
 import { isDepthAsset } from "../depthJobs.js";
 
 // Ticket-free URL builder; internal so every exported producer appends the media
@@ -22,7 +23,7 @@ function bareAssetUrl(asset) {
       .filter(Boolean)
       .map((segment) => encodeURIComponent(segment))
       .join("/");
-    return `${API_BASE_URL}/api/v1/projects/${asset.projectId}/files/${normalizedPath}`;
+    return projectFileUrl(asset.projectId, normalizedPath, { ticket: false, encodedPath: true });
   }
   return "";
 }
@@ -87,7 +88,7 @@ function isPreviewBackedAsset(asset) {
 function storedPreviewUrl(asset) {
   if (!asset?.projectId || !asset?.preview?.path) return "";
   const path = asset.preview.path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
-  return withMediaTicket(`${API_BASE_URL}/api/v1/projects/${asset.projectId}/files/${path}`);
+  return projectFileUrl(asset.projectId, path, { encodedPath: true });
 }
 
 export function assetCanRenderAsVideo(asset) {
@@ -238,6 +239,7 @@ function ImageThumb({ src, className }) {
 }
 
 export function AssetThumbnail({ asset, className = "" }) {
+  React.useSyncExternalStore(subscribeMediaTicket, getMediaTicket, getMediaTicket);
   if (!asset) {
     return null;
   }
@@ -282,6 +284,58 @@ function VideoPoster({ asset, className }) {
   );
 }
 
+function withoutTicket(src) {
+  const url = new URL(src, "http://sceneworks.invalid");
+  url.searchParams.delete("ticket");
+  return url.href;
+}
+
+// Capture playback before React changes src. A finite credential must rotate,
+// but renewing authorization for the same file must not restart a long clip.
+export class TicketedPlayback extends React.Component {
+  node = null;
+  resume = null;
+
+  setNode = (node) => {
+    this.node = node;
+    const ref = this.props.forwardedRef;
+    if (typeof ref === "function") ref(node);
+    else if (ref) ref.current = node;
+  };
+
+  getSnapshotBeforeUpdate(previous) {
+    if (this.node && previous.src !== this.props.src && withoutTicket(previous.src) === withoutTicket(this.props.src)) {
+      return this.resume ?? { time: this.node.currentTime, paused: this.node.paused, rate: this.node.playbackRate };
+    }
+    return null;
+  }
+
+  componentDidUpdate(previous, _state, snapshot) {
+    if (previous.src !== this.props.src) this.resume = snapshot;
+    if (previous.forwardedRef !== this.props.forwardedRef) {
+      if (typeof previous.forwardedRef === "function") previous.forwardedRef(null);
+      else if (previous.forwardedRef) previous.forwardedRef.current = null;
+      this.setNode(this.node);
+    }
+  }
+
+  loadedMetadata = (event) => {
+    const resume = this.resume;
+    this.resume = null;
+    if (resume && this.node) {
+      this.node.currentTime = resume.time;
+      this.node.playbackRate = resume.rate;
+      if (!resume.paused) this.node.play()?.catch(() => {});
+    }
+    this.props.onLoadedMetadata?.(event);
+  };
+
+  render() {
+    const { element: Element, forwardedRef: _forwardedRef, onLoadedMetadata: _onLoadedMetadata, ...props } = this.props;
+    return <Element {...props} ref={this.setNode} onLoadedMetadata={this.loadedMetadata} />;
+  }
+}
+
 // `muted` is a PROP, defaulting to false (sc-17161). It used to be hard-set on every <video> this
 // component rendered, and no call site overrode it, so every clip in the app played silent — the
 // asset detail, the preview modal, the queue card, the A/B compare. That was survivable while
@@ -292,6 +346,7 @@ function VideoPoster({ asset, className }) {
 // explicitly — autoplay policy blocks an unmuted programmatic play() — which is why this is a
 // default rather than a removal.
 export const AssetMedia = React.forwardRef(function AssetMedia({ asset, className = "", controls = true, muted = false, ...mediaProps }, ref) {
+  React.useSyncExternalStore(subscribeMediaTicket, getMediaTicket, getMediaTicket);
   if (!asset) {
     return null;
   }
@@ -305,14 +360,15 @@ export const AssetMedia = React.forwardRef(function AssetMedia({ asset, classNam
   }
   if (assetCanRenderAsVideo(asset)) {
     return (
-      <video
+      <TicketedPlayback
+        element="video"
         className={className}
         controls={controls}
         muted={muted}
         playsInline
         poster={posterUrl(asset)}
         preload="metadata"
-        ref={ref}
+        forwardedRef={ref}
         src={src}
         {...mediaProps}
       />
@@ -324,12 +380,13 @@ export const AssetMedia = React.forwardRef(function AssetMedia({ asset, classNam
     // ref with controls off) can play the clip. Mirrors the <video> branch above
     // for src resolution, controls, preload and ref/prop passthrough.
     return (
-      <audio
+      <TicketedPlayback
+        element="audio"
         className={className}
         controls={controls}
         muted={muted}
         preload="metadata"
-        ref={ref}
+        forwardedRef={ref}
         src={src}
         {...mediaProps}
       />

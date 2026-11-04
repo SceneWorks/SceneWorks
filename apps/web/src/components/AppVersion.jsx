@@ -1,5 +1,7 @@
+import { queueApi } from "../api/queueResources.js";
+import { jobsApi } from "../api/jobsResources.js";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch } from "../api.js";
+
 import { appConfirm } from "../appConfirm.jsx";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { Modal } from "./Modal.jsx";
@@ -8,7 +10,7 @@ const APP_VERSION = import.meta.env.VITE_APP_VERSION ?? "";
 
 // Re-read the global, uncapped queue: the visible jobs may be stale or project-filtered.
 export async function prepareAppUpdate(token, confirmed = false, onCanceling = () => {}) {
-  const queue = await apiFetch("/api/v1/queue", token);
+  const queue = await queueApi.queue(token);
   if (!Array.isArray(queue?.activeJobs)) throw new Error("Unable to check work in progress.");
   if (!queue.activeJobs.length) return { proceed: true, confirmed };
   if (!confirmed) {
@@ -27,12 +29,12 @@ export async function prepareAppUpdate(token, confirmed = false, onCanceling = (
   const requested = new Set();
   const deadline = Date.now() + 60_000;
   while (true) {
-    const current = await apiFetch("/api/v1/queue", token);
+    const current = await queueApi.queue(token);
     if (!Array.isArray(current?.activeJobs)) throw new Error("Unable to check work in progress.");
     if (!current.activeJobs.length) break;
     if (Date.now() >= deadline) throw new Error("Work is still stopping. Please try updating again once it has stopped.");
     await Promise.all(current.activeJobs.filter((job) => !requested.has(job.id)).map(async (job) => {
-      await apiFetch(`/api/v1/jobs/${encodeURIComponent(job.id)}/cancel`, token, { method: "POST" });
+      await jobsApi.cancel(job.id, token, { method: "POST" });
       requested.add(job.id);
     }));
     await new Promise((resolve) => setTimeout(resolve, 250));
