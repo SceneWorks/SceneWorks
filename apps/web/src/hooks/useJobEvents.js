@@ -1,6 +1,8 @@
+import { jobEventsSource } from "../api/jobs.js";
+import { jobsApi } from "../api/jobsResources.js";
 import { backoffDelay } from "../retry.js";
 import { useEffect } from "react";
-import { apiFetch, eventUrl, isReauthenticating } from "../api.js";
+import { isReauthenticating } from "../api.js";
 import {
   acceptsJobUpdate,
   jobRevision,
@@ -417,7 +419,7 @@ export function useJobEvents({
       pruneClearedJobs();
       try {
         if (access.authRequired || activeJobIds.length > 0 || knownTerminalJobIds.length > 0) {
-          const response = await apiFetch("/api/v1/jobs/events/ticket", token, {
+          const response = await jobsApi.eventsTicket(token, {
             method: "POST",
             signal: ticketController.signal,
             body: JSON.stringify({ activeJobIds, knownTerminalJobIds }),
@@ -450,7 +452,7 @@ export function useJobEvents({
       // Event revisions are process-local. An API restart can reset the counter,
       // so each newly opened source establishes its own snapshot baseline.
       snapshotRevision = 0;
-      const source = new EventSource(eventUrl("/api/v1/jobs/events", ticket));
+      const source = jobEventsSource(ticket);
       events = source;
       source.addEventListener("jobs.snapshot", handleJobsSnapshot);
       source.addEventListener("jobs.cleared", handleJobsCleared);

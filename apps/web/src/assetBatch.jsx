@@ -1,6 +1,7 @@
+import { submitJobRequest } from "./api/jobs.js";
 import { loadImage } from "./imageDimensions.js";
 import React, { useEffect, useRef, useState } from "react";
-import { apiFetch } from "./api.js";
+
 import {
   batchEligibleAssets,
   batchItemStatusForItem,
@@ -202,7 +203,7 @@ export function useAssetBatch() {
           }
         }
         const { endpoint, body } = buildBatchJob({ op, asset, params, project: activeProject, requestedGpu, dims });
-        const job = await apiFetch(endpoint, token, { method: "POST", body: JSON.stringify(body) });
+        const job = await submitJobRequest(endpoint, token, { method: "POST", body: JSON.stringify(body) });
         if (!job?.id) {
           throw new Error("The job response did not include an id.");
         }

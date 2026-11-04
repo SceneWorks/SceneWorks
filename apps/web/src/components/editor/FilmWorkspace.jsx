@@ -1,5 +1,6 @@
+import { jobsApi } from "../../api/jobsResources.js";
 import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch, isAbortError } from "../../api.js";
+import { isAbortError } from "../../api.js";
 import {
   applyFilmPlanning,
   cancelFilmPlanning,
@@ -266,7 +267,7 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
 
     async function pollInstall() {
       try {
-        const job = await apiFetch(`/api/v1/jobs/${encodeURIComponent(jobId)}`, token, { signal: controller.signal });
+        const job = await jobsApi.item(jobId, token, { signal: controller.signal });
         if (canceled) return;
         setRequestedPlannerInstallJob(job);
         setPlannerInstallError("");

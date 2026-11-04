@@ -1,6 +1,6 @@
 // Start a cancel-safe natural-dimension probe. Cleanup detaches handlers and
 // releases the pending image request so a stale selection cannot update state.
-export function probeImageDimensions(src, onDimensions) {
+export function probeImageDimensions(src, onDimensions, onError) {
   if (!src || typeof Image === "undefined" || typeof onDimensions !== "function") {
     return () => {};
   }
@@ -11,6 +11,7 @@ export function probeImageDimensions(src, onDimensions) {
       onDimensions(image.naturalWidth, image.naturalHeight);
     }
   };
+  image.onerror = () => { if (active) onError?.(); };
   image.src = src;
   return () => {
     active = false;

@@ -1,8 +1,11 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
+import { JOB_PATHS, submitJobRequest } from "../api/jobs.js";
+import { mediaResponseWithTicketRetry } from "../api/media.js";
 import { blobToImage } from "../imageDimensions.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Stage, Layer, Group, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
-import { apiFetch, inspectWorkflowFile, isAbortError } from "../api.js";
+import { inspectWorkflowFile, isAbortError } from "../api.js";
 import { nonCanvasJobOutputs } from "../editorScratch.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -1206,6 +1209,7 @@ export async function collectCropLayers(layers, decode, isCurrent) {
 }
 
 export function ImageEditor() {
+  useMediaTicket();
   const {
     activeProject,
     assets,
@@ -2235,7 +2239,7 @@ export function ImageEditor() {
       }
       setStatus({ loading: true, error: "" });
       try {
-        const res = await fetch(url, { signal: controller.signal });
+        const res = await mediaResponseWithTicketRetry(() => assetUrl(asset), { signal: controller.signal });
         if (!res.ok) throw new Error(`Failed to load asset (${res.status})`);
         const blob = await res.blob();
         if (!isCurrent()) return;
@@ -2848,7 +2852,7 @@ export function ImageEditor() {
     }
     runAiOp({
       label: "edit",
-      endpoint: "/api/v1/image/jobs",
+      endpoint: JOB_PATHS.image,
       // The boxes overlay the whole document → the baked composite is the source and
       // the re-rendered result flattens the stack to one base layer (sc-6119).
       layerSource: "composite",
@@ -2965,7 +2969,7 @@ export function ImageEditor() {
       buildBody,
       label,
       edit,
-      endpoint = "/api/v1/jobs",
+      endpoint = JOB_PATHS.generic,
       maskFile = null,
       sourceFile = null,
       onComplete = null,
@@ -2988,7 +2992,7 @@ export function ImageEditor() {
       try {
         // Share the durable recipe choice while retaining this scratch job's
         // original transport and cleanup (no deferred library-retry callback).
-        if (endpoint === "/api/v1/image/jobs") {
+        if (endpoint === JOB_PATHS.image) {
           if ((await confirmWorkflowEmbeddingBeforeGeneration()) === false || !mountedRef.current) return false;
         }
         const staged =
@@ -3001,7 +3005,7 @@ export function ImageEditor() {
         return false;
       }
       try {
-        const job = await apiFetch(endpoint, token, {
+        const job = await submitJobRequest(endpoint, token, {
           method: "POST",
           body: JSON.stringify(buildBody(scratch, maskScratch)),
         });
@@ -3135,7 +3139,7 @@ export function ImageEditor() {
     }
     runAiOp({
       label: "edit",
-      endpoint: "/api/v1/image/jobs",
+      endpoint: JOB_PATHS.image,
       layerSource: dimsChange ? "composite" : "activeLayer",
       edit: { op: "edit", model: editModel, prompt, ...(masked ? { masked: true } : {}) },
       maskFile,
@@ -3209,7 +3213,7 @@ export function ImageEditor() {
           await onComplete(resultAsset);
           return;
         }
-        const res = await fetch(assetUrl(resultAsset));
+        const res = await mediaResponseWithTicketRetry(() => assetUrl(resultAsset));
         if (!res.ok) throw new Error(`Failed to load result (${res.status})`);
         const blob = await res.blob();
         const prepared = await blobToEditorImage(blob);

@@ -1,6 +1,7 @@
+import { metricsApi } from "../api/metricsResources.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { apiFetch, isAbortError } from "../api.js";
+import { isAbortError } from "../api.js";
 
 // Fetches the aggregate generation-metrics feed (epic 10402, GET /api/v1/metrics)
 // for the Generation Stats screen. Screen-local rather than in the app context:
@@ -32,7 +33,7 @@ export function useGenerationMetrics({ token, enabled = true, params = {} } = {}
           }
         }
         const suffix = query.toString() ? `?${query.toString()}` : "";
-        const items = await apiFetch(`/api/v1/metrics${suffix}`, token, { signal });
+        const items = await metricsApi.list (suffix, token, { signal });
         if (!signal?.aborted) {
           setRows(Array.isArray(items) ? items : []);
         }
