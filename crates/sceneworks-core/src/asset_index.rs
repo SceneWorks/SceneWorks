@@ -16,7 +16,7 @@ use crate::project_store::{
 };
 use crate::store_util::{
     is_safe_id, is_safe_relative_path, optional_bool, optional_str, optional_u64, read_json,
-    relative_string,
+    relative_string, required_str,
 };
 
 pub(crate) const ASSET_SIDECAR_PATTERN: &str = "*.sceneworks.json";
@@ -602,11 +602,6 @@ fn upsert_asset_row(
         ],
     )?;
     Ok(())
-}
-
-fn required_str<'a>(asset: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
-    optional_str(asset, key)
-        .ok_or_else(|| ProjectStoreError::BadRequest(format!("Missing required field: {key}")))
 }
 
 #[cfg(test)]

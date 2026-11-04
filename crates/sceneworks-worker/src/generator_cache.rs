@@ -52,8 +52,8 @@ struct CachedGenerator {
 type GeneratorCache = CacheThread<LoadIdentity, CachedGenerator>;
 type GeneratorJob = CacheJob<LoadIdentity, CachedGenerator>;
 
-const GENERATOR_CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
-const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = 300;
+#[cfg(test)]
+const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = cache_thread::DEFAULT_CACHE_IDLE_SECONDS;
 
 /// The generator cache does NOT free the backend cache before a cold load (unlike the refine cache,
 /// which sets this `true` to bound peak memory to one ~16 GB model). A cold miss here clears the
@@ -624,7 +624,7 @@ impl GeneratorCacheHandle {
 fn generator_worker() -> &'static mpsc::Sender<GeneratorJob> {
     GENERATOR_WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<GeneratorJob>();
-        let idle_timeout = generator_cache_idle_timeout_from_env();
+        let idle_timeout = cache_thread::idle_timeout_from_env();
         thread::Builder::new()
             .name("sceneworks-mlx-generator-cache".to_owned())
             .spawn(move || {
@@ -673,14 +673,7 @@ fn log_generator_cache_miss(resident: Option<&LoadIdentity>, incoming: &LoadIden
     }
 }
 
-fn generator_cache_idle_timeout_from_env() -> Option<Duration> {
-    generator_cache_idle_timeout(
-        std::env::var(GENERATOR_CACHE_IDLE_SECONDS_ENV)
-            .ok()
-            .as_deref(),
-    )
-}
-
+#[cfg(test)]
 fn generator_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
     cache_thread::idle_timeout_from_secs(raw, DEFAULT_GENERATOR_CACHE_IDLE_SECONDS)
 }
@@ -779,10 +772,7 @@ pub(crate) fn resolve_gpu_memory_limit(requested: u64, total_unified_bytes: Opti
     let Some(total) = total_unified_bytes else {
         return 0;
     };
-    let total_gb = total as f64 / crate::fit_gate::BYTES_PER_GIB;
-    let reserve = (crate::fit_gate::legacy_unified_reserve(total_gb).gb
-        * crate::fit_gate::BYTES_PER_GIB) as u64;
-    total.saturating_sub(reserve)
+    crate::fit_gate::unified_available_bytes(total)
 }
 
 /// The device's wired-residency ceiling in bytes (`recommendedMaxWorkingSetSize`), derived once.

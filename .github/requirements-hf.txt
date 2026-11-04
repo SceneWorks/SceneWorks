@@ -1,0 +1,2 @@
+# Shared provisioning client for dispatched MLX and Candle workflows.
+huggingface_hub==0.36.0

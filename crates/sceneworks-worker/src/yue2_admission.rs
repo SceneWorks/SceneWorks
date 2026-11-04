@@ -200,31 +200,7 @@ const TRANSCRIPTION_WINDOW_SECS: u64 = 300;
 // ---- Tiers, backends, precision ---------------------------------------------------------------------
 
 /// A YuE2 weight tier (`candle_audio_yue2::precision::Tier`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum Yue2Tier {
-    Bf16,
-    Q8,
-    Q4,
-}
-
-impl Yue2Tier {
-    /// Every tier, densest first.
-    pub(crate) const ALL: [Yue2Tier; 3] = [Yue2Tier::Bf16, Yue2Tier::Q8, Yue2Tier::Q4];
-
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            Self::Bf16 => "bf16",
-            Self::Q8 => "q8",
-            Self::Q4 => "q4",
-        }
-    }
-
-    /// The tier a catalog variant names. Anything else is `None`, which every caller refuses — an
-    /// unknown tier is never priced as zero.
-    pub(crate) fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|tier| tier.key() == key)
-    }
-}
+pub(crate) use crate::fit_gate::AudioWeightTier as Yue2Tier;
 
 /// The Candle backend a render runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1528,7 +1504,11 @@ fn fit(estimate: &Yue2Estimate, budget: &Yue2Budget, other_live: u64) -> Fit {
                     };
                 }
             }
-            let reclaimed = (free_bytes + reclaimable_bytes).min(*total_bytes);
+            let reclaimed = crate::fit_gate::with_reclaimable_bytes(
+                *free_bytes,
+                *total_bytes,
+                *reclaimable_bytes,
+            );
             let short = |available: u64| {
                 estimate
                     .stages
@@ -2650,16 +2630,14 @@ async fn live_budget(gpu_id: &str) -> Option<Yue2Budget> {
 
 #[cfg(target_os = "macos")]
 async fn probe_budget(_gpu_id: &str) -> Option<Yue2Budget> {
-    let working_set = working_set_ceiling_bytes().or_else(|| {
-        // No working-set reading: the unified total less the legacy reserve.
-        let total = crate::mlx_fit_gate::probe_total_unified_memory_bytes()?;
-        let reserve = crate::fit_gate::legacy_unified_reserve(gb(total)).gb * BYTES_PER_GIB;
-        Some(total.saturating_sub(reserve as u64))
-    })?;
-    // The small-Mac emulation cap caps the reading, as for every other unified-memory gate.
-    let capacity_bytes = crate::mlx_fit_gate::mlx_memory_cap_gb().map_or(working_set, |cap| {
-        working_set.min((cap * BYTES_PER_GIB) as u64)
-    });
+    let capacity_bytes = crate::fit_gate::working_set_capacity_bytes(
+        working_set_ceiling_bytes(),
+        || {
+            crate::mlx_fit_gate::probe_total_unified_memory_bytes()
+                .map(crate::fit_gate::unified_available_bytes)
+        },
+        crate::mlx_fit_gate::mlx_memory_cap_gb(),
+    )?;
     // The rest of this process shares the working set: the MLX allocator's live and cached bytes —
     // the image generator the cache keeps warm for 300 s after an image job, the refine model.
     // Evicting the cached generator frees its own load's bytes; clearing the MLX cache frees the
@@ -2695,15 +2673,12 @@ pub(crate) fn unified_budget(
 /// the real ceiling); reading it runs no workload.
 #[cfg(target_os = "macos")]
 fn working_set_ceiling_bytes() -> Option<u64> {
-    Some(crate::generator_cache::device_wired_ceiling_bytes() as u64).filter(|&bytes| bytes > 0)
+    crate::fit_gate::working_set_ceiling_bytes()
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn probe_budget(gpu_id: &str) -> Option<Yue2Budget> {
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    )?;
+    let budget = crate::vram_gate::live_capped_budget(gpu_id).await?;
     let bytes = |gib: f64| (gib.max(0.0) * BYTES_PER_GIB) as u64;
     let compute_cap = crate::gpu::cached_compute_cap();
     #[cfg(test)]

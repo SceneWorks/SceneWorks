@@ -863,6 +863,44 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn every_shipped_partial_component_floor_table_uses_the_provider_entry_rule() {
+        use gen_core::Quant;
+        let mut partial_tables = 0;
+        for registration in crate::inference_runtime::media().generators() {
+            let descriptor = (registration.descriptor)();
+            let floors = descriptor.capabilities.component_precision_floors;
+            if floors.is_empty() {
+                continue;
+            }
+            for selected in [
+                None,
+                Some(Quant::Q4),
+                Some(Quant::Q8),
+                Some(Quant::Nvfp4),
+                Some(Quant::Fp8Rowwise),
+            ] {
+                let expected: Vec<_> = floors
+                    .iter()
+                    .copied()
+                    .filter(|floor| selected.is_some_and(|tier| floor.applies_to(tier)))
+                    .collect();
+                if expected.len() != floors.len() {
+                    partial_tables += 1;
+                }
+                assert_eq!(
+                    sceneworks_core::memory_contracts::active_component_floors(floors, selected),
+                    expected
+                );
+            }
+        }
+        assert!(
+            partial_tables > 0,
+            "linked bundle must exercise its real floor declarations"
+        );
+    }
+
     /// The candle half of sc-18408 item (d) / sc-22736: every candle plan row resolves a
     /// weights-free contract that implements its planned rung — including the three SCAIL-2 cells
     /// whose provider declares `Resident` alone and which the plan therefore anchors resident.

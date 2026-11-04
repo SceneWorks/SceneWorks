@@ -103,7 +103,7 @@ struct SenseNovaDirectAdmission {
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
-const SENSENOVA_BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const SENSENOVA_BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn sensenova_gib_bytes(gb: f64) -> u64 {
@@ -155,22 +155,16 @@ fn sensenova_mlx_tier_key(request: &ImageRequest, weights_dir: &Path) -> &'stati
         // A flat `modelPath` has no tier basename: fall back to the requested/declared MLX bit
         // width, the same reading `vram_gate::requested_tier_key` performs (that module is compiled
         // only on the candle lane, so it cannot be called from here).
-        _ => match request
-            .advanced
-            .get("mlxQuantize")
-            .and_then(json_to_i64)
-            .or_else(|| {
+        _ => crate::payload::tier_for_bits(
+            request.quant_bits().or_else(|| {
                 request
                     .model_manifest_entry
                     .get("mlx")
                     .and_then(|mlx| mlx.get("quantize"))
-                    .and_then(json_to_i64)
-            }) {
-            None => "q8",
-            Some(bits) if bits <= 0 => "bf16",
-            Some(bits) if bits <= 4 => "q4",
-            Some(_) => "q8",
-        },
+                    .and_then(quant_int)
+            }),
+            "q8",
+        ),
     }
 }
 
@@ -253,10 +247,7 @@ async fn sensenova_direct_admission(
                 ))
             },
         )?;
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let (total_gb, free_gb) = budget
         .map(|budget| (budget.total_gb, budget.free_gb))
         .unwrap_or((predicted_peak_gb, predicted_peak_gb));
@@ -352,48 +343,11 @@ fn sensenova_selection_parameters(
     contract: &gen_core::MemoryProviderContract,
     strategy: gen_core::MemoryStrategy,
 ) -> Option<gen_core::MemoryStrategyParameters> {
-    let smallest = |rung: gen_core::MemoryStrategy,
-                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
-     -> Option<Option<u32>> {
-        if !contract.engages(strategy, rung) {
-            return Some(None);
-        }
-        pick(&contract.capability(rung)?.parameters)
-            .iter()
-            .copied()
-            .min()
-            .map(Some)
-    };
-    let window_component = if contract.engages(
-        strategy,
-        gen_core::MemoryStrategy::BoundedTransformerResidency,
-    ) {
-        contract
-            .capability(gen_core::MemoryStrategy::BoundedTransformerResidency)?
-            .parameters
-            .transformer_window_components
-            .first()
-            .copied()
-    } else {
-        None
-    };
-    Some(gen_core::MemoryStrategyParameters {
-        stage_residency: None,
-        decode_tile_edge: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_tile_edges
-        })?,
-        decode_overlap: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_overlaps
-        })?,
-        attention_chunk_size: smallest(gen_core::MemoryStrategy::BoundedAttention, |ranges| {
-            &ranges.attention_chunk_sizes
-        })?,
-        transformer_window_size: smallest(
-            gen_core::MemoryStrategy::BoundedTransformerResidency,
-            |ranges| &ranges.transformer_window_sizes,
-        )?,
-        transformer_window_component: window_component,
-    })
+    sceneworks_core::memory_contracts::smallest_parameters(
+        contract,
+        &contract.engaged_composition(strategy),
+        sceneworks_core::memory_contracts::TransformerScopeParameters::ProviderOrder,
+    )
 }
 
 /// The request's predicted resident peak, in bytes.
@@ -633,22 +587,12 @@ pub(crate) async fn run_vqa_job(
         ));
     }
     let model_id = sensenova_model_id(&request);
-    let question = job
-        .payload
-        .get("question")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let question = crate::payload::trimmed_string(job.payload.get("question"))
         .ok_or_else(|| {
             WorkerError::InvalidPayload("Visual question answering requires a question.".to_owned())
         })?
         .to_owned();
-    let source_asset_id = job
-        .payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let source_asset_id = crate::payload::trimmed_string(job.payload.get("sourceAssetId"))
         .ok_or_else(|| {
             WorkerError::InvalidPayload(
                 "Visual question answering requires a source image asset.".to_owned(),
@@ -1013,11 +957,7 @@ fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> In
             .get("thinkMode")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        system_message: advanced
-            .get("systemMessage")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        system_message: crate::payload::trimmed_string(advanced.get("systemMessage"))
             .map(str::to_owned)
             .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned()),
         seed: resolve_seed(request, 0),
@@ -1785,12 +1725,7 @@ fn image_to_chw01_candle(img: &Image, min_pixels: i64, max_pixels: i64) -> Worke
 /// The SenseNova-U1 repo (manifest `repo` else the default), for the document telemetry.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn model_repo_for(request: &ImageRequest) -> String {
-    request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model)
                 .unwrap_or("sensenova/SenseNova-U1-8B-MoT")
@@ -1822,23 +1757,9 @@ fn interleave_resolution_snap(width: i64, height: i64) -> (i32, i32) {
 /// cross-platform (it is pure string logic), so it compiles under `test` off macOS too.
 #[cfg(any(target_os = "macos", test, feature = "backend-candle"))]
 fn strip_reasoning(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("<think>") {
-        out.push_str(&rest[..start]);
-        match rest[start..].find("</think>") {
-            // Complete block: drop `<think>…</think>` and continue after it.
-            Some(end) => rest = &rest[start + end + "</think>".len()..],
-            // Dangling/unclosed block (truncated by max_new_tokens): drop everything from
-            // `<think>` on.
-            None => {
-                rest = "";
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
-    out.trim().to_owned()
+    crate::text_clean::strip_think_blocks(text, crate::text_clean::ThinkPolicy::DropUnclosed)
+        .trim()
+        .to_owned()
 }
 
 /// `safe_int` over a top-level payload field: parse (int / float / numeric string) else `default`,

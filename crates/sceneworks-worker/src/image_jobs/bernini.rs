@@ -57,15 +57,10 @@ fn bernini_image_engine_task(mode: &str) -> &'static str {
 /// default, not the generic image `resolve_quant`'s Q8 default — the snapshot is ~93 GB at bf16).
 #[cfg(target_os = "macos")]
 fn resolve_bernini_image_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
-    match request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
-        Some(bits) if bits <= 0 => (None, None),
-        Some(bits) if bits <= 4 => (Some(Quant::Q4), Some(4)),
-        Some(_) => (Some(Quant::Q8), Some(8)),
-        None => (Some(Quant::Q4), Some(4)),
+    match crate::payload::tier_for_bits(request.quant_bits(), "q4") {
+        "bf16" => (None, None),
+        "q4" => (Some(Quant::Q4), Some(4)),
+        _ => (Some(Quant::Q8), Some(8)),
     }
 }
 
@@ -252,10 +247,7 @@ async fn generate_bernini_image_stream(
     // Fetch the requested tier subdir (q8/bf16) if not the shipped q4 default, then descend into it: a
     // pre-packed tier loads with `quant = None` (config sidecars authoritative); a legacy flat snapshot
     // keeps load-time quant (`quant` above).
-    let tier_bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let tier_bits = request.quant_bits();
     crate::video_jobs::bernini::ensure_bernini_tier_present(api, settings, job, tier_bits).await?;
     // Image lane keeps the epic-10721 app-wide Q8 default on a no-explicit-pick (sc-10726); only the
     // video lane reverts to q4-first (sc-10859), so pass the image default order explicitly.
@@ -499,11 +491,10 @@ pub(crate) fn resolve_candle_bernini_model_dir(settings: &Settings) -> WorkerRes
 /// bf16.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
-    match bits {
-        None => &["bf16", "q8", "q4"],
-        Some(b) if b <= 0 => &["bf16", "q8", "q4"],
-        Some(b) if b <= 4 => &["q4", "q8", "bf16"],
-        Some(_) => &["q8", "q4", "bf16"],
+    match crate::payload::tier_for_bits(bits, "bf16") {
+        "bf16" => &["bf16", "q8", "q4"],
+        "q4" => &["q4", "q8", "bf16"],
+        _ => &["q8", "q4", "bf16"],
     }
 }
 
@@ -633,10 +624,7 @@ async fn generate_candle_bernini_image_stream(
     // (`bf16/`|`q8/`|`q4/`) the candle lane loads and the matching load-time quant (sc-11003). No
     // explicit pick ⇒ bf16 dense (the off-Mac validated baseline); `mlxQuantize:4`|`:8` opt into the
     // packed tiers (validated clean on sm_120, sc-11003).
-    let tier_bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let tier_bits = request.quant_bits();
     let (weights_dir, quant) = resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
     // sc-20799: the evidence/manifest axes the shared evaluator is keyed by. `tier_key` names the
     // tier the disk-probing resolver ACTUALLY landed on (via its load quant), not a manifest
@@ -732,10 +720,7 @@ async fn generate_candle_bernini_image_stream(
 
     // Live device budget, mirroring base.rs: credit the reclaimable pool the imminent single-slot
     // evict will produce, then cap it to the configured CUDA ceiling.
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
     let budget =
         raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));

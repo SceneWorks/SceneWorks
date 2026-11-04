@@ -235,12 +235,7 @@ async fn run_training_caption_job_using(
             .await;
     }
     let options = caption_job_options(&job.payload);
-    let model_name_or_path = job
-        .payload
-        .get("modelNameOrPath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let model_name_or_path = crate::payload::trimmed_string(job.payload.get("modelNameOrPath"))
         .unwrap_or(JOY_CAPTION_MODEL)
         .to_owned();
     let weights_dir = resolve_caption_weights_dir(settings, &model_name_or_path)?;
@@ -389,122 +384,82 @@ async fn run_training_caption_job_using(
         Ok(())
     });
 
-    // Bind the blocking captioner task to its cancel flag (sc-8804, F-003): every `update_job`/
-    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
-    // reclaim); on that early return this guard trips `cancel` and aborts the captioner thread
-    // instead of leaving it running on a job nobody is consuming. `cancel` is kept alongside (it's
-    // `Clone`) for the in-loop cancel poll; the guard drives only the drop-time teardown.
-    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
-    // Heartbeat + poll-cancel cadence (the shared 5–15 s worker interval).
-    let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
-    heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // Coalesced per-step progress cadence (sc-11189, F-016): a fixed short tick that drains ONLY the
-    // newest token count from the watch channel — hundreds of per-token POSTs collapse to a few, and
-    // decode is never back-pressured by API latency. Decoupled from the (coarser) heartbeat interval
-    // so per-step progress stays smooth without the token stream driving the API.
-    let mut progress_interval = tokio::time::interval(PROGRESS_POST_INTERVAL);
-    progress_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // Skip a redundant post when the token count has not advanced since the last one (the watch holds
-    // the same value between ticks), so a stalled decode does not re-POST identical progress.
+    let mut supervisor = StreamSupervisor::new(
+        cancel,
+        blocking,
+        progress_report_interval(settings),
+        Some(PROGRESS_POST_INTERVAL),
+    );
     let mut last_posted: Option<(usize, u32, u32)> = None;
-    // Defer the terminal `Canceled` until the blocking captioner has actually stopped (sc-11189,
-    // F-017): a cancel poll here only TRIPS the engine flag (`cancel_requested_peek`, no terminal
-    // write) and latches `canceled`; the terminal `Canceled` — which frees the worker row — is posted
-    // below only AFTER `into_handle().await` returns, so the scheduler never sees a free worker while
-    // the captioner is still on the GPU (mirrors `run_batched_analysis_job` sc-8917/F-115 + the
-    // training path). The old path called `check_cancel` on the tick, which posted the terminal
-    // `Canceled` at acknowledgement time.
-    let mut canceled = false;
     let mut captions = Vec::with_capacity(items.len());
-    // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
-    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
-    let loop_result: WorkerResult<()> = async {
+    let handling: WorkerResult<()> = async {
         loop {
-        tokio::select! {
-            event = rx.recv() => {
-                match event {
-                    Some(CaptionedItem { index, item_id, text, trigger_words }) => {
-                        captions.push(caption_sidecar_item(&item_id, &text, &trigger_words, &mode));
-                        let progress = 0.12 + 0.76 * ((index + 1) as f64 / items.len() as f64);
-                        update_job(
-                            api,
-                            &job.id,
-                            caption_progress(
-                                JobStatus::Running,
-                                ProgressStage::Running,
-                                progress,
-                                &format!("Captioned image {} of {}.", index + 1, items.len()),
-                                None,
-                                backend,
-                            ),
-                        )
-                        .await?;
-                    }
-                    None => break,
-                }
-            }
-            _ = progress_interval.tick() => {
-                // Coalesced per-step progress: post ONLY the latest `(index, current, total)`, and
-                // only if it moved since the last post (a stalled decode holds the same value between
-                // ticks → no redundant re-POST). Copy the `(usize, u32, u32)` out of the borrow first
-                // so the non-`Send` `watch::Ref` is not held across the `.await` (keeps the enclosing
-                // job future `Send` for rust-api's `tokio::spawn`).
-                let latest = *progress_rx.borrow();
-                if let Some((index, current, total)) = next_caption_step_post(latest, last_posted) {
+            match supervisor
+                .next(api, settings, &job.id, Some(&mut rx))
+                .await?
+            {
+                StreamSignal::Event(CaptionedItem {
+                    index,
+                    item_id,
+                    text,
+                    trigger_words,
+                }) => {
+                    captions.push(caption_sidecar_item(&item_id, &text, &trigger_words, &mode));
+                    let progress = 0.12 + 0.76 * ((index + 1) as f64 / items.len() as f64);
                     update_job(
                         api,
                         &job.id,
                         caption_progress(
                             JobStatus::Running,
                             ProgressStage::Running,
-                            caption_step_progress(index, current, total, items.len()),
-                            &format!("Captioning image {} of {}.", index + 1, items.len()),
+                            progress,
+                            &format!("Captioned image {} of {}.", index + 1, items.len()),
                             None,
                             backend,
                         ),
                     )
                     .await?;
-                    last_posted = Some((index, current, total));
                 }
-            }
-            _ = heartbeat_interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API poll
-                // (a local flag read) so a quit trips the captioner flag at its next per-item check
-                // instead of waiting out the grace window, exactly like a user cancel does. Here we
-                // only TRIP the engine flag and latch `canceled`; the terminal `Canceled` is posted
-                // below once the task has actually stopped (sc-11189, F-017).
-                if !canceled && (shutdown_requested() || cancel_requested_peek(api, &job.id).await) {
-                    cancel.cancel();
-                    canceled = true;
+                StreamSignal::ProgressTick => {
+                    // Coalesced per-step progress: post ONLY the latest `(index, current, total)`, and
+                    // only if it moved since the last post (a stalled decode holds the same value between
+                    // ticks → no redundant re-POST). Copy the `(usize, u32, u32)` out of the borrow first
+                    // so the non-`Send` `watch::Ref` is not held across the `.await` (keeps the enclosing
+                    // job future `Send` for rust-api's `tokio::spawn`).
+                    let latest = *progress_rx.borrow();
+                    if let Some((index, current, total)) =
+                        next_caption_step_post(latest, last_posted)
+                    {
+                        update_job(
+                            api,
+                            &job.id,
+                            caption_progress(
+                                JobStatus::Running,
+                                ProgressStage::Running,
+                                caption_step_progress(index, current, total, items.len()),
+                                &format!("Captioning image {} of {}.", index + 1, items.len()),
+                                None,
+                                backend,
+                            ),
+                        )
+                        .await?;
+                        last_posted = Some((index, current, total));
+                    }
                 }
+                StreamSignal::CancelRequested => {}
+                StreamSignal::Finished => break,
             }
-        }
         }
         Ok(())
     }
     .await;
-    if let Err(error) = loop_result {
-        // A progress/heartbeat POST failed (transient error or 409 stale-sweep reclaim): trip the
-        // flag and bounded-join the captioner before returning so it isn't left running (sc-8804).
-        guard.cancel_and_join().await;
-        return Err(error);
-    }
-
-    // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
-    let join_result = guard
-        .into_handle()
-        .await
-        .map_err(|error| task_join_error("caption task join", error))?;
+    let (canceled, result) = supervisor.finish_stream(handling, &mut rx).await?;
+    let result = result.map_err(|error| task_join_error("caption task join", error))?;
     if canceled {
-        // The captioner has actually stopped now, so post the TERMINAL `Canceled` here (not at the
-        // earlier cancel poll, which only tripped the flag) — this terminal write frees the worker row
-        // as the worker returns to its claim loop, so the next queued job waits only until the GPU is
-        // genuinely free (sc-11189, F-017; mirrors `run_batched_analysis_job` + the training path).
         mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
-    join_result?;
+    result?;
 
     save_caption_results(
         api,
@@ -703,21 +658,7 @@ fn caption_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        // Stamped by update_job before posting (sc-4172).
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 #[cfg(any(
@@ -763,48 +704,14 @@ fn caption_result(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<CaptionItem>> {
-    let dataset_root = payload
-        .get("datasetRoot")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Caption payload.datasetRoot must be an app-managed dataset path.".to_owned(),
-            )
-        })?;
-    let items = payload
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload("Caption payload.items must be an array.".to_owned())
-        })?;
-    items
-        .iter()
-        .map(|item| {
-            let object = item.as_object().ok_or_else(|| {
-                WorkerError::InvalidPayload("Caption item must be an object.".to_owned())
-            })?;
-            let item_id = object
-                .get("itemId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload("Caption item is missing itemId.".to_owned())
-                })?
-                .to_owned();
-            let image_path = object
-                .get("imagePath")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Caption item {item_id} is missing imagePath."
-                    ))
-                })?;
-            let trigger_words = object
+    parse_dataset_items(
+        settings,
+        payload,
+        "Caption",
+        DatasetItemPolicy::Strict,
+        |item| {
+            let trigger_words = item
+                .object
                 .get("triggerWords")
                 .and_then(Value::as_array)
                 .map(|values| {
@@ -814,22 +721,16 @@ fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
                         .map(str::to_owned)
-                        .collect::<Vec<_>>()
+                        .collect()
                 })
                 .unwrap_or_default();
-            let image_path = resolve_dataset_item_path(
-                settings,
-                dataset_root,
-                image_path,
-                &format!("Caption item {item_id} imagePath"),
-            )?;
             Ok(CaptionItem {
-                item_id,
-                image_path,
+                item_id: item.item_id.to_owned(),
+                image_path: item.image_path()?,
                 trigger_words,
             })
-        })
-        .collect()
+        },
+    )
 }
 
 #[cfg(any(

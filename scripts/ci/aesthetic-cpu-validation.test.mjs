@@ -5,6 +5,7 @@ import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { discoverRootTests } from '../run-root-tests.mjs';
 import { ROOT, CASES, FEATURE, body, checkRouting, admission, lockedPin, discover, validateExecution } from './aesthetic-cpu-validation.mjs';
 const read = p => readFileSync(path.join(ROOT, p), 'utf8');
 const manifest = checkRouting();
@@ -61,7 +62,10 @@ test('manual dispatcher adds one hosted CPU suite while preserving NAX default a
   const dispatchers = readdirSync(path.join(ROOT, '.github/workflows')).filter(name => /\.ya?ml$/.test(name) && read(`.github/workflows/${name}`).includes('aesthetic-cpu-validation.mjs --run'));
   assert.deepEqual(dispatchers, ['nax-kernel-validation.yml'], 'learned execution entrypoint belongs only to its explicit manual dispatcher');
   const pkg = JSON.parse(read('package.json'));
-  assert.ok(pkg.scripts.check.includes('scripts/ci/aesthetic-cpu-validation.test.mjs'));
+  assert.equal(pkg.scripts.check, 'node scripts/run-root-tests.mjs');
+  assert.ok(discoverRootTests().includes('scripts/ci/aesthetic-cpu-validation.test.mjs'));
+  assert.ok(discoverRootTests().includes('scripts/lib/script-helpers.test.mjs'));
+  assert.ok(discoverRootTests().includes('scripts/historical-artifacts.test.mjs'));
 });
 
 test('dispatch admission rejects normal CI, wrong workflows, moved source and pin substitution', () => {

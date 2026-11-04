@@ -207,10 +207,10 @@ assert.ok(
   "publication workflow must never print an inference credential",
 );
 
-const runtimeCuda = /FROM nvidia\/cuda:([0-9.]+)-runtime-ubuntu24\.04 AS rust-worker-candle-base/.exec(
+const runtimeCuda = /FROM nvidia\/cuda:([0-9.]+)-runtime-ubuntu24\.04@sha256:[0-9a-f]{64} AS rust-worker-candle-base/.exec(
   dockerfile,
 )?.[1];
-const builderCuda = /FROM nvidia\/cuda:([0-9.]+)-devel-ubuntu22\.04 AS candle-builder/.exec(
+const builderCuda = /FROM nvidia\/cuda:([0-9.]+)-devel-ubuntu22\.04@sha256:[0-9a-f]{64} AS candle-builder/.exec(
   dockerfile,
 )?.[1];
 const serverCuda = /^\s+cuda:\s*"([^"]+)"/m.exec(serverCandle)?.[1];

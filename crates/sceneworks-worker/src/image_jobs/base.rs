@@ -1675,12 +1675,7 @@ fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn model_repo_with_default(request: &ImageRequest, default_repo: &str) -> String {
-    request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(default_repo)
         .to_owned()
 }
@@ -1690,20 +1685,9 @@ fn model_repo_with_default(request: &ImageRequest, default_repo: &str) -> String
 /// intentionally excluded because each repo resolves its own receipt independently.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn requested_receipt_variant(request: &ImageRequest) -> Option<String> {
-    if let Some(bits) = request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
+    if let Some(bits) = request.quant_bits() {
         return Some(
-            if bits <= 0 {
-                "bf16"
-            } else if bits > 4 {
-                "q8"
-            } else {
-                "q4"
-            }
-            .to_owned(),
+            crate::payload::tier_for_bits(Some(bits), "q8").to_owned(),
         );
     }
     let selectable = request
@@ -1857,9 +1841,7 @@ fn model_path_override(request: &ImageRequest) -> Option<String> {
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
     else {
         return None;
     };
@@ -1930,27 +1912,14 @@ fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
     if !sceneworks_core::jobs_store::convert_artifact_required_here(converter) {
         return Ok(());
     }
-    let name = request
-        .model_manifest_entry
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let name = crate::payload::trimmed_string(request.model_manifest_entry.get("name"))
         .unwrap_or(request.model.as_str());
     // The base whose text encoder / VAE / tokenizer the conversion borrows. Named explicitly when
     // the manifest declares it so the user knows the exact second install to make; the sentence is
     // dropped rather than faked when it does not (a dir-sourced converter borrows nothing).
-    let base = mlx
-        .get("convertBaseRepo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let base = crate::payload::trimmed_string(mlx.get("convertBaseRepo"))
         .map(|repo| {
-            let tier = mlx
-                .get("convertBaseSubdir")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
+            let tier = crate::payload::trimmed_string(mlx.get("convertBaseSubdir"));
             match tier {
                 Some(tier) => format!(
                     " It also requires the base model {repo} ({tier}) to be installed — the \
@@ -2179,10 +2148,7 @@ pub(crate) fn resolve_weights_dir(
             all(not(target_os = "macos"), feature = "backend-candle")
         ))]
         {
-            let wants_bf16 = request
-                .advanced
-                .get("mlxQuantize")
-                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+            let wants_bf16 = request.quant_bits()
                 .is_some_and(|bits| bits <= 0);
             if wants_bf16 {
                 if let Some(bf16) = huggingface_snapshot_dir(&settings.data_dir, IDEOGRAM_BF16_REPO)
@@ -2353,7 +2319,7 @@ fn qwen_image_2_1_tier_dir(
     request: &ImageRequest,
 ) -> WorkerResult<Option<(PathBuf, &'static str)>> {
     const TIERS: [&str; 3] = ["bf16", "q8", "q4"];
-    let tier_for_bits = |bits: i64| -> &'static str {
+    let qwen_checkpoint_tier = |bits: i64| -> &'static str {
         match bits {
             // A dense bit width (16 = bf16, 32 = f32) is the unquantized tier, never q8 (sc-24114).
             bits if bits <= 0 || bits >= 9 => "bf16",
@@ -2366,10 +2332,8 @@ fn qwen_image_2_1_tier_dir(
         .get("mlxQuantize")
         .filter(|value| !value.is_null())
         .map(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-                .map(tier_for_bits)
+            crate::payload::quant_int(value)
+                .map(qwen_checkpoint_tier)
                 .ok_or_else(|| {
                     WorkerError::InvalidPayload(format!(
                         "{} advanced.mlxQuantize must be an integer bit count, got {value}",
@@ -2404,7 +2368,7 @@ fn qwen_image_2_1_tier_dir(
         .get("mlx")
         .and_then(|mlx| mlx.get("quantize"))
         .and_then(Value::as_i64)
-        .map_or("q8", tier_for_bits);
+        .map_or("q8", qwen_checkpoint_tier);
     Ok(installed(default).or_else(|| {
         TIERS
             .into_iter()
@@ -2579,9 +2543,7 @@ fn qwen_image_2_1_declared_tier_dir(
 fn candle_flux1_packed_requested_tier(request: &ImageRequest) -> WorkerResult<&'static str> {
     match request.advanced.get("mlxQuantize") {
         None | Some(Value::Null) => Ok("q4"),
-        Some(value) => match value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
+        Some(value) => match crate::payload::quant_int(value)
         {
             Some(4) => Ok("q4"),
             Some(8) => Ok("q8"),
@@ -3151,10 +3113,7 @@ fn is_anima_model(model: &str) -> bool {
 /// rather than `transformer/`, and — unlike the standard q4-first convention — defaults to q8 (below).
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let bits = request.quant_bits();
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
         // A hidden `._*.safetensors` AppleDouble sidecar is not a DiT (SceneWorks#1333).
@@ -3243,10 +3202,7 @@ fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
 /// carries only `q4/`/`q8/` (bf16 is a separate catalog repo), so the clean-tiers fallback here is
 /// q8 ⇆ q4 and a bf16 floor has no in-turnkey tier to land on (it falls through to the best installed).
 fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let bits = request.quant_bits();
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
         dir.join("transformer/model.safetensors")
@@ -3277,9 +3233,9 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// Requested Boogu download subfolder. Even the default Q8 variant can be absent when only
 /// a sibling variant is installed. The load-side resolver separately chooses among complete tiers.
 fn boogu_tier_subdir(variant: &str, bits: Option<i64>) -> String {
-    match bits {
-        Some(b) if b <= 0 => format!("{variant}-bf16"),
-        Some(b) if b <= 4 => format!("{variant}-q4"),
+    match crate::payload::tier_for_bits(bits, "q8") {
+        "bf16" => format!("{variant}-bf16"),
+        "q4" => format!("{variant}-q4"),
         _ => variant.to_owned(),
     }
 }
@@ -3300,10 +3256,7 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         "boogu_image_edit" => "edit",
         _ => "base",
     };
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let bits = request.quant_bits();
     // q4/q8 ship a single packed transformer file; bf16 is the dense diffusers tree (SHARDED → only
     // the `.index.json`). Accept either shape.
     let present = |name: &str| -> Option<PathBuf> {
@@ -3372,10 +3325,7 @@ fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// [`krea_model_subdir`] with the NVFP4 **host** gate passed in rather than probed (sc-11042). Split
 /// out for testability, exactly like [`standard_tier_subdir_gated`]; production has one caller.
 fn krea_model_subdir_gated(root: &Path, request: &ImageRequest, nvfp4_host: bool) -> PathBuf {
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let bits = request.quant_bits();
     // q4/q8 ship a single packed transformer file; the bf16 tier (sc-8513) is the dense diffusers
     // tree (SHARDED → only the `.index.json`). Accept either shape.
     let present = |name: &str| -> Option<PathBuf> {
@@ -3584,7 +3534,7 @@ async fn ensure_boogu_tier_present(
         "boogu_image_edit" => "edit",
         _ => return Ok(()),
     };
-    let bits = request.advanced.get("mlxQuantize").and_then(quant_int);
+    let bits = request.quant_bits();
     let tier = boogu_tier_subdir(variant, bits);
     let Some(model) = mlx_model(&request.model) else {
         return Ok(());
@@ -3669,7 +3619,7 @@ async fn ensure_ideogram_tier_present(
     if request.model != "ideogram_4" && request.model != "ideogram_4_turbo" {
         return Ok(());
     }
-    let bits = request.advanced.get("mlxQuantize").and_then(quant_int);
+    let bits = request.quant_bits();
     let Some(tier) = ideogram_tier_subdir(bits) else {
         // Default q4 ships in the catalog download — nothing to fetch.
         return Ok(());
@@ -3784,10 +3734,7 @@ fn resolve_quant_gated(
     if nvfp4_selected(request, nvfp4_host, tier_dir) {
         return (Some(Quant::Nvfp4), None);
     }
-    let raw = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(quant_int)
+    let raw = request.quant_bits()
         .or_else(|| {
             request
                 .model_manifest_entry
@@ -3795,11 +3742,10 @@ fn resolve_quant_gated(
                 .and_then(|mlx| mlx.get("quantize"))
                 .and_then(quant_int)
         });
-    match raw {
-        None => (Some(Quant::Q8), Some(8)),
-        Some(bits) if bits <= 0 => (None, None),
-        Some(bits) if bits <= 4 => (Some(Quant::Q4), Some(4)),
-        Some(_) => (Some(Quant::Q8), Some(8)),
+    match crate::payload::tier_for_bits(raw, "q8") {
+        "bf16" => (None, None),
+        "q4" => (Some(Quant::Q4), Some(4)),
+        _ => (Some(Quant::Q8), Some(8)),
     }
 }
 
@@ -3825,15 +3771,10 @@ fn resolve_quant_gated(
 /// layout), alongside [`tier_quant_from_resolved_dir`].
 #[cfg(target_os = "macos")]
 fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
-    match bits {
-        None => Some(8),
-        Some(b) if b <= 0 => None,
-        Some(b) if b > 4 => Some(8),
-        _ => Some(4),
+    match crate::payload::tier_for_bits(request.quant_bits(), "q8") {
+        "bf16" => None,
+        "q4" => Some(4),
+        _ => Some(8),
     }
 }
 
@@ -12856,10 +12797,7 @@ pub(super) async fn admit_sdxl_bespoke_memory(
     let runtime_overlay_bytes = contract.asset_facts.overlay_bytes;
     let artifact_is_certified = additional_artifacts_certified
         && candle_certified_load_spec("sdxl", settings, &spec, &request.model_manifest_entry, tier);
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
@@ -13933,10 +13871,7 @@ async fn generate_candle_registry_stream_using(
             model = %request.model,
         );
     }
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     // sc-11023: the single-slot generator cache evicts its current occupant BEFORE the incoming load.
     // This gate reads `free` while that occupant is still resident (so raw `free` still counts the model
     // it is about to replace); crediting the reclaimable pool predicts the `free` the imminent evict will

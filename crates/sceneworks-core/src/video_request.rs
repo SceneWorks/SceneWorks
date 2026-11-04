@@ -596,6 +596,11 @@ pub struct VideoRequest {
 }
 
 impl VideoRequest {
+    /// Explicit quantization bits, before model-specific defaults or tier validation.
+    pub fn quant_bits(&self) -> Option<i64> {
+        crate::payload_util::optional_i64(&self.advanced, "mlxQuantize")
+    }
+
     /// Parse a job payload (the `payload` object of a `JobSnapshot`). Infallible:
     /// missing fields fall back to the Python defaults and `project_id` may be empty
     /// — the caller validates it is present (the worker rejects an empty project id).

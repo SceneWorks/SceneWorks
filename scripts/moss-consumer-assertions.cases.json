@@ -840,7 +840,7 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "json!(advanced_str(&plan.config.advanced, \"networkType\", \"lora\"))",
+          "old": "json!(optional_payload_string(&plan.config.advanced, \"networkType\").unwrap_or(\"lora\"))",
           "new": "json!(\"lora\")",
           "anchor": "fn training_result("
         }

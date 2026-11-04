@@ -1295,7 +1295,7 @@ async fn spawn_finishing_heartbeat_stub(state: FinishingHeartbeatStub) -> String
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }
-        Json(json!({})).into_response()
+        Json(worker_snapshot_json("test-worker")).into_response()
     }
     async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
         Json(job_snapshot_json(&job_id, true)).into_response()
@@ -1549,4 +1549,155 @@ async fn with_job_heartbeat_keeps_worker_live_through_a_long_staging_copy() {
         "at least one heartbeat must fire while a >interval region runs (got {})",
         beats.load(Ordering::SeqCst)
     );
+}
+
+/// F-005/F-035: arbitrary lane events, the independent progress cadence, and heartbeat cadence
+/// share one supervisor. A completed producer's buffered events are drained before returning.
+#[tokio::test]
+async fn stream_supervisor_drains_events_and_preserves_both_timers() {
+    let (base, beats) = spawn_heartbeat_counting_stub().await;
+    let mut settings = test_settings(base.clone(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let (release, ready) = tokio::sync::oneshot::channel();
+    let mut release = Some(release);
+    let task = crate::load_progress::spawn(async move {
+        ready.await.expect("timers observed");
+        tx.send("first").await.expect("first event");
+        tx.send("last").await.expect("last event");
+        42
+    });
+    let mut supervisor = crate::StreamSupervisor::new(
+        cancel.clone(), task, Duration::from_millis(5), Some(Duration::from_millis(3)),
+    );
+    let mut events = Vec::new();
+    let mut progress_ticks = 0;
+    loop {
+        match supervisor.next(&api, &settings, "job-1", Some(&mut rx)).await.expect("supervised event") {
+            crate::StreamSignal::Event(event) => events.push(event),
+            crate::StreamSignal::ProgressTick => {
+                progress_ticks += 1;
+                if beats.load(Ordering::SeqCst) > 0 {
+                    if let Some(release) = release.take() {
+                        release.send(()).expect("release task");
+                    }
+                }
+            }
+            crate::StreamSignal::CancelRequested => panic!("control run canceled"),
+            crate::StreamSignal::Finished => break,
+        }
+    }
+    let (canceled, output) = supervisor.finish_stream(Ok(()), &mut rx).await.expect("finish");
+    assert!(!canceled);
+    assert!(!cancel.is_cancelled());
+    assert_eq!(output.expect("task joined"), 42);
+    assert_eq!(events, ["first", "last"]);
+    assert!(progress_ticks > 0);
+    assert!(beats.load(Ordering::SeqCst) > 0);
+}
+
+/// A cancellation acknowledgment is only safe after the producer has stopped. This fake native
+/// task deliberately takes time to wind down after seeing its flag; no model work executes.
+#[tokio::test]
+async fn stream_supervisor_joins_before_cancel_acknowledgment() {
+    let (base, posts) = spawn_no_user_cancel_capture_stub().await;
+    let mut settings = test_settings(base.clone(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_stopped = stopped.clone();
+    let (release, ready) = std::sync::mpsc::channel();
+    let task = crate::load_progress::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !task_cancel.is_cancelled() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(task_cancel.is_cancelled(), "supervisor must cancel producer");
+        ready.recv_timeout(Duration::from_secs(5)).expect("release canceled task");
+        task_stopped.store(true, Ordering::SeqCst);
+    });
+    let shutdown = gen_core::CancelFlag::new();
+    shutdown.cancel();
+    let mut supervisor = crate::StreamSupervisor::new(cancel, task, Duration::from_millis(5), None);
+    crate::with_shutdown_flag(shutdown, async {
+        assert!(super::progress::shutdown_requested(), "shutdown scope is active");
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), supervisor.next::<()>(&api, &settings, "job-1", None)).await.expect("timely signal").expect("signal") {
+                crate::StreamSignal::CancelRequested => {
+                    assert!(!stopped.load(Ordering::SeqCst));
+                    release.send(()).expect("release task");
+                    assert!(posts.lock().expect("posts").is_empty());
+                }
+                crate::StreamSignal::Finished => break,
+                _ => {}
+            }
+        }
+    }).await;
+    let (canceled, result) = supervisor.finish(Ok(())).await.expect("finish");
+    result.expect("task joined");
+    assert!(canceled);
+    assert!(stopped.load(Ordering::SeqCst));
+    super::mark_job_canceled(&api, "job-1", "test canceled").await.expect("terminal acknowledgment");
+    assert_eq!(posts.lock().expect("posts")[0]["status"], "canceled");
+}
+
+/// An API failure must cancel and join a producer that may be blocked on a full progress channel.
+#[tokio::test]
+async fn stream_supervisor_error_closes_channel_and_joins_producer() {
+    let base = spawn_failing_heartbeat_stub().await;
+    let mut settings = test_settings(base.clone(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_stopped = stopped.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let task = crate::load_progress::spawn_blocking(move || {
+        while tx.blocking_send(1).is_ok() {}
+        task_stopped.store(true, Ordering::SeqCst);
+    });
+    let mut supervisor = crate::StreamSupervisor::new(cancel.clone(), task, Duration::from_millis(1), None);
+    let handling = async {
+        loop {
+            if matches!(supervisor.next(&api, &settings, "job-1", Some(&mut rx)).await?, crate::StreamSignal::Finished) {
+                break;
+            }
+        }
+        Ok(())
+    }.await;
+    assert!(handling.is_err());
+    assert!(supervisor.finish_stream(handling, &mut rx).await.is_err());
+    assert!(cancel.is_cancelled());
+    assert!(stopped.load(Ordering::SeqCst));
+}
+
+/// The generic task-only driver preserves the established sc-22999 completed-result policy even
+/// when an HTTP heartbeat/cancel read races the native task's completion.
+#[tokio::test]
+async fn stream_supervisor_keeps_result_completed_during_cancel_poll() {
+    let state = FinishingHeartbeatStub {
+        release: Default::default(),
+        progress: Default::default(),
+    };
+    let base = spawn_finishing_heartbeat_stub(state.clone()).await;
+    let mut settings = test_settings(base.clone(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+    let (release, ready) = std::sync::mpsc::channel();
+    let task = crate::load_progress::spawn_blocking(move || {
+        ready.recv_timeout(Duration::from_secs(5)).expect("heartbeat releases producer");
+        7
+    });
+    *state.release.lock().expect("release") = Some((release, task.abort_handle()));
+    let cancel = gen_core::CancelFlag::new();
+    let (canceled, result) = crate::StreamSupervisor::new(cancel.clone(), task, Duration::from_millis(5), None)
+        .wait(&api, &settings, "job-1").await.expect("supervised completion");
+    assert!(!canceled);
+    assert!(!cancel.is_cancelled());
+    assert_eq!(result.expect("task joined"), 7);
+    assert!(state.progress.lock().expect("progress").is_empty());
 }

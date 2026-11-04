@@ -588,10 +588,7 @@ use dataset_parquet_jobs::*;
 pub mod catalog_analysis;
 pub mod catalog_image_fetch;
 pub mod catalog_parquet_scanner;
-// The shared scaffold both dataset-analysis jobs route through (sc-8836, F-034) — the `CancelJoinGuard`
-// select loop, per-item progress ramp, and sidecar POST extracted out of the two near-duplicate modules.
-// Gated to the same lanes as its only callers (the real `run_*_analysis_job` in the two modules below);
-// on the parity lane those fall back to no-op stubs, so the scaffold has no consumer and must not compile.
+// Dataset item parsing is shared by the native analysis, caption and upscale jobs.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1196,6 +1193,7 @@ pub(crate) use manifest::*;
 mod paths;
 pub use paths::*;
 mod payload;
+mod text_clean;
 pub(crate) use payload::*;
 mod settings;
 pub use settings::*;
@@ -1205,6 +1203,10 @@ pub use imports::*;
 mod load_progress;
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 mod model_io;
+mod stream_supervision;
+#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+use stream_supervision::StreamSignal;
+use stream_supervision::StreamSupervisor;
 mod progress;
 pub(crate) use progress::*;
 mod util;

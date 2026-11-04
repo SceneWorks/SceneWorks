@@ -4206,7 +4206,8 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.doesNotMatch(terminalBlock, /inferenceSha = '[0-9a-f]{40}'/);
   assert.doesNotMatch(terminalBlock, /snapshot_download/);
   assert.match(terminalBlock, /python -m venv \$venv/);
-  assert.match(terminalBlock, /pip install[^\n]*'huggingface_hub==0\.36\.0'/);
+  assert.match(terminalBlock, /pip install[^\n]*-r \.github\/requirements-hf\.txt/);
+  assert.match(await readFile(".github/requirements-hf.txt", "utf8"), /^huggingface_hub==0\.36\.0$/m);
   assert.match(terminalBlock, /Scripts\\python\.exe/);
   assert.match(terminalBlock, /SCENEWORKS_TERMINAL_PYTHON=\$python/);
   assert.match(terminalBlock, /from huggingface_hub import __version__/);

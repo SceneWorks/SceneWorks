@@ -18,7 +18,7 @@ use super::wan::{
 use super::{
     ltx::extract_clip_frames,
     vace::{load_source_video_frames, replacement_status_value, resolve_character_references},
-    wan::local_mlx_dir,
+    wan::resolve_mlx_family_dir,
 };
 #[cfg(any(
     target_os = "macos",
@@ -106,22 +106,12 @@ pub(super) fn scail2_available(_request: &VideoRequest, settings: &Settings) -> 
 /// (mirrors `resolve_bernini_model_dir`). Errors clearly if none is present (no stub fallback).
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_scail2_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
-    if let Some(dir) = local_mlx_dir(settings, "SCENEWORKS_MLX_SCAIL2_DIR", "scail2") {
-        return Ok(dir);
-    }
-    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, "SceneWorks/scail2-mlx") {
-        return Ok(dir);
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "scail2: no MLX weights found. Download the turnkey SceneWorks/scail2-mlx snapshot via the \
-         Model Manager, set $SCENEWORKS_MLX_SCAIL2_DIR, or place a converted snapshot at {}.",
-        settings
-            .data_dir
-            .join("models")
-            .join("mlx")
-            .join("scail2")
-            .display(),
-    )))
+    resolve_mlx_family_dir(
+        settings,
+        "SCENEWORKS_MLX_SCAIL2_DIR",
+        "scail2",
+        "SceneWorks/scail2-mlx",
+    )
 }
 
 /// MLX quantization for a SCAIL-2 load: Q4 default, Q8 opt-in via the advanced `mlxQuantize: 8`

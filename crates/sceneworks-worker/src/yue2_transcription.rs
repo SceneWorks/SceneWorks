@@ -542,7 +542,8 @@ pub(crate) async fn run<B: TranscriptionBackend>(
     };
     let audio = {
         let scratch = decode_scratch(&job.id)?;
-        let disk_cap = fs2::available_space(scratch.path())?.saturating_sub(64 << 20);
+        let disk_cap =
+            sceneworks_core::disk::disk_free_bytes(scratch.path())?.saturating_sub(64 << 20);
         if disk_cap < (2 << 20) || (source_layout.is_some() && output_cap > disk_cap) {
             return Err(WorkerError::InvalidPayload(format!(
                 "yue2: transcription scratch disk cannot admit {:.2} GiB of decoded recording",

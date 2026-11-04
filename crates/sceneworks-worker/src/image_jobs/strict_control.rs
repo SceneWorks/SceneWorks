@@ -175,9 +175,7 @@ fn trusted_control_weight_revision(
         .unwrap_or(false);
     let overlay_id = control
         .and_then(|weights| weights.get("overlayId"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .and_then(crate::payload::trimmed_value_str);
     let revision = control
         .and_then(|weights| weights.get("revision"))
         .and_then(Value::as_str)
@@ -234,12 +232,7 @@ fn control_kind_label(kind: &ControlKind) -> String {
 /// — when a future per-model exposure story sets it — selects `canny` / `depth` / `pose`. An unknown value
 /// is rejected loudly rather than silently falling back.
 fn requested_control_kind(request: &ImageRequest) -> WorkerResult<ControlKind> {
-    let Some(mode) = request
-        .advanced
-        .get("controlMode")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let Some(mode) = crate::payload::trimmed_string(request.advanced.get("controlMode"))
     else {
         return Ok(ControlKind::Pose);
     };
@@ -260,12 +253,7 @@ fn resolve_user_control_map(
     settings: &Settings,
     project_path: &Path,
 ) -> WorkerResult<Option<Image>> {
-    let Some(asset_id) = request
-        .advanced
-        .get("controlImage")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
+    let Some(asset_id) = crate::payload::trimmed_string(request.advanced.get("controlImage"))
     else {
         return Ok(None);
     };

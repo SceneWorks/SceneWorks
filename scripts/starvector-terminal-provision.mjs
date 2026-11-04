@@ -1,8 +1,9 @@
 #!/usr/bin/env node
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 // Source-owned, idempotent host provisioning for the terminal campaign. It
 // acquires immutable inputs and assembles manifests; it never starts a product
 // service, invokes a model, writes an install receipt, or claims a campaign.
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -19,7 +20,7 @@ import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "
 const execFile = promisify(execFileCallback);
 const SHA256 = /^[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
-const sha = (value) => createHash("sha256").update(value).digest("hex");
+
 const die = (message) => { throw new Error(`starvector terminal provision: ${message}`); };
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 

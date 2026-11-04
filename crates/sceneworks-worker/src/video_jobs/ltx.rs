@@ -392,22 +392,11 @@ pub(super) fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
     sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(dir)
 }
 
-/// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
-#[cfg(target_os = "macos")]
-fn ltx_quant_bits(request: &VideoRequest) -> Option<i64> {
-    request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-}
-
 /// Whether the request opts into the higher-quality Q8 LTX checkpoint (`advanced.mlxQuantize: 8`,
 /// accepted as int or string). The default is Q4 (sc-5608).
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_wants_q8(request: &VideoRequest) -> bool {
-    ltx_quant_bits(request)
-        .map(|bits| bits >= 8)
-        .unwrap_or(false)
+    request.quant_bits().map(|bits| bits >= 8).unwrap_or(false)
 }
 
 /// Whether the request opts into the dense **bf16** LTX checkpoint (`advanced.mlxQuantize <= 0`,
@@ -415,9 +404,7 @@ pub(super) fn ltx_wants_q8(request: &VideoRequest) -> bool {
 /// so the big bf16 bundle is a deliberate opt-in (mirrors [`resolve_mlx_dense_quant`]'s `<= 0` rule).
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_wants_bf16(request: &VideoRequest) -> bool {
-    ltx_quant_bits(request)
-        .map(|bits| bits <= 0)
-        .unwrap_or(false)
+    request.quant_bits().map(|bits| bits <= 0).unwrap_or(false)
 }
 
 /// The SceneWorks LTX bundle tier search order for a request — preferred tier first, then the

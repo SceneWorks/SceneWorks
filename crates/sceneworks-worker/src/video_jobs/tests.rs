@@ -957,8 +957,11 @@ fn video_jobs_remains_split_into_real_engine_modules() {
             source.lines().count() >= 100,
             "{name}.rs is unexpectedly empty or collapsed"
         );
+        // Check the family module's root imports, not nested test modules whose parent
+        // is the family itself. This stays independent of cfg aliases on those tests.
         assert!(
-            !source.contains("use super::*"),
+            !source.lines().any(|line| line.starts_with("use super::*"))
+                && source.lines().any(|line| line == "use super::prelude::*;"),
             "{name}.rs must import its parent dependencies through the explicit prelude"
         );
         assert!(
@@ -1756,7 +1759,9 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
 fn scail2_cold_admission_uses_a_fresh_bounded_probe_without_blocking_the_request_runtime() {
     const CANDLE: &str = include_str!("candle.rs");
     const GPU: &str = include_str!("../gpu.rs");
-    assert!(CANDLE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
+    const VRAM: &str = include_str!("../vram_gate.rs");
+    assert!(CANDLE.contains("live_capped_budget_fresh_blocking(&gpu_id)"));
+    assert!(VRAM.contains("crate::gpu::nvidia_vram_budget_gb_fresh_blocking(gpu_id)"));
     let helper = GPU
         .split_once("pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(")
         .expect("fresh blocking NVIDIA helper")
@@ -5988,8 +5993,14 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
                 panic!("expected an actionable InvalidPayload");
             };
             assert!(
-                message.contains("krea_realtime_14b") && message.contains("Model Manager"),
-                "the error must name the model and tell the user what to do: {message}"
+                message.starts_with("krea_realtime: no MLX weights found.")
+                    && message.contains("Download the turnkey SceneWorks/krea-realtime-14b-mlx")
+                    && message.contains("Model Manager")
+                    && message.contains("$SCENEWORKS_MLX_KREA_REALTIME_DIR")
+                    && message.contains(
+                        &empty.join("models/mlx/krea_realtime").display().to_string()
+                    ),
+                "the error must name the model family, published snapshot and installation routes: {message}"
             );
         },
     );
@@ -8067,7 +8078,7 @@ fn candle_vace_fun_attaches_fail_closed_sequential_cold_admission() {
     assert!(arm.contains("vace_fun_cold_load_admission("));
     assert!(arm.contains("cold_load_admission,"));
     assert!(SOURCE.contains("wan_vace_fun_sequential_weight_bytes("));
-    assert!(SOURCE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
+    assert!(SOURCE.contains("live_capped_budget_fresh_blocking(&gpu_id)"));
 }
 
 /// sc-10997 (epic 6562): the candle Bernini VIDEO lane routes t2v + every editing/reference/
@@ -21962,3 +21973,76 @@ fn minimax_h3_veda_queued_request_prices_bound_before_engine_generate() {
 // it reuses this suite's harness (`ArmProbe`, `drive_minimax_h3_arm`, the tier/base fixtures).
 #[path = "minimax_h3_import_tests.rs"]
 mod minimax_h3_import_tests;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn shared_mlx_family_dirs_preserve_override_managed_and_snapshot_resolution() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        data_dir: temp.path().join("data"),
+        ..offline_settings()
+    };
+    for (env, name, repo) in [
+        (
+            "SCENEWORKS_MLX_BERNINI_DIR",
+            "bernini",
+            "SceneWorks/bernini-mlx",
+        ),
+        (
+            "SCENEWORKS_MLX_SCAIL2_DIR",
+            "scail2",
+            "SceneWorks/scail2-mlx",
+        ),
+        (
+            "SCENEWORKS_MLX_KREA_REALTIME_DIR",
+            "krea_realtime",
+            "SceneWorks/krea-realtime-14b-mlx",
+        ),
+    ] {
+        let managed = settings.data_dir.join("models/mlx").join(name);
+        let override_dir = temp.path().join(format!("override-{name}"));
+        let hub = temp.path().join("hub");
+        let repo_cache = hub.join(format!("models--{}", repo.replace('/', "--")));
+        let revision = "a".repeat(40);
+        let snapshot = repo_cache.join("snapshots").join(&revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::create_dir_all(repo_cache.join("refs")).unwrap();
+        std::fs::write(repo_cache.join("refs/main"), &revision).unwrap();
+        std::fs::write(snapshot.join("config.json"), "{}").unwrap();
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(managed.join("config.json"), "{}").unwrap();
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(override_dir.join("config.json"), "{}").unwrap();
+        temp_env_vars(
+            &[
+                (env, override_dir.to_str().unwrap()),
+                ("HF_HUB_CACHE", hub.to_str().unwrap()),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || {
+                assert_eq!(
+                    resolve_mlx_family_dir(&settings, env, name, repo).unwrap(),
+                    override_dir
+                );
+                std::fs::remove_file(override_dir.join("config.json")).unwrap();
+                assert_eq!(
+                    resolve_mlx_family_dir(&settings, env, name, repo).unwrap(),
+                    managed
+                );
+                std::fs::remove_file(managed.join("config.json")).unwrap();
+                assert_eq!(
+                    resolve_mlx_family_dir(&settings, env, name, repo).unwrap(),
+                    snapshot
+                );
+                std::fs::remove_dir_all(&repo_cache).unwrap();
+                let error = resolve_mlx_family_dir(&settings, env, name, repo)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains(env) && error.contains(repo) && error.contains("Model Manager")
+                );
+            },
+        );
+    }
+}

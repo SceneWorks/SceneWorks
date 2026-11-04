@@ -1,15 +1,15 @@
 #!/usr/bin/env node
+import { fileSha256 } from "./lib/file-sha256.mjs";
 // Issue 3197. Exactly two cold SDXL q4 renders, using the maintained catalog artifact resolver
 // and calibration capture protocol. Dispatch-only; never imported by a normal-CI inference test.
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFile, writeFile, mkdir, realpath, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { performance } from "node:perf_hooks";
-import { ROOT, parseArgs, planRun, providerCommand, run } from "./measure-memory-catalog.mjs";
+import { ROOT, compiledInferencePin, parseArgs, planRun, providerCommand, run } from "./measure-memory-catalog.mjs";
 import { capturePlannedCase, logicalCaseId, planAnchor } from "./memory-calibration-harness.mjs";
 import { hashArtifactInventory, artifactInventoryReceipt } from "./hash-artifact-inventory.mjs";
 
@@ -406,7 +406,7 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
   const state = path.join(workDir, "owned-app-state"); await mkdir(state, { recursive: true });
   const port = await new Promise((resolve, reject) => { const server = createServer(); server.once("error", reject); server.listen(0, "127.0.0.1", () => { const value = server.address().port; server.close((error) => error ? reject(error) : resolve(value)); }); });
   const workerId = `sdxl-replay-${process.env.GITHUB_RUN_ID ?? process.pid}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`;
-  const hashFile = async (file) => { const digest = createHash("sha256"); for await (const bytes of createReadStream(file)) digest.update(bytes); return digest.digest("hex"); };
+  const hashFile = fileSha256;
   const receipt = { schemaVersion: 1, profile: "sdxl-cuda-admitted-replay", status: "running", inferencePin: pin,
     inferenceSource,
     apiBinary: { path: apiBinary, sha256: await hashFile(apiBinary) },
@@ -557,7 +557,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (!relative.startsWith("..") && !path.isAbsolute(relative)) throw new Error("endpoint output must be outside both clean checkouts");
     if ((await run("git", ["status", "--porcelain"], { cwd: repo })).stdout.trim()) throw new Error(`dirty source checkout: ${repo}`);
   }
-  const pin = /INFERENCE_PIN: &str = "([a-f0-9]{40})"/.exec(await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8"))?.[1];
+  const pin = await compiledInferencePin();
   const inferenceHead = (await run("git", ["rev-parse", "HEAD"], { cwd: args.inferenceRepo })).stdout.trim();
   if (pin !== inferenceHead) throw new Error(`inference checkout ${inferenceHead} differs from compiled adapter pin ${pin}`);
   const { plan, rows } = await planRun({ ...args, ...(admittedReplay ? { campaign: `${args.campaign ?? "gi-3197"}-replay` } : {}), backend: "candle", anchors: ["sdxl:q4:candle"], models: ["sdxl"], skipCurrent: false });

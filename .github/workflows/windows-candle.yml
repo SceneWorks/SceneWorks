@@ -547,6 +547,10 @@ jobs:
       # Only the input NAMES moved (krea_revision -> provision_revision, krea_repository ->
       # provision_repository), so a five-rung dispatch is rejected under exactly the same
       # conditions as before.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        with:
+          node-version: 22
       - name: Validate dispatch inputs
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: powershell
@@ -648,8 +652,8 @@ jobs:
           if ($env:PROVISION_REPOSITORY -ne 'SceneWorks/krea-2-turbo-mlx') {
             throw 'provision_repository must be the fixed SceneWorks/krea-2-turbo-mlx reference artifact for a five-rung capture'
           }
-          $pinLine = Select-String -Path 'crates/sceneworks-memory-adapter/src/lib.rs' -Pattern '^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";$'
-          if (-not $pinLine -or $pinLine.Matches[0].Groups[1].Value -ne $env:INFERENCE_REVISION) {
+          $pin = node scripts/lib/inference-provenance.mjs
+          if ($LASTEXITCODE -ne 0 -or $pin -ne $env:INFERENCE_REVISION) {
             throw "input inference_revision does not match the adapter's compiled INFERENCE_PIN"
           }
       # Derives the cache dir and the exact snapshot suffix ONCE, so the provisioning step and
@@ -694,10 +698,6 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "PROVISION_SUBDIR_TAIL=$subdirTail"
           Write-Host "cache dir       : $cache"
           Write-Host "snapshot suffix : $suffix"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
-        with:
-          node-version: 22
       - name: Validate runner Python for snapshot provisioning
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot }}
         shell: powershell
@@ -730,7 +730,7 @@ jobs:
           HF_HUB_DISABLE_TELEMETRY: "1"
           HF_HUB_VERBOSITY: "error"
         run: |
-          python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
           if ($LASTEXITCODE -ne 0) { throw "installing huggingface_hub failed with exit code $LASTEXITCODE" }
           @'
           import os
@@ -1168,7 +1168,7 @@ jobs:
           python -m venv $venv
           if ($LASTEXITCODE -ne 0) { throw 'failed to create the job-local LTX provisioning venv' }
           $python = Join-Path $venv 'Scripts\python.exe'
-          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
           if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned huggingface_hub client' }
           @'
           import os
@@ -1489,7 +1489,7 @@ jobs:
           python -m venv $venv
           if ($LASTEXITCODE -ne 0) { throw 'Python 3 with venv support is required for terminal artifact staging' }
           $python = Join-Path $venv 'Scripts\python.exe'
-          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
           if ($LASTEXITCODE -ne 0) { throw 'failed to install pinned huggingface_hub 0.36.0 in the isolated terminal venv' }
           & $python -c "from huggingface_hub import __version__; assert __version__ == '0.36.0', __version__; print('terminal artifact Python ready')"
           if ($LASTEXITCODE -ne 0) { throw 'isolated terminal Python did not retain exact huggingface_hub 0.36.0' }

@@ -315,12 +315,7 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
         .and_then(Value::as_str)
         .or(job.project_id.as_deref());
 
-    if let Some(asset_id) = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
+    if let Some(asset_id) = crate::payload::trimmed_string(payload.get("sourceAssetId")) {
         let project_id = project_id.ok_or_else(|| {
             WorkerError::InvalidPayload("kps extraction sourceAssetId needs a projectId".to_owned())
         })?;
@@ -334,12 +329,7 @@ fn load_source_image(settings: &Settings, job: &JobSnapshot) -> WorkerResult<Ima
         return load_reference_image(&settings.data_dir, project_id, asset_id, &project_path);
     }
 
-    if let Some(path) = payload
-        .get("sourcePath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
+    if let Some(path) = crate::payload::trimmed_string(payload.get("sourcePath")) {
         // Decode by CONTENT, not file extension: staged uploads land as `upload-<uuid>.tmp`
         // (the API's generic temp-file writer keeps no extension), so `image::open` — which
         // picks the codec from the extension — would reject a perfectly valid JPEG/PNG. Read
@@ -543,12 +533,14 @@ mod tests {
         let staged = uploads.join("upload-abc123.tmp");
         write_png(&staged, 3, 2);
 
-        let image = load_source_image(
-            &settings,
-            &kps_job(json!({ "sourcePath": staged.to_str().unwrap() })),
-        )
-        .expect("staged keypoint-uploads source accepted");
-        assert_eq!((image.width, image.height), (3, 2));
+        for path in [
+            staged.display().to_string(),
+            format!("  {}  ", staged.display()),
+        ] {
+            let image = load_source_image(&settings, &kps_job(json!({ "sourcePath": path })))
+                .expect("staged keypoint-uploads source accepted with normalized whitespace");
+            assert_eq!((image.width, image.height), (3, 2));
+        }
     }
 
     /// The confinement itself must survive the sc-13713 fix: a readable file outside the
