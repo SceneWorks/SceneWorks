@@ -15,7 +15,7 @@
 //! Gated on the SUPERSET of the two smoke lanes (`test` AND (macOS OR the off-Mac candle build)) so the
 //! module compiles exactly where at least one smoke that imports it does, and nowhere else.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gen_core::Image;
 
@@ -83,11 +83,9 @@ pub(crate) const DEGENERATE_STD_FLOOR_TIGHT: f64 = 20.0;
 /// whitespace-only. Trims the value. Filtering set-but-empty values keeps a bare `FOO_STEPS=` (or a
 /// whitespace-only value) from feeding `""` into a downstream `.parse()` and panicking (sc-8924).
 pub(crate) fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
+    env_value(key)
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
+        .unwrap_or_else(|| default.to_owned())
 }
 
 /// Per-pixel mean over the RGB buffer — the "is it black?" floor check, reported for the record.
@@ -843,6 +841,140 @@ mod ghost_guard_tests {
         fft_2d(&mut re, &mut im, n, true);
         for (a, b) in orig.iter().zip(re.iter()) {
             assert!((a - b).abs() < 1e-9, "fft round-trip drift: {a} vs {b}");
+        }
+    }
+}
+
+/// A required smoke path, trimming shell assignment whitespace.
+pub(crate) fn env_path(key: &str) -> PathBuf {
+    PathBuf::from(required_path_value(key).trim())
+}
+
+/// A required path whose literal whitespace is meaningful to the caller.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn env_path_raw(key: &str) -> PathBuf {
+    PathBuf::from(required_path_value(key))
+}
+
+fn required_path_value(key: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| panic!("set ${key}"))
+}
+
+/// Standard HF-CLI cache fallback; explicit overrides use the production HF resolver.
+pub(crate) fn hub_cache_root() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let default = home.map(|home| PathBuf::from(home).join(".cache/huggingface/hub"));
+    let root = sceneworks_core::hf_home::huggingface_hub_cache_dir_or_else(|| {
+        default.clone().unwrap_or_default()
+    });
+    (!root.as_os_str().is_empty()).then_some(root)
+}
+
+/// Find an existing cached snapshot; the caller owns completeness, tier and format checks.
+pub(crate) fn cached_snapshot(repo: &str, accepts: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    cached_snapshot_at(&hub_cache_root()?, repo, accepts)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn cached_tier_dir(repo: &str, tier: &str, sentinel: &str) -> Option<PathBuf> {
+    cached_snapshot(repo, |root| root.join(tier).join(sentinel).is_file())
+        .map(|root| root.join(tier))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn env_or_allow_empty(key: &str, default: &str) -> String {
+    env_value(key).unwrap_or_else(|| default.to_owned())
+}
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key).ok().map(|v| v.trim().to_owned())
+}
+
+pub(crate) fn cached_snapshot_at(
+    hub: &Path,
+    repo: &str,
+    accepts: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let repo_dir = if repo.starts_with("models--") {
+        repo.to_owned()
+    } else {
+        format!("models--{}", repo.replace('/', "--"))
+    };
+    std::fs::read_dir(hub.join(repo_dir).join("snapshots"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|root| accepts(root))
+}
+
+#[cfg(test)]
+mod cache_contracts {
+    use super::*;
+    #[test]
+    fn cached_snapshot_respects_overrides_and_caller_completeness_without_loading_weights() {
+        let root = tempfile::tempdir().unwrap();
+        let primary = root.path().join("primary");
+        let alias = root.path().join("alias");
+        let home = root.path().join("home");
+        let legacy = root.path().join("legacy");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", primary.to_str().unwrap()),
+            ("HUGGINGFACE_HUB_CACHE", alias.to_str().unwrap()),
+            ("HF_HOME", home.to_str().unwrap()),
+            ("HOME", legacy.to_str().unwrap()),
+        ]);
+        assert_eq!(hub_cache_root(), Some(primary.clone()));
+        let snapshot = primary.join("models--owner--repo/snapshots/revision");
+        std::fs::create_dir_all(snapshot.join("q4/transformer")).unwrap();
+        assert!(cached_snapshot("owner/repo", |root| root
+            .join("q4/transformer/config.json")
+            .is_file())
+        .is_none());
+        std::fs::write(
+            snapshot.join("q4/transformer/config.json"),
+            b"fixture metadata only",
+        )
+        .unwrap();
+        assert_eq!(
+            cached_snapshot("owner/repo", |root| root
+                .join("q4/transformer/config.json")
+                .is_file()),
+            Some(snapshot.clone())
+        );
+        assert_eq!(
+            cached_snapshot("models--owner--repo", |root| root
+                .join("q4/transformer")
+                .is_dir()),
+            Some(snapshot)
+        );
+        std::env::remove_var("HF_HUB_CACHE");
+        assert_eq!(hub_cache_root(), Some(alias));
+        std::env::remove_var("HUGGINGFACE_HUB_CACHE");
+        assert_eq!(hub_cache_root(), Some(home.join("hub")));
+        std::env::remove_var("HF_HOME");
+        assert_eq!(
+            hub_cache_root(),
+            Some(legacy.join(".cache/huggingface/hub"))
+        );
+    }
+
+    #[test]
+    fn smoke_environment_policies_keep_trimming_and_empty_value_distinctions() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("SMOKE_HELPER_PATH", "  path with spaces  "),
+            ("SMOKE_HELPER_EMPTY", "   "),
+        ]);
+        assert_eq!(
+            env_path("SMOKE_HELPER_PATH"),
+            PathBuf::from("path with spaces")
+        );
+        assert_eq!(env_or("SMOKE_HELPER_EMPTY", "default"), "default");
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            assert_eq!(
+                env_path_raw("SMOKE_HELPER_PATH"),
+                PathBuf::from("  path with spaces  ")
+            );
+            assert_eq!(env_or_allow_empty("SMOKE_HELPER_EMPTY", "default"), "");
         }
     }
 }

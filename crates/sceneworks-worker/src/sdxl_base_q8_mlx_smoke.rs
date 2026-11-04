@@ -54,18 +54,10 @@ fn resolve_q8_dir(root: &Path) -> PathBuf {
 /// the snapshot whose `q8/` subdir carries the packed UNet. `None` if the q8 tier hasn't been pulled
 /// (the smoke then panics with the `SDXL_Q8_DIR` hint).
 fn cached_turnkey_root() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let snapshots = PathBuf::from(home)
-        .join(".cache/huggingface/hub/models--SceneWorks--sdxl-base-mlx/snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .find_map(|e| {
-            let dir = e.path();
-            dir.join("q8/unet/diffusion_pytorch_model.safetensors")
-                .is_file()
-                .then_some(dir)
-        })
+    super::smoke_support::cached_snapshot("SceneWorks/sdxl-base-mlx", |root| {
+        root.join("q8/unet/diffusion_pytorch_model.safetensors")
+            .is_file()
+    })
 }
 
 #[test]

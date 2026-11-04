@@ -76,13 +76,7 @@ fn has_flat_safetensors(dir: &Path) -> bool {
 }
 
 fn env_path(key: &str) -> PathBuf {
-    // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`
-    // (reference_candle_build_toolchain_win — cost two build cycles on sc-9994).
-    PathBuf::from(
-        std::env::var(key)
-            .unwrap_or_else(|_| panic!("set ${key}"))
-            .trim(),
-    )
+    super::smoke_support::env_path(key)
 }
 
 #[cfg(test)]
