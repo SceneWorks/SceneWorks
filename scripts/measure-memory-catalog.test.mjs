@@ -1,4 +1,3 @@
-import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, open, readdir, writeFile, readFile, stat, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
