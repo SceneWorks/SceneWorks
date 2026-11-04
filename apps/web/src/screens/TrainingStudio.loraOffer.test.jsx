@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -166,7 +167,7 @@ async function render(contextOverrides = {}, valueOverrides) {
   await act(async () => {
     root.render(<Harness contextOverrides={contextOverrides} valueOverrides={valueOverrides}>{<TrainingStudio />}</Harness>);
   });
-  await settle();
+  await settle({ microtasks: 8 });
 }
 
 // Unmount and mount again with the same localStorage — the reload the story names.
@@ -181,7 +182,7 @@ async function reload(contextOverrides = {}) {
   await act(async () => {
     root.render(<Harness contextOverrides={contextOverrides}>{<TrainingStudio />}</Harness>);
   });
-  await settle();
+  await settle({ microtasks: 8 });
 }
 
 // Re-render in place — a project switch, NOT a remount. A remount would discard the
@@ -190,16 +191,10 @@ async function rerender(contextOverrides = {}) {
   await act(async () => {
     root.render(<Harness contextOverrides={contextOverrides}>{<TrainingStudio />}</Harness>);
   });
-  await settle();
+  await settle({ microtasks: 8 });
 }
 
-async function settle() {
-  await act(async () => {
-    for (let index = 0; index < 8; index += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 function buttonByText(label) {
   return [...container.querySelectorAll("button")].find((item) => item.textContent.trim() === label) ?? null;
@@ -209,7 +204,7 @@ async function click(node) {
   await act(async () => {
     node.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   });
-  await settle();
+  await settle({ microtasks: 8 });
 }
 
 // A second completed run of the same dataset, newer than adapterJob().
@@ -410,7 +405,7 @@ describe("TrainingStudio trained-LoRA offer (sc-24815)", () => {
       button.click();
       await Promise.resolve();
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(apiFetchMock).toHaveBeenCalledTimes(1);
     expect(panelLoras()).toEqual(["Mira v3"]);
@@ -426,7 +421,7 @@ describe("TrainingStudio trained-LoRA offer (sc-24815)", () => {
     act(() => {
       window.dispatchEvent(new window.StorageEvent("storage", { key: DECISIONS_KEY }));
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(offerPanel()).toBeNull();
     expect(apiFetchMock).not.toHaveBeenCalled();
@@ -453,7 +448,7 @@ describe("TrainingStudio trained-LoRA offer (sc-24815)", () => {
     act(() => {
       window.dispatchEvent(new window.StorageEvent("storage", { key: DECISIONS_KEY }));
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(offerHeading()).toBe("Attach “Mira v3” to Mira?");
   });
@@ -469,7 +464,7 @@ describe("TrainingStudio trained-LoRA offer (sc-24815)", () => {
     act(() => {
       window.dispatchEvent(new window.StorageEvent("storage", { key: DECISIONS_KEY }));
     });
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(offerHeading()).toBe("Attach “Mira v3” to Mira?");
     expect(offerPanel()?.textContent).not.toContain("Could not attach");

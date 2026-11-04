@@ -73,7 +73,7 @@ export const initialExclusions = Object.freeze({
   "Setup Wizard": ["/src/screens/SetupWizard.jsx"],
   "Batch operations": ["/src/components/BatchOperationsPanel.jsx"],
   "Workflow replay offer": ["/src/components/WorkflowDropPanel.jsx"],
-  "Offline model catalog": ["/src/modelCatalog.js", "/src/data/previewSupport.json"],
+  "Offline model catalog": ["/src/data/previewSupport.json"],
 });
 
 function normalize(value) {

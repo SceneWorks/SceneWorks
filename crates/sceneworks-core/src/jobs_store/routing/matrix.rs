@@ -68,6 +68,7 @@ const MODEL_IMPORT_DEFAULTS: &str = include_str!("../../lora_family.rs");
 const BASE_WEIGHT_IMPORTS: &str = include_str!("../../base_weights.rs");
 const API_VALIDATION: &str = include_str!("../../../../../apps/rust-api/src/jobs.rs");
 const API_GENERATION: &str = include_str!("../../../../../apps/rust-api/src/generation.rs");
+const API_MODEL_CATALOG: &str = include_str!("../../../../../apps/rust-api/src/models.rs");
 const API_CONTRACT_ENTRY: &str = include_str!("../../../../../apps/rust-api/src/lib.rs");
 const API_DTO: &str = include_str!("../../../../../apps/rust-api/src/dto.rs");
 const WORKER_DISPATCH: &str = include_str!("../../../../sceneworks-worker/src/lib.rs");
@@ -134,7 +135,6 @@ const SCHEDULER: &str = include_str!("../../jobs_store.rs");
 const TRAINING_CATALOG: &str = include_str!("../../training.rs");
 const WEB_IMAGE_REQUEST: &str = include_str!("../../../../../apps/web/src/imageJobRequest.js");
 const WEB_IMAGE_ADVANCED: &str = include_str!("../../../../../apps/web/src/imageJobAdvanced.js");
-const WEB_FALLBACK_CATALOG: &str = include_str!("../../../../../apps/web/src/modelCatalog.js");
 const WEB_MAC_GATING: &str = include_str!("../../../../../apps/web/src/macGating.js");
 const WEB_PREVIEW_GATING: &str = include_str!("../../../../../apps/web/src/previewSupport.js");
 const WEB_SIMPLE_JOBS: &str = include_str!("../../../../../apps/web/src/simple/simpleJobs.js");
@@ -3815,6 +3815,7 @@ fn source_digests_for_runtime_sources(
         ("baseWeightImports", BASE_WEIGHT_IMPORTS),
         ("apiValidation", API_VALIDATION),
         ("apiGeneration", API_GENERATION),
+        ("apiModelCatalog", API_MODEL_CATALOG),
         ("apiContractEntry", API_CONTRACT_ENTRY),
         ("apiDto", API_DTO),
         ("scheduler", SCHEDULER),
@@ -3851,7 +3852,6 @@ fn source_digests_for_runtime_sources(
         ("descriptorPreviewFacts", PREVIEW),
         ("webImageRequest", WEB_IMAGE_REQUEST),
         ("webImageAdvanced", WEB_IMAGE_ADVANCED),
-        ("webFallbackCatalog", WEB_FALLBACK_CATALOG),
         ("webMacGating", WEB_MAC_GATING),
         ("webPreviewGating", WEB_PREVIEW_GATING),
         ("webSimpleJobs", WEB_SIMPLE_JOBS),
@@ -6665,7 +6665,7 @@ mod tests {
             "workerAudioDispatch",
             "workerUtilityDispatch",
             "webSimpleJobs",
-            "webFallbackCatalog",
+            "apiModelCatalog",
             "webSimpleVideo",
             "webVideoValidation",
             "webVideoStudio",

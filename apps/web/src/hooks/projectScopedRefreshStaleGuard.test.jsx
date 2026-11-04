@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 // sc-8858 (F-056): SSE-triggered, project-scoped refreshers must drop a stale
 // response — one whose fetch was fired for project A but resolves AFTER the user
 // switched the active project to B. Committing it would clobber B's state with A's
@@ -33,13 +34,7 @@ vi.mock("../api.js", async (importOriginal) => {
   };
 });
 
-async function settle() {
-  await act(async () => {
-    for (let i = 0; i < 4; i += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 // Each hook exposes a project-scoped `refresh*` plus a `set*`/state pair. activeProjectRef
 // mirrors the *currently active* project (mutated by the test to simulate a switch),
@@ -112,7 +107,7 @@ describe.each(CASES)("$name stale-project guard (sc-8858)", ({ hook, refreshKey,
       pendingRequests[0].resolve([{ id: "from-A" }]);
       await pending;
     });
-    await settle();
+    await settle({ microtasks: 4 });
 
     expect(get().api[stateKey]).toEqual([]);
   });
@@ -132,7 +127,7 @@ describe.each(CASES)("$name stale-project guard (sc-8858)", ({ hook, refreshKey,
       pendingRequests[0].reject(new Error("late A failure"));
       await pending;
     });
-    await settle();
+    await settle({ microtasks: 4 });
 
     expect(get().api[stateKey]).toEqual([]);
     expect(setError).not.toHaveBeenCalledWith("late A failure");
@@ -164,7 +159,7 @@ describe.each(CASES)("$name stale-project guard (sc-8858)", ({ hook, refreshKey,
       pendingRequests[0].resolve([{ id: "from-A" }]);
       await pending;
     });
-    await settle();
+    await settle({ microtasks: 4 });
 
     expect(get().api[stateKey]).toEqual([{ id: "from-A" }]);
   });
@@ -228,7 +223,7 @@ describe("useModelsAndLoras.refreshLoras global (no project) still commits (sc-8
       pendingRequests[0].resolve([{ id: "global-lora" }]);
       await pending;
     });
-    await settle();
+    await settle({ microtasks: 4 });
 
     expect(latest.api.loras).toEqual([{ id: "global-lora" }]);
   });
