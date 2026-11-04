@@ -1,5 +1,10 @@
 # Desktop vendor review — 2026-11-03 (SW-6822 / F-185)
 
+Rechecked 2026-11-04 against the official crate indexes and RustSec zip advisory
+index: the versions, immutable archive checksums and all five advisory file SHAs
+are unchanged from this review. The compatibility and removal decisions below
+still apply.
+
 The production overrides remain GLib 0.18.5 with the string-array iterator safety
 backport and updater 2.11.0 with its Windows zip 9 requirement. No package versions,
 locked dependencies, signatures, permissions or historical source digests changed.
