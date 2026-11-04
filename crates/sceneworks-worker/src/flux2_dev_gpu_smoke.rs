@@ -50,12 +50,7 @@ fn synthetic_rgb(w: u32, h: u32) -> Image {
 }
 
 fn env_path(key: &str) -> PathBuf {
-    // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`.
-    PathBuf::from(
-        std::env::var(key)
-            .unwrap_or_else(|_| panic!("set ${key}"))
-            .trim(),
-    )
+    super::smoke_support::env_path(key)
 }
 
 fn file_sha256(path: &Path) -> String {

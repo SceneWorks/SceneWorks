@@ -79,19 +79,12 @@ fn resolve_tokenizer(native_dir: &Path) -> PathBuf {
     if native_umt5.is_file() {
         return native_umt5;
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let snapshots = PathBuf::from(home)
-            .join(".cache/huggingface/hub")
-            .join("models--SceneWorks--wan2.2-ti2v-5b-mlx")
-            .join("snapshots");
-        if let Ok(entries) = std::fs::read_dir(&snapshots) {
-            for entry in entries.flatten() {
-                let candidate = entry.path().join("tokenizer.json");
-                if candidate.is_file() {
-                    return candidate;
-                }
-            }
-        }
+    if let Some(root) =
+        super::smoke_support::cached_snapshot("SceneWorks/wan2.2-ti2v-5b-mlx", |root| {
+            root.join("tokenizer.json").is_file()
+        })
+    {
+        return root.join("tokenizer.json");
     }
     panic!(
         "no tokenizer.json found — set SCENEWORKS_WAN_TI2V_5B_TOKENIZER, place one at {}, or cache \
