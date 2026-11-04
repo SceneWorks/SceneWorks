@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn kps_source_path_accepts_keypoint_uploads_staging() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = temp.path().join("data");
         let uploads = settings.data_dir.join("cache").join("keypoint-uploads");
         std::fs::create_dir_all(&uploads).expect("uploads dir");
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn kps_source_path_rejects_unstaged_file() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = temp.path().join("data");
         std::fs::create_dir_all(&settings.data_dir).expect("data dir");
         let outside = temp.path().join("outside.png");
@@ -575,7 +575,7 @@ mod tests {
         let mount_link = temp.path().join("Volumes SSD");
         std::os::unix::fs::symlink(&real_mount, &mount_link).expect("mount symlink");
 
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = mount_link.join("scene folder");
         let uploads = settings.data_dir.join("cache").join("keypoint-uploads");
         std::fs::create_dir_all(&uploads).expect("uploads dir");

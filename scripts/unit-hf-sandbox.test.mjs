@@ -82,9 +82,23 @@ test("only declared ordinary unit steps use the child sandbox, never ignored rea
 });
 test("existing API cache and Iris environment guards clear every inherited HF alias", () => {
   const support = text("apps/rust-api/src/tests/support.rs");
-  const isolate = support.slice(support.indexOf("pub(crate) fn isolate_hf_cache()"), support.indexOf("impl Drop for HfCacheEnvGuard"));
-  assert.match(isolate, /\["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"\]/); assert.match(isolate, /std::env::remove_var\(key\)/);
+  const shared = text("crates/sceneworks-core/src/test_env.rs");
+  assert.match(support, /use sceneworks_core::test_env::\{isolate_hf_cache, EnvVars as HfCacheEnvGuard\}/);
+  const isolate = shared.slice(shared.indexOf("pub fn isolate_hf_cache()"));
+  assert.match(isolate, /EnvVars::set\(&\[/);
+  for (const key of ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"]) {
+    assert.ok(isolate.includes(`("${key}", "")`), `isolation clears ${key}`);
+  }
+  assert.match(shared, /\(!value\.is_empty\(\)\)\.then\(\|\| std::ffi::OsStr::new\(value\)\)/);
+  assert.match(shared, /Self::set_os\(&vars\)/);
+  assert.match(shared, /pub fn set_os\([\s\S]*?let guard = env_lock\(\)/);
+  assert.match(shared, /let previous = std::env::var_os\(key\)/);
+  assert.match(shared, /std::env::remove_var\(key\)/);
+  assert.match(shared, /_guard: guard/);
+  assert.match(shared, /impl Drop for EnvVars[\s\S]*Some\(prior\) => std::env::set_var\(key, prior\)[\s\S]*None => std::env::remove_var\(key\)/);
   const pin = support.slice(support.indexOf("pub(crate) fn pin_hf_hub_cache("), support.indexOf("pub(crate) fn readiness_worker("));
-  assert.match(pin, /\["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"\]/); assert.match(pin, /std::env::remove_var\(key\)/);
+  assert.match(pin, /EnvVars::set_os\(&\[/);
+  assert.match(pin, /\("HF_HUB_CACHE", Some\(hub\.as_os_str\(\)\)\)/);
+  for (const key of ["HUGGINGFACE_HUB_CACHE", "HF_HOME"]) assert.ok(pin.includes(`("${key}", None)`));
   for (const file of ["apps/rust-api/src/tests/iris_training.rs", "apps/rust-api/src/tests/iris_task_training.rs"]) { const body = text(file); assert.match(body, /let hf = isolate_hf_cache\(\);/); assert.match(body, /_hf: hf/); }
 });

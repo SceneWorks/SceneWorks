@@ -1,8 +1,9 @@
-// The full npm check command remains the single test inventory. Split only its existing files;
+// The root discovery launcher owns the test inventory. Split only its existing files;
 // no per-test weakening, no optional source checks, and no second hand-maintained portable list.
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { rootTestGroups } from "./run-root-tests.mjs";
 
 export const HISTORICAL_TESTS = [
   "scripts/anchor-loader-closure.test.mjs",
@@ -11,17 +12,14 @@ export const HISTORICAL_TESTS = [
   "scripts/starvector-terminal-producer.test.mjs",
 ];
 
-export function scaffoldTestGroups(command, mode) {
+export function scaffoldTestGroups(command, mode, groups = rootTestGroups()) {
   if (!["portable", "history"].includes(mode)) throw new Error("expected --portable or --history");
-  const commands = command.split("&&").map((part) => part.trim().split(/\s+/));
-  if (commands.some((parts) => parts[0] !== "node" || parts[1] !== "--test" || parts.slice(2).some((file) => !/^scripts\/[\w/.-]+\.test\.mjs$/.test(file)))) {
-    throw new Error("npm check test inventory changed; update scaffold selection before splitting it");
-  }
-  const files = commands.flatMap((parts) => parts.slice(2));
+  if (command !== "node scripts/run-root-tests.mjs") throw new Error("npm check launcher changed; review scaffold selection");
+  const files = groups.flat();
   if (new Set(files).size !== files.length || HISTORICAL_TESTS.some((file) => !files.includes(file))) {
     throw new Error("npm check inventory is duplicated or missing a historical suite");
   }
-  const selected = commands.map((parts) => parts.slice(2).filter((file) => HISTORICAL_TESTS.includes(file) === (mode === "history"))).filter((group) => group.length);
+  const selected = groups.map((group) => group.filter((file) => HISTORICAL_TESTS.includes(file) === (mode === "history"))).filter((group) => group.length);
   if (!selected.length) throw new Error("empty scaffold selection");
   return selected;
 }

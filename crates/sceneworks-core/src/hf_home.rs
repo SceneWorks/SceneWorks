@@ -126,6 +126,11 @@ pub fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
     if let Some(root) = test_support::root(data_dir) {
         return root;
     }
+    huggingface_hub_cache_dir_or_else(|| data_dir.join("cache").join("huggingface").join("hub"))
+}
+
+/// The same HF override precedence with a caller-owned fallback (CLI smoke caches use HOME/.cache).
+pub fn huggingface_hub_cache_dir_or_else(default: impl FnOnce() -> PathBuf) -> PathBuf {
     if let Some(path) = std::env::var("HF_HUB_CACHE")
         .ok()
         .map(|value| value.trim().to_owned())
@@ -147,7 +152,7 @@ pub fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
     {
         return PathBuf::from(path).join("hub");
     }
-    data_dir.join("cache").join("huggingface").join("hub")
+    default()
 }
 
 /// Typed authoritative model source library. Runtime and catalog compatibility helpers delegate

@@ -912,8 +912,12 @@ pub(crate) fn safe_project_path(project_path: &Path, relative: &str) -> WorkerRe
         relative,
         sceneworks_core::safe_path::Confinement::SymlinkSafe,
     )
-    .map_err(|error| {
-        WorkerError::InvalidPayload(format!("Unsafe project-relative path: {relative}: {error}"))
+    .map_err(|_| {
+        WorkerError::InvalidPayload(if relative.trim().is_empty() {
+            "Project-relative path is required.".to_owned()
+        } else {
+            format!("Unsafe project-relative path: {relative}")
+        })
     })
 }
 
@@ -1054,6 +1058,22 @@ mod training_resume_bundle_tests {
 #[cfg(test)]
 mod confinement_tests {
     use super::*;
+
+    #[test]
+    fn project_path_refusals_retain_the_callers_error_envelope() {
+        let root = tempfile::tempdir().unwrap();
+        for (relative, expected) in [
+            ("", "Project-relative path is required."),
+            ("   ", "Project-relative path is required."),
+            ("../escape", "Unsafe project-relative path: ../escape"),
+            ("./escape", "Unsafe project-relative path: ./escape"),
+        ] {
+            assert!(matches!(
+                safe_project_path(root.path(), relative),
+                Err(WorkerError::InvalidPayload(message)) if message == expected
+            ));
+        }
+    }
 
     #[test]
     fn canonical_project_sources_keep_project_relative_metadata() {
