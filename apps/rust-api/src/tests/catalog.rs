@@ -7258,11 +7258,8 @@ async fn license_acknowledgment_typed_download_refuses_a_repo_another_entry_decl
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job:?}");
     assert_eq!(job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
-    // The STAMP, for the shape this test exists to cover. `shared_repo_model` carries no
-    // `requiresLicenseAcknowledgment`, so a stamp keyed on the entry's flag writes nothing here —
-    // and the RETRY below then re-runs the repo-keyed gate over the stored `repo` and 403s a
-    // download this same server had just authorized. Asserting CREATED and `payload.repo` alone
-    // does not see that; the stamp and the retry leg are what do.
+    // The explicit assertion permits this submission and remains visible on the queued payload.
+    // A replay cannot treat the old assertion as a fresh acceptance of the source owner's terms.
     assert_eq!(
         job["payload"]["licenseAcknowledged"],
         Value::Bool(true),
@@ -7270,6 +7267,27 @@ async fn license_acknowledgment_typed_download_refuses_a_repo_another_entry_decl
     );
 
     let job_id = job["id"].as_str().expect("job id").to_owned();
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "no current owner receipt: {refused}"
+    );
+    assert_eq!(refused["code"], "license_acknowledgment_required");
+    let (status, receipt) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/models/minimax_h3/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
     let (retry_status, retry_job) = request(
         app.clone(),
         "POST",
@@ -7488,8 +7506,8 @@ async fn license_acknowledgment_model_import_is_refused_for_a_restricted_repo() 
     .await;
     assert_eq!(plain_status, StatusCode::CREATED, "{plain_job:?}");
 
-    // Asserting the acknowledgment opens it, and the assertion is RECORDED on the queued job so a
-    // retry re-validates against it rather than being refused for a field nothing wrote.
+    // A fresh explicit assertion opens this submission and is retained in its payload. Replay
+    // separately requires a current server receipt rather than trusting the old assertion.
     let (asserted_status, asserted_job) = request(
         app,
         "POST",
@@ -7569,8 +7587,8 @@ async fn license_acknowledgment_lora_import_is_refused_for_a_restricted_repo() {
     .await;
     assert_eq!(plain_status, StatusCode::CREATED, "{plain_job:?}");
 
-    // Asserting the acknowledgment opens it, and the assertion is RECORDED on the queued job so the
-    // raw-payload re-validation on retry sees it rather than refusing what was just authorized.
+    // A fresh explicit assertion opens this submission and is retained in its payload. Replay
+    // separately requires a current server receipt rather than trusting the old assertion.
     let (asserted_status, asserted_job) = request(
         app,
         "POST",
@@ -8578,4 +8596,159 @@ async fn managed_predictor_raw_queue_stamps_digest_and_refuses_retry_overrides()
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+}
+
+#[tokio::test]
+async fn fetching_job_replays_require_current_receipts_for_every_source_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let _cache = catalog_fixture_cache_root(&settings);
+    let config_dir = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    write_license_acknowledgment_catalog(&config_dir);
+    let app = create_app(settings.clone()).unwrap();
+    let ack = "/api/v1/models/minimax_h3/license-acknowledgment";
+    let (status, accepted) = request(app.clone(), "PUT", ack, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    let output = settings.data_dir.join("models/mlx/convert-fixture");
+    let cases = [
+        (
+            "model_import",
+            "/api/v1/models/import",
+            json!({"repo":"MiniMaxAI/MiniMax-H3","type":"video","licenseAcknowledged":true}),
+        ),
+        (
+            "lora_import",
+            "/api/v1/loras/import",
+            json!({"repo":"MiniMaxAI/MiniMax-H3","name":"fixture","licenseAcknowledged":true}),
+        ),
+        (
+            "lora_download",
+            "/api/v1/loras/restricted_lora/download",
+            json!({"licenseAcknowledged":true}),
+        ),
+        (
+            "model_convert",
+            "/api/v1/jobs",
+            json!({"type":"model_convert","requestedGpu":"auto","payload":{
+            "modelId":"ltx_local","converter":"ltx_video","sourceRepo":"owner/plain","sourceFile":"ltx.safetensors",
+            "baseRepo":"MiniMaxAI/MiniMax-H3","upscalerFile":"**","outputDir":output.display().to_string(),"licenseAcknowledged":true}}),
+        ),
+    ];
+    let mut jobs = Vec::new();
+    for (kind, route, body) in cases {
+        let (status, job) = request(app.clone(), "POST", route, body).await;
+        assert_eq!(status, StatusCode::CREATED, "{kind}: {job}");
+        assert_eq!(job["type"], kind);
+        assert_eq!(job["payload"]["licenseAcknowledged"], true);
+        let id = job["id"].as_str().unwrap().to_owned();
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "current receipt {kind}/{operation}: {replay}"
+            );
+            assert_eq!(
+                replay["payload"]["licenseAcknowledged"], false,
+                "old assertion cleared: {replay}"
+            );
+        }
+        jobs.push((kind, id));
+    }
+    let (status, _) = request(app.clone(), "DELETE", ack, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut violations = Vec::new();
+    for (kind, id) in &jobs {
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            if status != StatusCode::FORBIDDEN
+                || replay["code"] != "license_acknowledgment_required"
+            {
+                violations.push(format!("withdrawn {kind}/{operation}: {status} {replay}"));
+            }
+        }
+    }
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({"repo":"MiniMaxAI/MiniMax-H3","type":"video","licenseAcknowledged":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "false assertion: {body}");
+    let (status, explicit) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({"repo":"MiniMaxAI/MiniMax-H3","type":"video","licenseAcknowledged":true}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "fresh explicit assertion: {explicit}"
+    );
+    let (_, view) = request(app.clone(), "GET", ack, Value::Null).await;
+    assert_eq!(
+        view["acknowledged"], false,
+        "assertion must not mint a stored receipt: {view}"
+    );
+    let explicit_id = explicit["id"].as_str().unwrap();
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{explicit_id}/{operation}"),
+            json!({"payloadChanges":{"licenseAcknowledged":true}}),
+        )
+        .await;
+        if status != StatusCode::FORBIDDEN || replay["code"] != "license_acknowledgment_required" {
+            violations.push(format!("assertion override {operation}: {status} {replay}"));
+        }
+    }
+    let (status, _) = request(app.clone(), "PUT", ack, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let path = config_dir.join("builtin.models.jsonc");
+    let source = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        source.replace(
+            "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+            "https://example.org/new-license",
+        ),
+    )
+    .unwrap();
+    let changed = create_app(settings).unwrap();
+    for (kind, id) in &jobs {
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                changed.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            if status != StatusCode::FORBIDDEN
+                || replay["code"] != "license_acknowledgment_required"
+            {
+                violations.push(format!(
+                    "changed terms {kind}/{operation}: {status} {replay}"
+                ));
+            }
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
