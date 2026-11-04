@@ -59,18 +59,16 @@ export function describeFilmSteps({ draft, planningOperation, preflight, selecte
   };
 }
 
-const QWEN_PLANNER_MODEL_ID = "film_planner_qwen3_6_27b";
-
-export function activeQwenPlannerInstall(jobs = []) {
+export function activeQwenPlannerInstall(jobs = [], modelId) {
   return jobs.find((job) =>
     job?.type === "model_download"
-    && job?.payload?.modelId === QWEN_PLANNER_MODEL_ID
+    && Boolean(modelId) && job?.payload?.modelId === modelId
     && !terminalStatuses.has(job.status)) ?? null;
 }
 
-export function latestQwenPlannerInstall(jobs = []) {
-  return activeQwenPlannerInstall(jobs)
-    ?? jobs.find((job) => job?.type === "model_download" && job?.payload?.modelId === QWEN_PLANNER_MODEL_ID)
+export function latestQwenPlannerInstall(jobs = [], modelId) {
+  return activeQwenPlannerInstall(jobs, modelId)
+    ?? jobs.find((job) => job?.type === "model_download" && Boolean(modelId) && job?.payload?.modelId === modelId)
     ?? null;
 }
 
@@ -156,8 +154,9 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
     scope.mounted = true;
     return () => { scope.mounted = false; };
   }, []);
-  const activeQueuePlannerInstallJob = activeQwenPlannerInstall(jobs);
-  const queuePlannerInstallJob = latestQwenPlannerInstall(jobs);
+  const nativePlannerModelId = plannerAvailability?.providers?.find((item) => item.provider === "native")?.modelId;
+  const activeQueuePlannerInstallJob = activeQwenPlannerInstall(jobs, nativePlannerModelId);
+  const queuePlannerInstallJob = latestQwenPlannerInstall(jobs, nativePlannerModelId);
   const plannerInstallJob = activeQueuePlannerInstallJob?.id !== requestedPlannerInstallJob?.id
     ? (activeQueuePlannerInstallJob ?? requestedPlannerInstallJob ?? queuePlannerInstallJob)
     : (requestedPlannerInstallJob ?? activeQueuePlannerInstallJob ?? queuePlannerInstallJob);
@@ -276,7 +275,7 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
           const availability = await getFilmPlannerAvailability(activeProject.id, draft.id, token, { signal: controller.signal });
           if (canceled || plannerAvailabilityRequest.current !== requestId) return;
           setPlannerAvailability(availability);
-          const qwen = availability?.providers?.find((item) => item.modelId === "film_planner_qwen3_6_27b");
+          const qwen = availability?.providers?.find((item) => item.provider === "native");
           setNotice(qwen?.available
             ? "Qwen3.6-27B download completed. Planning did not start automatically."
             : "Qwen3.6-27B download completed, but the planner is still unavailable. Check the model installation before retrying.");
@@ -822,6 +821,7 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
                     onReplaceDraft={replaceDraft}
                     saveDraft={saveDraft}
                     setNotice={setNotice}
+                    soundCapabilities={plannerAvailability}
                     token={token}
                   />
                 </Suspense>

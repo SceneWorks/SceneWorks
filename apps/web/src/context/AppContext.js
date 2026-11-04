@@ -29,10 +29,14 @@ export const AppLiveContext = createContext(null);
 // (existing tests, external callers) still satisfies every hook via the fallbacks below.
 export const AppContext = createContext(null);
 
-export function useAppStatic() {
+export function useAppStaticOptional() {
   const split = useContext(AppStaticContext);
   const combined = useContext(AppContext);
-  const value = split ?? combined;
+  return split ?? combined;
+}
+
+export function useAppStatic() {
+  const value = useAppStaticOptional();
   if (value === null || value === undefined) {
     throw new Error("useAppStatic must be used within an <AppStaticContext.Provider> or <AppContext.Provider>");
   }

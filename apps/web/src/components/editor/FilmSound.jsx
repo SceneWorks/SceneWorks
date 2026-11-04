@@ -4,7 +4,6 @@ import { AssetMedia, assetCanRenderAsAudio } from "../assetMedia.jsx";
 import { FindingList, SOUND_FIELD_PREFIX } from "./filmFindings.jsx";
 
 const KINDS = ["dialogue", "ambience", "music", "sfx"];
-const SPEECH_MODELS = ["kokoro_82m", "chatterbox_tts", "moss_tts_realtime", "moss_ttsd_v05"];
 
 function number(value, fallback = 0) {
   const parsed = Number(value);
@@ -40,7 +39,9 @@ function SfxBeds({ disabled, sound, onChange }) {
   </div>;
 }
 
-export function FilmSound({ activeProject, assets = [], disabled, draft, findings = [], onChange, onReplaceDraft, saveDraft, setNotice, token }) {
+export function FilmSound({ activeProject, assets = [], disabled, draft, findings = [], onChange, onReplaceDraft, saveDraft, setNotice, token, soundCapabilities }) {
+  const speechModels = soundCapabilities?.soundSynthesisModels ?? [];
+  const defaultSpeechModel = soundCapabilities?.defaultSoundSynthesisModel;
   const audioAssets = useMemo(() => assets.filter(assetCanRenderAsAudio), [assets]);
   // The sound half of the reference pack is authored HERE, so its findings are shown here
   // (sc-24028). The References step deliberately leaves them alone, and between the two panels
@@ -77,7 +78,7 @@ export function FilmSound({ activeProject, assets = [], disabled, draft, finding
   function addSynthesizedLine() {
     onChange((next) => {
       next.referencePack.sound ??= [];
-      next.referencePack.sound.push({ role: `line_${next.referencePack.sound.length + 1}`, kind: "dialogue", description: "", text: "", model: "kokoro_82m" });
+      next.referencePack.sound.push({ role: `line_${next.referencePack.sound.length + 1}`, kind: "dialogue", description: "", text: "", model: defaultSpeechModel });
     });
   }
 
@@ -106,7 +107,7 @@ export function FilmSound({ activeProject, assets = [], disabled, draft, finding
             {entry.text !== undefined ? <>
               <label>Dialogue text<textarea aria-label={`Sound ${index + 1} dialogue text`} disabled={disabled} maxLength={1000} value={entry.text ?? ""} onChange={(event) => onChange((next) => { next.referencePack.sound[index].text = event.target.value; })} /></label>
               <label>Voice<input aria-label={`Sound ${index + 1} voice`} disabled={disabled} placeholder="Model default" value={entry.voice ?? ""} onChange={(event) => onChange((next) => { const value = event.target.value; if (value) next.referencePack.sound[index].voice = value; else delete next.referencePack.sound[index].voice; })} /></label>
-              <label>Speech model<select aria-label={`Sound ${index + 1} speech model`} disabled={disabled} value={entry.model ?? "kokoro_82m"} onChange={(event) => onChange((next) => { next.referencePack.sound[index].model = event.target.value; })}>{SPEECH_MODELS.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+              <label>Speech model<select aria-label={`Sound ${index + 1} speech model`} disabled={disabled || !speechModels.length} value={entry.model ?? defaultSpeechModel ?? ""} onChange={(event) => onChange((next) => { next.referencePack.sound[index].model = event.target.value; })}>{!speechModels.includes(entry.model ?? defaultSpeechModel) ? <option value={entry.model ?? ""}>{entry.model ?? "Unavailable"}</option> : null}{speechModels.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
               <p className="ve-film-help">Preview is available on the timeline after synthesis.</p>
             </> : <>
               <p className="ve-film-help">Prerecorded · {entry.file}</p>
@@ -116,7 +117,7 @@ export function FilmSound({ activeProject, assets = [], disabled, draft, finding
           </fieldset>;
         })}
       </div>
-      <button disabled={disabled} onClick={addSynthesizedLine} type="button">Add generated dialogue</button>
+      <button disabled={disabled || !speechModels.includes(defaultSpeechModel)} onClick={addSynthesizedLine} type="button">Add generated dialogue</button>
       <fieldset>
         <legend>Add prerecorded sound</legend>
         <label>Project audio<select aria-label="Project audio" disabled={disabled} value={assetId} onChange={(event) => setAssetId(event.target.value)}><option value="">Choose audio</option>{audioAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.displayName}</option>)}</select></label>
