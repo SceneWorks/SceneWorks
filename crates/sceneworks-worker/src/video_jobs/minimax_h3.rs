@@ -943,13 +943,41 @@ pub(super) fn minimax_h3_reference_clip_filter(
 /// Scoped to the INPUT section on purpose. `Stream #…: Audio:` also appears under `Output #…` when
 /// a command writes audio, and a parser that read the whole buffer would answer a different
 /// question the moment this chain grows an audio output.
-#[cfg(native_lane)]
+#[cfg(all(test, native_lane))]
 pub(super) fn minimax_h3_clip_input_has_audio(stderr: &str) -> bool {
-    stderr
-        .lines()
-        .skip_while(|line| !line.trim_start().starts_with("Input #"))
-        .take_while(|line| !line.trim_start().starts_with("Output #"))
-        .any(|line| line.contains("Stream #") && line.contains(": Audio:"))
+    let mut input = MinimaxH3InputStreams::default();
+    for line in stderr.lines() {
+        input.read_line(line);
+    }
+    input.audio
+}
+
+#[cfg(native_lane)]
+#[derive(Default)]
+struct MinimaxH3InputStreams {
+    input: bool,
+    finished: bool,
+    audio: bool,
+}
+
+#[cfg(native_lane)]
+impl MinimaxH3InputStreams {
+    fn read_line(&mut self, line: &str) {
+        if self.finished {
+            return;
+        }
+        if !self.input {
+            if !line.trim_start().starts_with("Input #") {
+                return;
+            }
+            self.input = true;
+        }
+        if line.trim_start().starts_with("Output #") {
+            self.finished = true;
+            return;
+        }
+        self.audio |= line.contains("Stream #") && line.contains(": Audio:");
+    }
 }
 
 /// Refuse a decoded reference clip whose SHAPE the engine cannot condition on — from the frames
@@ -1104,7 +1132,7 @@ async fn minimax_h3_decode_reference_clip(
 ) -> WorkerResult<Conditioning> {
     let pattern = work_dir.join("ref_%05d.png");
     let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
-    let stderr = crate::media_jobs::run_ffmpeg_capture_stderr(
+    let capture = crate::media_jobs::run_ffmpeg_with_stderr(
         vec![
             "ffmpeg".to_owned(),
             "-nostdin".to_owned(),
@@ -1127,13 +1155,20 @@ async fn minimax_h3_decode_reference_clip(
             pattern.display().to_string(),
         ],
         Some(ctx),
+        |pipe| {
+            sceneworks_core::media_process::read_stderr_lines(
+                pipe,
+                MinimaxH3InputStreams::default(),
+                MinimaxH3InputStreams::read_line,
+            )
+        },
     )
     .await?;
 
     let decoded = minimax_h3_load_reference_frames(work_dir.to_path_buf()).await?;
     minimax_h3_validate_reference_clip(&request.model, asset_id, &decoded)?;
 
-    let audio = if minimax_h3_clip_input_has_audio(&stderr) {
+    let audio = if capture.data.audio {
         let wav = work_dir.join("ref_audio.wav");
         let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
         run_ffmpeg(
@@ -3024,4 +3059,36 @@ pub(super) fn resolve_candle_imported_minimax_h3_load(
         },
         bound.tier,
     ))
+}
+
+#[cfg(all(test, native_lane))]
+mod input_stream_regression {
+    use super::*;
+
+    #[test]
+    fn audio_detection_survives_long_logs_and_ignores_output_only_audio() {
+        for (input_audio, output_audio) in [(true, false), (false, true)] {
+            let mut log =
+                String::from("Input #0, mov, from 'fixture.mp4':\n  Stream #0:0: Video: h264\n");
+            if input_audio {
+                log.push_str("  Stream #0:1: Audio: aac\n");
+            }
+            log.push_str("Output #0, image2, to 'frames':\n");
+            if output_audio {
+                log.push_str("  Stream #0:1: Audio: pcm_s16le\n");
+            }
+            log.push_str(&"diagnostic progress\n".repeat(10_000));
+            let mut capture = sceneworks_core::media_process::ParsedStderr::new(
+                MinimaxH3InputStreams::default(),
+                MinimaxH3InputStreams::read_line,
+            );
+            for bytes in log.as_bytes().chunks(7) {
+                capture.push(bytes);
+            }
+            let capture = capture.complete();
+            assert_eq!(capture.data.audio, input_audio);
+            assert_eq!(minimax_h3_clip_input_has_audio(&log), input_audio);
+            assert!(capture.as_ref().len() <= sceneworks_core::media_process::STDERR_LIMIT);
+        }
+    }
 }

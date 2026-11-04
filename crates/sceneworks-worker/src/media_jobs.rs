@@ -4046,6 +4046,43 @@ async fn run_ffmpeg_capture_stderr_inner(
     stdin_chunks: Option<Vec<Vec<u8>>>,
     execution_timeout: Duration,
 ) -> WorkerResult<String> {
+    let stderr = run_ffmpeg_with_stderr_inner(
+        args,
+        context,
+        stdin_chunks,
+        execution_timeout,
+        sceneworks_core::media_process::read_stderr_tail,
+    )
+    .await?;
+    Ok(String::from_utf8_lossy(&stderr).into_owned())
+}
+
+#[cfg(native_lane)]
+pub(crate) async fn run_ffmpeg_with_stderr<G, H, S>(
+    args: Vec<String>,
+    context: Option<FfmpegContext<'_>>,
+    read_stderr: G,
+) -> WorkerResult<S>
+where
+    G: FnOnce(tokio::process::ChildStderr) -> H,
+    H: std::future::Future<Output = std::io::Result<S>> + Send + 'static,
+    S: AsRef<[u8]> + Send + 'static,
+{
+    run_ffmpeg_with_stderr_inner(args, context, None, ffmpeg_execution_timeout(), read_stderr).await
+}
+
+async fn run_ffmpeg_with_stderr_inner<G, H, S>(
+    args: Vec<String>,
+    context: Option<FfmpegContext<'_>>,
+    stdin_chunks: Option<Vec<Vec<u8>>>,
+    execution_timeout: Duration,
+    read_stderr: G,
+) -> WorkerResult<S>
+where
+    G: FnOnce(tokio::process::ChildStderr) -> H,
+    H: std::future::Future<Output = std::io::Result<S>> + Send + 'static,
+    S: AsRef<[u8]> + Send + 'static,
+{
     let Some((program, arguments)) = args.split_first() else {
         return Err(WorkerError::InvalidPayload(
             "FFmpeg command is empty.".to_owned(),
@@ -4076,12 +4113,13 @@ async fn run_ffmpeg_capture_stderr_inner(
             }
         }
     };
-    let output = sceneworks_core::media_process::run_command(
+    let output = sceneworks_core::media_process::run_command_with_stderr(
         command,
         stdin_chunks,
         execution_timeout,
         control,
         sceneworks_core::media_process::discard_stdout,
+        read_stderr,
     )
     .await;
     let output = match output {
@@ -4109,7 +4147,7 @@ async fn run_ffmpeg_capture_stderr_inner(
     if let Some(detail) = output.failure_detail() {
         return Err(WorkerError::Engine(detail));
     }
-    Ok(String::from_utf8_lossy(&output.stderr).into_owned())
+    Ok(output.stderr)
 }
 
 fn worker_error_with_cleanup(error: WorkerError, cleanup: Option<String>) -> WorkerError {
