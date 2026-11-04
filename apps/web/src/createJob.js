@@ -1,4 +1,5 @@
-import { apiFetch } from "./api.js";
+import { JOB_PATHS, submitJobRequest } from "./api/jobs.js";
+
 import { handleModelLibraryRejection } from "./modelLibrary.js";
 import { upsertJobNewest } from "./sorters.js";
 
@@ -13,19 +14,19 @@ function generationBody([payload], project, requestedGpu) {
 
 export const CREATE_JOB_DEFINITIONS = Object.freeze({
   video: {
-    path: "/api/v1/video/jobs",
+    path: JOB_PATHS.video,
     buildBody: generationBody,
   },
   audio: {
-    path: "/api/v1/audio/jobs",
+    path: JOB_PATHS.audio,
     buildBody: generationBody,
   },
   image: {
-    path: "/api/v1/image/jobs",
+    path: JOB_PATHS.image,
     buildBody: generationBody,
   },
   videoUpscale: {
-    path: "/api/v1/jobs",
+    path: JOB_PATHS.generic,
     buildBody: ([payload], project, requestedGpu) => ({
       type: "video_upscale",
       projectId: project.id,
@@ -35,7 +36,7 @@ export const CREATE_JOB_DEFINITIONS = Object.freeze({
     }),
   },
   vqa: {
-    path: "/api/v1/image/vqa/jobs",
+    path: JOB_PATHS.vqa,
     buildBody: ([asset, question, maxNewTokens], project, requestedGpu) => ({
       projectId: project.id,
       projectName: project.name,
@@ -46,15 +47,15 @@ export const CREATE_JOB_DEFINITIONS = Object.freeze({
     }),
   },
   interleave: {
-    path: "/api/v1/image/interleave/jobs",
+    path: JOB_PATHS.interleave,
     buildBody: generationBody,
   },
   vector: {
-    path: "/api/v1/image/vectorize/jobs",
+    path: JOB_PATHS.vector,
     buildBody: ([payload], project, requestedGpu) => ({ projectId: project.id, projectName: project.name, requestedGpu, ...payload }),
   },
   vectorPrompt: {
-    path: "/api/v1/image/vectorize/prompt/jobs",
+    path: JOB_PATHS.vectorPrompt,
     buildBody: generationBody,
   },
 });
@@ -97,7 +98,7 @@ export function makeCreateJob({
       }
       // A batch may be stopped while its shared confirmation is open.
       if (!shouldContinue()) return { cancelled: true };
-      const job = await apiFetch(definition.path, token, {
+      const job = await submitJobRequest(definition.path, token, {
         method: "POST",
         body: JSON.stringify(definition.buildBody(args, project, requestedGpu)),
       });

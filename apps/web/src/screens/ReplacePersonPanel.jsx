@@ -1,5 +1,6 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { API_BASE_URL, withMediaTicket } from "../api.js";
+import { projectFileUrl } from "../api/media.js";
 import { VideoSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
@@ -118,7 +119,7 @@ function maskUrl(projectId, relPath) {
     return "";
   }
   const normalized = String(relPath).replaceAll("\\", "/");
-  return withMediaTicket(`${API_BASE_URL}/api/v1/projects/${projectId}/files/${normalized}`);
+  return projectFileUrl(projectId, normalized);
 }
 
 /**
@@ -128,6 +129,7 @@ function maskUrl(projectId, relPath) {
  * replacement pipeline regenerates masks from corrected boxes.
  */
 function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
+  useMediaTicket();
   const frames = useMemo(() => track?.frames ?? [], [track]);
   const [frameIndex, setFrameIndex] = useState(0);
   const [drafts, setDrafts] = useState({});

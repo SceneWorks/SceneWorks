@@ -108,7 +108,13 @@ pub(crate) async fn create_job(
             payload.payload.remove(key);
         }
     }
-    validate_raw_job_payload(&state, &payload.job_type, &mut payload.payload).await?;
+    validate_raw_job_payload(
+        &state,
+        &payload.job_type,
+        &mut payload.payload,
+        FetchingLicenseValidation::FreshSubmission,
+    )
+    .await?;
     let canonical_entry =
         canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
     crate::model_sources::ensure_runtime_model_sources(
@@ -449,7 +455,7 @@ pub(crate) async fn retry_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    let (canonical_payload, model_provenance) =
+    let (canonical_payload, model_provenance, download_binding) =
         validate_and_canonicalize_merged_generation_payload(
             &state,
             &job_id,
@@ -459,12 +465,13 @@ pub(crate) async fn retry_job(
         .await?;
     payload.payload_changes = canonical_payload;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.retry_job_with_model_provenance(
+        store.retry_job_with_download_binding(
             &job_id,
             RetryJob {
                 payload_changes: payload.payload_changes,
             },
             model_provenance.as_ref(),
+            download_binding.as_ref(),
         )
     })
     .await?;
@@ -719,7 +726,7 @@ pub(crate) async fn duplicate_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    let (canonical_payload, model_provenance) =
+    let (canonical_payload, model_provenance, download_binding) =
         validate_and_canonicalize_merged_generation_payload(
             &state,
             &job_id,
@@ -746,7 +753,7 @@ pub(crate) async fn duplicate_job(
     let job = store_call(state.clone(), move |store, _timeout| {
         // Both halves: main's preallocated id for a freshened FLUX.3 training duplicate, and the
         // feature's canonical-admission source provenance (never read from payload metadata).
-        store.duplicate_job_with_options(
+        store.duplicate_job_with_download_binding(
             fresh_job_id,
             &job_id,
             DuplicateJob {
@@ -754,6 +761,7 @@ pub(crate) async fn duplicate_job(
                 requested_gpu: payload.requested_gpu,
             },
             model_provenance.as_ref(),
+            download_binding.as_ref(),
         )
     })
     .await?;
@@ -928,9 +936,12 @@ async fn validate_and_canonicalize_merged_generation_payload(
     job_id: &str,
     payload_changes: &JsonObject,
     retry: bool,
-) -> Result<(JsonObject, Option<Value>), ApiError> {
+) -> Result<(JsonObject, Option<Value>, Option<Value>), ApiError> {
     let job_id = job_id.to_owned();
-    let job = store_call(state.clone(), move |store, _timeout| store.get_job(&job_id)).await?;
+    let (job, download_binding) = store_call(state.clone(), move |store, _timeout| {
+        Ok((store.get_job(&job_id)?, store.download_binding(&job_id)?))
+    })
+    .await?;
     let job_type = job.job_type.clone();
     let project_id = job.project_id.clone();
     // sc-26691: only a job that actually rendered can be a legacy (pre-resize-mode) render.
@@ -983,7 +994,18 @@ async fn validate_and_canonicalize_merged_generation_payload(
             .await?;
         }
     } else {
-        validate_raw_job_payload(state, &job_type, &mut merged).await?;
+        if let Some(binding) = download_binding.as_ref() {
+            if !matches!(job_type, JobType::ModelDownload) {
+                return Err(ApiError::bad_request("Invalid saved download binding"));
+            }
+            crate::models::validate_catalog_download_replay(state, binding, &merged).await?;
+        }
+        let license_validation = if download_binding.is_some() {
+            FetchingLicenseValidation::VerifiedCatalogReplay
+        } else {
+            FetchingLicenseValidation::Replay
+        };
+        validate_raw_job_payload(state, &job_type, &mut merged, license_validation).await?;
     }
     // A replay model switch resets inherited MOSS controls. Explicit new advanced controls still
     // reach validation, so headless clients cannot silently drop a conflicting authored setting.
@@ -1260,7 +1282,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
         None
     };
     let provenance = canonical_model_provenance(state, selected_entry, &merged).await?;
-    Ok((merged, provenance))
+    Ok((merged, provenance, download_binding))
 }
 
 /// Accept only the entry returned by an actual server canonicalizer. Presence in an incoming or
@@ -1669,6 +1691,23 @@ fn dense_image_detail_error() -> ApiError {
     )
 }
 
+enum FetchingLicenseValidation {
+    FreshSubmission,
+    Replay,
+    VerifiedCatalogReplay,
+}
+
+fn is_license_gated_fetching_job(job_type: &JobType) -> bool {
+    matches!(
+        job_type,
+        JobType::ModelDownload
+            | JobType::ModelImport
+            | JobType::ModelConvert
+            | JobType::LoraDownload
+            | JobType::LoraImport
+    )
+}
+
 /// Jobs created through the raw queue route do not pass a typed request validator. Keep this
 /// inventory aligned with worker payload fields that reach filesystem model resolution:
 /// `image_upscale`, `image_detail`, and `prompt_refine` consume `model`; the model-management jobs
@@ -1682,6 +1721,7 @@ async fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
     payload: &mut JsonObject,
+    license_validation: FetchingLicenseValidation,
 ) -> Result<(), ApiError> {
     if matches!(
         job_type,
@@ -1765,9 +1805,9 @@ async fn validate_raw_job_payload(
     // not carry at all. So a `model_download` posted here fetched `MiniMaxAI/MiniMax-H3` and was
     // answered 201 while the typed `POST /api/v1/models/:id/download` answered 403 for the same
     // bytes. Rejecting the whole job type instead would break retry/duplicate, which re-validate a
-    // stored `model_download` payload through this same function; the repo-keyed check lets an
-    // already-authorized download retry (the typed route stamps `licenseAcknowledged` onto the job)
-    // while still refusing a fresh unacknowledged one.
+    // stored `model_download` payload through this same function. Replays with a private typed
+    // binding revalidate the selected catalog entry and current receipt before reaching this gate;
+    // unbound replays use this canonical repo check without trusting an old assertion.
     //
     // The LoRA download/import types are in the list because they take the same `repo` + `files`
     // shape through `run_lora_download_job` and would otherwise be the identical bypass wearing a
@@ -1789,15 +1829,24 @@ async fn validate_raw_job_payload(
     // `"**"` downloads the entire named repo. Adding the job type alone would have been inert;
     // `ensure_job_payload_license_acknowledged` reads `baseRepo`/`sourceRepo` as well as `repo`
     // (`LICENSE_GATED_REPO_PAYLOAD_KEYS`), which is what makes this line bite.
-    if matches!(
-        job_type,
-        JobType::ModelDownload
-            | JobType::ModelImport
-            | JobType::ModelConvert
-            | JobType::LoraDownload
-            | JobType::LoraImport
-    ) {
-        crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
+    if is_license_gated_fetching_job(job_type) {
+        match license_validation {
+            FetchingLicenseValidation::VerifiedCatalogReplay => {}
+            FetchingLicenseValidation::FreshSubmission => {
+                crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
+            }
+            FetchingLicenseValidation::Replay => {
+                // Ignore the old assertion only for authorization. Saved import payloads are
+                // also committed-request identities and must remain unchanged on retry.
+                let mut receipt_view = payload.clone();
+                receipt_view.insert(
+                    crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+                    Value::Bool(false),
+                );
+                crate::models::ensure_job_payload_license_acknowledged(state, &receipt_view)
+                    .await?;
+            }
+        }
     }
     // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
     // licence-bound target (Qwen Image 2.1) must not reach the queue around the typed route's gate.
