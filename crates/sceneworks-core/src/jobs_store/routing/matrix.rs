@@ -752,10 +752,19 @@ fn imported_probe_job(
 }
 
 fn source_has_ordered_fragments(source: &str, fragments: &[&str]) -> bool {
-    let source = strip_jsonc_comments(source);
+    // Rustfmt may wrap the same sink-bearing call across lines. Layout must not change a
+    // capability claim; keep the ordered code fragments and all sink-removal mutations strict.
+    let source: String = strip_jsonc_comments(source)
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
     let mut rest = source.as_str();
     for fragment in fragments {
-        let Some(index) = rest.find(fragment) else {
+        let fragment: String = fragment
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .collect();
+        let Some(index) = rest.find(&fragment) else {
             return false;
         };
         rest = &rest[index + fragment.len()..];
@@ -4964,15 +4973,36 @@ mod tests {
     }
 
     #[test]
+    fn preview_source_layout_cannot_change_the_sink_claim_or_its_order() {
+        let fragments = [
+            "drive_gen_items(tx, work,",
+            "let request = GenerationRequest {",
+            "preview,",
+            "model.generate(&request",
+        ];
+        let formatted = "drive_gen_items(\n    tx,\n    work,\n    move |preview| {\n        let request = GenerationRequest {\n            preview,\n        };\n        model.generate(&request);\n    })";
+        assert!(source_has_ordered_fragments(formatted, &fragments));
+        assert!(!source_has_ordered_fragments(
+            &formatted.replace("preview,", ""),
+            &fragments
+        ));
+        assert!(!source_has_ordered_fragments("model.generate(&request); drive_gen_items(tx, work, let request = GenerationRequest { preview,", &fragments));
+    }
+
+    #[test]
     fn imported_preview_rows_fail_closed_when_the_production_sink_is_removed() {
         // The indent is part of the fixture, not decoration: it is what pins the mutation to the
         // real request literal instead of some similarly-worded block. Imported Krea builds its
         // request inside a helper function (8 spaces); the SDXL lane builds it inline in the
-        // per-item closure (20). A mutation that silently fails to apply would make this test pass
+        // per-item closure (24). A mutation that silently fails to apply would make this test pass
         // while proving nothing, which is why the "mutation must apply" assertion is here.
         for (family, source, indent) in [
             ("krea_2", WORKER_IMAGE_KREA_IMPORTED, "        "),
-            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED, "                    "),
+            (
+                "sdxl",
+                WORKER_IMAGE_SDXL_IMPORTED,
+                "                        ",
+            ),
         ] {
             assert!(imported_preview_sink(family, source));
             let normalized = source.replace("\r\n", "\n");
@@ -4999,8 +5029,8 @@ mod tests {
         ));
         let normalized_mage = WORKER_IMAGE_MAGE_FINETUNED.replace("\r\n", "\n");
         let without_mage_sink = normalized_mage.replacen(
-            "                    guidance,\n                    preview,\n                    &cancel,",
-            "                    guidance,\n                    &cancel,",
+            "                        guidance,\n                        preview,\n                        &cancel,",
+            "                        guidance,\n                        &cancel,",
             1,
         );
         assert_ne!(without_mage_sink, normalized_mage);
@@ -5018,8 +5048,8 @@ mod tests {
         );
 
         let crossed_mage_request = normalized_mage.replacen(
-            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
-            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut unrelated_request,",
+            "crate::memory_strategy::generate_with_scope(\n                        model,\n                        &mut request,",
+            "crate::memory_strategy::generate_with_scope(\n                        model,\n                        &mut unrelated_request,",
             1,
         );
         assert_ne!(crossed_mage_request, normalized_mage);
