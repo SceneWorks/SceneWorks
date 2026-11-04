@@ -547,7 +547,7 @@ fn write_marker(root: &Path) -> Result<(), String> {
 
 /// Hex-encode a sha256 digest for comparison against the pinned value.
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    sceneworks_core::hashing::hex(bytes)
 }
 
 /// Download one wheel into `tmp`, verify its sha256, and extract its DLLs into the

@@ -1023,12 +1023,7 @@ async fn planning_root(
     project_id: &str,
     draft_id: &str,
 ) -> Result<PathBuf, ApiError> {
-    if draft_id.is_empty()
-        || draft_id.len() > 128
-        || !draft_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-    {
+    if !sceneworks_core::ids::is_safe_id_with_max(draft_id, 128) {
         return Err(ApiError::bad_request("Invalid film draft ID"));
     }
     Ok(project_path_for_id(state, project_id)
@@ -1069,22 +1064,15 @@ fn read_operation(path: &FsPath) -> Result<FilmPlanningOperation, ApiError> {
 fn write_json_file<T: Serialize>(path: &FsPath, value: &T) -> Result<(), ApiError> {
     let bytes =
         serde_json::to_vec_pretty(value).map_err(|error| ApiError::internal(error.to_string()))?;
-    std::fs::write(path, bytes).map_err(|error| ApiError::internal(error.to_string()))
+    sceneworks_core::fsutil::write_atomic(path, &bytes)
+        .map_err(|error| ApiError::internal(error.to_string()))
 }
 
 fn write_latest_operation(
     root: &FsPath,
     operation: &FilmPlanningOperation,
 ) -> Result<(), ApiError> {
-    std::fs::create_dir_all(root).map_err(|error| ApiError::internal(error.to_string()))?;
-    let path = root.join("latest.json");
-    let temp = root.join(format!(
-        ".latest-{}-{}.tmp",
-        operation.id,
-        uuid::Uuid::new_v4().simple()
-    ));
-    write_json_file(&temp, operation)?;
-    std::fs::rename(temp, path).map_err(|error| ApiError::internal(error.to_string()))
+    write_json_file(&root.join("latest.json"), operation)
 }
 
 // Cancellation and job/receipt callbacks may run on different API tasks. Keep their short

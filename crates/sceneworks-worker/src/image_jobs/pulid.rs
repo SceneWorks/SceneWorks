@@ -83,19 +83,12 @@ fn resolve_pulid_flux_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "PuLID-FLUX modelPath").map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(PULID_FLUX_REPO);
     let root = huggingface_snapshot_dir(&settings.data_dir, repo);
     // Quant-matrix turnkey (sc-9947): descend into the selected q4/q8/bf16 tier subdir. A non-turnkey
@@ -414,12 +407,7 @@ async fn generate_pulid_flux_stream(
         &job.id,
         backend,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(PULID_FLUX_REPO)
         .to_owned();
 

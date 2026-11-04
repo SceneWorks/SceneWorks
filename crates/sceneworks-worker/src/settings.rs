@@ -97,11 +97,7 @@ impl fmt::Debug for Settings {
 impl Settings {
     /// Latest explicit user cap, not MLX's derived default. A written zero clears
     /// a startup cap; an absent handoff preserves the launch-time environment.
-    #[cfg(any(
-        test,
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(any(test, native_lane))]
     pub(crate) fn requested_gpu_memory_limit(
         &self,
     ) -> WorkerResult<sceneworks_core::app_paths::GpuMemoryLimitRequest> {

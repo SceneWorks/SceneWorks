@@ -296,10 +296,7 @@ mod download_lock {
 // (Linux) lane the function is dead in the test build too. Gating the allow on `not(test)` compiles
 // on this Mac and fails `rust:check:candle` with `-D dead-code` — which is exactly what it did.
 #[allow(dead_code)]
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_cached_file(
     context: &DownloadContext<'_>,
     url: &str,
@@ -314,10 +311,7 @@ pub(crate) async fn ensure_cached_file(
 /// `expected_sha256` (a content digest — e.g. an HF `lfs.oid`) before returning
 /// (sc-8879). A malformed/absent digest is skipped by `verify_file_sha256`, so callers
 /// can pass whatever the source advertises; a mismatch removes the file and errors.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_cached_file_verified(
     context: &DownloadContext<'_>,
     url: &str,
@@ -381,10 +375,7 @@ pub(crate) async fn ensure_cached_file_verified(
     Ok(target.to_path_buf())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn remote_content_length(
     context: &DownloadContext<'_>,
     url: &str,
@@ -449,10 +440,7 @@ async fn remote_content_length(
 // `backend-candle`. Compiled on every platform anyway so the bare lib build type-checks it too
 // (a gated-out helper is how parity goes blind to dead code); dead_code silenced only where
 // nothing calls it, the same idiom as `safe_weight_filename`.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn resolve_hf_component_file(
     settings: &Settings,
     repo: &str,
@@ -474,10 +462,7 @@ pub(crate) fn resolve_hf_component_file(
 /// Resolve a single Hugging Face file and stream it into an app cache target with
 /// size-aware resume/progress. This is for first-use runtime weights that are not
 /// installed through the full model-download flow.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_hf_cached_file(
     context: &DownloadContext<'_>,
     repo: &str,
@@ -500,7 +485,7 @@ pub(crate) async fn ensure_hf_cached_file(
     .await
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 async fn resolve_single_hf_file(
     context: &DownloadContext<'_>,
     repo: &str,
@@ -534,10 +519,7 @@ async fn resolve_single_hf_file(
 /// their resumable state. Imported SDXL components are loader inputs shared by
 /// concurrent jobs, so a destination-path cache hit must be verified rather than
 /// inferred from `is_file()` (sc-21689).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_hf_cached_file_atomically(
     context: &DownloadContext<'_>,
     repo: &str,
@@ -562,10 +544,7 @@ pub(crate) async fn ensure_hf_cached_file_atomically(
 /// [`partial_download_path`] sibling. A final cache hit is reused only after it is
 /// checked against the same size and (when available) SHA-256 identity used for a
 /// freshly downloaded file.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn ensure_cached_file_verified_atomically(
     context: &DownloadContext<'_>,
     url: &str,
@@ -616,7 +595,7 @@ pub(crate) async fn ensure_cached_file_verified_atomically(
     // `ensure_cached_file_verified` validated the partial before returning. Sync
     // the bytes before publication so an acknowledged promotion has durable file
     // contents even if the process exits immediately after the rename.
-    tokio::fs::File::open(&partial).await?.sync_all().await?;
+    sync_completed_partial(&partial).await?;
     promote_partial_download(&partial, target).await?;
     sync_parent_directory(target).await?;
     Ok(target.to_path_buf())
@@ -631,10 +610,7 @@ fn partial_download_path(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn cached_file_matches_expected(
     context: &DownloadContext<'_>,
     path: &Path,
@@ -653,6 +629,17 @@ async fn cached_file_matches_expected(
     Ok(sha256_file(context.api, context.settings, context.job_id, path).await? == expected_sha256)
 }
 
+async fn sync_completed_partial(partial: &Path) -> WorkerResult<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    // Windows implements sync_all with FlushFileBuffers, which requires GENERIC_WRITE.
+    // Unix keeps the existing read-only access contract; never create, truncate or chmod.
+    #[cfg(windows)]
+    options.write(true);
+    options.open(partial).await?.sync_all().await?;
+    Ok(())
+}
+
 async fn promote_partial_download(partial: &Path, target: &Path) -> WorkerResult<()> {
     // Tokio delegates to std::fs::rename, which uses MOVEFILE_REPLACE_EXISTING
     // on Windows as well as rename on Unix. Never remove the old destination:
@@ -662,23 +649,12 @@ async fn promote_partial_download(partial: &Path, target: &Path) -> WorkerResult
 }
 
 async fn sync_parent_directory(path: &Path) -> WorkerResult<()> {
-    #[cfg(unix)]
-    {
-        let parent = path.parent().map(Path::to_path_buf).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!("download target {} has no parent", path.display()))
-        })?;
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
-            std::fs::File::open(parent)?.sync_all()?;
-            Ok(())
-        })
-        .await
-        .map_err(|error| task_join_error("download directory sync", error))?
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
+    let path = path.to_path_buf();
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
+        Ok(sceneworks_core::fsutil::sync_parent_directory(&path)?)
+    })
+    .await
+    .map_err(|error| task_join_error("download directory sync", error))?
 }
 
 #[derive(Debug, Clone)]
@@ -786,7 +762,7 @@ impl HuggingFaceSnapshot {
 /// Obtain only the content digest of one pinned HF file for installed-receipt verification.
 /// LFS weights use their published SHA-256; small non-LFS metadata is streamed into a digest.
 /// No remote bytes or filesystem destination cross this boundary, and no model is installed.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) async fn huggingface_file_content_sha256(
     client: &reqwest::Client,
     settings: &Settings,
@@ -827,7 +803,7 @@ pub(crate) async fn huggingface_file_content_sha256(
     if received != size {
         return Err(invalid("upstream file is incomplete"));
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(sceneworks_core::hashing::hex(&digest.finalize()))
 }
 
 /// Extract the `rel="next"` target from an RFC 5988 `Link` header, if present. The HF tree API
@@ -1106,12 +1082,11 @@ pub(crate) async fn sha256_file(
     job_id: &str,
     path: &Path,
 ) -> WorkerResult<String> {
-    Ok(format!(
-        "{:x}",
-        download_hash_state_raw(api, settings, job_id, path)
-            .await?
-            .finalize()
-    ))
+    let path = path.to_path_buf();
+    let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
+        sceneworks_core::hashing::sha256_file(&path).map_err(WorkerError::Io)
+    });
+    heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
 }
 
 async fn download_hash_state(context: &DownloadContext<'_>, path: &Path) -> WorkerResult<Sha256> {
@@ -1126,17 +1101,9 @@ async fn download_hash_state_raw(
 ) -> WorkerResult<Sha256> {
     let path = path.to_path_buf();
     let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<Sha256> {
-        use std::io::Read;
-        let mut file = std::fs::File::open(&path).map_err(WorkerError::Io)?;
+        let file = std::fs::File::open(&path).map_err(WorkerError::Io)?;
         let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; 1024 * 1024];
-        loop {
-            let read = file.read(&mut buffer).map_err(WorkerError::Io)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
+        sceneworks_core::hashing::update_sha256(file, &mut hasher).map_err(WorkerError::Io)?;
         Ok(hasher)
     });
     heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
@@ -1385,7 +1352,7 @@ async fn download_file_inner(
             if let Some(expected) = expected_size {
                 let written = tokio::fs::metadata(dest).await?.len();
                 if written == expected {
-                    return Ok(Some(format!("{:x}", hasher.finalize())));
+                    return Ok(Some(sceneworks_core::hashing::hex(&hasher.finalize())));
                 }
                 if written < expected && resume.take_network_resume() {
                     continue;
@@ -1404,7 +1371,7 @@ async fn download_file_inner(
         if let Some(expected) = expected_size {
             let written = tokio::fs::metadata(dest).await?.len();
             if written == expected {
-                return Ok(Some(format!("{:x}", hasher.finalize())));
+                return Ok(Some(sceneworks_core::hashing::hex(&hasher.finalize())));
             }
             if written < expected && resume.take_network_resume() {
                 continue;
@@ -1416,7 +1383,7 @@ async fn download_file_inner(
                 label, written, expected,
             )));
         }
-        return Ok(Some(format!("{:x}", hasher.finalize())));
+        return Ok(Some(sceneworks_core::hashing::hex(&hasher.finalize())));
     }
 }
 
@@ -1659,7 +1626,10 @@ fn normalize_etag(raw: &str) -> Option<String> {
 }
 
 fn blob_fallback_name(path: &str) -> String {
-    format!("path-{:x}", Sha256::digest(path.as_bytes()))
+    format!(
+        "path-{}",
+        sceneworks_core::hashing::sha256_bytes(path.as_bytes())
+    )
 }
 
 /// Materialize a snapshot entry pointing at its blob, returning whether it
@@ -1859,7 +1829,7 @@ pub(crate) async fn download_source_url(
         &progress,
     )
     .await?;
-    tokio::fs::File::open(&partial).await?.sync_all().await?;
+    sync_completed_partial(&partial).await?;
     promote_partial_download(&partial, &target_path).await?;
     sync_parent_directory(&target_path).await?;
     Ok(())
@@ -3074,7 +3044,7 @@ mod resolve_hf_component_file_tests {
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 mod atomic_cache_publication_tests {
     use super::*;
     use axum::{
@@ -3899,5 +3869,78 @@ mod integrity_regression_tests {
             .unwrap(),
             vec!["1.1.1.1:443".parse::<SocketAddr>().unwrap()]
         );
+    }
+}
+
+#[cfg(test)]
+mod partial_sync_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completed_partial_sync_preserves_bytes_and_does_not_create_missing_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("verified.partial");
+        let bytes = b"verified complete bytes";
+        tokio::fs::write(&partial, bytes).await.unwrap();
+
+        sync_completed_partial(&partial).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&partial).await.unwrap(), bytes);
+        let missing = directory.path().join("missing.partial");
+        assert!(matches!(
+            sync_completed_partial(&missing).await,
+            Err(WorkerError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(
+            !missing.exists(),
+            "sync must never create a replacement partial"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completed_partial_sync_preserves_unix_read_only_access_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("verified.partial");
+        let bytes = b"read-only verified bytes";
+        std::fs::write(&partial, bytes).unwrap();
+        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        sync_completed_partial(&partial).await.unwrap();
+
+        assert_eq!(std::fs::read(&partial).unwrap(), bytes);
+        assert_eq!(
+            std::fs::metadata(&partial).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn completed_partial_sync_refuses_read_only_windows_file_without_changing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("verified.partial");
+        let bytes = b"read-only verified bytes";
+        std::fs::write(&partial, bytes).unwrap();
+        let original = std::fs::metadata(&partial).unwrap().permissions();
+        let mut read_only = original.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(&partial, read_only).unwrap();
+
+        let result = sync_completed_partial(&partial).await;
+        let permissions = std::fs::metadata(&partial).unwrap().permissions();
+        let contents = std::fs::read(&partial).unwrap();
+        // Restore only this fixture's original attributes so cleanup also works on Windows.
+        std::fs::set_permissions(&partial, original).unwrap();
+
+        assert!(matches!(result, Err(WorkerError::Io(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied));
+        assert!(
+            permissions.readonly(),
+            "sync must not clear the read-only attribute"
+        );
+        assert_eq!(contents, bytes);
     }
 }

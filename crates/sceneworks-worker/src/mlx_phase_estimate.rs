@@ -7,6 +7,42 @@ use gen_core::{
     MemorySelection, MemoryStrategy, StagedWeightSchedule,
 };
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceAnchors {
+    layerwise_decode: LayerwiseAnchor,
+    sana: SanaAnchor,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LayerwiseAnchor {
+    lower_peak_gib: f64,
+    upper_peak_gib: f64,
+    lower_peak_upper_bound_gib: f64,
+    lower_edge: u32,
+    upper_edge: u32,
+    reference_edge: u32,
+    reference_decoder_bytes: u64,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SanaAnchor {
+    conditioning_peak_bytes: u64,
+    conditioning_weight_bytes: u64,
+    denoise_peak_bytes: u64,
+    transformer_weight_bytes: u64,
+    decode_peak_bytes: u64,
+    reference_edge: u32,
+    reference_tile_edge: u32,
+}
+fn workspace_anchors() -> &'static WorkspaceAnchors {
+    static ANCHORS: std::sync::OnceLock<WorkspaceAnchors> = std::sync::OnceLock::new();
+    ANCHORS.get_or_init(|| {
+        serde_json::from_str(include_str!("../../../config/mlx-workspace-anchors.json"))
+            .expect("packaged workspace anchors must be valid")
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Workspace {
     pub conditioning: u64,
@@ -51,12 +87,16 @@ pub(crate) fn layerwise_decode_workspace(
     {
         return None;
     }
-    const GIB: f64 = 1_073_741_824.0;
-    const REFERENCE_DECODER_BYTES: f64 = 97_583_622.0;
-    let tile_slope = (6.129 - 4.457) * GIB / (512_f64.powi(2) - 256_f64.powi(2));
-    let global = 4.4575 * GIB - REFERENCE_DECODER_BYTES - tile_slope * 256_f64.powi(2);
-    let area_scale =
-        (f64::from(geometry.width) * f64::from(geometry.height) / 1024_f64.powi(2)).max(1.0);
+    let anchor = &workspace_anchors().layerwise_decode;
+    let tile_slope = (anchor.upper_peak_gib - anchor.lower_peak_gib)
+        * crate::fit_gate::BYTES_PER_GIB
+        / (f64::from(anchor.upper_edge).powi(2) - f64::from(anchor.lower_edge).powi(2));
+    let global = anchor.lower_peak_upper_bound_gib * crate::fit_gate::BYTES_PER_GIB
+        - anchor.reference_decoder_bytes as f64
+        - tile_slope * f64::from(anchor.lower_edge).powi(2);
+    let area_scale = (f64::from(geometry.width) * f64::from(geometry.height)
+        / f64::from(anchor.reference_edge).powi(2))
+    .max(1.0);
     Some((global * area_scale + tile_slope * f64::from(edge).powi(2)).ceil() as u64)
 }
 
@@ -92,9 +132,13 @@ pub(crate) fn sana_workspace(
         return None;
     }
     let edge = edge.filter(|edge| (192..=512).contains(edge))?;
-    let area_scale =
-        (f64::from(geometry.width) * f64::from(geometry.height) / 1_048_576.0).max(1.0);
-    let tile_scale = (f64::from(edge) / 192.0).powi(2).max(1.0);
+    let anchor = &workspace_anchors().sana;
+    let area_scale = (f64::from(geometry.width) * f64::from(geometry.height)
+        / f64::from(anchor.reference_edge).powi(2))
+    .max(1.0);
+    let tile_scale = (f64::from(edge) / f64::from(anchor.reference_tile_edge))
+        .powi(2)
+        .max(1.0);
     let forwards = if classifier_free_guidance { 2.0 } else { 1.0 };
     // The base path adds five CFG merge tensors. The ten curated solvers retain at most two
     // history tensors; reserve 32 latent tensors for their full per-step expression graphs,
@@ -105,10 +149,15 @@ pub(crate) fn sana_workspace(
         0
     };
     Some(Workspace {
-        conditioning: ((3_864_237_044_u64 - 2_318_787_072) as f64 * forwards).ceil() as u64,
-        denoise: ((4_118_238_400_u64 - 1_992_341_184) as f64 * area_scale * forwards).ceil() as u64
+        conditioning: ((anchor.conditioning_peak_bytes - anchor.conditioning_weight_bytes) as f64
+            * forwards)
+            .ceil() as u64,
+        denoise: ((anchor.denoise_peak_bytes - anchor.transformer_weight_bytes) as f64
+            * area_scale
+            * forwards)
+            .ceil() as u64
             + carried,
-        decode: (3_140_425_096_f64 * area_scale.max(tile_scale)).ceil() as u64,
+        decode: (anchor.decode_peak_bytes as f64 * area_scale.max(tile_scale)).ceil() as u64,
     })
 }
 
@@ -182,6 +231,100 @@ pub(crate) fn peak(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packaged_workspace_anchors_preserve_original_estimate_outputs_and_provenance() {
+        use sha2::{Digest, Sha256};
+        let packaged: serde_json::Value =
+            serde_json::from_str(include_str!("../../../config/mlx-workspace-anchors.json"))
+                .unwrap();
+        let source = include_str!("../../../docs/calibration/sc-23648/sana-sprint-phases.json");
+        let source_json: serde_json::Value = serde_json::from_str(source).unwrap();
+        assert_eq!(
+            packaged["sana"]["provenance"]["sourceSha256"],
+            format!("{:x}", Sha256::digest(source.as_bytes()))
+        );
+        assert_eq!(
+            packaged["sana"]["conditioningPeakBytes"],
+            source_json["phaseCapture"]["conditioningPeakBytes"]
+        );
+        assert_eq!(
+            packaged["sana"]["denoisePeakBytes"],
+            source_json["phaseCapture"]["denoisePeakBytes"]
+        );
+        assert_eq!(
+            packaged["sana"]["decodePeakBytes"],
+            source_json["phaseCapture"]["decodePeakBytes"]
+        );
+        assert_eq!(
+            packaged["layerwiseDecode"]["provenance"]["actionsRun"],
+            31918926833_u64
+        );
+        let layerwise = DecoderWorkspaceFacts {
+            tiling: DecoderTilingRealization::LayerwiseConvolution,
+            activation_dtype_width: 4,
+            channels: vec![512, 512, 256, 128],
+            input_channels: vec![512, 512, 512, 256],
+            spatial_divisors: vec![8, 4, 2, 1],
+        };
+        let sana = DecoderWorkspaceFacts {
+            tiling: DecoderTilingRealization::WholeTail,
+            activation_dtype_width: 4,
+            channels: vec![1024, 1024, 512, 512, 256, 128],
+            input_channels: vec![32, 1024, 1024, 512, 512, 256],
+            spatial_divisors: vec![32, 16, 8, 4, 2, 1],
+        };
+        for width in [256, 512, 768, 1024, 2048] {
+            let geometry = MemoryGeometry {
+                width,
+                height: width,
+                frames: 1,
+                batch: 1,
+                reference_count: 0,
+            };
+            for edge in [256, 384, 512, 768] {
+                // Frozen pre-refactor equation: exact integer output equality, including ceil.
+                let tile_slope =
+                    (6.129 - 4.457) * 1_073_741_824.0 / (512_f64.powi(2) - 256_f64.powi(2));
+                let global = 4.4575 * 1_073_741_824.0 - 97_583_622.0 - tile_slope * 256_f64.powi(2);
+                let area_scale = (f64::from(width) * f64::from(width) / 1024_f64.powi(2)).max(1.0);
+                let expected =
+                    (global * area_scale + tile_slope * f64::from(edge).powi(2)).ceil() as u64;
+                assert_eq!(
+                    layerwise_decode_workspace(&layerwise, geometry, edge),
+                    Some(expected)
+                );
+            }
+            if width <= 1024 {
+                for edge in [192, 256, 384, 512] {
+                    for cfg in [false, true] {
+                        let got = sana_workspace(&sana, geometry, Some(edge), cfg).unwrap();
+                        let area = (f64::from(width) * f64::from(width) / 1_048_576.0).max(1.0);
+                        let tile = (f64::from(edge) / 192.0).powi(2).max(1.0);
+                        let forwards = if cfg { 2.0 } else { 1.0 };
+                        let carried = if cfg {
+                            37 * 32 * u64::from(width / 32).pow(2) * 4
+                        } else {
+                            0
+                        };
+                        assert_eq!(
+                            got.conditioning,
+                            ((3_864_237_044_u64 - 2_318_787_072) as f64 * forwards).ceil() as u64
+                        );
+                        assert_eq!(
+                            got.denoise,
+                            ((4_118_238_400_u64 - 1_992_341_184) as f64 * area * forwards).ceil()
+                                as u64
+                                + carried
+                        );
+                        assert_eq!(
+                            got.decode,
+                            (3_140_425_096_f64 * area.max(tile)).ceil() as u64
+                        );
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn sana_retains_dense_head_cost_and_accounts_for_cfg() {
         let facts = DecoderWorkspaceFacts {

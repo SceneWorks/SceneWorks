@@ -333,12 +333,7 @@ fn encode_png(mask: &GrayImage) -> ProjectStoreResult<Vec<u8>> {
 
 /// [`SubjectMaskRecord::revision`] of `png`: the first 16 hex chars of its SHA-256.
 fn mask_revision(png: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(png)
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::hashing::sha256_bytes(png)[..16].to_owned()
 }
 
 fn index_path(project_path: &Path, dataset_id: &str) -> PathBuf {

@@ -62,12 +62,7 @@ fn sdxl_advanced_available(request: &ImageRequest, settings: &Settings) -> bool 
 /// Resolve the IP-Adapter snapshot directory (`advanced.ipAdapterRepo` override, else the
 /// h94 default). The engine loader finds the ViT-H encoder + plus/plus-face weights inside.
 fn resolve_ip_adapter_dir(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
-    let repo = request
-        .advanced
-        .get("ipAdapterRepo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.advanced.get("ipAdapterRepo"))
         .unwrap_or(SDXL_IP_ADAPTER_REPO);
     huggingface_snapshot_dir(&settings.data_dir, repo)
 }

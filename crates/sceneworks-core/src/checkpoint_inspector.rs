@@ -44,7 +44,6 @@ const MAX_GGUF_DESCRIPTOR_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_GGUF_ITEMS: u64 = 1_000_000;
 const MAX_GGUF_STRING_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GGUF_ARRAY_DEPTH: usize = 16;
-const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_AGGREGATE_TENSOR_NAMES: usize = 65_536;
 const MAX_AGGREGATE_TENSOR_NAME_BYTES: usize = 32 * 1024 * 1024;
 const MAX_AGGREGATE_EVIDENCE_STRING_BYTES: usize = 64 * 1024 * 1024;
@@ -2412,10 +2411,20 @@ fn validate_json_descriptor(
     }
     dialects.sort();
     dialects.dedup();
-    let families = dialects
+    let explicit_families = dialects
         .iter()
-        .filter_map(|value| normalize_family(value))
+        .filter_map(|value| crate::model_family::exact_identity(value).map(str::to_owned))
         .collect::<BTreeSet<_>>();
+    let families = if explicit_families.is_empty() {
+        dialects
+            .iter()
+            .filter_map(|value| normalize_family(value))
+            .collect::<BTreeSet<_>>()
+    } else {
+        // A generic pipeline-class substring is weaker evidence than an explicit generation or
+        // family identity. Preserve conflicting exact declarations as a diagnostic below.
+        explicit_families
+    };
     if families.len() > 1 {
         return Err(CheckpointDiagnosticV1::error(
             CheckpointDiagnosticCodeV1::FamilyDialectConflict,
@@ -2450,39 +2459,7 @@ fn collect_strings(value: &Value, output: &mut Vec<String>) {
 }
 
 fn normalize_family(value: &str) -> Option<String> {
-    let lower = value.to_ascii_lowercase();
-    for (needle, family) in [
-        // MiniMax-H3's diffusers `_class_name` (`MiniMaxH3Transformer3DModel`, sc-26680). First so
-        // no broader needle below can claim it.
-        ("minimaxh3", "minimax-h3"),
-        ("minimax_h3", "minimax-h3"),
-        ("minimax-h3", "minimax-h3"),
-        ("stable diffusion xl", "sdxl"),
-        ("stablediffusionxl", "sdxl"),
-        ("sdxl", "sdxl"),
-        ("qwenimage", "qwen-image"),
-        ("qwen_image", "qwen-image"),
-        ("qwen-image", "qwen-image"),
-        ("flux2", "flux2"),
-        ("flux.2", "flux2"),
-        ("flux", "flux"),
-        ("wan", "wan-video"),
-        ("z_image", "z-image"),
-        ("z-image", "z-image"),
-        ("mageflow", "mage-flow"),
-        ("mage_flow", "mage-flow"),
-        ("mage-flow", "mage-flow"),
-        ("krea", "krea_2"),
-        ("ltx", "ltx-video"),
-        ("ideogram", "ideogram"),
-        ("anima", "anima"),
-        ("cosmos", "anima"),
-    ] {
-        if lower.contains(needle) {
-            return Some(family.to_owned());
-        }
-    }
-    None
+    crate::model_family::checkpoint_descriptor_family(value)
 }
 
 fn is_auxiliary_family(family: &str) -> bool {
@@ -2707,29 +2684,18 @@ fn snapshot_file(path: &Path, prefix_limit: u64) -> std::io::Result<ArtifactSnap
     });
     let mut file = File::open(path)?;
     let before = FileStamp::from_metadata(&file.metadata()?);
-    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
-    let mut hasher = Sha256::new();
     let mut prefix = Vec::new();
-    let mut size_bytes = 0_u64;
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    let (sha256, size_bytes) = crate::hashing::sha256_reader_with(&mut file, |_, event| {
+        if let crate::hashing::ReadEvent::After(bytes) = event {
+            let remaining = prefix_limit.saturating_sub(prefix.len() as u64) as usize;
+            prefix.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
         }
-        hasher.update(&buffer[..read]);
-        size_bytes = size_bytes.checked_add(read as u64).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "artifact size overflows u64",
-            )
-        })?;
-        let remaining = prefix_limit.saturating_sub(prefix.len() as u64) as usize;
-        prefix.extend_from_slice(&buffer[..read.min(remaining)]);
-    }
+        Ok(())
+    })?;
     let after = FileStamp::from_metadata(&file.metadata()?);
     let stable = before == after && size_bytes == after.len;
     Ok(ArtifactSnapshot {
-        sha256: format!("{:x}", hasher.finalize()),
+        sha256,
         size_bytes,
         prefix,
         before,
@@ -3483,5 +3449,53 @@ impl<'a> ByteReader<'a> {
             _ => return Err(format!("unsupported GGUF metadata value type {value_type}")),
         }
         .ok_or_else(|| "truncated metadata value".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod canonical_descriptor_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn exact_generation_outweighs_generic_class_and_exact_conflicts_remain_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("model")).unwrap();
+        let request =
+            CheckpointInspectionRequestV1::linked("fixture", temp.path(), "model", "root").unwrap();
+        let resolved = resolve_input(&request).unwrap();
+        for (class, family) in [
+            ("QwenImagePipeline", "qwen-image-2-1"),
+            ("KreaPipeline", "krea-realtime"),
+        ] {
+            let raw =
+                serde_json::to_vec(&json!({"_class_name":class,"architecture":family})).unwrap();
+            let evidence = validate_json_descriptor(
+                &resolved,
+                &temp.path().join("model/config.json"),
+                "model/config.json",
+                &raw,
+                raw.len() as u64,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(evidence.family.as_deref(), Some(family));
+        }
+        let raw =
+            serde_json::to_vec(&json!({"architectures":["qwen-image", "qwen-image-2-1"]})).unwrap();
+        let error = validate_json_descriptor(
+            &resolved,
+            &temp.path().join("model/config.json"),
+            "model/config.json",
+            &raw,
+            raw.len() as u64,
+            &mut Vec::new(),
+        )
+        .err()
+        .expect("conflicting explicit families must be refused");
+        assert_eq!(
+            error.code,
+            CheckpointDiagnosticCodeV1::FamilyDialectConflict
+        );
     }
 }
