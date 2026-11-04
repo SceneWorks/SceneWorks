@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use reqwest::header;
@@ -32,8 +31,6 @@ use sceneworks_core::lora_family::{
 // `classify_adapter` as the only caller — which is gated.
 #[cfg(native_lane)]
 use sceneworks_core::lora_family::read_safetensors_header;
-#[cfg(native_lane)]
-use sceneworks_core::lora_family::resolve_adapter_in_dir;
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
     validate_lora_url_host, validate_public_ip,
@@ -44,7 +41,7 @@ use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use tracing::Level;
@@ -423,6 +420,7 @@ use media_jobs::*;
 // `sceneworks_core::media_convert` routine (sips on macOS, ffmpeg elsewhere).
 mod image_decode;
 mod image_jobs;
+mod parquet_row;
 use image_jobs::*;
 
 /// Model-scoped enhancement TOKEN ceiling shared by API enqueue and worker/native parsing.
@@ -2898,3 +2896,8 @@ mod cpu_preparation_startup_tests {
         }
     }
 }
+
+mod weights_source;
+
+#[cfg(any(test, native_lane))]
+mod adapter_resolution;

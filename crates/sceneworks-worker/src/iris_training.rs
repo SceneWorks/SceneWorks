@@ -1362,9 +1362,7 @@ mod job_tests {
                 let mut seen = loader_seen.lock().unwrap();
                 seen.loads += 1;
                 for (id, source) in &spec.components {
-                    let path = match source {
-                        WeightsSource::Dir(path) | WeightsSource::File(path) => path.clone(),
-                    };
+                    let path = crate::weights_source::WeightsSourceExt::path(source).to_path_buf();
                     seen.components.push((id.clone(), path));
                 }
                 if let WeightsSource::Dir(dir) = &spec.weights {

@@ -7,20 +7,9 @@
 //! like steps/guidanceScale/mlxQuantize/poses/angleSet/controlScale/referenceStrength
 //! and the resolved model manifest entry), so adding a family needs no DTO change.
 //!
-//! **Geometry, deliberately un-normalized (sc-12384).** Unlike the video request
-//! ([`crate::video_request`], which floors dims to `limits.requiresDimensionsMultipleOf`
-//! and fits them into `limits.maxPixels` via `normalized_dimensions`), the image lane
-//! applies NO stride/area refit — `width`/`height` are only sanity-clamped to
-//! `256..=4096` and handed to the engine as-is. The engine is the single authority on
-//! image geometry: it rejects an illegal size loudly rather than the app silently
-//! substituting a different one (the failure mode a refit twin would reintroduce — cf.
-//! the per-side clamp `image_jobs::sensenova::sensenova_dim` was doing to over-cap
-//! SenseNova buckets before sc-12384 trimmed them). What keeps that contract honest is
-//! not a runtime normalize but a build-time guard: every image model's advertised
-//! `limits.resolutions` + default must fit its PINNED engine's `[min_size, max_size]`
-//! envelope, asserted by `sceneworks_worker::engines`'s
-//! `shipped_image_geometry_is_within_the_pinned_engine_envelope`. So the manifest may
-//! only advertise buckets the engine honors, and no app-layer refit is needed or wanted.
+//! Geometry is validated at API enqueue and worker dispatch by [`validate_image_request_payload`].
+//! Accepted dimensions are preserved verbatim, including declared floors below 256 pixels.
+//! The engine remains authoritative for geometry beyond the declared product envelope.
 
 pub mod flux3;
 
@@ -28,8 +17,8 @@ use serde_json::Value;
 
 use crate::contracts::{HiresFixRequest, ImageUpscaleRequest, JsonObject};
 use crate::payload_util::{
-    array_or_empty, clamped_u32, declared_resolution, int_array, nonempty_string_or,
-    object_or_empty, optional_i64, optional_id, string_list, string_or,
+    array_or_empty, declared_resolution, int_array, nonempty_string_or, object_or_empty,
+    optional_i64, optional_id, string_list, string_or,
 };
 
 /// Default model when the payload omits one (matches the Python worker).
@@ -148,13 +137,13 @@ pub struct ImageRequest {
     pub prompts: Vec<String>,
     pub negative_prompt: String,
     pub model: String,
-    /// Number of images, clamped to 1..=8.
+    /// Number of images; validated to 1..=8 before enqueue/load.
     pub count: u32,
     /// Base seed (per-image seeds in `seeds` take precedence).
     pub seed: Option<i64>,
     /// Explicit per-image seeds.
     pub seeds: Vec<i64>,
-    /// Output dimensions, clamped to 256..=4096.
+    /// Output dimensions, preserved verbatim after model-envelope validation.
     pub width: u32,
     pub height: u32,
     pub style_preset: String,
@@ -249,14 +238,6 @@ impl ImageRequest {
         let (default_width, default_height) = default_resolution(&model_manifest_entry)
             .unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
         let default_count = default_count(&model_manifest_entry).unwrap_or(DEFAULT_COUNT);
-        // The sanity floor yields to a model's DECLARED `limits.minDimension` below it (sc-25681):
-        // the API admits a declared envelope down to its own floor (Iris-3B renders from 16 px,
-        // Qwen-Image 2.1 from 32), and the blanket 256 here silently re-sized those requests on the
-        // worker — an accepted size that never reached the engine. Every model that declares no
-        // floor (or one at/above 256) keeps the historical clamp.
-        let min_dimension = crate::video_request::image_dimension_envelope(&model_manifest_entry)
-            .min
-            .map_or(MIN_DIMENSION, |declared| declared.min(MIN_DIMENSION));
         Self {
             project_id: string_or(payload, "projectId", ""),
             mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
@@ -274,21 +255,11 @@ impl ImageRequest {
                 .unwrap_or_default(),
             negative_prompt: string_or(payload, "negativePrompt", ""),
             model: nonempty_string_or(payload, "model", DEFAULT_MODEL),
-            count: clamped_u32(payload.get("count"), default_count, MIN_COUNT, MAX_COUNT),
+            count: unsigned_or(payload.get("count"), default_count),
             seed: optional_i64(payload, "seed"),
             seeds: int_array(payload, "seeds"),
-            width: clamped_u32(
-                payload.get("width"),
-                default_width,
-                min_dimension,
-                MAX_DIMENSION,
-            ),
-            height: clamped_u32(
-                payload.get("height"),
-                default_height,
-                min_dimension,
-                MAX_DIMENSION,
-            ),
+            width: unsigned_or(payload.get("width"), default_width),
+            height: unsigned_or(payload.get("height"), default_height),
             style_preset: nonempty_string_or(payload, "stylePreset", DEFAULT_STYLE_PRESET),
             style_id: optional_id(payload, "styleId"),
             loras: array_or_empty(payload, "loras"),
@@ -314,8 +285,8 @@ impl ImageRequest {
 }
 
 /// Parse the optional `upscale` object (the Image Studio "Upscale" toggle). A missing or
-/// malformed value falls back to the disabled default, so a bad payload never aborts a
-/// generation — it just skips upscaling.
+/// malformed value falls back to the disabled default for tolerant legacy reads. Execution
+/// boundaries call `validate_image_request_payload` first and reject malformed controls.
 fn parse_upscale(payload: &JsonObject) -> ImageUpscaleRequest {
     payload
         .get("upscale")
@@ -896,21 +867,22 @@ mod tests {
     }
 
     #[test]
-    fn clamps_count_and_dimensions() {
-        let request = ImageRequest::from_payload(&payload(json!({
-            "projectId": "p", "count": 99, "width": 10, "height": 99999
-        })));
-        assert_eq!(request.count, 8);
-        assert_eq!(request.width, 256);
-        assert_eq!(request.height, 4096);
-
-        let low = ImageRequest::from_payload(&payload(json!({ "projectId": "p", "count": 0 })));
-        assert_eq!(low.count, 1);
+    fn preserves_raw_count_and_dimensions_for_explicit_boundary_validation() {
+        let raw = payload(json!({"projectId":"p","count":99,"width":10,"height":99999}));
+        let request = ImageRequest::from_payload(&raw);
+        assert_eq!(
+            (request.count, request.width, request.height),
+            (99, 10, 99999)
+        );
+        assert!(validate_image_request_payload(&raw, &JsonObject::new()).is_err());
+        let low = payload(json!({"projectId":"p","count":0}));
+        assert_eq!(ImageRequest::from_payload(&low).count, 0);
+        assert!(validate_image_request_payload(&low, &JsonObject::new()).is_err());
     }
 
     /// sc-25681: a model's declared `limits.minDimension` below the 256 sanity floor is honoured
     /// (the API admits it, so the worker must not re-size it); a declared floor above 256, or none,
-    /// keeps the historical clamp.
+    /// is enforced by the shared boundary, without resizing the parsed value.
     ///
     /// *Mutation that reds this:* clamp to the constant `MIN_DIMENSION` again.
     #[test]
@@ -924,8 +896,8 @@ mod tests {
         assert_eq!(request(iris.clone(), 64).width, 64);
         assert_eq!(
             request(iris, 8).height,
-            16,
-            "still clamped to the declared floor"
+            8,
+            "parser preserves intent; the shared boundary rejects below-floor requests"
         );
         let high = json!({ "limits": { "minDimension": 512 } });
         assert_eq!(
@@ -933,7 +905,7 @@ mod tests {
             300,
             "the sanity floor never rises"
         );
-        assert_eq!(request(json!({}), 64).width, 256);
+        assert_eq!(request(json!({}), 64).width, 64);
     }
 
     /// sc-25681: a native prompt batch maps image `k` to `prompts[k % len]` (prompt-minor) and
@@ -1178,5 +1150,121 @@ mod tests {
         )
         .expect("conflict refused");
         assert!(reason.contains("flux3_klein"), "{reason}");
+    }
+}
+
+fn unsigned_or(value: Option<&Value>, default: u32) -> u32 {
+    value
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(default)
+}
+
+/// Count validation shared by typed HTTP requests and raw worker payloads.
+pub fn image_count_error(count: u32) -> Option<String> {
+    (!(MIN_COUNT..=MAX_COUNT).contains(&count)).then(|| "count must be between 1 and 8".to_owned())
+}
+
+/// Validate raw queued intent before tolerant parsing can hide malformed fields. Uses the canonical
+/// manifest's existing per-model envelope and FLUX.3's reference-derived geometry contract.
+pub fn validate_image_request_payload(
+    payload: &JsonObject,
+    entry: &JsonObject,
+) -> Result<(), String> {
+    for key in ["count", "width", "height"] {
+        if let Some(value) = payload.get(key).filter(|v| !v.is_null()) {
+            if value.as_u64().and_then(|n| u32::try_from(n).ok()).is_none() {
+                return Err(format!("{key} must be an unsigned integer"));
+            }
+        }
+    }
+    let count = unsigned_or(
+        payload.get("count"),
+        default_count(entry).unwrap_or(DEFAULT_COUNT),
+    );
+    if let Some(error) = image_count_error(count) {
+        return Err(error);
+    }
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_MODEL);
+    let reference_derived = flux3::is_model(model) && !flux3::parse(payload)?.asset_ids.is_empty();
+    if !reference_derived {
+        let (width, height) =
+            default_resolution(entry).unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
+        if let Some(error) = crate::video_request::image_dimension_error(
+            model,
+            unsigned_or(payload.get("width"), width),
+            unsigned_or(payload.get("height"), height),
+            entry,
+            MIN_DIMENSION,
+            MAX_DIMENSION,
+        ) {
+            return Err(error);
+        }
+    }
+    let upscale = match payload.get("upscale").filter(|v| !v.is_null()) {
+        None => ImageUpscaleRequest::default(),
+        Some(value) => serde_json::from_value::<ImageUpscaleRequest>(value.clone())
+            .map_err(|error| format!("upscale: {error}"))?,
+    };
+    upscale.validate()
+}
+
+#[cfg(test)]
+mod request_validation_tests {
+    use super::*;
+    use serde_json::json;
+    fn check(value: Value, entry: Value) -> Result<(), String> {
+        validate_image_request_payload(value.as_object().unwrap(), entry.as_object().unwrap())
+    }
+    #[test]
+    fn rejects_bad_counts_dimensions_and_upscale_without_clamping() {
+        for value in [
+            json!({"count":0}),
+            json!({"count":9}),
+            json!({"count":"2"}),
+            json!({"width":0}),
+            json!({"width":4097}),
+            json!({"height":-1}),
+            json!({"width":1.5}),
+            json!({"upscale":{"enabled":true,"factor":3}}),
+        ] {
+            assert!(check(value, json!({})).is_err());
+        }
+        assert!(check(
+            json!({"width":1024,"height":768,"count":8,"upscale":{"enabled":true,"factor":4}}),
+            json!({})
+        )
+        .is_ok());
+    }
+    #[test]
+    fn declared_small_geometry_is_preserved_and_enforced() {
+        let entry = json!({"limits":{"minDimension":16,"maxDimension":2048,"requiresDimensionsMultipleOf":16}});
+        let payload = json!({"width":16,"height":32,"count":1,"modelManifestEntry":entry});
+        assert!(check(payload.clone(), entry.clone()).is_ok());
+        let parsed = ImageRequest::from_payload(payload.as_object().unwrap());
+        assert_eq!((parsed.width, parsed.height), (16, 32));
+        assert!(check(json!({"width":17,"height":32}), entry.clone()).is_err());
+        assert!(check(json!({"width":16,"height":32}), json!({})).is_err());
+        assert!(check(json!({"width":2049,"height":32}), entry).is_err());
+    }
+    #[test]
+    fn flux3_reference_floor_and_omitted_sides_keep_provider_contract() {
+        assert!(check(
+            json!({"model":"flux3_klein","referenceAssetId":"a","width":16}),
+            json!({"limits":{"minDimension":64}})
+        )
+        .is_ok());
+        assert!(check(
+            json!({"model":"flux3_klein","referenceAssetId":"a","width":17}),
+            json!({})
+        )
+        .is_err());
     }
 }
