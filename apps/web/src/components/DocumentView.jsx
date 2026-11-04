@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import React from "react";
 import { assetUrl } from "./assetMedia.jsx";
 
@@ -6,6 +7,7 @@ import { assetUrl } from "./assetMedia.jsx";
 // the normalized `url`), falling back to building the file URL from projectId + path
 // (used by the Library reader, which only has the document asset itself).
 export function DocumentView({ segments, assets = [], projectId }) {
+  useMediaTicket();
   if (!Array.isArray(segments) || !segments.length) {
     return <p className="empty-panel">This document has no content.</p>;
   }

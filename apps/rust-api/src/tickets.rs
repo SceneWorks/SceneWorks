@@ -145,6 +145,13 @@ impl TicketStore {
             .map(|entry| entry.event_context)
     }
 
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self, ticket: &str) {
+        let mut state = self.state.lock();
+        let entry = state.tickets.get_mut(ticket).expect("test ticket exists");
+        entry.expires_at = Instant::now() - Duration::from_secs(1);
+    }
+
     /// Non-consuming check for multi-use (media) tickets.
     pub(crate) fn validate(&self, ticket: &str) -> bool {
         if ticket.is_empty() {

@@ -1,3 +1,4 @@
+import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, open, readdir, writeFile, readFile, stat, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
@@ -6030,7 +6031,7 @@ test("the watchdog guard's footprint hard stop is the incident and host RAM, nev
 });
 
 test("the runner's incident footprint and unified reserve are the Rust declarations, not second literals", async () => {
-  const adapter = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8");
+  const adapter = await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"));
   const crash = /const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES: u64 = ([\d_]+);/.exec(adapter);
   assert.ok(crash, "the adapter declares the incident footprint");
   assert.equal(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES, Number(crash[1].replaceAll("_", "")));
@@ -6042,7 +6043,7 @@ test("the runner's incident footprint and unified reserve are the Rust declarati
   // And the worker READS it rather than restating it.
   const fitGate = await readFile(path.join(ROOT, "crates/sceneworks-worker/src/fit_gate.rs"), "utf8");
   assert.match(fitGate, /LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 =\s*sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB;/);
-  const mlxFitGate = await readFile(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs"), "utf8");
+  const mlxFitGate = await rustFacadeSource(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs"));
   assert.match(mlxFitGate, /const HEADROOM_GB: f64 = sceneworks_core::memory_anchor::MLX_GENERIC_HEADROOM_GB;/);
 });
 

@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { catalogsApi } from "../api/catalogsResources.js";
 import { projectsApi } from "../api/projectsResources.js";
 import { systemApi } from "../api/systemResources.js";
@@ -256,6 +257,7 @@ function curationFromSaved(saved) {
 }
 
 function CatalogCuration({ catalogId, token }) {
+  useMediaTicket();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(PRIMARY_CURATION);
   const [items, setItems] = useState([]);

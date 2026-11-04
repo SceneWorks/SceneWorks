@@ -905,6 +905,146 @@ pub(crate) async fn ensure_job_payload_license_acknowledged(
     .await
 }
 
+async fn queue_catalog_download(
+    state: AppState,
+    payload: JsonObject,
+    requested_gpu: String,
+    binding: Value,
+) -> Result<JobSnapshot, ApiError> {
+    create_generation_job_with_binding(
+        state,
+        JobType::ModelDownload,
+        None,
+        None,
+        payload,
+        requested_gpu,
+        (None, Some(binding)),
+    )
+    .await
+}
+
+fn catalog_download_binding(
+    model_id: &str,
+    owner_id: &str,
+    kind: &str,
+    row: &Value,
+    payload: &JsonObject,
+    purpose: Option<&str>,
+    component: Option<&str>,
+) -> Value {
+    json!({"modelId": model_id, "ownerId": owner_id, "kind": kind, "row": row,
+        "payload": payload, "purpose": purpose, "component": component})
+}
+
+pub(crate) async fn validate_catalog_download_replay(
+    state: &AppState,
+    binding: &Value,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let invalid = || {
+        ApiError::bad_request(
+            "The saved catalog download no longer matches its authorized selection",
+        )
+    };
+    // A patch cannot turn an accepted selection into a different worker operation.
+    if !sceneworks_core::jobs_store::download_binding_matches_payload(binding, payload) {
+        return Err(invalid());
+    }
+    let model_id = binding
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let owner_id = binding
+        .get("ownerId")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let row = binding.get("row").ok_or_else(invalid)?;
+    let catalog = model_catalog(state).await?;
+    let model = catalog
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(model_id))
+        .ok_or_else(invalid)?;
+    let owner = catalog
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(owner_id))
+        .ok_or_else(invalid)?;
+    let valid = match binding.get("kind").and_then(Value::as_str) {
+        Some("download") if model_id == owner_id => model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                rows.contains(row)
+                    && binding
+                        .get("selectedDownload")
+                        .is_none_or(|selected| rows.contains(selected))
+            }),
+        Some("conditional") if model_id == owner_id => {
+            let purpose = binding
+                .get("purpose")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            sceneworks_core::model_usage_policy::conditional_component_downloads(model, purpose)
+                .map_err(|_| invalid())?
+                .contains(row)
+        }
+        Some("importComponent") => {
+            if model.get("baseModel").and_then(Value::as_str) != Some(owner_id) {
+                return Err(invalid());
+            }
+            let component = binding
+                .get("component")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            let current = bound_import_component_download(
+                model,
+                owner,
+                component,
+                None,
+                &state.settings.data_dir,
+                true,
+            )
+            .map_err(|_| invalid())?;
+            ensure_inherited_component_licenses_acknowledged(
+                state,
+                model.as_object().ok_or_else(invalid)?,
+                false,
+            )
+            .await?;
+            &current == row
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(invalid());
+    }
+    for entry in [model, owner] {
+        if model_requires_license_acknowledgment(entry)
+            && crate::yue2_jobs::current_license_acknowledgment(state, entry)
+                .await?
+                .is_none()
+        {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                detail: "Current model license acknowledgment is required".to_owned(),
+                code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+                context: None,
+            });
+        }
+    }
+    let repos = LICENSE_GATED_REPO_PAYLOAD_KEYS
+        .iter()
+        .map(|key| payload.get(*key).and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    ensure_license_acknowledged_for_source_inner(
+        state,
+        &repos,
+        payload.get("sourceUrl").and_then(Value::as_str),
+        false,
+        Some(owner_id),
+    )
+    .await
+}
+
 pub(crate) async fn create_model_download_job(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -961,8 +1101,17 @@ pub(crate) async fn create_model_download_job(
             component_id,
             payload.variant.as_deref(),
             &state.settings.data_dir,
+            false,
         )
         .map_err(ApiError::bad_request)?;
+        if payload.license_acknowledged {
+            for entry in [&model, &base] {
+                if model_requires_license_acknowledgment(entry) {
+                    crate::yue2_jobs::record_license_acknowledgment(&state, entry, "download")
+                        .await?;
+                }
+            }
+        }
         ensure_inherited_component_licenses_acknowledged(
             &state,
             model.as_object().expect("validated import"),
@@ -991,13 +1140,20 @@ pub(crate) async fn create_model_download_job(
             "importComponentTier".to_owned(),
             model["importComponentTier"].clone(),
         );
-        let job = create_generation_job(
+        let binding = catalog_download_binding(
+            &model_id,
+            base["id"].as_str().expect("validated base"),
+            "importComponent",
+            &download,
+            &job_payload,
+            None,
+            Some(component_id),
+        );
+        let job = queue_catalog_download(
             state,
-            JobType::ModelDownload,
-            None,
-            None,
             job_payload,
             requested_gpu_or_auto(payload.requested_gpu),
+            binding,
         )
         .await?;
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
@@ -1026,6 +1182,7 @@ pub(crate) async fn create_model_download_job(
             ApiError::bad_request("Model does not define a Hugging Face download")
         })?,
     };
+    let selected_download = download.clone();
     // sc-24112: a DECLARED-but-unpublished tier is refused HERE, at the one place a download job is
     // created, rather than by hiding the row — the catalog must keep enumerating it so the tier
     // axis, the memory ladder and the picker are all real before the bytes exist. Its revision is
@@ -1218,27 +1375,30 @@ pub(crate) async fn create_model_download_job(
             payload.license_acknowledged,
             &state.settings.data_dir,
         )?;
-        create_generation_job(
-            state.clone(),
-            JobType::ModelDownload,
+        let binding = catalog_download_binding(
+            &model_id,
+            &model_id,
+            "download",
+            co_requisite,
+            &co_payload,
             None,
             None,
-            co_payload,
-            requested_gpu.clone(),
-        )
-        .await?;
+        );
+        queue_catalog_download(state.clone(), co_payload, requested_gpu.clone(), binding).await?;
     }
 
     // The primary job is the one returned to the caller (its id is what the download UI tracks).
-    let job = create_generation_job(
-        state,
-        JobType::ModelDownload,
+    let mut binding = catalog_download_binding(
+        &model_id,
+        &model_id,
+        "download",
+        &download,
+        &job_payload,
         None,
         None,
-        job_payload,
-        requested_gpu,
-    )
-    .await?;
+    );
+    binding["selectedDownload"] = selected_download;
+    let job = queue_catalog_download(state, job_payload, requested_gpu, binding).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -1352,15 +1512,18 @@ pub(crate) async fn create_conditional_components_download_jobs(
             payload.license_acknowledged,
             &state.settings.data_dir,
         )?;
-        let job = create_generation_job(
-            state.clone(),
-            JobType::ModelDownload,
+        let binding = catalog_download_binding(
+            &model_id,
+            &model_id,
+            "conditional",
+            row,
+            &job_payload,
+            Some(&purpose),
             None,
-            None,
-            job_payload,
-            requested_gpu.clone(),
-        )
-        .await?;
+        );
+        let job =
+            queue_catalog_download(state.clone(), job_payload, requested_gpu.clone(), binding)
+                .await?;
         components.push(json!({
             "componentId": component_id,
             "repo": row.get("repo"),
@@ -1506,6 +1669,7 @@ fn bound_import_component_download(
     component_id: &str,
     requested_variant: Option<&str>,
     data_dir: &FsPath,
+    allow_installed: bool,
 ) -> Result<Value, String> {
     use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
     let entry = model
@@ -1547,7 +1711,9 @@ fn bound_import_component_download(
                 .into(),
         );
     }
-    if imported_component_presence(data_dir, row) == CoRequisitePresence::Installed {
+    if !allow_installed
+        && imported_component_presence(data_dir, row) == CoRequisitePresence::Installed
+    {
         return Err("This imported resident component is already installed".into());
     }
     Ok(row.clone())
@@ -18245,7 +18411,7 @@ mod minimax_h3_import_declaration_tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
         }
-        let (status, jobs) = request(router, "GET", "/api/v1/jobs", Value::Null).await;
+        let (status, jobs) = request(router.clone(), "GET", "/api/v1/jobs", Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{jobs}");
         assert_eq!(
             jobs.as_array().unwrap().len(),
@@ -18253,6 +18419,44 @@ mod minimax_h3_import_declaration_tests {
             "repair must not queue a stock DiT or unrelated component: {jobs}"
         );
         assert!(store.resolve(&compiled.checkpoint_id).is_ok());
+        let repair_job_id = job["id"].as_str().unwrap();
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                router.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{repair_job_id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+            let (status, replay) = request(
+                router.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{repair_job_id}/{operation}"),
+                json!({"payloadChanges":{"componentId":"text_encoder"}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {replay}");
+        }
+        assert!(
+            sceneworks_core::license_acknowledgments::revoke_acknowledgment(
+                &sceneworks_core::license_acknowledgments::acknowledgments_file(
+                    &settings.config_dir
+                ),
+                inherited_id
+            )
+            .unwrap()
+        );
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                router.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{repair_job_id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{operation}: {replay}");
+        }
     }
 
     #[tokio::test]

@@ -4564,6 +4564,8 @@
           "families": [
             "wan-video"
           ],
+          "imageConditionedBackbone": true,
+          "sizeClass": "5b",
           "types": [
             "style",
             "motion",

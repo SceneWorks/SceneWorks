@@ -1,6 +1,7 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import React, { useCallback, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
-import { AssetThumbnail, assetDisplayUrl, assetUrl } from "../components/assetMedia.jsx";
+import { AssetThumbnail, assetUrl } from "../components/assetMedia.jsx";
 import { assetCanCarryWorkflow, stripWorkflowUrl } from "../assetActions.js";
 import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbedPreferences.js";
 import { yue2AssetFilename } from "../yue2Policy.js";
@@ -85,7 +86,7 @@ export function ReferenceTile({ label, hint, asset, assets, onChange, required =
       options: assets.map((item) => ({
         value: item.id,
         label: item.displayName ?? item.id,
-        thumbnail: assetDisplayUrl(item),
+        thumbnailAsset: item,
       })),
       onSelect: (id) => {
         onChange(id);
@@ -343,6 +344,7 @@ export function StudioResults({ job, assets, type, columns, meta, pendingCount =
 // strip is server-side because a bare `<a download>` cannot transform bytes; everything here is
 // one query param on the URL the anchor already points at, ticket and all.
 export function DownloadButton({ asset, className = "su-result-action su-result-action--dl", label = null }) {
+  useMediaTicket();
   const anchorRef = useRef(null);
   const strippedRef = useRef(null);
   const { toast } = useSimpleUi();

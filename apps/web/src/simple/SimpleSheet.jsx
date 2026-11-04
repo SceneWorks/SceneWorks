@@ -1,5 +1,7 @@
 import { useDialogFocus } from "../components/Modal.jsx";
 import React, { useRef } from "react";
+import { getMediaTicket, subscribeMediaTicket } from "../api.js";
+import { assetDisplayUrl } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 
 // The Simple UI's one picker/overlay chrome (design handoff): a bottom sheet on phone
@@ -46,6 +48,7 @@ export function SimpleSheet({ title, onClose, phone, children, labelId = "su-she
 //   grid  — size & aspect (3-up tiles with a label + sub-label)
 //   pills — duration (wrapping pills)
 export function SimpleSheetOptions({ kind, options, onSelect }) {
+  React.useSyncExternalStore(subscribeMediaTicket, getMediaTicket, getMediaTicket);
   if (kind === "grid") {
     return (
       <div className="su-option-grid">
@@ -93,7 +96,9 @@ export function SimpleSheetOptions({ kind, options, onSelect }) {
           onClick={() => onSelect(option.value)}
           type="button"
         >
-          {option.thumbnail ? <img alt="" src={option.thumbnail} /> : null}
+          {option.thumbnailAsset || option.thumbnail ? (
+            <img alt="" referrerPolicy="no-referrer" src={option.thumbnailAsset ? assetDisplayUrl(option.thumbnailAsset) : option.thumbnail} />
+          ) : null}
           <span>{option.label}</span>
           {option.active ? <Icon.Check size={16} /> : null}
         </button>
