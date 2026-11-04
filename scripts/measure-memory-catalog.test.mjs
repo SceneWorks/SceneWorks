@@ -821,7 +821,7 @@ test("FLUX3 producer dispatch: all sixteen canonical anchors are published activ
   }
   for (const backend of ["candle", "mlx"]) {
     const relative = `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`;
-    const source = await readFile(path.join(ROOT, relative), "utf8");
+    const source = await rustFacadeSource(path.join(ROOT, relative));
     assert.ok(adapterCapturableProviders(source, relative).includes("flux3_klein"), `${backend} must dispatch to a real modular producer`);
     const module = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}_flux3.rs`), "utf8");
     assert.match(module, /catalog\.media\(\)|\.media\(\)/);
@@ -5086,7 +5086,7 @@ function adapterArms() {
         Object.entries(ADAPTER_BIN_PATHS).map(async ([backend, relative]) => [
           backend,
           adapterCapturableProviders(
-            await readFile(path.join(ROOT, relative), "utf8"),
+            await rustFacadeSource(path.join(ROOT, relative)),
             relative,
           ),
         ]),
