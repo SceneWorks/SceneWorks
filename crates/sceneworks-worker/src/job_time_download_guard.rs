@@ -1490,7 +1490,7 @@ fn test_only_files(tree: &BTreeMap<String, String>, root_module: &str) -> BTreeS
         let declared = module_declarations(code);
         let production = module_declarations(&strip_cfg_test_items(code));
         for name in &declared {
-            if let Some(target) = resolve_module(rel, name, tree, root_module) {
+            if let Some(target) = resolve_module(rel, name, code, tree, root_module) {
                 children
                     .entry(rel.as_str())
                     .or_default()
@@ -1581,9 +1581,49 @@ fn include_paths(code: &str) -> Vec<String> {
 fn resolve_module(
     rel: &str,
     name: &str,
+    code: &str,
     tree: &BTreeMap<String, String>,
     root_module: &str,
 ) -> Option<String> {
+    fn explicit_path(items: &[syn::Item], name: &str) -> Option<String> {
+        for item in items {
+            if let syn::Item::Mod(module) = item {
+                if module.ident == name && module.content.is_none() {
+                    for attribute in &module.attrs {
+                        if attribute.path().is_ident("path") {
+                            if let syn::Meta::NameValue(value) = &attribute.meta {
+                                if let syn::Expr::Lit(syn::ExprLit {
+                                    lit: syn::Lit::Str(path),
+                                    ..
+                                }) = &value.value
+                                {
+                                    return Some(path.value());
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((_, children)) = &module.content {
+                    if let Some(path) = explicit_path(children, name) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+        None
+    }
+    if let Some(path) = syn::parse_file(code)
+        .ok()
+        .and_then(|file| explicit_path(&file.items, name))
+    {
+        let parent = rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        let target = if parent.is_empty() {
+            path
+        } else {
+            format!("{parent}/{path}")
+        };
+        return tree.contains_key(&target).then_some(target);
+    }
     let dir = if rel == root_module || rel.ends_with("/mod.rs") {
         rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
     } else {
@@ -1600,6 +1640,29 @@ fn resolve_module(
     ]
     .into_iter()
     .find(|candidate| tree.contains_key(candidate))
+}
+
+#[test]
+fn path_attributes_preserve_test_only_and_production_module_edges() {
+    let root = r#"
+        #[cfg(test)]
+        #[path = "renamed_fixture.rs"]
+        mod fixture;
+        #[path = "renamed_runtime.rs"]
+        mod runtime;
+    "#;
+    let tree = BTreeMap::from([
+        ("bin/lane.rs".to_owned(), root.to_owned()),
+        ("bin/renamed_fixture.rs".to_owned(), String::new()),
+        ("bin/renamed_runtime.rs".to_owned(), String::new()),
+    ]);
+    let test_only = test_only_files(&tree, "lib.rs");
+    assert!(test_only.contains("bin/renamed_fixture.rs"));
+    assert!(!test_only.contains("bin/renamed_runtime.rs"));
+    assert_eq!(
+        resolve_module("bin/lane.rs", "runtime", root, &tree, "lib.rs"),
+        Some("bin/renamed_runtime.rs".to_owned())
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
