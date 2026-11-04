@@ -61,16 +61,7 @@ const CONTROL_VOICE_MALE: &str = "am_michael";
 /// Find the single HF-hub snapshot dir for `models--<owner>--<repo>` under `~/.cache/huggingface`,
 /// or `None` if the cache is laid out elsewhere (then the caller falls back to the env override).
 fn hub_snapshot(owner_repo: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let cache_key = format!("models--{}", owner_repo.replace('/', "--"));
-    let snapshots = Path::new(&home)
-        .join(".cache/huggingface/hub")
-        .join(cache_key)
-        .join("snapshots");
-    let mut entries = std::fs::read_dir(&snapshots).ok()?;
-    entries
-        .find_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_dir())
+    super::smoke_support::cached_snapshot(owner_repo, |_| true).filter(|root| root.is_dir())
 }
 
 /// Resolve a model dir from an env override or the HF hub cache, panicking with a clear message if
@@ -904,26 +895,16 @@ fn chatterbox_offline_install_parity_smoke() {
 
     let settings = crate::Settings {
         api_url: "http://127.0.0.1:1".to_owned(),
-        access_token: None,
-        data_dir: data_dir.path().to_path_buf(),
         config_dir: data_dir.path().join("config"),
         worker_id: "sc-13541".to_owned(),
         gpu_id: "gpu-0".to_owned(),
-        is_child_worker: false,
-        poll_seconds: 1,
         heartbeat_seconds: 5,
-        shutdown_timeout_seconds: 1,
         huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
         huggingface_token: std::env::var("HF_TOKEN").ok(),
-        credentials: Vec::new(),
         max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
         max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
-        allow_private_lora_urls: false,
-        utility_workers: 1,
         backend_mlx_enabled: true,
-        backend_candle_enabled: false,
-        gpu_memory_limit_bytes: 0,
-        external_model_roots: Vec::new(),
+        ..crate::Settings::for_test(data_dir.path().to_path_buf())
     };
 
     // ── Step 2: install (the exact executor a Models-screen install runs), into the ISOLATED cache ─
