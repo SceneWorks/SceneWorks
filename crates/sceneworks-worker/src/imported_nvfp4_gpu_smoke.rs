@@ -20,8 +20,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path as AxumPath, State};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::routing::post;
+use axum::Json;
 use sceneworks_core::checkpoint_weight_facts::{CheckpointWeightFactsV1, NVFP4_CODEC_ID};
 use serde_json::{json, Value};
 
@@ -118,9 +118,7 @@ async fn stub_metrics(Json(payload): Json<Value>) -> Json<Value> {
 
 async fn spawn_worker_api_stub() -> (String, ProgressPosts) {
     let progress_posts = Arc::new(Mutex::new(Vec::new()));
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(stub_job))
-        .route("/api/v1/jobs/:job_id/progress", post(stub_progress))
+    let app = crate::test_api_stub::job_progress_routes(stub_job, stub_progress)
         .route("/api/v1/jobs/:job_id/metrics", post(stub_metrics))
         .route("/api/v1/workers/:worker_id/heartbeat", post(stub_heartbeat))
         .with_state(WorkerApiStubState {

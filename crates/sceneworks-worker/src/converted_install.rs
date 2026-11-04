@@ -256,13 +256,7 @@ mod tests {
         settings
     }
 
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
+    use crate::test_env::isolate_hf_cache;
 
     fn payload(bundle: &std::path::Path) -> JsonObject {
         json!({
