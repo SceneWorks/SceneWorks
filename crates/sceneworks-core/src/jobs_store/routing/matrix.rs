@@ -752,10 +752,19 @@ fn imported_probe_job(
 }
 
 fn source_has_ordered_fragments(source: &str, fragments: &[&str]) -> bool {
-    let source = strip_jsonc_comments(source);
+    // Rustfmt may wrap the same sink-bearing call across lines. Layout must not change a
+    // capability claim; keep the ordered code fragments and all sink-removal mutations strict.
+    let source: String = strip_jsonc_comments(source)
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
     let mut rest = source.as_str();
     for fragment in fragments {
-        let Some(index) = rest.find(fragment) else {
+        let fragment: String = fragment
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .collect();
+        let Some(index) = rest.find(&fragment) else {
             return false;
         };
         rest = &rest[index + fragment.len()..];
@@ -4961,6 +4970,23 @@ mod tests {
     fn imported_transformer_file_route_registered(backend: &str, family: &str) -> bool {
         super::super::catalog::imported_provider_routes(backend, family)
             .any(|route| route.source == "transformer_file")
+    }
+
+    #[test]
+    fn preview_source_layout_cannot_change_the_sink_claim_or_its_order() {
+        let fragments = [
+            "drive_gen_items(tx, work,",
+            "let request = GenerationRequest {",
+            "preview,",
+            "model.generate(&request",
+        ];
+        let formatted = "drive_gen_items(\n    tx,\n    work,\n    move |preview| {\n        let request = GenerationRequest {\n            preview,\n        };\n        model.generate(&request);\n    })";
+        assert!(source_has_ordered_fragments(formatted, &fragments));
+        assert!(!source_has_ordered_fragments(
+            &formatted.replace("preview,", ""),
+            &fragments
+        ));
+        assert!(!source_has_ordered_fragments("model.generate(&request); drive_gen_items(tx, work, let request = GenerationRequest { preview,", &fragments));
     }
 
     #[test]
