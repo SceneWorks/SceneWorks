@@ -12,7 +12,6 @@ use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
-use serde_json::json;
 
 // Candle (Windows/CUDA) Z-Image Fun-ControlNet (strict pose) route (sc-5489, epic 5480) —
 // `z_image_turbo` + `advanced.poses` off-Mac via `runtime_cuda::providers::z_image::ZImageControl`. The LAST family

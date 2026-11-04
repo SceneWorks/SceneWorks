@@ -49,6 +49,13 @@ use ConsumerResolution as Resolution;
 
 pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/adapter_resolution.rs"],
+        categories: &[Category::LoraControl],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::ManagedModelPath,
+        },
+    },
+    ModelConsumerInventoryEntry {
         source_files: &[
             "crates/sceneworks-worker/src/image_jobs.rs",
             "crates/sceneworks-worker/src/image_jobs/base.rs",
@@ -548,6 +555,8 @@ mod tests {
         "crates/sceneworks-worker/src/resolution_sweep.rs",
         "crates/sceneworks-worker/src/sana_mlx_smoke.rs",
         "crates/sceneworks-worker/src/sd3_5_mlx_smoke.rs",
+        // Shared HF/cache and metric helpers, gated by cfg(all(test, native_lane)) in lib.rs.
+        "crates/sceneworks-worker/src/smoke_support.rs",
         "crates/sceneworks-worker/src/voiceclone_smoke.rs",
         "crates/sceneworks-worker/src/wan_i2v_14b_tier_build.rs",
         "crates/sceneworks-worker/src/wan_t2v_14b_tier_build.rs",
@@ -1014,6 +1023,12 @@ mod tests {
         .expect("read mixed production/test image resolver");
         let production = production_rust_source(&image_jobs);
         assert!(production.contains("resolve_adapter_file"));
+        let adapter_resolution = std::fs::read_to_string(
+            repository.join("crates/sceneworks-worker/src/adapter_resolution.rs"),
+        )
+        .expect("read shared confined adapter resolver");
+        let production = production_rust_source(&adapter_resolution);
         assert!(production.contains("normalize_app_managed_lora_path"));
+        assert!(production.contains("pin_app_managed_model_file"));
     }
 }
