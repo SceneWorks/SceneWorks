@@ -3419,6 +3419,8 @@ pub(crate) enum MemoryGateFamily {
     Sd35,
     Flux3,
     Krea,
+    // The composed provider has its own overlay/load identity on every host; it is not a base DiT.
+    KreaControl,
     Sdxl,
     Pulid,
 }
@@ -3445,6 +3447,7 @@ pub(crate) fn gate_family(engine_id: &str) -> Option<MemoryGateFamily> {
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => Sd35,
         "flux3_klein" | "flux3_klein_base" => Flux3,
         "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit" => Krea,
+        "krea_2_turbo_control" => KreaControl,
         "sdxl" => Sdxl,
         "pulid_flux" => Pulid,
         _ => return None,
