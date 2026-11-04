@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(test)]
+use std::fs::OpenOptions;
 use std::future::Future;
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
