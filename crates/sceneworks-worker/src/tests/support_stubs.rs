@@ -1,6 +1,3 @@
-#[path = "test_api_stub.rs"]
-pub(crate) mod test_api_stub;
-
 #[tokio::test]
 async fn huggingface_snapshot_resolve_accepts_tree_and_sibling_shapes_with_auth() {
     let array_url = spawn_hf_stub(
