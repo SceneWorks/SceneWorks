@@ -1535,7 +1535,7 @@
                 "type": "integer",
                 "minimum": 1,
                 "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" }],
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
               "minMemoryGbByTier": {
@@ -1545,7 +1545,7 @@
                 "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
                 "x-sceneworks-contract": "advisory",
                 "x-sceneworks-readers": [
-                  { "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" },
+                  { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" },
                   { "path": "apps/web/src/tierSuggestion.js", "anchor": "tierFloorRowGb(options.model, options.backend, variant?.variant)" },
                   { "path": "apps/web/src/tierSuggestion.js", "anchor": "blanketFloorGb(model, backend, tier)" }
                 ],

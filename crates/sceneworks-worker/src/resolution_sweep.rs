@@ -136,36 +136,12 @@ fn sweep_cells() -> Vec<(u32, u32)> {
 /// Locate a cached `SceneWorks/<repo>` turnkey snapshot whose `<tier>/` subdir carries `sentinel`.
 /// Same resolution rule as [`crate::footprint_measure`] so both harnesses see the same on-disk set.
 fn cached_tier_dir(repo: &str, tier: &str, sentinel: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let repo_cache = repo.replace('/', "--");
-    let snapshots = PathBuf::from(home)
-        .join(".cache/huggingface/hub")
-        .join(format!("models--{repo_cache}"))
-        .join("snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .find_map(|entry| {
-            let tier_dir = entry.path().join(tier);
-            tier_dir.join(sentinel).is_file().then_some(tier_dir)
-        })
+    super::smoke_support::cached_tier_dir(repo, tier, sentinel)
 }
 
 /// Locate a cached turnkey whose weights live at the snapshot root rather than in q4/q8/bf16.
 fn cached_snapshot_dir(repo: &str, sentinel: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let repo_cache = repo.replace('/', "--");
-    let snapshots = PathBuf::from(home)
-        .join(".cache/huggingface/hub")
-        .join(format!("models--{repo_cache}"))
-        .join("snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .find_map(|entry| {
-            let root = entry.path();
-            root.join(sentinel).is_file().then_some(root)
-        })
+    super::smoke_support::cached_snapshot(repo, |root| root.join(sentinel).is_file())
 }
 
 /// Resolve the tier dir from an explicit override env (a turnkey root OR the tier dir itself) or the

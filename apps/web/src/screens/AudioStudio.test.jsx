@@ -1,3 +1,5 @@
+import { deferred } from "../testUtils/async.js";
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
@@ -26,13 +28,7 @@ beforeEach(() => {
   appConfirmMock.mockResolvedValue(true);
 });
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
+
 
 // Fixture audio models mirroring the seeded `type:"audio"` catalog entries (constants.js). Each
 // carries only the `audio` sub-block the eligibility predicates + UI read — voices (speech),
@@ -241,13 +237,7 @@ const setTextareaValue = async (el, value) => {
     el.dispatchEvent(new window.Event("input", { bubbles: true }));
   });
 };
-const settle = async () => {
-  await act(async () => {
-    for (let index = 0; index < 8; index += 1) {
-      await Promise.resolve();
-    }
-  });
-};
+
 
 describe("AudioStudio shell (sc-13407)", () => {
   let container;
@@ -457,14 +447,14 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
     await render(baseContext());
 
     await click(buttonWithText(container, "Prompt guide"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/kokoro-82m.md", { signal: expect.any(AbortSignal) });
     expect(document.querySelector("#prompt-guide-title").textContent).toBe("Kokoro Speech Guide");
 
     await click(buttonWithText(document, "Close"));
     await click(modeTab(container, "Music"));
     await click(buttonWithText(container, "Prompt guide"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/acestep-v15-turbo.md", { signal: expect.any(AbortSignal) });
     expect(document.querySelector("#prompt-guide-title").textContent).toBe("ACE-Step Music Guide");
   });
@@ -489,7 +479,7 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
     const promptInput = container.querySelector('textarea[aria-label="Prompt"]');
     await setTextareaValue(promptInput, "dreamy pop");
     await click(buttonWithText(container, "Refine my prompt"));
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(fetchGuide).toHaveBeenCalledWith(
       "/prompt-guides/acestep-v15-turbo.md",
@@ -508,7 +498,7 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
     expect(promptInput.value).toBe("dreamy pop");
 
     await click(buttonWithText(container, "Refine my prompt"));
-    await settle();
+    await settle({ microtasks: 8 });
     await click(buttonWithText(container, "Apply"));
     expect(promptInput.value).toBe(
       "Dreamy synth-pop with warm analog pads and a rising final chorus.",
@@ -533,7 +523,7 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
 
     await click(modeTab(container, "Sound FX"));
     await click(buttonWithText(container, "Prompt guide"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/generic-audio.md", { signal: expect.any(AbortSignal) });
     expect(document.querySelector("#prompt-guide-title").textContent).toBe("Audio Prompt Guide");
   });
@@ -553,11 +543,11 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
     await render(baseContext({ refinePrompt }));
     await setTextareaValue(container.querySelector('textarea[aria-label="Prompt"]'), "Read this aloud.");
     await click(buttonWithText(container, "Refine my prompt"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(refineSignal.aborted).toBe(false);
 
     await click(modeTab(container, "Music"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(refineSignal.aborted).toBe(true);
     expect(container.querySelector(".refine-review")).toBeNull();
     expect(container.querySelector(".refine-error")).toBeNull();
@@ -581,10 +571,10 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
     );
     await setTextareaValue(container.querySelector('textarea[aria-label="Prompt"]'), "Read this.");
     await click(buttonWithText(container, "Refine my prompt"));
-    await settle();
+    await settle({ microtasks: 8 });
 
     await click(buttonWithText(container, "Download refinement model"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({
       id: PROMPT_REFINE_MODEL_ID,
     }));
@@ -610,7 +600,7 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
     expect(container.querySelector('[data-testid="multi-speaker-script"]')).toBeTruthy();
 
     await click(buttonWithText(container, "Prompt guide"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/moss-ttsd-v05.md", { signal: expect.any(AbortSignal) });
     expect(document.querySelector("#prompt-guide-title").textContent).toBe(
       "MOSS Multi-Speaker Guide",
@@ -626,7 +616,7 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
     );
     expect(refineButtons).toHaveLength(2);
     await click(refineButtons[0]);
-    await settle();
+    await settle({ microtasks: 8 });
 
     expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
       prompt: "hello there and welcome",
@@ -2493,7 +2483,7 @@ describe("AudioStudio YuE lyrics-to-song (sc-19385)", () => {
     await setValue(tagInput, "pop");
     await pressEnter(tagInput);
     await click(buttonWithText(container, "Refine my prompt"));
-    await settle();
+    await settle({ microtasks: 8 });
     expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({ prompt: "pop" }));
     await click(buttonWithText(container, "Apply"));
     const chips = [

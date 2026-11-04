@@ -32,16 +32,7 @@ use super::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEF
 /// Find the newest snapshot dir of a cached `SceneWorks/<repo>` HF model whose `probe` relative path
 /// exists, or `None` if the repo/tier isn't pulled.
 fn cached_snapshot(repo_dir: &str, probe: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let snapshots = PathBuf::from(home)
-        .join(".cache/huggingface/hub")
-        .join(repo_dir)
-        .join("snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|dir| dir.join(probe).exists())
+    super::smoke_support::cached_snapshot(repo_dir, |root| root.join(probe).exists())
 }
 
 /// Resolve the z-image-turbo-mlx engine root: prefer `<root>/bf16` (the tiered turnkey layout), else the
