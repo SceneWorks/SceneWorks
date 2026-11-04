@@ -60,7 +60,7 @@ image = { workspace = true }
 # The round-trip test drives the mounted service through a REAL MCP client
 # (initialize → tools/list → tools/call over streamable HTTP), not hand-rolled
 # JSON-RPC — client features are additive on the same pinned version.
-rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"], default-features = true }
 

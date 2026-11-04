@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 // sc-11967 (S8): the active video timeline is lifted to App-level useTimelines and
 // survives soft navigation in memory. Two paths used to silently clobber the user's
 // unsaved in-memory structural edits:
@@ -35,13 +36,7 @@ vi.mock("../api.js", async (importOriginal) => {
   };
 });
 
-async function settle() {
-  await act(async () => {
-    for (let i = 0; i < 6; i += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 function makeTimeline(overrides = {}) {
   return {

@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
-import { useAppContext } from "../context/AppContext.js";
+import { useAppStatic } from "../context/AppContext.js";
 import {
   loraHasResolvableFamily,
   loraMatchesModel,
@@ -11,7 +11,7 @@ import { loraMeta } from "./useSimpleLoras.js";
 // The Add LoRA sheet body (epic 15404): the picker list plus a collapsed inline import,
 // rendered inside Simple's ONE sheet chrome (`SimpleSheet`).
 //
-// The LoRA catalog is read LIVE from `useAppContext()` rather than handed in by the studio.
+// The LoRA catalog is read LIVE from `useAppStatic()` rather than handed in by the studio.
 // The sheet descriptor is held in shell state, so a body captured at open time would freeze
 // the list — and the one thing that must update while this is open is exactly that list: an
 // import queued from the panel below has to appear here when it completes.
@@ -28,7 +28,7 @@ const FILE_ACCEPT = ".safetensors,.ckpt,.pt,.bin";
  * @param {(job: object) => void} [props.onImportQueued]
  */
 export function SimpleLoraSheet({ selectedModel, excludeIds = [], atLimit, onAdd, onImportQueued }) {
-  const { loras = [], createLoraImportJob, activeProject } = useAppContext();
+  const { loras = [], createLoraImportJob, activeProject } = useAppStatic();
   const excluded = useMemo(() => new Set(excludeIds), [excludeIds]);
 
   // The same eligibility predicate `useSimpleLoras` applies, over the live catalog. It is a

@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "./context/useAppDomainValue.js";
 import { KEEP_ALIVE_VIEWS, navSections, viewTitles, KeepAlivePane, ProjectSwitcher, FirstRunProjectGate } from "./components/shell/ShellChrome.jsx";
 import { useThemeAccent } from "./hooks/useThemeAccent.js";
 import { useWebView2RepaintPump } from "./hooks/useWebView2RepaintPump.js";
@@ -262,7 +263,6 @@ export function App() {
   // model is present on this machine. Until GET /models completes its install/availability sweep,
   // keep the studios in an explicit initializing state instead (the request may legitimately take
   // tens of seconds on a cold start). A settled refresh keeps the last authoritative catalog live.
-  const [modelCatalogStatus, setModelCatalogStatus] = useState("idle");
   const [trainingTargets, setTrainingTargets] = useState({ schemaVersion: 1, targets: [] });
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
@@ -519,7 +519,7 @@ export function App() {
     setSidebarCollapsed(next);
     persistNavigationPreferences({ sidebarCollapsed: next });
   };
-  const { theme, setTheme, changeTheme, accent, setAccent, changeAccent } = useThemeAccent();
+  const { theme, setTheme, changeTheme, accent, setAccent, changeAccent, context: themeAccentContext } = useThemeAccent();
 
   // Simple UI (design handoff). `simpleUiDefault` is the persisted "Use Simple UI by
   // default" preference — same durable contract as theme/accent (server copy in
@@ -668,12 +668,6 @@ export function App() {
     });
   }, []);
   const activeProjectRef = useRef(null);
-  const refreshModelsRef = useRef(null);
-  const refreshModelAndLorasRef = useRef(null);
-  const hydrateLaunchDomainsRef = useRef(null);
-  const refreshAssetsRef = useRef(null);
-  const refreshCharactersRef = useRef(null);
-  const refreshPersonTracksRef = useRef(null);
 
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
@@ -785,30 +779,11 @@ export function App() {
     [requestProjectSwitch],
   );
 
-  const { createVideoJob, createAudioJob, createPlaceholderJob, createImageJob, createVectorJob, createVectorPromptWorkflow, createVideoUpscaleJob, createVqaJob, createInterleaveJob } = useJobCreators({
+  const { createVideoJob, context: jobCreatorsContext } = useJobCreators({
     token, activeProject, requestedGpu, setJobs, setError, setActiveView, activeViewRef, confirmWorkflowEmbeddingBeforeGeneration
   });
 
-  const {
-    characters,
-    setCharacters,
-    refreshCharacters,
-    createCharacter,
-    updateCharacter,
-    archiveCharacter,
-    unarchiveCharacter,
-    listArchivedCharacters,
-    addCharacterReference,
-    updateCharacterReference,
-    removeCharacterReference,
-    createCharacterLook,
-    updateCharacterLook,
-    deleteCharacterLook,
-    attachCharacterLora,
-    updateCharacterLora,
-    detachCharacterLora,
-    createCharacterTestJob,
-  } = useCharacters({
+  const { setCharacters, refreshCharacters, context: charactersContext } = useCharacters({
     token,
     activeProject,
     activeProjectRef,
@@ -817,75 +792,23 @@ export function App() {
     setActiveView,
   });
 
-  const {
-    presets,
-    setPresets,
-    refreshPresets,
-    createPreset,
-    updatePreset,
-    duplicatePreset,
-    deletePreset,
-  } = usePresets({ token, activeProject, activeProjectRef, setError: domainErrors.presets });
+  const { setPresets, refreshPresets, context: presetsContext } = usePresets({ token, activeProject, activeProjectRef, setError: domainErrors.presets });
 
-  const {
-    savedVoices,
-    setSavedVoices,
-    refreshSavedVoices,
-    createSavedVoice,
-    deleteSavedVoice,
-  } = useSavedVoices({
+  const { setSavedVoices, refreshSavedVoices, context: savedVoicesContext } = useSavedVoices({
     token,
     activeProject,
     activeProjectRef,
     setError: domainErrors.savedVoices,
   });
 
-  const {
-    promptBatches,
-    setPromptBatches,
-    refreshPromptBatches,
-    createPromptBatch,
-    updatePromptBatch,
-    duplicatePromptBatch,
-    deletePromptBatch,
-  } = usePromptBatches({
+  const { setPromptBatches, refreshPromptBatches, context: promptBatchesContext } = usePromptBatches({
     token,
     activeProject,
     activeProjectRef,
     setError: domainErrors.promptBatches,
   });
 
-  const {
-    trainingDatasets,
-    setTrainingDatasets,
-    trainingDatasetsProjectId,
-    setTrainingDatasetsProjectId,
-    loadingTrainingDatasets,
-    trainingDatasetsError,
-    setTrainingDatasetsError,
-    refreshTrainingDatasets,
-    loadTrainingDataset,
-    loadTrainingDatasetReadiness,
-    setTrainingDatasetItemQualityAck,
-    createTrainingDataset,
-    uploadTrainingDatasetItem,
-    uploadLtxPreparedBundle,
-    updateTrainingDataset,
-    batchRenameTrainingDataset,
-    deleteTrainingDataset,
-    writeTrainingDatasetCaptionSidecars,
-    createTrainingDatasetCaptionJob,
-    createTrainingDatasetParquetImportJob,
-    createTrainingDatasetUpscaleJob,
-    createTrainingDatasetAnalysisJob,
-    createTrainingDatasetFaceAnalysisJob,
-    createTrainingDatasetSubjectMaskJob,
-    loadTrainingDatasetSubjectMasks,
-    uploadTrainingDatasetSubjectMask,
-    smartCropTrainingDataset,
-    stripExifTrainingDataset,
-    createTrainingJob,
-  } = useTraining({
+  const { setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, refreshTrainingDatasets, context: trainingContext } = useTraining({
     token,
     activeProject,
     activeProjectRef,
@@ -893,42 +816,7 @@ export function App() {
     setJobs,
   });
 
-  // sc-8811: useModelsAndLoras lists these two model-domain refresh orchestrators as
-  // useCallback deps of deleteModel/deleteLora, which sit in appContextValue's
-  // dependency array. The orchestrator bodies are published into the
-  // refs above, so passing them in directly would give deleteModel/deleteLora — and
-  // therefore the whole ~130-key context value — a fresh identity on every App render,
-  // silently defeating the sc-4194 memoization. These identity-stable wrappers delegate
-  // through the refs instead: callers always invoke the latest body (fresh token /
-  // activeProject), while the hook's actions stay referentially stable.
-  const stableRefreshData = useCallback((...args) => refreshModelsRef.current?.(...args), [refreshModelsRef]);
-  const stableRefreshDataWithLoraOverlay = useCallback(
-    (...args) => refreshModelAndLorasRef.current?.(...args),
-    [refreshModelAndLorasRef],
-  );
-  const stableHydrateLaunchDomains = useCallback(
-    (...args) => hydrateLaunchDomainsRef.current?.(...args),
-    [hydrateLaunchDomainsRef],
-  );
-
-  const {
-    models,
-    setModels,
-    loras,
-    setLoras,
-    refreshLoras,
-    deleteModel,
-    deleteModelVariant,
-    deleteLora,
-    updateLora,
-    fetchLoraEmbeddedTags,
-    createModelImportJob,
-    createLoraImportJob,
-    createModelDownloadJob,
-    downloadConditionalComponents,
-    createLoraDownloadJob,
-    createModelConvertJob,
-  } = useModelsAndLoras({
+  const { refreshModels, refreshModelAndLoras, models, loras, setLoras, refreshLoras, createModelDownloadJob, createLoraDownloadJob, context: modelsAndLorasContext } = useModelsAndLoras({
     token,
     activeProject,
     activeProjectRef,
@@ -936,18 +824,9 @@ export function App() {
     setLoraError: domainErrors.loras,
     setJobs,
     setActiveView,
-    refreshData: stableRefreshData,
-    refreshDataWithLoraOverlay: stableRefreshDataWithLoraOverlay,
   });
 
-  const {
-    personTracks,
-    setPersonTracks,
-    refreshPersonTracks,
-    createPersonDetectionJob,
-    createPersonTrackJob,
-    saveTrackCorrections,
-  } = usePersonTracks({
+  const { setPersonTracks, refreshPersonTracks, context: personTracksContext } = usePersonTracks({
     token,
     activeProject,
     activeProjectRef,
@@ -956,25 +835,7 @@ export function App() {
     setActiveView,
   });
 
-  const {
-    timelines,
-    setTimelines,
-    setTimelinesProjectId,
-    selectedTimelineId,
-    setSelectedTimelineId,
-    activeTimeline,
-    setActiveTimeline,
-    isActiveTimelineDirty,
-    refreshTimelines,
-    refreshFilmTimeline,
-    createTimeline,
-    saveTimeline,
-    resolveTimelineTrim,
-    exportTimeline,
-    extractTimelineFrame,
-    queueTimelineVideoJob,
-    enqueueTimelineGenerationApply,
-  } = useTimelines({
+  const { setTimelines, setTimelinesProjectId, setSelectedTimelineId, setActiveTimeline, refreshTimelines, enqueueTimelineGenerationApply, context: timelinesContext } = useTimelines({
     token,
     activeProject,
     activeProjectRef,
@@ -1352,10 +1213,8 @@ export function App() {
 
   useWebView2RepaintPump();
 
-
-  const { refreshMacCapabilities } = useShellHydration({
-    refreshModelsRef, refreshModelAndLorasRef, hydrateLaunchDomainsRef, refreshAssetsRef, refreshCharactersRef, refreshPersonTracksRef,
-    ready, token, activeProject, setAssets, setLoadedAssetsProjectId, setAssetLoadState, setCharacters, setSavedVoices, setPersonTracks, setTimelines, setTimelinesProjectId, setPresets, setPromptBatches, setLoras, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, setSelectedTimelineId, setActiveTimeline, setMacCapabilitiesAuthoritative, setMacCapabilitiesLoading, setMacCapabilities, setMacCapabilitiesError, setDomainError, setProjects, setActiveProject, setProjectsLoaded, setJobs, setQueueSummary, setWorkers, setModelCatalogStatus, setModels, domainErrors, setTrainingTargets, setTrainingTargetsError, setTrainingPresets, setTrainingPresetsError, activeProjectRef, loadedAssetsProjectId, setSelectedAssetId, refreshLoras, setupCompleted, authenticated, uiMode, simpleActiveScreen, activeView, refreshCharacters, refreshSavedVoices, refreshPresets, refreshPromptBatches, refreshTrainingDatasets, refreshPersonTracks, refreshTimelines, projectsLoaded, activeAssetLoadState, hasLibraryConsumerAsset
+  const { refreshAssets, hydrateLaunchDomains, context: shellHydrationContext } = useShellHydration({
+    ready, token, activeProject, setAssets, setLoadedAssetsProjectId, setAssetLoadState, setCharacters, setSavedVoices, setPersonTracks, setTimelines, setTimelinesProjectId, setPresets, setPromptBatches, setLoras, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, setSelectedTimelineId, setActiveTimeline, setMacCapabilitiesAuthoritative, setMacCapabilitiesLoading, setMacCapabilities, setMacCapabilitiesError, setDomainError, setProjects, setActiveProject, setProjectsLoaded, setJobs, setQueueSummary, setWorkers, refreshModels, domainErrors, setTrainingTargets, setTrainingTargetsError, setTrainingPresets, setTrainingPresetsError, activeProjectRef, loadedAssetsProjectId, setSelectedAssetId, refreshLoras, setupCompleted, authenticated, uiMode, simpleActiveScreen, activeView, refreshCharacters, refreshSavedVoices, refreshPresets, refreshPromptBatches, refreshTrainingDatasets, refreshPersonTracks, refreshTimelines, projectsLoaded, activeAssetLoadState, hasLibraryConsumerAsset
   });
   // sc-11231 (F-037): useJobEvents captures whichever callback existed at subscribe time
   // (its SSE effect deps are only [access.authRequired, ready, token]), so this MUST have a
@@ -1387,10 +1246,10 @@ export function App() {
     pushNotice,
     dismissNoticeKind,
     generatedAssetRefreshesRef,
-    refreshAssetsRef,
-    refreshModelsRef,
-    refreshModelAndLorasRef,
-    refreshPersonTracksRef,
+    refreshAssets,
+    refreshModels,
+    refreshModelAndLoras,
+    refreshPersonTracks,
     activeProjectRef,
     enqueueTimelineGenerationApply,
     hasVisibleLocalFailure,
@@ -1447,7 +1306,7 @@ export function App() {
     }
   }
 
-  const { refinePrompt, qwenRewritePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness } = usePromptRunners({
+  const { context: promptRunnersContext } = usePromptRunners({
     token
   });
 
@@ -1463,12 +1322,12 @@ export function App() {
     }));
   }, []);
 
-  const { sendAssetToImage, sendAssetToImageEdit, sendAssetToImageEditor, clearEditorLaunch, launchImageRecipe, sendAssetRecipeToStudio, sendAssetRecipeToQueue, sendPresetToStudio, sendAssetToVideo, sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary } = useSendToStudio({
-    setSelectedAssetId, setStudioLaunch, setActiveView, imageModels, setEditorLaunch, uiMode, uiModeLocked, setUiModeOverride, activeProjectRef, stableHydrateLaunchDomains, closePreview, token, requestedGpu, models, assets, confirmWorkflowEmbeddingBeforeGeneration, setJobs
+  const { sendAssetToImageEdit, sendAssetToImageEditor, launchImageRecipe, sendAssetRecipeToStudio, sendAssetRecipeToQueue, context: sendToStudioContext } = useSendToStudio({
+    setSelectedAssetId, setStudioLaunch, setActiveView, imageModels, setEditorLaunch, uiMode, uiModeLocked, setUiModeOverride, activeProjectRef, stableHydrateLaunchDomains: hydrateLaunchDomains, closePreview, token, requestedGpu, models, assets, confirmWorkflowEmbeddingBeforeGeneration, setJobs
   });
 
-  const { updateAssetStatus, updateAssetTags, moveAssetToLibrary, moveAssetToCharacter, deleteAsset, purgeAsset, deletePreviewAsset, previewAssetInDirection, purgePreviewAsset, importAsset } = useAssetActions({
-    token, setAssets, setError, refreshCharactersRef, setSelectedAssetId, previewNavigation, previewDirectionRef, setPreviewAsset, closePreview, purgeAssetRef, activeProject, activeProjectRef
+  const { updateAssetStatus, deletePreviewAsset, previewAssetInDirection, purgePreviewAsset, importAsset, context: assetActionsContext } = useAssetActions({
+    token, setAssets, setError, refreshCharacters, setSelectedAssetId, previewNavigation, previewDirectionRef, setPreviewAsset, closePreview, purgeAssetRef, activeProject, activeProjectRef
   });
 
   // Drop a shared image anywhere → "Workflow found" → prefill Image Studio (sc-15951).
@@ -1624,7 +1483,7 @@ export function App() {
 
   const appUpdate = useAppUpdate(token, authenticated);
 
-  const { jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob } = useJobActions({
+  const { context: jobActionsContext } = useJobActions({
     token, setJobs, setError
   });
 
@@ -1681,11 +1540,11 @@ export function App() {
   //     state (jobs/filteredJobs/*LocalJobs/visibleWorkers/workersById/personReadiness/
   //     gpuOptions). These change identity on nearly every tick.
   //   - appStaticValue: everything else (actions/catalogs/project/presets/characters/
-  //     training/timelines/models). Its dependency array MUST NOT reference jobs or
-  //     workersById (or anything derived from them) — that exclusion is the whole point:
+  //     training/timelines/models). Its domains exclude jobs, workersById and
+  //     other live values — that separation is the whole point:
   //     cold-only consumers reading via useAppStatic() no longer re-render on job ticks.
-  // NOTE: each dependency array must mirror the corresponding object below.
-  const appLiveValue = useMemo(() => ({
+  // Owner-memoized domain values are composed without mirrored dependency lists.
+  const appLiveValue = useAppDomainValue({
     // Jobs / queue (high-churn — new identity per SSE tick)
     jobs,
     filteredJobs,
@@ -1698,32 +1557,12 @@ export function App() {
     workersById,
     personReadiness,
     gpuOptions,
-  }), [
-    jobs, filteredJobs, imageLocalJobs, videoLocalJobs, audioLocalJobs, documentLocalJobs,
-    visibleWorkers, workersById, personReadiness, gpuOptions,
-  ]);
+  });
 
-  const appStaticValue = useMemo(() => ({
+  const shellContext = useAppDomainValue({
     activeProject,
     mediaAssets,
     setPreviewAsset: openPreview,
-    sendAssetToImage,
-    sendAssetToVideo,
-    activeTimeline,
-    timelines,
-    selectedTimelineId,
-    setSelectedTimelineId,
-    setActiveTimeline,
-    isActiveTimelineDirty,
-    createTimeline,
-    saveTimeline,
-    resolveTimelineTrim,
-    exportTimeline,
-    extractTimelineFrame,
-    queueTimelineVideoJob,
-    refreshTimelines,
-    refreshFilmTimeline,
-    // Assets / library (sc-1651 Phase B batch 1)
     assets,
     assetsReady: Boolean(
       activeProject &&
@@ -1733,215 +1572,61 @@ export function App() {
     assetsLoading: activeAssetLoadState.status === "loading",
     assetsError: activeAssetLoadState.error,
     selectedAsset,
-    // The RAW selection id (null when nothing is explicitly selected). Studios need it
-    // to tell an explicit user selection apart from `selectedAsset`'s assets[0] fallback
-    // so a restored source isn't clobbered by the newest asset on a cold restart (sc-11964).
     selectedAssetId,
     setSelectedAssetId,
-    deleteAsset,
-    purgeAsset,
-    moveAssetToLibrary,
-    moveAssetToCharacter,
-    importAsset,
-    updateAssetStatus,
-    updateAssetTags,
     latestImageAssets,
-    // Job actions (creation/control — stable callbacks, NOT the churning jobs list)
-    jobAction,
-    clearCompletedJobs,
-    cancelPendingJobs,
-    prioritizeJobs,
-    clearJob,
-    createVqaJob,
-    createInterleaveJob,
-    // Queue screen (sc-1651 Phase B batch 2)
-    createPlaceholderJob,
     projectFilter,
     setProjectFilter,
     projects,
-    // Generation studios (sc-1651 Phase B batch 3)
-    createVideoJob,
-    createVideoUpscaleJob,
-    createImageJob,
     confirmWorkflowEmbeddingBeforeGeneration,
-    createVectorJob,
-    createVectorPromptWorkflow,
-    createAudioJob,
-    refinePrompt,
-    qwenRewritePrompt,
-    magicPrompt,
-    imageCaption,
-    imageDescribe,
-    compareFaceLikeness,
     latestVideoAssets,
     recentImageAssets,
     recentVideoAssets,
     recentAudioAssets,
     studioLaunch,
-    // sc-8730: Image Editor launch channel + the two Edit paths. sendAssetToImageEditor
-    // routes to the editor canvas (FullscreenPreview Edit button); sendAssetToImageEdit
-    // routes to Image Studio edit_image (exposed for the S4 sc-8729 context menu).
     editorLaunch,
-    clearEditorLaunch,
-    sendAssetToImageEditor,
-    sendAssetToImageEdit,
     rememberLocalGenerationJob,
-    // Person tracks (Video Studio + Replace Person)
-    personTracks,
-    createPersonDetectionJob,
-    createPersonTrackJob,
-    saveTrackCorrections,
-    // Models / GPU
     imageModels,
     videoModels,
     audioModels,
-    models,
-    modelCatalogStatus,
-    // Mac UI gating (sc-3486)
     macCapabilities,
     macCapabilitiesAuthoritative,
     macCapabilitiesError,
     macCapabilitiesLoading,
-    refreshMacCapabilities,
-    loras,
-    deleteLora,
-    updateLora,
-    fetchLoraEmbeddedTags,
-    deleteModel,
-    deleteModelVariant,
-    createModelDownloadJob,
-    downloadConditionalComponents,
-    createLoraDownloadJob,
-    createModelConvertJob,
-    createLoraImportJob,
-    createModelImportJob,
     requestedGpu,
     setRequestedGpu,
-    // Presets
-    presets,
-    createPreset,
-    updatePreset,
-    deletePreset,
-    duplicatePreset,
-    // Prompt batches (sc-9954, epic 9952)
-    promptBatches,
-    createPromptBatch,
-    updatePromptBatch,
-    deletePromptBatch,
-    duplicatePromptBatch,
-    // Auth (sc-4168): pairing token for screens that call apiFetch directly
-    // (Image Editor, Logs, Pose Library, useUserPoseLoader). Empty string when
-    // the deployment doesn't require auth.
     token,
-    // Training (sc-1651 Phase B batch 7)
     authenticated,
-    trainingDatasets,
-    trainingDatasetsProjectId,
-    trainingDatasetsError,
-    loadingTrainingDatasets,
-    refreshTrainingDatasets,
-    loadTrainingDataset,
-    loadTrainingDatasetReadiness,
-    setTrainingDatasetItemQualityAck,
-    createTrainingDataset,
-    uploadTrainingDatasetItem,
-    uploadLtxPreparedBundle,
-    updateTrainingDataset,
-    batchRenameTrainingDataset,
-    deleteTrainingDataset,
-    writeTrainingDatasetCaptionSidecars,
-    createTrainingDatasetCaptionJob,
-    createTrainingDatasetParquetImportJob,
-    createTrainingDatasetUpscaleJob,
-    createTrainingDatasetAnalysisJob,
-    createTrainingDatasetFaceAnalysisJob,
-    createTrainingDatasetSubjectMaskJob,
-    loadTrainingDatasetSubjectMasks,
-    uploadTrainingDatasetSubjectMask,
-    smartCropTrainingDataset,
-    stripExifTrainingDataset,
-    createTrainingJob,
     trainingPresets,
     trainingPresetsError,
     trainingTargets,
     trainingTargetsError,
-    // Navigation
     setActiveView,
     registerLeaveGuard,
-    // Unsaved-draft guard consulted before a project switch (sc-11970)
     registerProjectSwitchGuard,
-    // Image-Editor scratch-op survivor coordination (sc-8850)
     trackEditorScratchOp,
     releaseEditorScratchOp,
     registerEditorScratchClaim,
-    // Saved voices (Voice Clone registry, sc-13517)
-    savedVoices,
-    refreshSavedVoices,
-    createSavedVoice,
-    deleteSavedVoice,
-    // Characters
-    characters,
-    createCharacter,
-    updateCharacter,
-    archiveCharacter,
-    unarchiveCharacter,
-    listArchivedCharacters,
-    addCharacterReference,
-    updateCharacterReference,
-    removeCharacterReference,
-    createCharacterLook,
-    updateCharacterLook,
-    deleteCharacterLook,
-    attachCharacterLora,
-    updateCharacterLora,
-    detachCharacterLora,
-    createCharacterTestJob,
-    sendCharacterToImage,
-    sendCharacterToVideo,
-    sendPresetToStudio,
-    openDatasetInLibrary,
-    // Global theme (sc-10244): exposed so the Image Editor's top-bar toggle
-    // drives the app-wide data-theme rather than a screen-local override.
-    theme,
-    changeTheme,
-    // Whether the durable ui-preferences GET has landed (sc-15425). The studios gate their
-    // settings WRITER on it: until it resolves the localStorage cache may be empty (a relaunched
-    // desktop app has a new origin), and persisting catalog defaults during that window would
-    // overwrite the stored snapshot before anything read it.
-    preferencesHydrated: navigationHydrated,
-  }), [
-    navigationHydrated,
-    activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
-    activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline, isActiveTimelineDirty,
-    createTimeline, saveTimeline, resolveTimelineTrim, exportTimeline, extractTimelineFrame, queueTimelineVideoJob, refreshTimelines, refreshFilmTimeline,
-    assets, loadedAssetsProjectId, activeAssetLoadState, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
-    updateAssetStatus, updateAssetTags, latestImageAssets,
-    jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
-    projectFilter, setProjectFilter, projects,
-    createVideoJob, createVideoUpscaleJob, createImageJob, confirmWorkflowEmbeddingBeforeGeneration, createVectorJob, createVectorPromptWorkflow, createAudioJob, refinePrompt, qwenRewritePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
-    recentVideoAssets, recentAudioAssets, studioLaunch,
-    editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
-    rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
-    createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, audioModels, models, modelCatalogStatus, macCapabilities,
-    macCapabilitiesAuthoritative, macCapabilitiesError, macCapabilitiesLoading,
-    refreshMacCapabilities,
-    loras, deleteLora, updateLora, fetchLoraEmbeddedTags, deleteModel, deleteModelVariant, createModelDownloadJob, downloadConditionalComponents, createLoraDownloadJob, createModelConvertJob,
-    createLoraImportJob, createModelImportJob, requestedGpu, setRequestedGpu,
-    presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,
-    promptBatches, createPromptBatch, updatePromptBatch, deletePromptBatch, duplicatePromptBatch,
-    trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
-    refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem, uploadLtxPreparedBundle,
-    updateTrainingDataset, batchRenameTrainingDataset, deleteTrainingDataset, writeTrainingDatasetCaptionSidecars,
-    createTrainingDatasetCaptionJob, createTrainingDatasetParquetImportJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, createTrainingDatasetSubjectMaskJob, loadTrainingDatasetSubjectMasks, uploadTrainingDatasetSubjectMask, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
-    trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, registerProjectSwitchGuard,
-    trackEditorScratchOp, releaseEditorScratchOp, registerEditorScratchClaim,
-    savedVoices, refreshSavedVoices, createSavedVoice, deleteSavedVoice, characters,
-    createCharacter, updateCharacter, archiveCharacter, unarchiveCharacter, listArchivedCharacters,
-    addCharacterReference, updateCharacterReference,
-    removeCharacterReference, createCharacterLook, updateCharacterLook, deleteCharacterLook,
-    attachCharacterLora, updateCharacterLora, detachCharacterLora, createCharacterTestJob,
-    sendCharacterToImage, sendCharacterToVideo, sendPresetToStudio, openDatasetInLibrary, theme, changeTheme,
-  ]);
+    preferencesHydrated: navigationHydrated
+  });
+  const appStaticValue = useAppDomainValue({
+    ...shellContext,
+    ...charactersContext,
+    ...presetsContext,
+    ...savedVoicesContext,
+    ...promptBatchesContext,
+    ...trainingContext,
+    ...modelsAndLorasContext,
+    ...personTracksContext,
+    ...timelinesContext,
+    ...promptRunnersContext,
+    ...assetActionsContext,
+    ...sendToStudioContext,
+    ...jobActionsContext,
+    ...jobCreatorsContext,
+    ...shellHydrationContext,
+    ...themeAccentContext
+  });
 
   // Remote-access blocker (sc-15102). Returned INSTEAD of either shell — no sidebar, no
   // topbar, no screens — so a remote browser that hasn't unlocked the host cannot walk
