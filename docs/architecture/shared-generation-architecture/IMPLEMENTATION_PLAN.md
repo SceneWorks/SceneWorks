@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…3 were approved by Michael on 2026-11-03; DEC-4 reuse strategy is approved; its chained-pass product scope and DEC-5…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
+| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…4 were approved by Michael on 2026-11-03 (including DEC-4's chained-pass product scope); DEC-5…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
 | **Date** | 2026-11-03 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
 | **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
@@ -421,7 +421,7 @@ finish request accounting and host resource release on every exit; GPU cleanup o
 - **Shared resident modules are never mutated.** Per-request state flows through `ForwardArgs` and `StepCtx`.
 - **A single-pass, single-phase plan equals the legacy route bit-exactly.** Inert splits preserve numerical and stochastic traces.
 
-**DEC-4 boundary:** Michael approved selective prior-art reuse on 2026-11-03, not a port of the executor or its hand-written wire contract. User-configurable chained denoise passes remain a separate open product-scope choice; support for fresh-per-pass schedules under DEC-3 does not itself approve that feature. If selected, its schema belongs to the shared option system after APP-2 and it needs an explicit roadmap delivery slice. No implementation or tracker creation is authorized during this design discussion.
+**Approved DEC-4:** Michael selected both selective prior-art reuse and user-configurable chained denoise passes on 2026-11-03. ENG-16 delivers FEAT-2 as a shared recipe Feature after APP-2/3 and ENG-7. It produces typed passes before phase contributions, uses fresh-per-pass schedules and declares transition, history and seed policies. Preserve low-res start's first-pass-only targeting and validate native-pass composition through stable pass roles; ambiguous ownership refuses. Derive the versioned advanced controls from the shared option schema, inventory/disposition the old controls and persist the resolved recipe. Admission prices the complete chain through the existing `PricingPlan` interface; it does not wait for APP-4. No separate family executor or hand-written wire contract is introduced. No implementation or tracker creation is authorized during this design discussion.
 
 ### 3.4 Features (HOOK-1…5) [ENG-11]
 
@@ -894,13 +894,15 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 ### 7.5 SW-F327 overlap ledger (snapshot 2026-11-03; refreshed at each feature's planning)
 
+**Live refresh during decision review:** #3258 and #3264 are merged into `feature/sw-f327-code-review-remediation`, with merge commits `1c3e121bc2` and `c04f551f9a`; neither is an ancestor of fetched `origin/main`. #3260, #3268 and #3270 remain open against that feature branch. The dispositions below describe ownership and intended reuse, not acceptance on main. Recheck at implementation planning. DEC-5 remains open, and this snapshot authorizes no implementation.
+
 | SW-F327 PR | Cards | SGA requirements touched | Disposition |
 |---|---|---|---|
-| #3258 | SW-6642 shared stream/heartbeat/cancel supervisor | LANE-4 | **Delivered by SW-F327.** LANE-4 builds on it. APP-5 sequenced after its merge. |
+| #3258 | SW-6642 shared stream/heartbeat/cancel supervisor | LANE-4 | **SW-F327-owned; merged to its feature branch.** LANE-4 builds on it after main delivery and re-baselining. |
 | #3260 | inference pin to the SW-F327 head | Pin choreography | Sequence per §7.4 |
-| #3264 | SW-6659 (`apply_vram_cap` sites), SW-6662 (YuE/YuE2 admission), SW-6753 (Mochi/SVD twins), SW-6754 (`hw.memsize` probes), SW-6640 (floor semantics); touches `krea_multiphase.rs`, `candle_memory_strategy.rs`, `generator_cache.rs`, `base_admission.rs`, `conditioning_gate.rs`, `moss.rs`, `instantid.rs` | ADM-2 (part), ENG-4b `[SW]`, APP-4 | **Partly delivered by SW-F327.** All `[SW]` items touching these files are gated on its merge. APP-4 re-baselines after it. |
-| #3268 | Deletes `apps/web/src/modelCatalog.js` | TOOL-3, APPREG-2 | **Delivered by SW-F327.** Removed from SGA scope. |
-| #3270 | SW-6677/6679 cfg alias, SW-6686 AST architecture checks, SW-6812/6817/6824 dependency de-dup and direction guard | LANE-5, DEC-6, LANE-6 | **Delivered by SW-F327.** SGA builds on it. Structural guards extend `architecture_tests.rs` if DEC-6 allows. |
+| #3264 | SW-6659 (`apply_vram_cap` sites), SW-6662 (YuE/YuE2 admission), SW-6753 (Mochi/SVD twins), SW-6754 (`hw.memsize` probes), SW-6640 (floor semantics); touches `krea_multiphase.rs`, `candle_memory_strategy.rs`, `generator_cache.rs`, `base_admission.rs`, `conditioning_gate.rs`, `moss.rs`, `instantid.rs` | ADM-2 (part), ENG-4b `[SW]`, APP-4 | **SW-F327-owned subset; merged to its feature branch.** Overlapping `[SW]` items wait for main delivery. APP-4 re-baselines after it. |
+| #3268 | Deletes `apps/web/src/modelCatalog.js` | TOOL-3, APPREG-2 | **SW-F327-owned; PR open.** SGA does not duplicate its deletion; re-baseline after main delivery. |
+| #3270 | SW-6677/6679 cfg alias, SW-6686 AST architecture checks, SW-6812/6817/6824 dependency de-dup and direction guard | LANE-5, DEC-6, LANE-6 | **SW-F327-owned; PR open.** SGA builds on main-delivered changes. Structural guards extend `architecture_tests.rs` if DEC-6 allows. |
 | SW-F148 (`sc-8432`) | Krea Realtime interactive streaming, spike-gated; NO-GO permitted | PIPE-16, HOOK-1 | **Separate product owner; sequenced adoption (§6.9).** ENG-6 puts current batch output through the production terminal/repeated-chunk primitive. If a streaming path already exists, ENG-6 migrates it too; if delivered later, SW-F148 adopts that primitive with its first stream-only production hooks. NO-GO retains the batch user and removes no existing capability. No duplicate streaming delivery or orphan mock-only hook. |
 
 **Rule (DEC-5).**
@@ -974,6 +976,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 | **ENG-13: Computed memory contracts + R1 + iOS** | MEM-2 (delete the fixtures); R1 in the lifetime graph; retire `MemoryRequestScope`; MEM-6 iOS admission. `[SW]` migrate the admission contract input if APP-4 has landed. | ENG-10, ENG-11, ENG-12 | 5–6 wk |
 | **ENG-14: Audio + LLM adoption** | XL-1/2 | ENG-9, ENG-13 | 5–6 wk |
 | **ENG-15: DEC-1 (c) pilots** | Approved design direction: pilot A then pilot B, with no rollout until both satisfy BACK-5. Failure leaves baseline (b) in place. Successful rollout waves remain separately planned; no pilot execution is authorized by decision review. | ENG-8…12; DEC-1 approved | 4–6 wk pilots; conditional rollout 3–6 months `[L]` |
+| **ENG-16: Configurable chained denoise passes** `[INF]+[SW]` | FEAT-2: inventory/disposition sc-20414 pass controls; shared recipe schema and bounded pass-list validation; fresh schedule resolution, explicit transitions/history/seeds; whole-chain pricing and typed refusals across the supported route inventory. Persist/version the recipe; expose advanced controls through APP-3's common renderer. Prove replay, cancellation and low-res/native-pass composition; bounded separately dispatched output/quality/time/memory evidence on both shipped backends. No family chain loop or parallel schema. | ENG-7, APP-2, APP-3; DEC-4 approved; `[SW]` DEC-5 gate | 4–6 wk `[L]`; re-estimate after schema/route inventory; split at a complete consumer boundary if larger |
 
 ### 9.3 SceneWorks features (all `[SW]`; start after the DEC-5 gate)
 
@@ -998,11 +1001,12 @@ ENGINE  ENG-1a → ENG-1b → [ENG-2 + ENG-3] → ENG-4a → ENG-4b → ENG-5 �
 APP     (DEC-5 gate) APP-1 → APP-2 → APP-3
                          └──────────(after ENG-6)→ APP-4 → (after ENG-7) APP-5 → APP-6
                          └──────────(after ENG-9)→ APP-7
+RECIPE  [ENG-7 + APP-2 + APP-3] → ENG-16
 ```
 
 - **Delivery estimates `[L]`, restored (C4-06).** These are my estimates, at low confidence, re-estimated when each feature is planned.
   - **Per feature:** 4–6 weeks each, as shown in the tables. Any feature planned above 6 weeks is split at a complete consumer boundary (DEC-12).
-  - **Engine track:** ENG-1a…14 contains **16 features** including the 1a/1b and 4a/4b splits (24 roadmap nodes including ENG-15 pilots and APP-1…7). With the parallelism the graph allows (ENG-2∥3, ENG-8∥9, ENG-10∥11∥12 on disjoint files), that is **about 14–18 months**.
+  - **Engine track:** ENG-1a…14 contains **16 features** including the 1a/1b and 4a/4b splits; ENG-16 adds one cross-repository recipe feature. There are **17 non-pilot engine features and 25 roadmap nodes** including ENG-15 pilots and APP-1…7. With the parallelism the graph allows (ENG-2∥3, ENG-8∥9, ENG-10∥11∥12 on disjoint files), the aggregate remains **about 14–18 months**, assuming ENG-16 can run alongside later component waves after ENG-7 and APP-3. Serializing it adds its 4–6 weeks; this is a staffing assumption, not a guaranteed date.
   - **SceneWorks track:** APP-1…3 can run from the DEC-5 gate onward, in roughly months 2–8. APP-4…7 follow their engine producers and finish around months 14–18.
   - **DEC-1 (c):** backend-generic rollout adds 3–6 months if both approved pilots pass.
   - **Why longer than draft 0.2's 13–16 months:** the R2 prerequisites (pass model, state contracts, first-consumer admission, the primitives extraction) now land inside early features.
