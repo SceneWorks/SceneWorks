@@ -874,6 +874,13 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 ### 7.3 AP13 expected classes per feature (initial; refined at planning)
 
+**DEC-7 revision following Michael's direction:** prefer bit-exact results without an open-ended GPU repair loop for small differences. Before numerical validation, declare the component metric, bound and output checks, the finite proof set and investigation budget. Reuse applicable evidence and the feature's already planned Tier 1/2 runs; this adds no campaign or dispatch cadence. “Less than 1%” is not a universal tensor/image tolerance.
+
+- Diagnose a mismatch with source/operation-order, dtype, seed and state inspection first. A valid comparison inside the declared bound with acceptable output evidence supports class (b), without more GPU runs solely to chase zero error.
+- Repeat learned checks only for a concrete unresolved correctness/measurement question or a numerical change affecting that evidence. Unchanged evidence is reused; no post-hoc widening of a limit to pass a result.
+- At the planned investigation limit, report the measured difference, confidence and accept/fix/retain-existing-path choice. Material output/replay/capability changes remain explicit; class (c) still needs route approval. Pilot exceptions to BACK-5 remain explicit rather than silently becoming tolerance-based.
+- Full DEC-7 class-policy approval remains open. Component-specific limits and the run budget are specified at feature planning; learned execution remains separately dispatched under DEC-14/15, never ordinary CI.
+
 | Feature | Expected class | Notes |
 |---|---|---|
 | ENG-1a, ENG-2, ENG-3, ENG-5, ENG-6 (pipeline adoption) | (a) | Loops, combines, seeds and history are preserved bit-exactly by design |
