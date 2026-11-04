@@ -505,8 +505,8 @@ pub(crate) fn model_requires_license_acknowledgment(model: &Value) -> bool {
 
 /// The payload key every job-creation door uses to carry the caller's acknowledgment through to
 /// the queue (sc-17227). Stamped by `create_model_download_job` once its own gate has passed, so a
-/// RETRY of a legitimately-authorized download re-validates against the same assertion rather than
-/// being refused for a field the typed route never wrote.
+/// legacy explicit assertions survive retry; server-record authorization is rechecked
+/// against current terms and withdrawal on each request.
 pub(crate) const LICENSE_ACKNOWLEDGED_PAYLOAD_KEY: &str = "licenseAcknowledged";
 
 /// Error code for a fetch of a repo a catalog entry declares as a BLOCKED conditional component
@@ -603,9 +603,26 @@ async fn license_acknowledgment_repo_index(
 fn license_acknowledgment_index_for(
     models: &[Value],
 ) -> std::collections::BTreeMap<String, LicenseAcknowledgmentSource> {
+    license_acknowledgment_index_for_selected(models, None)
+}
+
+fn license_acknowledgment_index_for_selected(
+    models: &[Value],
+    selected_model_id: Option<&str>,
+) -> std::collections::BTreeMap<String, LicenseAcknowledgmentSource> {
     let mut index: std::collections::BTreeMap<String, LicenseAcknowledgmentSource> =
         std::collections::BTreeMap::new();
-    for model in models {
+    // A catalog-validated selection owns its declared shared repositories. Raw
+    // repository requests retain canonical manifest order; an arbitrary accepted
+    // model must never grant access. Blocked components from ANY entry still win.
+    let selected = |model: &&Value| {
+        selected_model_id.is_some_and(|id| model.get("id").and_then(Value::as_str) == Some(id))
+    };
+    for model in models
+        .iter()
+        .filter(selected)
+        .chain(models.iter().filter(|model| !selected(model)))
+    {
         let Some(model_id) = model.get("id").and_then(Value::as_str) else {
             continue;
         };
@@ -617,6 +634,7 @@ fn license_acknowledgment_index_for(
         let source = |blocked: Option<BlockedComponent>| LicenseAcknowledgmentSource {
             model_id: model_id.to_owned(),
             model_name: model_name.clone(),
+            terms: model.clone(),
             blocked,
         };
         let conditional = model
@@ -694,6 +712,7 @@ pub(crate) struct BlockedComponent {
 pub(crate) struct LicenseAcknowledgmentSource {
     pub(crate) model_id: String,
     pub(crate) model_name: String,
+    terms: Value,
     /// Set when the repo is a BLOCKED conditional component (sc-22998): refused whatever the
     /// caller asserts.
     pub(crate) blocked: Option<BlockedComponent>,
@@ -782,14 +801,26 @@ pub(crate) async fn annotate_license_acknowledgment_sources(
 /// repo). Checking every repo-bearing key of a payload is what keeps this ONE predicate rather than
 /// one per job type — a new key is an addition to the list, not a second gate.
 ///
-/// `acknowledged` is the caller's own assertion, exactly as on the typed route: the gate obtains
-/// an affirmative acknowledgment, it is not an authorization check (see
+/// `acknowledged` is a legacy explicit acceptance assertion. Without it, the existing
+/// terms-bound server acknowledgment is required (see
 /// `docs/minimax-h3-use-restriction-safeguards.md`).
 pub(crate) async fn ensure_license_acknowledged_for_source(
     state: &AppState,
     repos: &[Option<&str>],
     source_url: Option<&str>,
     acknowledged: bool,
+) -> Result<(), ApiError> {
+    ensure_license_acknowledged_for_source_inner(state, repos, source_url, acknowledged, None).await
+}
+
+// Only catalog-resolved model/component download routes supply a selected ID.
+// Other repository-bearing doors deliberately use the public canonical wrapper.
+async fn ensure_license_acknowledged_for_source_inner(
+    state: &AppState,
+    repos: &[Option<&str>],
+    source_url: Option<&str>,
+    acknowledged: bool,
+    selected_model_id: Option<&str>,
 ) -> Result<(), ApiError> {
     // Each candidate keeps the caller's own spelling next to the lookup key, so the refusal echoes
     // what was actually requested rather than the lowercased index key.
@@ -804,7 +835,12 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
     if candidates.is_empty() {
         return Ok(());
     }
-    let index = license_acknowledgment_repo_index(state).await?;
+    let index = if selected_model_id.is_some() {
+        let (models, _) = merged_model_manifest_entries(state).await?;
+        license_acknowledgment_index_for_selected(&models, selected_model_id)
+    } else {
+        license_acknowledgment_repo_index(state).await?
+    };
     // A blocked conditional component is refused before anything else, and an acknowledgment does
     // not clear it (sc-22998).
     if let Some((requested, source, blocked)) = candidates.iter().find_map(|(named, key)| {
@@ -829,15 +865,25 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
             context: None,
         });
     }
-    let Some((requested, source)) = candidates
-        .iter()
-        .find_map(|(named, key)| index.get(key.as_str()).map(|source| (named, source)))
-    else {
+    // Every restricted source must have a current acknowledgment. Checking only the
+    // first repo could authorize a second component governed by different terms.
+    let mut missing = None;
+    for (requested, key) in &candidates {
+        let Some(source) = index.get(key.as_str()) else {
+            continue;
+        };
+        if !acknowledged
+            && crate::yue2_jobs::current_license_acknowledgment(state, &source.terms)
+                .await?
+                .is_none()
+        {
+            missing = Some((requested, source));
+            break;
+        }
+    }
+    let Some((requested, source)) = missing else {
         return Ok(());
     };
-    if acknowledged {
-        return Ok(());
-    }
     let model_id = &source.model_id;
     Err(ApiError {
         status: StatusCode::FORBIDDEN,
@@ -998,12 +1044,182 @@ pub(crate) async fn ensure_job_payload_license_acknowledged(
     .await
 }
 
+async fn queue_catalog_download(
+    state: AppState,
+    payload: JsonObject,
+    requested_gpu: String,
+    binding: Value,
+) -> Result<JobSnapshot, ApiError> {
+    create_generation_job_with_binding(
+        state,
+        JobType::ModelDownload,
+        None,
+        None,
+        payload,
+        requested_gpu,
+        (None, Some(binding)),
+    )
+    .await
+}
+
+fn catalog_download_binding(
+    model_id: &str,
+    owner_id: &str,
+    kind: &str,
+    row: &Value,
+    payload: &JsonObject,
+    purpose: Option<&str>,
+    component: Option<&str>,
+) -> Value {
+    json!({"modelId": model_id, "ownerId": owner_id, "kind": kind, "row": row,
+        "payload": payload, "purpose": purpose, "component": component})
+}
+
+pub(crate) async fn validate_catalog_download_replay(
+    state: &AppState,
+    binding: &Value,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let invalid = || {
+        ApiError::bad_request(
+            "The saved catalog download no longer matches its authorized selection",
+        )
+    };
+    // A patch cannot turn an accepted selection into a different worker operation.
+    if !sceneworks_core::jobs_store::download_binding_matches_payload(binding, payload) {
+        return Err(invalid());
+    }
+    let model_id = binding
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let owner_id = binding
+        .get("ownerId")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let row = binding.get("row").ok_or_else(invalid)?;
+    let catalog = model_catalog(state).await?;
+    let model = catalog
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(model_id))
+        .ok_or_else(invalid)?;
+    let owner = catalog
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(owner_id))
+        .ok_or_else(invalid)?;
+    let valid = match binding.get("kind").and_then(Value::as_str) {
+        Some("download") if model_id == owner_id => model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                rows.contains(row)
+                    && binding
+                        .get("selectedDownload")
+                        .is_none_or(|selected| rows.contains(selected))
+            }),
+        Some("conditional") if model_id == owner_id => {
+            let purpose = binding
+                .get("purpose")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            sceneworks_core::model_usage_policy::conditional_component_downloads(model, purpose)
+                .map_err(|_| invalid())?
+                .contains(row)
+        }
+        Some("importComponent") => {
+            if model.get("baseModel").and_then(Value::as_str) != Some(owner_id) {
+                return Err(invalid());
+            }
+            let component = binding
+                .get("component")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            let current = bound_import_component_download(
+                model,
+                owner,
+                component,
+                None,
+                &state.settings.data_dir,
+                true,
+            )
+            .map_err(|_| invalid())?;
+            ensure_inherited_component_licenses_acknowledged(
+                state,
+                model.as_object().ok_or_else(invalid)?,
+                false,
+            )
+            .await?;
+            &current == row
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(invalid());
+    }
+    for entry in [model, owner] {
+        if model_requires_license_acknowledgment(entry)
+            && crate::yue2_jobs::current_license_acknowledgment(state, entry)
+                .await?
+                .is_none()
+        {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                detail: "Current model license acknowledgment is required".to_owned(),
+                code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+                context: None,
+            });
+        }
+    }
+    let repos = LICENSE_GATED_REPO_PAYLOAD_KEYS
+        .iter()
+        .map(|key| payload.get(*key).and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    ensure_license_acknowledged_for_source_inner(
+        state,
+        &repos,
+        payload.get("sourceUrl").and_then(Value::as_str),
+        false,
+        Some(owner_id),
+    )
+    .await
+}
+
 pub(crate) async fn create_model_download_job(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
     ApiJson(payload): ApiJson<ModelDownloadRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let model = require_model_by_id(&state, &model_id).await?;
+    // License-acknowledgment gate (sc-17227), enforced HERE and not only in the web client.
+    //
+    // The web client refuses an unacknowledged download at `createModelDownloadJob`, but that code
+    // only runs in the client. This endpoint is reachable from a browser on another machine (the
+    // remote-access lane, epic 4484), from a workflow envelope's suggested action, and from curl,
+    // and no client-side check binds any of those.
+    //
+    // Scoped to `requiresLicenseAcknowledgment` — NOT to `gated`. A gated model's download fails at
+    // Hugging Face with a 401 without a saved credential, so an unacknowledged fetch never lands its
+    // weights; adding the requirement there would 4xx every existing gated download whose client
+    // predates the field, for no gain. A `requiresLicenseAcknowledgment` model's repo is PUBLIC —
+    // nothing upstream refuses it — so this rejection is the only thing between the request and the
+    // weights, which is why the flag defaults to `false` and must be asserted, not assumed.
+    if model_requires_license_acknowledgment(&model)
+        && !payload.license_acknowledged
+        && crate::yue2_jobs::current_license_acknowledgment(&state, &model)
+            .await?
+            .is_none()
+    {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            detail: format!(
+                "Model '{model_id}' requires accepting its license before download. Accept the \
+                 license on the Models screen, or send `licenseAcknowledged: true` to assert that \
+                 the user has accepted it."
+            ),
+            code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+            context: None,
+        });
+    }
     if let Some(component_id) = payload.component_id.as_deref() {
         ensure_model_not_cleanup_only(&model)?;
         if !payload.choices.is_empty() {
@@ -1024,19 +1240,29 @@ pub(crate) async fn create_model_download_job(
             component_id,
             payload.variant.as_deref(),
             &state.settings.data_dir,
+            false,
         )
         .map_err(ApiError::bad_request)?;
+        if payload.license_acknowledged {
+            for entry in [&model, &base] {
+                if model_requires_license_acknowledgment(entry) {
+                    crate::yue2_jobs::record_license_acknowledgment(&state, entry, "download")
+                        .await?;
+                }
+            }
+        }
         ensure_inherited_component_licenses_acknowledged(
             &state,
             model.as_object().expect("validated import"),
             payload.license_acknowledged,
         )
         .await?;
-        ensure_license_acknowledged_for_source(
+        ensure_license_acknowledged_for_source_inner(
             &state,
             &[download.get("repo").and_then(Value::as_str)],
             None,
             payload.license_acknowledged,
+            base.get("id").and_then(Value::as_str),
         )
         .await?;
         let mut job_payload = build_model_download_job_payload(
@@ -1053,43 +1279,25 @@ pub(crate) async fn create_model_download_job(
             "importComponentTier".to_owned(),
             model["importComponentTier"].clone(),
         );
-        let job = create_generation_job(
+        let binding = catalog_download_binding(
+            &model_id,
+            base["id"].as_str().expect("validated base"),
+            "importComponent",
+            &download,
+            &job_payload,
+            None,
+            Some(component_id),
+        );
+        let job = queue_catalog_download(
             state,
-            JobType::ModelDownload,
-            None,
-            None,
             job_payload,
             requested_gpu_or_auto(payload.requested_gpu),
+            binding,
         )
         .await?;
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
     ensure_model_downloadable(&model)?;
-    // License-acknowledgment gate (sc-17227), enforced HERE and not only in the web client.
-    //
-    // The web client refuses an unacknowledged download at `createModelDownloadJob`, but that code
-    // only runs in the client. This endpoint is reachable from a browser on another machine (the
-    // remote-access lane, epic 4484), from a workflow envelope's suggested action, and from curl,
-    // and no client-side check binds any of those.
-    //
-    // Scoped to `requiresLicenseAcknowledgment` — NOT to `gated`. A gated model's download fails at
-    // Hugging Face with a 401 without a saved credential, so an unacknowledged fetch never lands its
-    // weights; adding the requirement there would 4xx every existing gated download whose client
-    // predates the field, for no gain. A `requiresLicenseAcknowledgment` model's repo is PUBLIC —
-    // nothing upstream refuses it — so this rejection is the only thing between the request and the
-    // weights, which is why the flag defaults to `false` and must be asserted, not assumed.
-    if model_requires_license_acknowledgment(&model) && !payload.license_acknowledged {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            detail: format!(
-                "Model '{model_id}' requires accepting its license before download. Accept the \
-                 license on the Models screen, or send `licenseAcknowledged: true` to assert that \
-                 the user has accepted it."
-            ),
-            code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
-            context: None,
-        });
-    }
     // sc-22999: the acceptance is recorded server-side for the entry's current terms, so a queued
     // YuE2 job can re-check it at execution and a withdrawn acknowledgment refuses the job.
     if model_requires_license_acknowledgment(&model) && payload.license_acknowledged {
@@ -1113,6 +1321,7 @@ pub(crate) async fn create_model_download_job(
             ApiError::bad_request("Model does not define a Hugging Face download")
         })?,
     };
+    let selected_download = download.clone();
     // sc-24112: a DECLARED-but-unpublished tier is refused HERE, at the one place a download job is
     // created, rather than by hiding the row — the catalog must keep enumerating it so the tier
     // axis, the memory ladder and the picker are all real before the bytes exist. Its revision is
@@ -1250,11 +1459,12 @@ pub(crate) async fn create_model_download_job(
         .iter()
         .map(|repo| Some(repo.as_str()))
         .collect();
-    ensure_license_acknowledged_for_source(
+    ensure_license_acknowledged_for_source_inner(
         &state,
         &queued_repos,
         None,
         payload.license_acknowledged,
+        Some(&model_id),
     )
     .await?;
 
@@ -1304,27 +1514,30 @@ pub(crate) async fn create_model_download_job(
             payload.license_acknowledged,
             &state.settings.data_dir,
         )?;
-        create_generation_job(
-            state.clone(),
-            JobType::ModelDownload,
+        let binding = catalog_download_binding(
+            &model_id,
+            &model_id,
+            "download",
+            co_requisite,
+            &co_payload,
             None,
             None,
-            co_payload,
-            requested_gpu.clone(),
-        )
-        .await?;
+        );
+        queue_catalog_download(state.clone(), co_payload, requested_gpu.clone(), binding).await?;
     }
 
     // The primary job is the one returned to the caller (its id is what the download UI tracks).
-    let job = create_generation_job(
-        state,
-        JobType::ModelDownload,
+    let mut binding = catalog_download_binding(
+        &model_id,
+        &model_id,
+        "download",
+        &download,
+        &job_payload,
         None,
         None,
-        job_payload,
-        requested_gpu,
-    )
-    .await?;
+    );
+    binding["selectedDownload"] = selected_download;
+    let job = queue_catalog_download(state, job_payload, requested_gpu, binding).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -1376,7 +1589,11 @@ pub(crate) async fn create_conditional_components_download_jobs(
         ),
     })?;
     if model_requires_license_acknowledgment(&model) {
-        if !payload.license_acknowledged {
+        if !payload.license_acknowledged
+            && crate::yue2_jobs::current_license_acknowledgment(&state, &model)
+                .await?
+                .is_none()
+        {
             return Err(ApiError {
                 status: StatusCode::FORBIDDEN,
                 detail: format!(
@@ -1388,7 +1605,9 @@ pub(crate) async fn create_conditional_components_download_jobs(
                 context: None,
             });
         }
-        crate::yue2_jobs::record_license_acknowledgment(&state, &model, "download").await?;
+        if payload.license_acknowledged {
+            crate::yue2_jobs::record_license_acknowledgment(&state, &model, "download").await?;
+        }
     }
     let repos: Vec<String> = rows
         .iter()
@@ -1396,8 +1615,14 @@ pub(crate) async fn create_conditional_components_download_jobs(
         .map(str::to_owned)
         .collect();
     let repo_refs: Vec<Option<&str>> = repos.iter().map(|repo| Some(repo.as_str())).collect();
-    ensure_license_acknowledged_for_source(&state, &repo_refs, None, payload.license_acknowledged)
-        .await?;
+    ensure_license_acknowledged_for_source_inner(
+        &state,
+        &repo_refs,
+        None,
+        payload.license_acknowledged,
+        Some(&model_id),
+    )
+    .await?;
     let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
     let mut jobs = Vec::new();
     let mut components = Vec::new();
@@ -1426,15 +1651,18 @@ pub(crate) async fn create_conditional_components_download_jobs(
             payload.license_acknowledged,
             &state.settings.data_dir,
         )?;
-        let job = create_generation_job(
-            state.clone(),
-            JobType::ModelDownload,
+        let binding = catalog_download_binding(
+            &model_id,
+            &model_id,
+            "conditional",
+            row,
+            &job_payload,
+            Some(&purpose),
             None,
-            None,
-            job_payload,
-            requested_gpu.clone(),
-        )
-        .await?;
+        );
+        let job =
+            queue_catalog_download(state.clone(), job_payload, requested_gpu.clone(), binding)
+                .await?;
         components.push(json!({
             "componentId": component_id,
             "repo": row.get("repo"),
@@ -1580,6 +1808,7 @@ fn bound_import_component_download(
     component_id: &str,
     requested_variant: Option<&str>,
     data_dir: &FsPath,
+    allow_installed: bool,
 ) -> Result<Value, String> {
     use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
     let entry = model
@@ -1621,7 +1850,9 @@ fn bound_import_component_download(
                 .into(),
         );
     }
-    if imported_component_presence(data_dir, row) == CoRequisitePresence::Installed {
+    if !allow_installed
+        && imported_component_presence(data_dir, row) == CoRequisitePresence::Installed
+    {
         return Err("This imported resident component is already installed".into());
     }
     Ok(row.clone())
@@ -1710,23 +1941,10 @@ fn build_model_download_job_payload(
     // client request cannot supply or override this flag, and co-requisites stay inert because the
     // calibration artifact identity is the primary checkpoint.
     insert_memory_calibration_provenance_requirement(&mut job_payload, model, include_family);
-    // Record the acknowledgment ON the job (sc-17227). `create_model_download_job` — the only
-    // non-test caller — has already refused the request unless the caller asserted it, so reaching
-    // here for a gated fetch means the assertion was made. Writing it into the payload is what
-    // keeps RETRY and DUPLICATE working: those re-run `validate_raw_job_payload` over the stored
-    // payload, and the repo-keyed gate there would otherwise refuse a download the typed route had
-    // already authorized. Co-requisites carry it too — `MiniMaxAI/MiniMax-H3` is itself a
-    // co-requisite repo, and it is the one the review's bypass named.
-    //
-    // Keyed on the FLAG OR the caller's own assertion, not on the flag alone. The two gates in
-    // `create_model_download_job` do not fire on the same predicate: the id gate reads the entry's
-    // flag, while the repo gate reads the repos the job will queue. For the shape the repo gate
-    // exists to catch — an entry with NO flag whose download names a repo a flagged entry declares
-    // — a flag-keyed stamp writes nothing, and the RETRY of that authorized download is then
-    // refused by the repo gate over its own stored `repo`. `license_acknowledged` is the caller's
-    // assertion carried verbatim, so the stamp records exactly what was asserted rather than
-    // re-deriving it from a predicate that already disagreed once.
-    if model_requires_license_acknowledgment(model) || license_acknowledged {
+    // Preserve legacy explicit assertions verbatim. A download authorized by the
+    // server store must recheck that store on retry/duplicate, rather than minting
+    // a permanent assertion that could survive withdrawal or changed terms.
+    if license_acknowledged {
         job_payload.insert(
             LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
             Value::Bool(true),
@@ -18196,11 +18414,21 @@ mod minimax_h3_import_declaration_tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
         assert_eq!(error["code"], "license_acknowledgment_required");
+        // F-209: accepting the card persists the displayed inherited terms too.
+        let (status, accepted) = request(
+            router.clone(),
+            "PUT",
+            "/api/v1/models/repair_h3/license-acknowledgment",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        assert_eq!(accepted["acknowledged"], true);
         let (status, job) = request(
             router.clone(),
             "POST",
             "/api/v1/models/repair_h3/download",
-            json!({"componentId":repairs[0]["componentId"], "licenseAcknowledged":true}),
+            json!({"componentId":repairs[0]["componentId"]}),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{job}");
@@ -18215,6 +18443,48 @@ mod minimax_h3_import_declaration_tests {
             .unwrap()
             .iter()
             .all(|file| !file.as_str().unwrap().contains("transformer")));
+        // Withdrawing a displayed inherited obligation invalidates hydration too.
+        let inherited = sceneworks_core::minimax_h3_import::inherited_component_entries(
+            projected.as_object().unwrap(),
+        );
+        let inherited_id = inherited
+            .iter()
+            .find(|row| row["requiresLicenseAcknowledgment"] == true || row["gated"] == true)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap();
+        assert!(
+            sceneworks_core::license_acknowledgments::revoke_acknowledgment(
+                &sceneworks_core::license_acknowledgments::acknowledgments_file(
+                    &settings.config_dir
+                ),
+                inherited_id
+            )
+            .unwrap()
+        );
+        let (_, view) = request(
+            router.clone(),
+            "GET",
+            "/api/v1/models/repair_h3/license-acknowledgment",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(view["acknowledged"], false, "{view}");
+        let (status, error) = request(
+            router.clone(),
+            "POST",
+            "/api/v1/models/repair_h3/download",
+            json!({"componentId":"audio_vae"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+        request(
+            router.clone(),
+            "PUT",
+            "/api/v1/models/repair_h3/license-acknowledgment",
+            Value::Null,
+        )
+        .await;
         for body in [
             json!({}),
             json!({"componentId":"transformer"}),
@@ -18231,7 +18501,7 @@ mod minimax_h3_import_declaration_tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
         }
-        let (status, jobs) = request(router, "GET", "/api/v1/jobs", Value::Null).await;
+        let (status, jobs) = request(router.clone(), "GET", "/api/v1/jobs", Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{jobs}");
         assert_eq!(
             jobs.as_array().unwrap().len(),
@@ -18239,6 +18509,44 @@ mod minimax_h3_import_declaration_tests {
             "repair must not queue a stock DiT or unrelated component: {jobs}"
         );
         assert!(store.resolve(&compiled.checkpoint_id).is_ok());
+        let repair_job_id = job["id"].as_str().unwrap();
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                router.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{repair_job_id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+            let (status, replay) = request(
+                router.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{repair_job_id}/{operation}"),
+                json!({"payloadChanges":{"componentId":"text_encoder"}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {replay}");
+        }
+        assert!(
+            sceneworks_core::license_acknowledgments::revoke_acknowledgment(
+                &sceneworks_core::license_acknowledgments::acknowledgments_file(
+                    &settings.config_dir
+                ),
+                inherited_id
+            )
+            .unwrap()
+        );
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                router.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{repair_job_id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{operation}: {replay}");
+        }
     }
 
     #[tokio::test]

@@ -472,7 +472,7 @@ pub(crate) async fn start_film_planning(
     let source_script = draft.original_script.clone();
     let external_model = planner_model;
     let external_send_reference_pixels = draft.planning.send_reference_pixels;
-    let external_client = state.http_client.clone();
+    let external_client = state.planner_http_client.clone();
     tokio::spawn(async move {
         let result = async {
             let transport = HttpTransport::new(&base_url, Some(token))?;

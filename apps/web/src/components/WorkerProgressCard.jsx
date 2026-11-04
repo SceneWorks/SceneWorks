@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { AssetVedaOutcome, VedaOutcome } from "./VedaOutcome.jsx";
 import React, { useEffect, useMemo, useState } from "react";
 import { actionStatuses, terminalStatuses } from "../jobTypes.js";
@@ -479,6 +480,7 @@ function ThumbnailGroups({ groups, variant, onThumbnailClick }) {
 }
 
 function VideoThumbnail({ assets, onThumbnailClick }) {
+  useMediaTicket();
   const asset = Array.isArray(assets) ? assets[0] : null;
   if (!asset) {
     return (

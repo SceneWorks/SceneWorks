@@ -1,3 +1,4 @@
+import { legacySortedValue as canonical } from "./canonical-json.mjs";
 // Typed sampled Windows process accounting: never a physical-residency/allocator alias
 // or predictive fit authorization. Pure CPU validation; no telemetry or model access.
 import assert from 'node:assert/strict';
@@ -7,7 +8,7 @@ const sha = /^[a-f0-9]{64}$/;
 const exact = (value, keys, label) => { assert(value && typeof value === 'object' && !Array.isArray(value), `${label} object required`); assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `${label} unknown/missing fields`); };
 const natural = (v, label) => assert(Number.isSafeInteger(v) && v >= 0, `${label} finite nonnegative safe integer required`);
 const text = (v, label) => assert(typeof v === 'string' && v.length > 0, `${label} required`);
-const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])])) : value;
+
 export const ownedAccountingDigest = (domain, value) => createHash('sha256').update(domain).update(JSON.stringify(canonical(value))).digest('hex');
 const unavailable = value => { exact(value, ['physicalResidentBytes','activeBytes','allocatorBytes'], 'unavailable accounting metrics'); for (const v of Object.values(value)) assert.equal(v, null, 'unavailable residency/allocator metrics cannot become numbers'); };
 export function validateOwnedProcessAccountingRecord(record) {

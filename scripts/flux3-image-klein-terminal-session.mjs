@@ -1,3 +1,4 @@
+import { fileSha256 as fileHash } from "./lib/file-sha256.mjs";
 // Concrete owned API/worker launcher. Offline by default; no build or dispatch.
 // Only explicitly approved provisioning uses the shared legacy credential boundary.
 import assert from 'node:assert/strict';
@@ -5,7 +6,6 @@ import { spawn, execFile as execFileCb } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { createHash, randomBytes } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import { cp, mkdir, open, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { userInfo } from 'node:os';
@@ -16,7 +16,7 @@ import { validateApprovedPlan, planHash, auditLedger, reserveInvocation, boundIn
 const execFile = promisify(execFileCb);
 // Physical Macs: runner name -> its GitHub runner target and unique label.
 export const MAC_RUNNERS = Object.freeze({ 'nax-macos': Object.freeze({ runnerTarget: 'primary', runnerLabel: 'rw-starvector' }), 'nax-macos-2': Object.freeze({ runnerTarget: 'secondary', runnerLabel: 'rw-mage' }) });
-export async function fileHash(file) { const h = createHash('sha256'); for await (const chunk of createReadStream(file)) h.update(chunk); return h.digest('hex'); }
+export { fileHash };
 export async function contained(file, root) {
   const resolved = await realpath(file), relative = path.relative(await realpath(root), resolved);
   assert(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), 'file escaped admitted root');

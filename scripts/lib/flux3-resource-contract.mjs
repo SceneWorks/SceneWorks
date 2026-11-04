@@ -1,8 +1,9 @@
+import { fileSha256 } from "./file-sha256.mjs";
+import { legacySortedValue as canonical } from "./canonical-json.mjs";
 // FLUX3 terminal supplemental resources, NOT a second calibration grid or trusted pin registry.
 // No downloads, conversions, native loads or measurements occur in this module.
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { realpath, stat, readdir } from "node:fs/promises";
 import { admittedCandleDevice } from "../flux3-image-klein-terminal-session.mjs";
 import { OWNED_ACCOUNTING_KIND, validateOwnedProcessAccountingRecord } from "./flux3-owned-accounting-contract.mjs";
@@ -165,11 +166,6 @@ function hash(value) {
   if (!/^[a-f0-9]{64}$/.test(value ?? "")) throw new Error("BLOCKED: full lowercase SHA256 required");
   return value;
 }
-function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
-  return value;
-}
 // Exact canonical native-anchor request identity also computed immediately before native generate.
 // This is a planning hash, never a generation/capture authorization.
 export function flux3AnchorRequestDigest(backend, modelId, tier) {
@@ -273,9 +269,7 @@ async function fileBinding(root, candidate, expected, bytes) {
   const file = await confined(root, candidate);
   const before = await stat(file);
   if (!before.isFile() || !before.size || (bytes !== undefined && before.size !== bytes)) throw new Error("BLOCKED: empty or mismatched local input");
-  const digest = createHash("sha256");
-  for await (const chunk of createReadStream(file)) digest.update(chunk);
-  const sha256 = digest.digest("hex");
+  const sha256 = await fileSha256(file);
   const after = await stat(file);
   if (sha256 !== expected || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error("BLOCKED: local input checksum mismatch/change");
   return { path: file, bytes: after.size, sha256 };

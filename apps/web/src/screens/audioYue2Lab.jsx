@@ -1,3 +1,4 @@
+import { safeExternalUrl } from "../urls.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
@@ -10,7 +11,7 @@ import {
   sessionOnlyFields,
   useStudioSettingsWriter,
 } from "../hooks/useStudioSettings.js";
-import { writeLicenseAck } from "../licenseAcknowledgment.js";
+import { licenseTermsMatch, writeLicenseAck } from "../licenseAcknowledgment.js";
 import { terminalStatuses } from "../jobTypes.js";
 import {
   MAX_DECODE_TILE_FRAMES,
@@ -250,6 +251,7 @@ function Yue2Gate({ model, models, identity, ack, onAccept, busy, error, optIn, 
   const [accepted, setAccepted] = useState(Boolean(ack.acknowledged));
   const alternatives = commercialAlternatives(model, models);
   const canEnable = understood && accepted && !busy && ack.status === "ready";
+  const licenseUrl = safeExternalUrl(identity.licenseUrl);
   return (
     <div className="yue2-gate" data-testid="yue2-gate">
       <div className="yue2-gate__head">
@@ -262,8 +264,8 @@ function Yue2Gate({ model, models, identity, ack, onAccept, busy, error, optIn, 
         Studio modes changes when you enable it.
       </p>
       {model.licenseNotice ? <p className="model-license-terms">{model.licenseNotice}</p> : null}
-      {identity.licenseUrl ? (
-        <a href={identity.licenseUrl} rel="noreferrer" target="_blank">
+      {licenseUrl ? (
+        <a href={licenseUrl} rel="noreferrer" target="_blank">
           Read the full licence
         </a>
       ) : null}
@@ -377,7 +379,7 @@ export function Yue2SongLab({ header }) {
   // back a new object for the same entry, and re-reading on identity would reset the lab to
   // "checking" on every refresh. Changed terms do re-read (the server lapses the old acceptance).
   const modelId = model?.id ?? null;
-  const termsKey = model ? `${model.licenseNotice ?? ""}|${model.licenseUrl ?? ""}` : "";
+  const termsKey = model ? JSON.stringify([model.license, model.licenseUrl, model.licenseNotice]) : "";
   const loadAck = useCallback(() => {
     if (!modelId) return undefined;
     let live = true;
@@ -385,6 +387,7 @@ export function Yue2SongLab({ header }) {
     getLicenseAcknowledgment(modelId, token)
       .then((view) => {
         if (!live) return;
+        if (!licenseTermsMatch(model, view)) throw new Error("License terms changed. Refresh the model catalog and review them before accepting.");
         setAck({ status: "ready", acknowledged: view?.acknowledged === true, error: null, view });
         // Mirror the server's record into the download choke point's cache so an install from
         // here (or the Models card) is not refused for a stale browser flag.
@@ -409,7 +412,7 @@ export function Yue2SongLab({ header }) {
     setGateError(null);
     try {
       if (!ack.acknowledged) {
-        const view = await putLicenseAcknowledgment(model.id, token);
+        const view = await putLicenseAcknowledgment(model.id, token, ack.view?.termsSha256);
         setAck({ status: "ready", acknowledged: view?.acknowledged === true, error: null, view });
       }
       writeLicenseAck(model.id, true);

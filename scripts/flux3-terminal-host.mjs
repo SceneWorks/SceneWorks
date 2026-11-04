@@ -1,11 +1,11 @@
+import { fileSha256 } from "./lib/file-sha256.mjs";
+import { sha256 as digest } from "./lib/file-sha256.mjs";
 // sc-26243: per-host MLX terminal steps behind the manual `flux3-image-klein-terminal-host` workflow.
 // Runs ONLY on the Mac the dispatch names, under a fixed $HOME/sc26243-run, from a hash-pinned local
 // control file. Nothing is uploaded: the repository and its Actions logs are PUBLIC, so this script
 // prints hashes and counts only, and every child's own output goes to a local log file.
 import assert from 'node:assert/strict';
 import { spawn, execFile as execFileCb } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, open, readFile, readdir, stat, statfs, writeFile } from 'node:fs/promises';
 import { hostname, userInfo } from 'node:os';
 import path from 'node:path';
@@ -24,8 +24,8 @@ export const DATASET_INPUTS_MANIFEST_SHA256 = 'a9551ff98b7088c3653052079ba19e006
 export const MLX_CONVERSIONS = Object.freeze(['flux3-mlx-affine-q4-g64-v1', 'flux3-mlx-affine-q8-g64-v1']);
 const sha = /^[a-f0-9]{64}$/, revision = /^[a-f0-9]{40}$/;
 const blocked = message => new Error(`BLOCKED: ${message}`);
-const digest = bytes => createHash('sha256').update(bytes).digest('hex');
-export async function fileSha256(file) { const h = createHash('sha256'); for await (const chunk of createReadStream(file)) h.update(chunk); return h.digest('hex'); }
+
+export { fileSha256 };
 
 /** Typed dispatch inputs. GitHub turns ANY empty dispatch value into the declared default, so every
  *  input defaults to the sentinel `none`, which is refused: absence can never select a host/step. */

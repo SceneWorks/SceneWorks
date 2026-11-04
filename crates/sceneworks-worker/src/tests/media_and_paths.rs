@@ -128,8 +128,8 @@ fn path_and_error_helpers_are_bounded_and_defensive() {
     }
     // A normal project-relative media path still resolves under the project root.
     let safe = safe_project_path(temp.path(), "assets/images/x.png").expect("safe path resolves");
-    let canonical_root = temp.path().canonicalize().expect("tempdir canonicalizes");
-    assert!(safe.starts_with(&canonical_root));
+    let canonical_root = temp.path().canonicalize().expect("project root resolves");
+    assert_eq!(safe, canonical_root.join("assets/images/x.png"));
     assert!(safe.ends_with("assets/images/x.png"));
 
     let noisy = (0..100)

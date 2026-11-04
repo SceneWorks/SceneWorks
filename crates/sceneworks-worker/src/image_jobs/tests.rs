@@ -19589,7 +19589,7 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
     let source = include_str!("candle.rs");
     let artifacts = include_str!("artifact_resolution.rs");
     let memory = include_str!("memory.rs");
-    let selector = include_str!("../candle_memory_strategy.rs");
+    let selector = crate::source_tests::facade_source("candle_memory_strategy.rs");
     let registry = include_str!("../memory_route_registry.rs");
     for required in [
         "SANA_CANDLE_DIFFUSERS_REVISION",
@@ -19799,7 +19799,10 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
     // Load a repo pose skeleton (already an OpenPose render) as the pose Control map.
     let pose_png = PathBuf::from(env_or(
         "KREA_CTRL_POSE",
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../poses/dance_01.png"),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/web/public/poses/dance_01.png"
+        ),
     ));
     let skel = image::open(&pose_png)
         .unwrap_or_else(|e| panic!("open pose {}: {e}", pose_png.display()))

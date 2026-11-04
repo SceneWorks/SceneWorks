@@ -1,3 +1,4 @@
+import { modelCacheApi } from "./api/modelCacheResources.js";
 // Resolved-model hot cache — client seam for the Settings storage card and the Model Manager's
 // per-model local-copy controls (sc-19711).
 //
@@ -11,7 +12,7 @@
 //    `manual_removal_preview` — measured bytes, the typed pin answer, the source-availability
 //    warning and the refusal reason — so the dialog cannot promise something the store would then
 //    refuse. `pins.kind === "unknown"` is surfaced as "can't determine", never as "not pinned".
-import { apiFetch } from "./api.js";
+
 import { readAccessToken } from "./accessToken.js";
 import { formatBytes } from "./formatting.js";
 
@@ -260,25 +261,25 @@ export function describeEntryState(entry) {
 // ---- transport ------------------------------------------------------------------
 
 export function fetchModelCache() {
-  return apiFetch("/api/v1/model-cache", readAccessToken());
+  return modelCacheApi.modelCache(readAccessToken());
 }
 
 export function previewCacheRemoval(cacheKey) {
-  return apiFetch("/api/v1/model-cache/removal-preview", readAccessToken(), {
+  return modelCacheApi.modelCacheRemovalPreview(readAccessToken(), {
     method: "POST",
     body: JSON.stringify({ cacheKey }),
   });
 }
 
 export function removeCacheEntry(cacheKey) {
-  return apiFetch("/api/v1/model-cache/remove", readAccessToken(), {
+  return modelCacheApi.modelCacheRemove(readAccessToken(), {
     method: "POST",
     body: JSON.stringify({ cacheKey }),
   });
 }
 
 export function setCacheEntryPin(cacheKey, pinned) {
-  return apiFetch("/api/v1/model-cache/pin", readAccessToken(), {
+  return modelCacheApi.modelCachePin(readAccessToken(), {
     method: "POST",
     body: JSON.stringify({ cacheKey, pinned }),
   });

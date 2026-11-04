@@ -1,5 +1,5 @@
 // Explicit manual-only learned validation. Importing, --check and --preflight execute no model.
-import { createHash } from 'node:crypto';
+import { sha256 as hash } from '../lib/file-sha256.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { hostname, cpus, platform, arch } from 'node:os';
@@ -15,7 +15,6 @@ export const CASES = Object.freeze([
   { package: 'sceneworks-image-quality', source: 'crates/sceneworks-image-quality/src/lib.rs', fqn: 'tests::bundled_aesthetic_predictor_loads_and_scores', fixture: 'bundled-laion-head', feature: FEATURE },
   { package: 'sceneworks-rust-api', source: 'apps/rust-api/src/tests/training.rs', fqn: 'tests::training::training_dataset_aesthetic_readiness_executes_bundled_head', fixture: 'api-bundled-laion-head', feature: 'aesthetic-inference-proof' },
 ]);
-const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const read = name => readFileSync(path.join(ROOT, name));
 const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).trim();
 

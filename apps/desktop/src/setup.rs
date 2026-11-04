@@ -2126,7 +2126,7 @@ fn supervise_worker(
                         &format!("[desktop] {label} worker environment setup failed: {error}\n"),
                     );
                     std::thread::sleep(Duration::from_secs(backoff));
-                    backoff = (backoff * 2).min(30);
+                    backoff = sceneworks_core::network_policy::next_retry_delay_seconds(backoff);
                     continue;
                 }
             };
@@ -2139,7 +2139,7 @@ fn supervise_worker(
                         &format!("[desktop] {label} worker spawn failed: {error}\n"),
                     );
                     std::thread::sleep(Duration::from_secs(backoff));
-                    backoff = (backoff * 2).min(30);
+                    backoff = sceneworks_core::network_policy::next_retry_delay_seconds(backoff);
                     continue;
                 }
             };
@@ -2329,7 +2329,7 @@ fn supervise_worker(
                 &format!("[desktop] restarting {label} worker in {backoff}s\n"),
             );
             std::thread::sleep(Duration::from_secs(backoff));
-            backoff = (backoff * 2).min(30);
+            backoff = sceneworks_core::network_policy::next_retry_delay_seconds(backoff);
         }
     });
 }

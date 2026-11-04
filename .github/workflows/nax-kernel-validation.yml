@@ -12,12 +12,23 @@ on:
         required: false
         type: choice
         default: nax
-        options: [nax, aesthetic-cpu]
+        options: [nax, aesthetic-cpu, cv]
       inference_sha:
-        description: Exact locked inference SHA (required only by aesthetic-cpu)
+        description: Exact locked inference SHA (required by aesthetic-cpu and cv)
         required: false
         type: string
         default: ""
+      backend:
+        description: CV provider backend (used only by suite=cv)
+        required: false
+        type: choice
+        default: mlx
+        options: [mlx, cuda]
+      build_only:
+        description: CV compile and discovery only, without model execution
+        required: false
+        type: boolean
+        default: true
       mac_go:
         description: Michael explicitly approved this Mac GPU run
         required: true
@@ -191,3 +202,14 @@ jobs:
           path: ${{ runner.temp }}/aesthetic-cpu-evidence/
           if-no-files-found: error
           retention-days: 30
+
+  cv:
+    # Registered manual dispatcher bridge; no ordinary CI can select this suite.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.suite == 'cv' }}
+    uses: ./.github/workflows/cv-provider-validation.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      inference_sha: ${{ inputs.inference_sha }}
+      backend: ${{ inputs.backend }}
+      build_only: ${{ inputs.build_only }}
+      mac_go: ${{ inputs.mac_go }}

@@ -8,6 +8,8 @@ vi.mock("../../api.js", () => ({
   API_BASE_URL: "http://localhost:44777",
   apiFetch: apiFetchMock,
   withMediaTicket: (url) => url,
+  getMediaTicket: () => "",
+  subscribeMediaTicket: () => () => {},
 }));
 
 import { FilmReview, normalizedPlan } from "./FilmReview.jsx";

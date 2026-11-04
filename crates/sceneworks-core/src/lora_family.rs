@@ -2205,18 +2205,7 @@ fn detect_metadata_family(header: &Value) -> Option<MetadataFamily> {
         "modelspec.architecture",
         "modelspec.implementation",
     ];
-    for key in keys {
-        let Some(value) = metadata.get(key).and_then(Value::as_str) else {
-            continue;
-        };
-        if let Some(family) = crate::model_family::exact_identity(value) {
-            return Some(MetadataFamily {
-                generic_qwen_label: family == crate::model_family::QWEN_IMAGE
-                    && is_generic_qwen_image_label(value),
-                family: family.to_owned(),
-            });
-        }
-    }
+    // Keep the established field order; canonical aliases apply within each value.
     for key in keys {
         let Some(value) = metadata.get(key).and_then(Value::as_str) else {
             continue;
@@ -3644,6 +3633,12 @@ pub fn validate_lora_compatibility_with_manifest(
                     ));
                 }
                 if let Some(base) = base {
+                    let base_manifest = lora
+                        .get("baseModelManifestEntry")
+                        .and_then(Value::as_object)
+                        .filter(|entry| {
+                            entry.get("id").and_then(Value::as_str) == Some(base.as_str())
+                        });
                     // `base_model_satisfies_gate` keeps the 5B-vs-14B split while letting a
                     // Wan-14B LoRA through on a model that accepts `wan-video` via the registry
                     // (sc-15017) — its base can never equal that model's own id.
@@ -3652,7 +3647,7 @@ pub fn validate_lora_compatibility_with_manifest(
                         model_id,
                         &base,
                         model,
-                        None,
+                        base_manifest,
                     ) {
                         let detail = if families.iter().any(|family| family == "ltx-video") {
                             "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable."
@@ -3674,6 +3669,61 @@ pub fn validate_lora_compatibility_with_manifest(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn recorded_base_metadata_precedes_later_family_aliases() {
+        for (base, alias, family) in [
+            ("black-forest-labs/FLUX.2-klein-9B", "flux", "flux2"),
+            ("lodestones/Chroma1-HD", "flux", "chroma"),
+            ("Qwen/Qwen-Image-2.1", "qwen_image", "qwen-image-2-1"),
+        ] {
+            for base_key in ["baseModel", "base_model"] {
+                for alias_key in [
+                    "ss_base_model_version",
+                    "modelspec.architecture",
+                    "modelspec.implementation",
+                ] {
+                    let mut header =
+                        header_from_keys(&["transformer_blocks.0.attn.to_q.lora_A.weight"]);
+                    header["__metadata__"] = json!({base_key: base, alias_key: alias});
+                    assert_eq!(
+                        detect_lora_family(&header).as_deref(),
+                        Some(family),
+                        "{base_key}={base} must precede {alias_key}={alias}"
+                    );
+                }
+            }
+        }
+        let native = json!({"__metadata__": {
+            "family": "flux", "baseModel": "black-forest-labs/FLUX.2-klein-9B"
+        }});
+        assert_eq!(detect_lora_family(&native).as_deref(), Some("flux"));
+        let fallback = json!({"__metadata__": {
+            "baseModel": "community/unclassified", "modelspec.architecture": "krea-realtime"
+        }});
+        assert_eq!(
+            detect_lora_family(&fallback).as_deref(),
+            Some("krea-realtime")
+        );
+    }
+
+    #[test]
+    fn versioned_qwen_repository_metadata_outweighs_generic_trainer_label() {
+        for version in ["Qwen/Qwen-Image-2.1", "qwen_image_2_1"] {
+            for key in ["baseModel", "base_model"] {
+                let mut header =
+                    header_from_keys(&["transformer_blocks.0.attn.to_q.lora_A.weight"]);
+                header["__metadata__"] = json!({
+                    key: version,
+                    "ss_base_model_version": "qwen_image"
+                });
+                assert_eq!(
+                    detect_lora_family(&header).as_deref(),
+                    Some("qwen-image-2-1")
+                );
+            }
+        }
+    }
 
     fn header_from_keys(keys: &[&str]) -> Value {
         let mut object = serde_json::Map::new();

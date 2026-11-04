@@ -1,5 +1,7 @@
+import { keypointsApi } from "./api/keypointsResources.js";
+import { assetsApi } from "./api/assetsResources.js";
 import { useCallback, useEffect, useState } from "react";
-import { API_BASE_URL, apiFetch, withMediaTicket } from "./api.js";
+import { projectFileUrl } from "./api/media.js";
 import { useAppStatic } from "./context/AppContext.js";
 
 // The reserved global project that holds user-created keypoint (face-angle) preset assets
@@ -30,18 +32,16 @@ export function keypointSourceImageUrl(sourceImageRef) {
     return "";
   }
   const normalized = String(sourceImageRef).replaceAll("\\", "/");
-  return withMediaTicket(
-    `${API_BASE_URL}/api/v1/projects/${GLOBAL_KEYPOINTS_PROJECT_ID}/files/${normalized}`,
-  );
+  return projectFileUrl(GLOBAL_KEYPOINTS_PROJECT_ID, normalized);
 }
 
 export async function loadKeypointPresets(token, options = {}) {
-  const presets = await apiFetch("/api/v1/keypoints/presets", token, options);
+  const presets = await keypointsApi.presets(token, options);
   return Array.isArray(presets) ? presets : [];
 }
 
 export async function loadKeypointCollections(token, options = {}) {
-  const collections = await apiFetch("/api/v1/keypoints/collections", token, options);
+  const collections = await keypointsApi.collections(token, options);
   return Array.isArray(collections) ? collections : [];
 }
 
@@ -51,38 +51,38 @@ export async function loadKeypointCollections(token, options = {}) {
 export async function stageKeypointSource(token, file) {
   const body = new FormData();
   body.append("file", file);
-  const result = await apiFetch("/api/v1/keypoints/sources", token, { method: "POST", body });
+  const result = await keypointsApi.sources(token, { method: "POST", body });
   const staged = Array.isArray(result?.sources) ? result.sources : [];
   return staged[0] ?? null;
 }
 
 // Persist a captured preset from an extracted kps + a staged source image.
 export async function saveKeypointPreset(token, spec) {
-  return apiFetch("/api/v1/keypoints", token, { method: "POST", body: JSON.stringify(spec) });
+  return keypointsApi.create(token, { method: "POST", body: JSON.stringify(spec) });
 }
 
 export async function deleteKeypointPreset(token, presetId) {
-  return apiFetch(`/api/v1/projects/${GLOBAL_KEYPOINTS_PROJECT_ID}/assets/${presetId}`, token, {
+  return assetsApi.item(GLOBAL_KEYPOINTS_PROJECT_ID, presetId, token, {
     method: "DELETE",
   });
 }
 
 // Create or update a user angle-set collection: { id?, name, orderedPresetIds[], isDefault? }.
 export async function upsertKeypointCollection(token, spec) {
-  return apiFetch("/api/v1/keypoints/collections", token, {
+  return keypointsApi.collections(token, {
     method: "POST",
     body: JSON.stringify(spec),
   });
 }
 
 export async function setDefaultKeypointCollection(token, collectionId) {
-  return apiFetch(`/api/v1/keypoints/collections/${encodeURIComponent(collectionId)}/default`, token, {
+  return keypointsApi.defaultCollection(collectionId, token, {
     method: "PUT",
   });
 }
 
 export async function deleteKeypointCollection(token, collectionId) {
-  return apiFetch(`/api/v1/keypoints/collections/${encodeURIComponent(collectionId)}`, token, {
+  return keypointsApi.collection(collectionId, token, {
     method: "DELETE",
   });
 }
