@@ -7,6 +7,7 @@ fn family_policy_is_closed_and_preserves_backend_route_identities() {
         ("flux3_klein_base", MemoryGateFamily::Flux3),
         ("candle_kolors_control", MemoryGateFamily::KolorsBespoke),
         ("krea_2_turbo_edit", MemoryGateFamily::Krea),
+        ("krea_2_turbo_control", MemoryGateFamily::KreaControl),
     ] {
         assert_eq!(gate_family(id), Some(family));
     }
@@ -16,6 +17,9 @@ fn family_policy_is_closed_and_preserves_backend_route_identities() {
 }
 #[test]
 fn every_registered_image_route_retains_gate_policy_without_a_parallel_family_list() {
+    for backend in [MemoryRouteBackend::Mlx, MemoryRouteBackend::Candle] {
+        assert!(has_gate_policy(backend, "krea_2_turbo_control"));
+    }
     for row in crate::engines::MODEL_TABLE {
         assert!(
             has_gate_policy(MemoryRouteBackend::Mlx, row.engine_id),
