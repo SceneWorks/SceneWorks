@@ -3192,7 +3192,9 @@ fn the_guard_module_is_excluded_from_its_own_scan() {
         "the guard module classified itself as production source"
     );
     assert!(
-        test_only.contains("tests.rs") && test_only.contains("tests/lora_and_downloads.rs"),
+        test_only.contains("tests.rs")
+            && test_only.contains("tests/lora_and_downloads.rs")
+            && test_only.contains("tests/test_api_stub.rs"),
         "the module walk must follow `include!` edges into src/tests/, or the crate's own download \
          tests read as production job-time downloads"
     );

@@ -39,7 +39,6 @@ use crate::Settings;
 use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
-use serde_json::json;
 
 // Candle (Windows/CUDA) Z-Image Fun-ControlNet (strict pose) route (sc-5489, epic 5480) —
 // `z_image_turbo` + `advanced.poses` off-Mac via `runtime_cuda::providers::z_image::ZImageControl`. The LAST family
