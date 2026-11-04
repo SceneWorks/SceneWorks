@@ -1,3 +1,4 @@
+import { deferred } from "./testUtils/async.js";
 import React, { act } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "./testUtils/dom.js";
@@ -7,11 +8,7 @@ import { apiFetch } from "./api.js";
 import { stagePoseSources } from "./poseLibrary.js";
 import { useCaptureLifecycle } from "./useCaptureLifecycle.js";
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
-}
+
 afterEach(() => vi.restoreAllMocks());
 
 it("keeps staged files associated through reordered and partial responses", async () => {

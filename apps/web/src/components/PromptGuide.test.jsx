@@ -1,16 +1,11 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Markdown } from "./Markdown.jsx";
 import { PromptGuideModal } from "./PromptGuideModal.jsx";
 
-async function settle() {
-  await act(async () => {
-    for (let index = 0; index < 6; index += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 describe("Markdown renderer", () => {
   let container;

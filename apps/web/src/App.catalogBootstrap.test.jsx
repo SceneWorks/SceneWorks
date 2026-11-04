@@ -1,3 +1,4 @@
+import { deferred } from "./testUtils/async.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -5,15 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { FakeEventSource, response, settle } from "./main.testSupport.jsx";
 
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, reject, resolve };
-}
+
 
 describe("independent project and asset bootstrap (sc-14754)", () => {
   let container;

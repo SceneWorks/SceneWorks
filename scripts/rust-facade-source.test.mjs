@@ -14,6 +14,8 @@ test("facade readers follow authored glob owners while keeping scoped/test names
   assert.deepEqual((await rustFacadeSources(entry)).map((x) => path.basename(x.path)), ["main.rs", "family.rs"]);
   assert.match(await rustFacadeSource(entry), /pub\(super\) fn run/);
   assert.deepEqual(await rustFacadeFunction(entry, "run"), { path: path.join(root, "family.rs"), source: 'pub(super) fn run() {\n    let value = "scoped braces { }";\n}' });
+  await writeFile(path.join(root, "family.rs"), "pub(super) fn open<'a>(value: &'a str) -> &'a str {\n    value\n}\n");
+  assert.match((await rustFacadeFunction(entry, "open")).source, /fn open<'a>/);
   await assert.rejects(rustFacadeFunction(entry, "missing"), /expected one owner/);
   await assert.rejects(rustFacadeFunction(entry, "run.*"), /Invalid Rust function name/);
 });

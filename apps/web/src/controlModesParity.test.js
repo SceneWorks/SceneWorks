@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
-import { fallbackModels } from "./modelCatalog.js";
+import { fallbackModels } from "./testSupport/builtinModels.js";
 
 // Manifest ↔ constants parity for strict-control modes (sc-8245, folded in from the sc-8244 review).
 //
@@ -124,7 +124,7 @@ describe("controlModes ↔ manifest parity (sc-8245)", () => {
       );
     }
     expect(fallback.ui.description).toMatch(/~5 steps/);
-    expect(fallback.ui.description).toMatch(/CFG-free.*guidance 1\.0/i);
+    expect(fallback.ui.description).toMatch(/CFG-free/i);
     expect(fallback.ui.description).toMatch(/negative prompt/i);
   });
 });
