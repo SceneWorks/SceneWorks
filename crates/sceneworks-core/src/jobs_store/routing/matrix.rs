@@ -4994,11 +4994,15 @@ mod tests {
         // The indent is part of the fixture, not decoration: it is what pins the mutation to the
         // real request literal instead of some similarly-worded block. Imported Krea builds its
         // request inside a helper function (8 spaces); the SDXL lane builds it inline in the
-        // per-item closure (20). A mutation that silently fails to apply would make this test pass
+        // per-item closure (24). A mutation that silently fails to apply would make this test pass
         // while proving nothing, which is why the "mutation must apply" assertion is here.
         for (family, source, indent) in [
             ("krea_2", WORKER_IMAGE_KREA_IMPORTED, "        "),
-            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED, "                    "),
+            (
+                "sdxl",
+                WORKER_IMAGE_SDXL_IMPORTED,
+                "                        ",
+            ),
         ] {
             assert!(imported_preview_sink(family, source));
             let normalized = source.replace("\r\n", "\n");
@@ -5025,8 +5029,8 @@ mod tests {
         ));
         let normalized_mage = WORKER_IMAGE_MAGE_FINETUNED.replace("\r\n", "\n");
         let without_mage_sink = normalized_mage.replacen(
-            "                    guidance,\n                    preview,\n                    &cancel,",
-            "                    guidance,\n                    &cancel,",
+            "                        guidance,\n                        preview,\n                        &cancel,",
+            "                        guidance,\n                        &cancel,",
             1,
         );
         assert_ne!(without_mage_sink, normalized_mage);
@@ -5044,8 +5048,8 @@ mod tests {
         );
 
         let crossed_mage_request = normalized_mage.replacen(
-            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
-            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut unrelated_request,",
+            "crate::memory_strategy::generate_with_scope(\n                        model,\n                        &mut request,",
+            "crate::memory_strategy::generate_with_scope(\n                        model,\n                        &mut unrelated_request,",
             1,
         );
         assert_ne!(crossed_mage_request, normalized_mage);
