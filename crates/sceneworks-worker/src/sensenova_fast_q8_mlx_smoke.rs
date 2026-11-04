@@ -60,19 +60,11 @@ fn resolve_packed_tier_dir(root: &Path) -> PathBuf {
 /// Returning the cache path is the POINT (see the module doc): the snapshot's `model.safetensors` is
 /// a symlink into `blobs/`, and that shape is what sc-17396 regressed on.
 fn cached_turnkey_root() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let snapshots = PathBuf::from(home)
-        .join(".cache/huggingface/hub/models--SceneWorks--sensenova-u1-8b-fast-mlx/snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .find_map(|entry| {
-            let dir = entry.path();
-            ["q4", "q8"]
-                .iter()
-                .any(|tier| dir.join(tier).join("model.safetensors").is_file())
-                .then_some(dir)
-        })
+    super::smoke_support::cached_snapshot("SceneWorks/sensenova-u1-8b-fast-mlx", |root| {
+        ["q4", "q8"]
+            .iter()
+            .any(|tier| root.join(tier).join("model.safetensors").is_file())
+    })
 }
 
 #[test]

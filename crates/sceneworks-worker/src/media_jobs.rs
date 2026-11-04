@@ -4827,8 +4827,8 @@ mod person_track_e2e_tests {
             1280,
             720,
             FfmpegContext {
-                api: &ApiClient::new(&crate::Settings::from_env()),
-                settings: &crate::Settings::from_env(),
+                api: &ApiClient::new(&crate::test_env::offline_settings()),
+                settings: &crate::test_env::offline_settings(),
                 job_id: "render-track-frames-verify",
                 cancel_message: "",
             },
@@ -4925,8 +4925,8 @@ mod person_track_e2e_tests {
             1280,
             720,
             FfmpegContext {
-                api: &ApiClient::new(&crate::Settings::from_env()),
-                settings: &crate::Settings::from_env(),
+                api: &ApiClient::new(&crate::test_env::offline_settings()),
+                settings: &crate::test_env::offline_settings(),
                 job_id: "render-track-frames-ungated",
                 cancel_message: "",
             },
