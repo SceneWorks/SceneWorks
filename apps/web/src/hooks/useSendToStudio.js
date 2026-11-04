@@ -1,3 +1,4 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useCallback } from "react";
 import { assetSeed } from "../components/assetPanels.jsx";
 import { editModelForAsset, workflowModelType } from "../presetUtils.js";
@@ -279,5 +280,16 @@ export function useSendToStudio({
     setStudioLaunch({ id: crypto.randomUUID(), view: "LibraryDataSets", datasetId });
     setActiveView("LibraryDataSets");
   }, [setActiveView, setStudioLaunch]);
-  return { sendAssetToImage, sendAssetToImageEdit, sendAssetToImageEditor, clearEditorLaunch, launchImageRecipe, sendAssetRecipeToStudio, sendAssetRecipeToQueue, sendPresetToStudio, sendAssetToVideo, sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary };
+  const context = useAppDomainValue({
+    sendAssetToImage,
+    sendAssetToImageEdit,
+    sendAssetToImageEditor,
+    clearEditorLaunch,
+    sendPresetToStudio,
+    sendAssetToVideo,
+    sendCharacterToImage,
+    sendCharacterToVideo,
+    openDatasetInLibrary
+  });
+  return { ...context, launchImageRecipe, sendAssetRecipeToStudio, sendAssetRecipeToQueue, context };
 }
