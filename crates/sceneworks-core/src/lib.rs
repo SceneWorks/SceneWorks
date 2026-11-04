@@ -29,6 +29,7 @@ pub mod film_planner;
 pub mod film_review;
 pub mod film_timeline;
 pub mod film_workspace;
+pub mod fsutil;
 pub mod h3_keyframes;
 mod h3_veda;
 pub mod hashing;
@@ -155,5 +156,6 @@ mod tests {
     }
 }
 
+pub mod network_policy;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_env;

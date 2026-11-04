@@ -10,13 +10,13 @@ use std::time::Duration;
 /// (`remote_content_length` / `lora_source_content_length`), which run before any
 /// cancel checkpoint exists — without a bound the process would never heartbeat or
 /// claim again (sc-11149).
-pub(crate) const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) use sceneworks_core::network_policy::HTTP_CONNECT_TIMEOUT;
 
 /// Chunk-level read timeout: the longest gap tolerated between received bytes on a
 /// streaming download. This bounds a stalled mid-stream peer WITHOUT a total timeout,
 /// so legitimate multi-GB weight streams still complete as long as bytes keep
 /// arriving (sc-11149).
-pub(crate) const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) use sceneworks_core::network_policy::DOWNLOAD_READ_TIMEOUT as HTTP_READ_TIMEOUT;
 
 /// Apply the standard connect + chunk-level read timeouts to a download client
 /// builder. Streaming downloads deliberately get NO total `timeout` (that would cap a
@@ -649,23 +649,12 @@ async fn promote_partial_download(partial: &Path, target: &Path) -> WorkerResult
 }
 
 async fn sync_parent_directory(path: &Path) -> WorkerResult<()> {
-    #[cfg(unix)]
-    {
-        let parent = path.parent().map(Path::to_path_buf).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!("download target {} has no parent", path.display()))
-        })?;
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
-            std::fs::File::open(parent)?.sync_all()?;
-            Ok(())
-        })
-        .await
-        .map_err(|error| task_join_error("download directory sync", error))?
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
+    let path = path.to_path_buf();
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
+        Ok(sceneworks_core::fsutil::sync_parent_directory(&path)?)
+    })
+    .await
+    .map_err(|error| task_join_error("download directory sync", error))?
 }
 
 #[derive(Debug, Clone)]

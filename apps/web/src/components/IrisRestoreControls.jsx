@@ -1,5 +1,6 @@
+import { imageRestorationApi } from "../api/imageRestorationResources.js";
 import React, { useEffect, useRef, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
+import { isAbortError } from "../api.js";
 import { useAppContextOptional } from "../context/AppContext.js";
 import {
   IRIS_INPUT_SIZINGS,
@@ -86,7 +87,7 @@ export function IrisRestoreControls({ value, onChange, planBody = null, token = 
     setPreview((current) => ({ ...current, state: "loading" }));
     statusRef.current?.({ ready: false, blocked: false, error: null });
     const timer = setTimeout(() => {
-      apiFetch("/api/v1/image-restoration/plan", token, {
+      imageRestorationApi.imageRestorationPlan(token, {
         method: "POST",
         body: planKey,
         signal: controller.signal,

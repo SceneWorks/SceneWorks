@@ -5,7 +5,7 @@ use crate::downloads::HTTP_CONNECT_TIMEOUT;
 /// progress). Safe here because these carry no large bodies, and it guarantees a hung
 /// API server can never wedge the worker at `send().await` (sc-11149). Streaming
 /// downloads deliberately use `downloads::HTTP_READ_TIMEOUT` instead of a total cap.
-const API_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+use sceneworks_core::network_policy::CONTROL_REQUEST_TIMEOUT as API_REQUEST_TIMEOUT;
 
 #[derive(Clone)]
 pub(crate) struct ApiClient {

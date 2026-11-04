@@ -1,6 +1,7 @@
+import { modelsApi } from "../api/modelsResources.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { apiFetch, fetchAssetWorkflow, inspectWorkflowFile, isAbortError } from "../api.js";
+import { fetchAssetWorkflow, inspectWorkflowFile, isAbortError } from "../api.js";
 import {
   keptSubstituteModelId,
   mossWorkflowReplayIssue,
@@ -498,7 +499,7 @@ export function useWorkflowDrop({
       // never execute a path carried by imported metadata.
       const start = component ? async () => {
         if (row.purpose !== "moss_image_edit" || !["moss_image_base", "moss_image_sft"].includes(row.modelId) || !row.licenseAcknowledged || !catalogModels.some((model) => model.id === row.modelId)) return null;
-        const result = await apiFetch(`/api/v1/models/${row.modelId}/conditional-components/moss_image_edit/download`, token, {
+        const result = await modelsApi.mossImageEditDownload(row.modelId, token, {
           method: "POST", body: JSON.stringify({ licenseAcknowledged: true }),
         });
         return result.jobs?.[0] ?? null;
