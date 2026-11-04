@@ -961,11 +961,7 @@ pub fn parse_reference_pack(text: &str) -> Result<ReferencePack, String> {
 /// `[A-Za-z0-9_-]{1,64}` — the charset every id and role in these documents must satisfy, so an
 /// id can be embedded in file names, tags and job payloads without escaping.
 pub fn is_safe_plan_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    crate::ids::is_safe_id_with_max(value, 64)
 }
 
 /// Parse `"WxH"` into `(width, height)`.

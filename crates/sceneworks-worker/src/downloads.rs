@@ -827,7 +827,7 @@ pub(crate) async fn huggingface_file_content_sha256(
     if received != size {
         return Err(invalid("upstream file is incomplete"));
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(sceneworks_core::hashing::hex(&digest.finalize()))
 }
 
 /// Extract the `rel="next"` target from an RFC 5988 `Link` header, if present. The HF tree API
@@ -1106,12 +1106,11 @@ pub(crate) async fn sha256_file(
     job_id: &str,
     path: &Path,
 ) -> WorkerResult<String> {
-    Ok(format!(
-        "{:x}",
-        download_hash_state_raw(api, settings, job_id, path)
-            .await?
-            .finalize()
-    ))
+    let path = path.to_path_buf();
+    let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
+        sceneworks_core::hashing::sha256_file(&path).map_err(WorkerError::Io)
+    });
+    heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
 }
 
 async fn download_hash_state(context: &DownloadContext<'_>, path: &Path) -> WorkerResult<Sha256> {
@@ -1126,17 +1125,9 @@ async fn download_hash_state_raw(
 ) -> WorkerResult<Sha256> {
     let path = path.to_path_buf();
     let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<Sha256> {
-        use std::io::Read;
-        let mut file = std::fs::File::open(&path).map_err(WorkerError::Io)?;
+        let file = std::fs::File::open(&path).map_err(WorkerError::Io)?;
         let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; 1024 * 1024];
-        loop {
-            let read = file.read(&mut buffer).map_err(WorkerError::Io)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
+        sceneworks_core::hashing::update_sha256(file, &mut hasher).map_err(WorkerError::Io)?;
         Ok(hasher)
     });
     heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
@@ -1385,7 +1376,7 @@ async fn download_file_inner(
             if let Some(expected) = expected_size {
                 let written = tokio::fs::metadata(dest).await?.len();
                 if written == expected {
-                    return Ok(Some(format!("{:x}", hasher.finalize())));
+                    return Ok(Some(sceneworks_core::hashing::hex(&hasher.finalize())));
                 }
                 if written < expected && resume.take_network_resume() {
                     continue;
@@ -1404,7 +1395,7 @@ async fn download_file_inner(
         if let Some(expected) = expected_size {
             let written = tokio::fs::metadata(dest).await?.len();
             if written == expected {
-                return Ok(Some(format!("{:x}", hasher.finalize())));
+                return Ok(Some(sceneworks_core::hashing::hex(&hasher.finalize())));
             }
             if written < expected && resume.take_network_resume() {
                 continue;
@@ -1416,7 +1407,7 @@ async fn download_file_inner(
                 label, written, expected,
             )));
         }
-        return Ok(Some(format!("{:x}", hasher.finalize())));
+        return Ok(Some(sceneworks_core::hashing::hex(&hasher.finalize())));
     }
 }
 
@@ -1659,7 +1650,10 @@ fn normalize_etag(raw: &str) -> Option<String> {
 }
 
 fn blob_fallback_name(path: &str) -> String {
-    format!("path-{:x}", Sha256::digest(path.as_bytes()))
+    format!(
+        "path-{}",
+        sceneworks_core::hashing::sha256_bytes(path.as_bytes())
+    )
 }
 
 /// Materialize a snapshot entry pointing at its blob, returning whether it

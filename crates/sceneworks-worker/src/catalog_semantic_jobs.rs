@@ -522,41 +522,7 @@ fn reconcile_semantic_records(
 }
 
 fn resolve_catalog_image(catalog: &Catalog, record: &CatalogRecord) -> WorkerResult<PathBuf> {
-    let relative = record
-        .metadata
-        .pointer("/acquisition/cachePath")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            (!record.image_path.contains("://") && !record.image_path.trim().is_empty())
-                .then_some(record.image_path.as_str())
-        })
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "catalog record {} has no available local image",
-                record.id
-            ))
-        })?;
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "catalog record {} has an unsafe image path",
-            record.id
-        )));
-    }
-    let candidate = catalog.root().join(path);
-    let resolved = candidate.canonicalize().map_err(WorkerError::Io)?;
-    let root = catalog.root().canonicalize().map_err(WorkerError::Io)?;
-    if !resolved.starts_with(&root) || !resolved.is_file() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "catalog record {} image escapes its catalog",
-            record.id
-        )));
-    }
-    Ok(resolved)
+    catalog.resolve_local_image(record).map_err(WorkerError::Io)
 }
 
 fn l2_normalize(mut vector: Vec<f32>) -> Result<Vec<f32>, String> {

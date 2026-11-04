@@ -2026,7 +2026,7 @@ fn imported_h3_load_identity(dit: &ImportedMiniMaxH3Dit) -> Value {
         "assembly": dit.assembly,
         "sourceFiles": dit._pins.iter().map(|pin| json!({
             "path": pin.loader_path(),
-            "sha256": pin.content_sha256().iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "sha256": sceneworks_core::hashing::hex(pin.content_sha256()),
         })).collect::<Vec<_>>(),
     })
 }
@@ -2479,10 +2479,7 @@ fn resolve_imported_minimax_h3_dit_with_check(
                 })?;
                 let actual = format!(
                     "sha256:{}",
-                    pin.content_sha256()
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<String>()
+                    sceneworks_core::hashing::hex(pin.content_sha256())
                 );
                 if file.sha256.as_deref() != Some(actual.as_str()) {
                     return Err(refuse(

@@ -551,6 +551,7 @@ fn parse_dataset_upscale_items_reject_missing_dataset_root() {
 fn dataset_upscale_output_path_rejects_traversal_ids() {
     let dir = tempfile::tempdir().expect("tempdir");
     let project_path = dir.path().join("project");
+    std::fs::create_dir(&project_path).expect("project root exists before dataset output");
     // itemId traversal
     let rel = format!("training/datasets/ds-1/upscaled/{}.png", "../../escaped");
     let error =
@@ -570,7 +571,8 @@ fn dataset_upscale_output_path_rejects_traversal_ids() {
     // valid ids resolve inside the project tree
     let rel = "training/datasets/ds-1/upscaled/item_1.png";
     let abs = crate::safe_project_path(&project_path, rel).expect("valid path resolves");
-    assert!(abs.starts_with(&project_path), "{abs:?}");
+    let canonical_project = project_path.canonicalize().expect("project root resolves");
+    assert_eq!(abs, canonical_project.join(rel));
     assert!(
         abs.ends_with("training/datasets/ds-1/upscaled/item_1.png"),
         "{abs:?}"

@@ -735,7 +735,7 @@ pub(crate) struct Inputs {
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 /// Verify a source run against the identity its producing job recorded, before anything reads it.

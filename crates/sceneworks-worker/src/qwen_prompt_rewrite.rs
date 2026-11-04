@@ -60,7 +60,6 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 
 use crate::{WorkerError, WorkerResult};
 
@@ -267,8 +266,7 @@ pub(crate) fn verify_system_prompt_digest(
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 /// A parsed rewriter reply.

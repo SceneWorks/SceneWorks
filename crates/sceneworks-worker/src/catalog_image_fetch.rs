@@ -19,10 +19,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::future::Future;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -622,20 +621,16 @@ impl CatalogFetchLease {
         processing: Option<CatalogProcessingLease>,
     ) -> CatalogImageFetchResult<Self> {
         let path = catalog.root().join(FETCH_LOCK_FILE);
-        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(CatalogImageFetchError::InvalidOptions(format!(
+        let file = sceneworks_core::file_lock::open_regular_lock_file(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidInput {
+                CatalogImageFetchError::InvalidOptions(format!(
                     "Catalog fetch lock must be a regular file: {}",
                     path.display()
-                )));
+                ))
+            } else {
+                CatalogImageFetchError::Io(error)
             }
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)?;
+        })?;
         let contended = fs2::lock_contended_error().raw_os_error();
         match FileLock::try_exclusive(file) {
             Ok(lock) => Ok(Self {
@@ -1779,7 +1774,12 @@ fn safe_catalog_directory(
     relative: &str,
     create: bool,
 ) -> CatalogImageFetchResult<PathBuf> {
-    let path = safe_relative_join(catalog.root(), relative)?;
+    // An empty parent denotes the trusted catalog root, never a file path.
+    let path = if relative.is_empty() {
+        catalog.root().to_path_buf()
+    } else {
+        safe_relative_join(catalog.root(), relative)?
+    };
     let mut current = catalog.root().to_path_buf();
     for component in Path::new(relative).components() {
         let Component::Normal(component) = component else {
@@ -1831,18 +1831,16 @@ fn safe_catalog_file(
 }
 
 fn safe_relative_join(root: &Path, relative: &str) -> CatalogImageFetchResult<PathBuf> {
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            !matches!(component, Component::Normal(_))
-                || component.as_os_str().to_string_lossy().contains('\0')
-        })
-    {
-        return Err(CatalogImageFetchError::InvalidOptions(
+    sceneworks_core::safe_path::confine_under(
+        root,
+        relative,
+        sceneworks_core::safe_path::Confinement::Lexical,
+    )
+    .map_err(|_| {
+        CatalogImageFetchError::InvalidOptions(
             "catalog cache path must contain only normal relative components".to_owned(),
-        ));
-    }
-    Ok(root.join(path))
+        )
+    })
 }
 
 fn atomic_create(path: &Path, bytes: &[u8]) -> CatalogImageFetchResult<()> {
@@ -2239,17 +2237,8 @@ fn validate_cached_file(path: &Path, expected_hash: &str, bytes: u64) -> std::io
             "cached image metadata mismatch",
         ));
     }
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    if format!("{:x}", hasher.finalize()) != expected_hash {
+    let digest = sceneworks_core::hashing::sha256_file(path)?;
+    if digest != expected_hash {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "cached image hash mismatch",
@@ -2263,7 +2252,7 @@ fn bounded_failure_reason(error: &WorkerError) -> String {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 #[cfg(test)]
@@ -3117,6 +3106,11 @@ mod tests {
     fn cache_paths_reject_parent_and_symlink_escape() {
         let (_root, registry, id) = catalog_fixture();
         let catalog = registry.open_attached(&id).expect("open");
+        std::fs::write(catalog.root().join("root.png"), b"fixture").unwrap();
+        assert_eq!(
+            safe_catalog_file(&catalog, "root.png", false).unwrap(),
+            catalog.root().join("root.png")
+        );
         assert!(safe_catalog_file(&catalog, "../outside", true).is_err());
         #[cfg(unix)]
         {
