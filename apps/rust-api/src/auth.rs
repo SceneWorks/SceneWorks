@@ -275,7 +275,12 @@ pub(crate) fn requires_token(method: &Method, path: &str) -> bool {
 /// Access Control section. Do not set `SCENEWORKS_TRUST_LOOPBACK` on a host other local
 /// users can log into unless you trust them all.
 pub(crate) fn loopback_trusted(trust_loopback: bool, peer: Option<SocketAddr>) -> bool {
-    trust_loopback && peer.is_some_and(|addr| addr.ip().is_loopback())
+    trust_loopback && is_loopback_peer(peer)
+}
+
+fn is_loopback_peer(peer: Option<SocketAddr>) -> bool {
+    // A dual-stack listener can report IPv4 loopback as ::ffff:127.0.0.1.
+    peer.is_some_and(|addr| addr.ip().to_canonical().is_loopback())
 }
 
 /// Whether a request may bypass the header-token check because it carries a valid
@@ -376,7 +381,7 @@ pub(crate) fn require_local_peer(
     peer: Option<SocketAddr>,
     rejection: impl FnOnce() -> ApiError,
 ) -> Result<(), ApiError> {
-    if peer.is_some_and(|addr| addr.ip().is_loopback()) {
+    if is_loopback_peer(peer) {
         Ok(())
     } else {
         Err(rejection())

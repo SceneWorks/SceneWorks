@@ -36,11 +36,23 @@ fn loopback_trusted_only_when_enabled_and_peer_is_local() {
     // local desktop UI/worker bypass the password while LAN clients (other IPs) don't.
     assert!(loopback_trusted(true, Some(addr("127.0.0.1:51234"))));
     assert!(loopback_trusted(true, Some(addr("[::1]:51234"))));
+    assert!(loopback_trusted(
+        true,
+        Some(addr("[::ffff:127.0.0.1]:51234"))
+    ));
     // Enabled but the peer is on the LAN → still gated.
     assert!(!loopback_trusted(true, Some(addr("192.168.1.5:51234"))));
     assert!(!loopback_trusted(true, Some(addr("0.0.0.0:51234"))));
+    assert!(!loopback_trusted(
+        true,
+        Some(addr("[::ffff:192.168.1.5]:51234"))
+    ));
     // A loopback peer alone never trusts without the opt-in (server/Docker default).
     assert!(!loopback_trusted(false, Some(addr("127.0.0.1:51234"))));
+    assert!(!loopback_trusted(
+        false,
+        Some(addr("[::ffff:127.0.0.1]:51234"))
+    ));
     // Unknown peer (e.g. the unit-test oneshot path with no connect info) → not trusted.
     assert!(!loopback_trusted(true, None));
 }

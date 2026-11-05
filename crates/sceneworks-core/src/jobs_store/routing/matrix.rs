@@ -87,6 +87,22 @@ const API_CONTRACT_ENTRY: &str = concat!(
     include_str!("../../../../../apps/rust-api/src/job_redaction.rs"),
     include_str!("../../../../../apps/rust-api/src/validators.rs"),
     include_str!("../../../../../apps/rust-api/src/file_serving.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/mod.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/assets.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/audio.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/catalogs.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/characters.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/films.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/generation.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/jobs.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/library.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/models.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/person.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/projects.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/system.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/timelines.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/training.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/workers.rs"),
 );
 const API_DTO: &str = include_str!("../../../../../apps/rust-api/src/dto.rs");
 const WORKER_DISPATCH: &str = include_str!("../../../../sceneworks-worker/src/lib.rs");
