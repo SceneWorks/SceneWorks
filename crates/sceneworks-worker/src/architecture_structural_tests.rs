@@ -1176,6 +1176,7 @@ const LEGACY_HELPER_COPIES: &[(&str, &str)] = &[("apps/desktop/src/settings.rs",
 fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
     // Each implementation has a shared core owner; compatibility wrappers delegate there.
     let canonical = [
+        ("crates/sceneworks-core/src/process.rs", "pid_alive_u32"),
         (
             "crates/sceneworks-core/src/model_artifacts/artifact_selection.rs",
             "safe_download_dir",

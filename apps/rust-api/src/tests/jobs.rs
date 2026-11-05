@@ -513,13 +513,7 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
         "2222222222222222222222222222222222222222",
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Prompt vectors" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Prompt vectors").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, parent) = request(
@@ -652,13 +646,7 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
         "2222222222222222222222222222222222222222",
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Prompt replay" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Prompt replay").await;
     let project_id = project["id"].as_str().expect("project id");
     let body = json!({
         "projectId": project_id,
@@ -744,13 +732,8 @@ async fn vector_route_resolves_default_seed_once_and_preserves_explicit_and_repl
         &["image_to_svg", "text_to_svg"],
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Vector seed persistence" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Vector seed persistence").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (status, source) = request_multipart_upload(
         app.clone(),
@@ -826,13 +809,7 @@ async fn vector_route_reports_typed_unavailable_backend_before_enqueue() {
         false,
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Vector" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Vector").await;
     let project_id = project["id"].as_str().expect("project id");
     let (_, source) = request_multipart_upload(
         app.clone(),
@@ -1103,13 +1080,7 @@ async fn vector_route_reports_typed_missing_and_incomplete_model_manager_recover
             std::fs::remove_dir_all(&installed).expect("missing install removes directory");
         }
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
-        let (_, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({ "name": "Vector" }),
-        )
-        .await;
+        let (_, project) = crate::tests::support::create_project(app.clone(), &"Vector").await;
         let project_id = project["id"].as_str().expect("project id");
         let (_, source) = request_multipart_upload(
             app.clone(),
@@ -1153,13 +1124,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Vector Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Vector Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (status, source) = request_multipart_upload(
         app.clone(),
@@ -1274,13 +1239,8 @@ async fn vector_worker_fact_publishes_through_the_api_sidecar_contract() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_vector_test_manifest(&temp_dir.path().join("config/manifests"), &["image_to_svg"]);
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Vector publication" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Vector publication").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
     let (_, source) = request_multipart_upload(
@@ -1448,20 +1408,8 @@ async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_be
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_vector_test_manifest(&temp_dir.path().join("config/manifests"), &["image_to_svg"]);
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project_a) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Project A" }),
-    )
-    .await;
-    let (_, project_b) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Project B" }),
-    )
-    .await;
+    let (_, project_a) = crate::tests::support::create_project(app.clone(), &"Project A").await;
+    let (_, project_b) = crate::tests::support::create_project(app.clone(), &"Project B").await;
     let project_a_id = project_a["id"].as_str().expect("project A id");
     let project_b_id = project_b["id"].as_str().expect("project B id");
     let (_, raster) = request_multipart_upload(
@@ -2022,13 +1970,8 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_imported_image_model_manifests(temp_dir.path());
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Imported image replay" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Imported image replay").await;
     let project_id = project["id"].as_str().expect("project id");
 
     for (mode, source) in [
@@ -2439,13 +2382,7 @@ async fn retry_and_duplicate_reject_path_unsafe_merged_generation_model_before_c
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Audio Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, audio_job) = request(
         app.clone(),
@@ -2517,13 +2454,8 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Control Retry Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Control Retry Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, original) = request(
         app.clone(),
@@ -4043,13 +3975,8 @@ async fn post_preset_prompt_enhancement_uses_the_resolved_candle_route() {
     .expect("user presets write");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Prompt enhancement preset" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Prompt enhancement preset").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, error) = request(
         app,
@@ -4612,13 +4539,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
     write_lora_gate_catalog(&temp_dir);
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "LoRA Gate" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"LoRA Gate").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // Baseline: created with a COMPATIBLE adapter, so the refusals below are about the merged set
@@ -4739,13 +4660,7 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_lora_gate_catalog(&temp_dir);
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Character Retry" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Character Retry").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (_, character) = request(
         app.clone(),
@@ -4994,13 +4909,7 @@ async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuse
     write_lora_gate_catalog(&temp_dir);
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "LoRA Gate" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"LoRA Gate").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let (status, original) = request(
@@ -5724,13 +5633,7 @@ async fn create_audio_job_maps_request_to_audio_generate_payload() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Audio Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -5777,13 +5680,8 @@ async fn create_audio_job_maps_the_multi_speaker_script() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Dialogue Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Dialogue Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -5829,13 +5727,8 @@ async fn create_audio_job_rejects_empty_prompt_and_empty_script() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Dialogue Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Dialogue Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // Empty prompt + empty script array → rejected (a script with no segments is not content).
@@ -5874,13 +5767,7 @@ async fn create_audio_job_maps_sfx_sampling_knobs() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SFX Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"SFX Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -5931,13 +5818,8 @@ async fn create_audio_job_injects_base_model_entry_for_voice_clone() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Voice Clone Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Voice Clone Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -5980,13 +5862,8 @@ async fn create_audio_job_omits_base_model_entry_without_a_reference() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Plain Audio Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Plain Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -6011,13 +5888,8 @@ async fn create_audio_job_rejects_out_of_range_match_strength() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Bad Strength Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Bad Strength Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, _body) = request(
@@ -6044,13 +5916,7 @@ async fn create_audio_job_rejects_nonsense_sampling_knobs() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SFX Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"SFX Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, body) = request(
@@ -6081,13 +5947,7 @@ async fn create_audio_job_maps_music_and_edit_fields() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Music Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -6143,13 +6003,7 @@ async fn create_audio_job_rejects_half_specified_edit() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Music Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, body) = request(
@@ -6180,13 +6034,7 @@ async fn create_audio_job_rejects_nonsense_music_fields() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Music Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // A non-positive BPM is rejected.
@@ -6256,13 +6104,7 @@ async fn create_audio_job_accepts_case_insensitive_edit_mode() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Music Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // A mixed-case KNOWN token is accepted (parity with the worker) and forwarded verbatim.
@@ -6309,13 +6151,7 @@ async fn create_audio_job_rejects_non_audio_model() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Audio Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // A path-safe but non-audio model id resolves to a `type: image` entry → rejected.
@@ -6356,13 +6192,7 @@ async fn create_audio_job_rejects_empty_prompt() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Audio Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, body) = request(
@@ -6388,13 +6218,7 @@ async fn yue_audio_app() -> (tempfile::TempDir, axum::Router, String) {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Song Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Song Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     (temp_dir, app, project_id)
 }
@@ -7885,13 +7709,8 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
     )
     .unwrap();
     let app = create_app(test_settings(&temp_dir)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"FLUX3 references"}),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"FLUX3 references").await;
     let project_id = project["id"].as_str().unwrap();
     let mut png = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
@@ -7915,13 +7734,8 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
         assert_eq!(status, StatusCode::CREATED, "{asset}");
         ids.push(asset["id"].as_str().unwrap().to_owned());
     }
-    let (_, foreign) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"Other references"}),
-    )
-    .await;
+    let (_, foreign) =
+        crate::tests::support::create_project(app.clone(), &"Other references").await;
     let (_, foreign_asset) = request_multipart_upload(
         app.clone(),
         &format!(
@@ -8566,13 +8380,7 @@ async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Caption Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Caption Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
 
@@ -8638,13 +8446,8 @@ async fn qwen_image_rewrite_rides_the_prompt_refine_seam_with_ordered_references
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen Rewrite Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen Rewrite Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let mut asset_ids = Vec::new();
@@ -8868,13 +8671,8 @@ async fn a_qwen_rewrite_result_offers_an_editable_prompt_beside_the_untouched_or
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen Rewrite Result Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen Rewrite Result Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let (status, job) = request(
@@ -9031,13 +8829,8 @@ async fn direct_prompting_needs_neither_rewriter_installed() {
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Direct Prompting Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Direct Prompting Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // Neither rewriter is auto-downloaded. That is the manifest fact the "no download, no prompt to
@@ -9125,13 +8918,8 @@ async fn image_describe_refine_job_resolves_asset_and_forwards_caption_style() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Describe Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Describe Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
 
@@ -9211,13 +8999,8 @@ async fn mood_board_refine_job_resolves_multiple_assets_to_image_paths() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Mood Board Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Mood Board Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
 
@@ -9414,13 +9197,7 @@ async fn image_and_video_job_routes_normalize_payloads() {
 async fn existing_video_models_keep_their_pre_sc_17160_reference_budget() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Budget" }),
-    )
-    .await;
+    crate::tests::support::create_project(app.clone(), &"Budget").await;
 
     let (status, job) = request(
         app.clone(),
@@ -9528,13 +9305,7 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Ref2VA" }),
-    )
-    .await;
+    crate::tests::support::create_project(app.clone(), &"Ref2VA").await;
 
     let submit = |model: &str, images: usize, clips: usize, audio: usize| {
         let app = app.clone();
@@ -9612,13 +9383,7 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
 async fn bernini_video_modes_validate_required_media() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Bernini" }),
-    )
-    .await;
+    crate::tests::support::create_project(app.clone(), &"Bernini").await;
 
     // video_to_video without a source clip is rejected.
     let (status, _) = request(
@@ -9949,13 +9714,7 @@ async fn bernini_video_modes_validate_required_media() {
 async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SCAIL-2" }),
-    )
-    .await;
+    crate::tests::support::create_project(app.clone(), &"SCAIL-2").await;
 
     // The regression itself: a complete request is ACCEPTED, not "Unsupported video mode".
     let (status, animate_job) = request(
@@ -10072,13 +9831,7 @@ fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_refe
 async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects_seven() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SCAIL-2 multi-reference" }),
-    )
-    .await;
+    crate::tests::support::create_project(app.clone(), &"SCAIL-2 multi-reference").await;
 
     let base = || {
         json!({
@@ -10199,13 +9952,7 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
     let config_dir = enabled_temp_dir.path().join("config/manifests");
     write_scail2_reference_test_manifest(&config_dir, true);
     let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
-    request(
-        enabled_app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SCAIL-2 paired descriptor" }),
-    )
-    .await;
+    crate::tests::support::create_project(enabled_app.clone(), &"SCAIL-2 paired descriptor").await;
     for count in [2usize, 6] {
         let references: Vec<String> = (0..count)
             .map(|index| format!("character-{index}"))
@@ -10236,11 +9983,9 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
 async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
     let current_temp_dir = tempfile::tempdir().expect("current temp dir creates");
     let current_app = create_app(test_settings(&current_temp_dir)).expect("current app creates");
-    request(
+    crate::tests::support::create_project(
         current_app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SCAIL-2 current descriptor replay" }),
+        &"SCAIL-2 current descriptor replay",
     )
     .await;
     let (status, current_original) = request(
@@ -10389,11 +10134,9 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
     let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
     write_scail2_reference_test_manifest(&enabled_temp_dir.path().join("config/manifests"), true);
     let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
-    request(
+    crate::tests::support::create_project(
         enabled_app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SCAIL-2 enabled descriptor replay" }),
+        &"SCAIL-2 enabled descriptor replay",
     )
     .await;
     let (status, enabled_original) = request(
@@ -10440,13 +10183,8 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
 async fn person_tracking_routes_match_contracts() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Tracking Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Tracking Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
     std::fs::write(
@@ -10640,13 +10378,7 @@ async fn generation_job_routes_reject_incompatible_loras() {
     write_test_safetensors(&lora_dir.join("qwen.safetensors"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Compatibility" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Compatibility").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, image_error) = request(
         app.clone(),
@@ -10873,13 +10605,8 @@ async fn video_jobs_expand_recipe_presets_server_side() {
     write_test_safetensors(&lora_dir.join("motion.safetensors"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Video Preset Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Video Preset Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, video_job) = request(
@@ -11059,13 +10786,8 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Preset Override Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Preset Override Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, video_job) = request(
@@ -11180,13 +10902,8 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
     *state.test_hooks.video_platform_override.lock() = Some("windows");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Platform Withdrawal Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Platform Withdrawal Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     for payload in [
@@ -11360,13 +11077,8 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Img Override Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Img Override Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, image_job) = request(
@@ -11497,13 +11209,8 @@ async fn preset_image_job_builds_each_catalog_once() {
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Image Preset Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Image Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // Reset the probe counters immediately before the job-create so project setup /
@@ -11650,13 +11357,8 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Client Resolved Preset Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Client Resolved Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // The client selected the preset (recipePresetId) but removed its only LoRA in the picker, so
@@ -11764,13 +11466,8 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Client Prompt Preset Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Client Prompt Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // Baseline: no flag → server folds the preset prefix into the prompt (today's behavior).
@@ -12418,13 +12115,8 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Duration Cap Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Duration Cap Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // 10s: legal for the default (15) but past the preset-resolved model's 5. `model` omitted so
@@ -12587,13 +12279,8 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Fps Menu Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Fps Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // 25fps: on the DEFAULT's menu, off the preset-resolved model's. `model` omitted so the preset's
@@ -12787,13 +12474,8 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Image Step Floor Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Image Step Floor Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // Under the floor: refused at enqueue, naming the model, the floor and what was asked.
@@ -12926,13 +12608,8 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Hires Fix Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Hires Fix Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // A capable model: admitted, and the block travels VERBATIM to the job payload — the DTO
@@ -13075,13 +12752,8 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Image Sampler Menu Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Image Sampler Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let post = |model: &'static str, advanced: Value| {
         let app = app.clone();
@@ -13179,13 +12851,8 @@ async fn iris_and_plain_app() -> (tempfile::TempDir, axum::Router, String) {
     )
     .expect("user models writes");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Iris Controls Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Iris Controls Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     (temp_dir, app, project_id)
 }
@@ -13425,13 +13092,8 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen 2.1 Controls Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Controls Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // Eleven REAL raster assets. sc-24110 added a per-entry half to this gate — each ordered
@@ -13787,13 +13449,8 @@ async fn image_jobs_outside_the_declared_admission_envelope_are_refused_at_enque
     )
     .expect("user models writes");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen 2.1 Envelope Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Envelope Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let enqueue = |width: u32, height: u32| {
         request(
@@ -13905,13 +13562,8 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen 2.1 Ordered Conditioning" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Ordered Conditioning").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // TWELVE distinct assets. The count below is over DISTINCT ids — the ordered list is deduped,
@@ -14232,13 +13884,8 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Step Floor Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Step Floor Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // 1 step: fine for the default (no floor) but under the preset-resolved model's 2. `model`
@@ -14446,13 +14093,8 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Step Menu Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Step Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // THE CASE THE STORY NAMES. 30 steps: over the menu, so a FLOOR-shaped key would have admitted
@@ -14611,13 +14253,8 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
     .expect("builtin manifests seed");
 
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Duration Default Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Duration Default Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // Every shipped video model whose cap is UNDER the old blanket 6.0 — i.e. every model this
@@ -14798,13 +14435,9 @@ async fn an_image_request_naming_no_size_renders_the_models_own_declared_resolut
     .expect("builtin manifests seed");
 
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Image Default Resolution Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Image Default Resolution Project")
+            .await;
     let project_id = project["id"].as_str().expect("project id");
 
     // A matrix that pins each axis INDEPENDENTLY. `defaults.resolution` and `defaults.count` are
@@ -14988,13 +14621,8 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     write_style_test_manifests(&temp_dir.path().join("config"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Styled Job Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Styled Job Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // Sub-style id → its `prompt` ("gentle hand-painted"); "a fox" becomes the leading Subject and
@@ -15080,13 +14708,8 @@ async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
     write_style_test_manifests(&temp_dir.path().join("config"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Tag Model Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Tag Model Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let body = json!({
@@ -15145,13 +14768,8 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
     write_style_test_manifests(&temp_dir.path().join("config"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Client Styled Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Client Styled Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let already_composed = "Subject: a fox\nStyle: gentle hand-painted";
@@ -15323,13 +14941,8 @@ async fn shipped_manifest_app_on_os(
     )
     .expect("builtin manifests seed");
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "MiniMax-H3 Reachability" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"MiniMax-H3 Reachability").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     (app, project_id)
 }
@@ -16833,13 +16446,7 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
     write_test_safetensors_with_keys(&lora_dir.join("h3_ref2v.safetensors"), &keys);
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "H3 partitions" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 partitions").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let submit = |model: &'static str, lora: &'static str| {
@@ -17079,13 +16686,7 @@ fn depth_source_png() -> Vec<u8> {
 async fn image_depth_route_queues_a_typed_job_and_publishes_a_depth_asset() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Depth" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Depth").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
     let (_, source) = request_multipart_upload(
@@ -17340,13 +16941,8 @@ async fn qwen_image_2_1_turbo_image_jobs_are_gated_on_turbos_declared_limits() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_shipped_qwen_image_2_1_pair(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen 2.1 Turbo Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Turbo Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let enqueue = |model: &'static str, extra: Value| {
         let mut body = json!({

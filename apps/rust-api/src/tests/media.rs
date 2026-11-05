@@ -8,13 +8,7 @@ use std::sync::Arc;
 async fn project_file_route_serves_files_and_rejects_traversal() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Files" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Files").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     let media_path = project_path.join("assets/images/image.png");
@@ -84,13 +78,7 @@ async fn project_file_route_serves_files_and_rejects_traversal() {
 async fn vector_source_is_attachment_only_while_its_preview_is_inline_png() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Vector files" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Vector files").await;
     let project_id = created["id"].as_str().expect("project id");
     let root = std::path::PathBuf::from(created["path"].as_str().expect("project path"))
         .join("assets/images/vector");
@@ -200,13 +188,8 @@ async fn project_file_route_backfills_and_reuses_bounded_thumbnails() {
     let settings = test_settings(&temp_dir);
     let data_dir = settings.data_dir.clone();
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Thumbnail backfill" }),
-    )
-    .await;
+    let (_, created) =
+        crate::tests::support::create_project(app.clone(), &"Thumbnail backfill").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     let media_path = project_path.join("assets/images/large.png");
@@ -326,13 +309,7 @@ async fn project_file_route_serves_a_copy_without_the_workflow() {
     // reader, the PIXELS are unchanged, and the file on disk is untouched.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Strip" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Strip").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
 
@@ -456,13 +433,7 @@ async fn a_strip_request_cannot_revalidate_into_the_unstripped_body() {
     // date must not produce a 304, and the correct tag still must.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Revalidate" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Revalidate").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     let embedded = workflow_png_bytes(&temp_dir, Some("a lighthouse in fog"));
@@ -573,13 +544,7 @@ async fn an_oversized_image_is_refused_rather_than_served_with_its_workflow() {
     // answered with the original is the one outcome this feature must not produce.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Oversize" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Oversize").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
 
@@ -680,13 +645,7 @@ async fn a_media_ticket_authorizes_the_stripped_download_too() {
 async fn project_file_route_serves_byte_ranges() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Ranges" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Ranges").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     let media_path = project_path.join("assets/videos/clip.mp4");
@@ -1684,13 +1643,7 @@ async fn smart_crop_and_strip_exif_rewrite_and_repoint_items() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Crop Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Crop Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // A 64×16 PNG: crop-loss (64-16)/64 = 0.75, well over the 0.35 flag.
@@ -1818,13 +1771,8 @@ async fn an_rgba_asset_keeps_its_alpha_through_the_file_and_thumbnail_routes() {
     let settings = test_settings(&temp_dir);
     let data_dir = settings.data_dir.clone();
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Transparent render" }),
-    )
-    .await;
+    let (_, created) =
+        crate::tests::support::create_project(app.clone(), &"Transparent render").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     std::fs::create_dir_all(project_path.join("assets/images")).expect("asset dir creates");
@@ -1931,13 +1879,8 @@ async fn a_downscaled_rgba_thumbnail_keeps_its_transparent_and_opaque_regions() 
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Large transparent render" }),
-    )
-    .await;
+    let (_, created) =
+        crate::tests::support::create_project(app.clone(), &"Large transparent render").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     std::fs::create_dir_all(project_path.join("assets/images")).expect("asset dir creates");
@@ -1999,13 +1942,7 @@ async fn an_rgb_asset_is_unchanged_by_the_alpha_aware_thumbnail_route() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Opaque render" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Opaque render").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     std::fs::create_dir_all(project_path.join("assets/images")).expect("asset dir creates");

@@ -1,4 +1,5 @@
 # Reviewed API -> worker Rust paths, including test-support embedding seams.
+
 apps/rust-api/src/catalogs.rs sceneworks_worker::catalog_image_fetch::fetch_verified_catalog_image
 apps/rust-api/src/catalogs.rs sceneworks_worker::catalog_image_fetch::verify_catalog_image_bytes
 apps/rust-api/src/catalogs.rs sceneworks_worker::catalog_parquet_scanner
@@ -63,13 +64,14 @@ apps/rust-api/src/models.rs sceneworks_worker::convert_source_state
 apps/rust-api/src/models.rs sceneworks_worker::flux3_receipted_snapshot
 apps/rust-api/src/models.rs sceneworks_worker::flux3_runtime_tier_bundle_check
 apps/rust-api/src/models.rs sceneworks_worker::image_text_encoder_options
-apps/rust-api/src/models.rs sceneworks_worker::minimax_h3_import_fixture::ManagedMiniMaxH3Import
-apps/rust-api/src/models.rs sceneworks_worker::minimax_h3_import_fixture::captured_component_context
-apps/rust-api/src/models.rs sceneworks_worker::minimax_h3_import_fixture::shared_component_snapshot
-apps/rust-api/src/models.rs sceneworks_worker::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source
 apps/rust-api/src/models.rs sceneworks_worker::resolve_image_text_encoder_selection
 apps/rust-api/src/models.rs sceneworks_worker::resolve_model_convert_output
 apps/rust-api/src/models.rs sceneworks_worker::text_encoder_options_for_adapter
+apps/rust-api/src/models/tests/download_receipt_tests.rs sceneworks_worker::flux3_receipted_snapshot
+apps/rust-api/src/models/tests/imported_checkpoint_product_surface_tests.rs sceneworks_worker::minimax_h3_import_fixture::ManagedMiniMaxH3Import
+apps/rust-api/src/models/tests/imported_checkpoint_product_surface_tests.rs sceneworks_worker::minimax_h3_import_fixture::shared_component_snapshot
+apps/rust-api/src/models/tests/imported_checkpoint_product_surface_tests.rs sceneworks_worker::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source
+apps/rust-api/src/models/tests/minimax_h3_import_declaration_tests.rs sceneworks_worker::minimax_h3_import_fixture::captured_component_context
 apps/rust-api/src/saved_voices.rs sceneworks_worker::voice_register
 apps/rust-api/src/saved_voices.rs sceneworks_worker::voice_register::VoiceEmbedError
 apps/rust-api/src/saved_voices.rs sceneworks_worker::voice_register::VoiceEmbedError::Decode

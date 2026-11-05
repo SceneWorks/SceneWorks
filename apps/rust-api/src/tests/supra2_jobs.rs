@@ -34,13 +34,7 @@ async fn supra2_accepts_the_published_controls_and_refuses_the_rest_before_enque
     let temp = tempfile::tempdir().unwrap();
     setup(&temp);
     let app = create_app(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Supra2" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Supra2").await;
     let job = |extra: Value| {
         let mut body =
             json!({ "projectId": project["id"], "model": "supra2_img", "prompt": "a red fox" });

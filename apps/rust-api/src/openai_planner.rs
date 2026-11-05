@@ -84,11 +84,21 @@ impl OpenAiPlannerLlm {
         self
     }
 
-    fn record_execution(&self, execution: &PlannerExecutionRecord) -> Result<(), HarnessError> {
+    async fn record_execution(
+        &self,
+        execution: &PlannerExecutionRecord,
+    ) -> Result<(), HarnessError> {
         if let Some(callback) = &self.execution_updated {
-            callback(execution)?;
+            let callback = callback.clone();
+            let execution = execution.clone();
+            crate::film_planner::planner_blocking(move || callback(&execution)).await??;
         }
         Ok(())
+    }
+
+    async fn cancellation_requested(&self) -> Result<bool, HarnessError> {
+        let callback = self.cancel_requested.clone();
+        crate::film_planner::planner_blocking(move || callback()).await
     }
 
     pub(crate) fn on_request_started(mut self, callback: RequestStarted) -> Self {
@@ -100,7 +110,7 @@ impl OpenAiPlannerLlm {
 impl PlannerLlm for OpenAiPlannerLlm {
     fn complete(&self, request: LlmRequest) -> LlmFuture<'_> {
         Box::pin(async move {
-            if (self.cancel_requested)() {
+            if self.cancellation_requested().await? {
                 return Err(HarnessError::Refused(
                     "planning canceled before the next external provider request".to_owned(),
                 ));
@@ -118,7 +128,13 @@ impl PlannerLlm for OpenAiPlannerLlm {
                 self.source_script, request.prompt
             );
             let user_content = if self.send_reference_pixels {
-                multimodal_content(&outbound_prompt, &request.reference_images)?
+                {
+                    let images = request.reference_images.clone();
+                    crate::film_planner::planner_blocking(move || {
+                        multimodal_content(&outbound_prompt, &images)
+                    })
+                    .await??
+                }
             } else {
                 Value::String(outbound_prompt)
             };
@@ -147,7 +163,7 @@ impl PlannerLlm for OpenAiPlannerLlm {
             }
             // Recheck immediately before dispatch, after optional file reads. A canceled request
             // has neither a POST nor an invented attempt receipt.
-            if (self.cancel_requested)() {
+            if self.cancellation_requested().await? {
                 return Err(HarnessError::Refused(
                     "planning canceled before external dispatch".to_owned(),
                 ));
@@ -170,9 +186,10 @@ impl PlannerLlm for OpenAiPlannerLlm {
                 ..PlannerExecutionRecord::default()
             };
             // This records a client dispatch attempt, not evidence that the server received it.
-            self.record_execution(&execution)?;
+            self.record_execution(&execution).await?;
             if let Some(callback) = &self.request_started {
-                callback();
+                let callback = callback.clone();
+                crate::film_planner::planner_blocking(move || callback()).await?;
             }
             let result: Result<String, (&str, HarnessError)> = async {
                 let mut pending = Box::pin(builder.json(&body).send());
@@ -185,7 +202,7 @@ impl PlannerLlm for OpenAiPlannerLlm {
                             (code, classify_transport_error(error))
                         })?,
                         _ = tokio::time::sleep(Duration::from_millis(25)) => {
-                            if (self.cancel_requested)() {
+                            if self.cancellation_requested().await.map_err(|error| ("operation_state_error", error))? {
                                 return Err(("canceled", HarnessError::Refused("planning canceled by user".to_owned())));
                             }
                         }
@@ -219,7 +236,7 @@ impl PlannerLlm for OpenAiPlannerLlm {
                             }
                         })?,
                         _ = tokio::time::sleep(Duration::from_millis(25)) => {
-                            if (self.cancel_requested)() {
+                            if self.cancellation_requested().await.map_err(|error| ("operation_state_error", error))? {
                                 return Err(("canceled", HarnessError::Refused("planning canceled by user".to_owned())));
                             }
                         }
@@ -241,7 +258,7 @@ impl PlannerLlm for OpenAiPlannerLlm {
             }.await;
             execution.duration_seconds = Some(started.elapsed().as_secs_f64());
             execution.failure_code = result.as_ref().err().map(|(code, _)| (*code).to_owned());
-            if let Err(source) = self.record_execution(&execution) {
+            if let Err(source) = self.record_execution(&execution).await {
                 return Err(HarnessError::PlannerExecutionFailure {
                     source: Box::new(source),
                     executions: vec![execution],
@@ -1008,13 +1025,7 @@ mod tests {
         held = held.on_execution_updated(Arc::new(|_| panic!("policy refusal precedes dispatch")));
         assert!(matches!(held.complete(request(Vec::new())).await,
             Err(HarnessError::Refused(detail)) if detail.contains("local/LAN")));
-        let (_, project) = api_request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({"name": "Policy test"}),
-        )
-        .await;
+        let (_, project) = crate::tests::support::create_project(app.clone(), &"Policy test").await;
         let project_id = project["id"].as_str().unwrap();
         let (_, mut draft) = api_request(
             app.clone(),

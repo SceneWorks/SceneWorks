@@ -291,7 +291,7 @@ pub(crate) async fn upload_training_dataset_item(
         })
         .await;
         if item.is_err() {
-            let _ = tokio::fs::remove_file(&temp_path).await;
+            crate::uploads::cleanup_staged_upload(&temp_path).await;
         }
         return Ok((StatusCode::CREATED, Json(item?)));
     }
@@ -317,7 +317,7 @@ pub(crate) async fn upload_ltx_prepared_bundle(
             store.install_ltx_prepared_bundle(&project_id, &dataset_id, &item_id, &source_path)
         })
         .await;
-        let _ = tokio::fs::remove_file(&temp_path).await;
+        crate::uploads::cleanup_staged_upload(&temp_path).await;
         return Ok((StatusCode::CREATED, Json(dataset?)));
     }
     Err(ApiError::bad_request("Upload file field is required"))
@@ -1554,7 +1554,7 @@ pub(crate) async fn upload_training_dataset_subject_mask(
             )
         })
         .await;
-        let _ = tokio::fs::remove_file(&temp_path).await;
+        crate::uploads::cleanup_staged_upload(&temp_path).await;
         return Ok(Json(report?));
     }
     Err(ApiError::typed(

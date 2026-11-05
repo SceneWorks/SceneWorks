@@ -931,13 +931,8 @@ async fn concurrent_models_and_preset_routes_share_one_install_state_sweep() {
         .lock() = Some(false);
     let size_hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
     *state.test_hooks.model_size_estimate_test_hook.lock() = Some(size_hook.clone());
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Preset Coalescing Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Preset Coalescing Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let models_task = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
@@ -1616,13 +1611,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         "builtInLoras migrated to loras"
     );
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Preset Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Preset Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, refusal) = request(
         app.clone(),

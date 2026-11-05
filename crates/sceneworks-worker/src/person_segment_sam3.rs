@@ -99,17 +99,16 @@ fn with_sam3_weights<R>(
     f: impl FnOnce(&Weights) -> WorkerResult<R>,
 ) -> WorkerResult<R> {
     let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = crate::image_jobs::read_weights(model_path)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    f(guard.as_ref().expect("weights loaded"))
+    let mut guard = crate::cache_thread::lock_resetting(cell, |slot| *slot = None);
+    let weights = crate::cache_thread::get_or_load(
+        &mut guard,
+        |_| true,
+        || {
+            crate::image_jobs::read_weights(model_path)
+                .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))
+        },
+    )?;
+    f(weights)
 }
 
 /// A built + quantized `Sam3VideoModel` with the `"person"` concept already tokenized. `propagate`
@@ -399,30 +398,10 @@ fn run_on_sam3_thread<T: Send + 'static>(
         .map_err(|_| WorkerError::Engine("sam3 smart-select thread dropped the reply".into()))?
 }
 
-/// Load the shared dense checkpoint into the process-wide [`WEIGHTS`] cache (poison-recovery) and run
-/// `build` against it — the common cache-miss body for the smart-select single-image builders.
-fn with_cached_weights<T>(
-    model_path: &Path,
-    build: impl FnOnce(&Weights) -> WorkerResult<T>,
-) -> WorkerResult<T> {
-    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = crate::image_jobs::read_weights(model_path)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    build(guard.as_ref().expect("weights loaded"))
-}
-
 /// Build a quantized `Sam3ImageSegmenter` from the shared (cached) dense checkpoint — the box
 /// smart-select cache-miss body (sc-8846). Split out so the build + `quantize` cost is in one place.
 fn build_box_segmenter(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sam3ImageSegmenter> {
-    with_cached_weights(model_path, |weights| {
+    with_sam3_weights(model_path, |weights| {
         let mut model = Sam3ImageSegmenter::from_weights(weights)
             .map_err(|e| WorkerError::Engine(format!("sam3 image model build: {e}")))?;
         if let Some(bits) = quant {
@@ -437,7 +416,7 @@ fn build_box_segmenter(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sa
 /// Build a quantized `Sam3Tracker` from the shared (cached) dense checkpoint — the point
 /// smart-select cache-miss body (sc-8846), sibling of [`build_box_segmenter`].
 fn build_point_tracker(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sam3Tracker> {
-    with_cached_weights(model_path, |weights| {
+    with_sam3_weights(model_path, |weights| {
         let mut tracker = Sam3Tracker::from_weights(weights)
             .map_err(|e| WorkerError::Engine(format!("sam3 tracker build: {e}")))?;
         if let Some(bits) = quant {
@@ -659,16 +638,12 @@ fn segment_box_on_thread(
     let quant = quant_bits();
     let key: Sam3CacheKey = (model_path.clone(), quant);
     let instances = BOX_SEGMENTER.with(|cell| -> WorkerResult<_> {
-        {
-            let cached = cell.borrow();
-            if cached.as_ref().map(|(k, _)| k) != Some(&key) {
-                drop(cached);
-                let model = build_box_segmenter(&model_path, quant)?;
-                *cell.borrow_mut() = Some((key.clone(), model));
-            }
-        }
-        let cached = cell.borrow();
-        let (_, model) = cached.as_ref().expect("segmenter cached");
+        let cached = crate::cache_thread::get_or_load_local(
+            cell,
+            |(cached_key, _)| cached_key == &key,
+            || Ok((key.clone(), build_box_segmenter(&model_path, quant)?)),
+        )?;
+        let (_, model) = &*cached;
         let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
             .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
         let (input_ids, text_mask) = tokenizer
@@ -794,16 +769,12 @@ fn segment_points_on_thread(
     let quant = quant_bits();
     let key: Sam3CacheKey = (model_path.clone(), quant);
     let mask = POINT_TRACKER.with(|cell| -> WorkerResult<_> {
-        {
-            let cached = cell.borrow();
-            if cached.as_ref().map(|(k, _)| k) != Some(&key) {
-                drop(cached);
-                let tracker = build_point_tracker(&model_path, quant)?;
-                *cell.borrow_mut() = Some((key.clone(), tracker));
-            }
-        }
-        let cached = cell.borrow();
-        let (_, tracker) = cached.as_ref().expect("tracker cached");
+        let cached = crate::cache_thread::get_or_load_local(
+            cell,
+            |(cached_key, _)| cached_key == &key,
+            || Ok((key.clone(), build_point_tracker(&model_path, quant)?)),
+        )?;
+        let (_, tracker) = &*cached;
         tracker
             .segment_points(&pixels, &coords, &labels)
             .map_err(|e| WorkerError::Engine(format!("sam3 tracker segment_points: {e}")))
