@@ -1,7 +1,10 @@
 #[cfg(target_os = "macos")]
-use super::is_anima_model;
-use super::{ImageRequest, Path, PathBuf, Value, STANDARD_TIER_MODELS};
-
+use super::artifact_resolution::is_anima_model;
+use super::artifact_resolution::STANDARD_TIER_MODELS;
+use super::ImageRequest;
+use crate::Path;
+use crate::PathBuf;
+use crate::Value;
 // sc-15799 (tier integrity): the hardcoded `DENSE_TE_TIER_MODELS` registry is DELETED. Keeping a dense
 // bf16 text encoder resident on a q4/q8 tier is an above-tier residency exception, and an exception the
 // shared decision cannot see is exactly what that story exists to eliminate — the ids lived in this file

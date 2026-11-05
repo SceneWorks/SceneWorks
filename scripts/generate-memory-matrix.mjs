@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { sha256 } from "./lib/file-sha256.mjs";
+import { rustFacadeSource, rustSourceWithTests } from "./lib/rust-facade-source.mjs";
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
@@ -1414,7 +1415,7 @@ function modesFor(model) {
 //
 // ## Why both backends, for every id here
 //
-// Both worker routers wire the SAME seven families, and `crates/sceneworks-worker/src/image_jobs/base.rs`
+// Both worker routers wire the SAME seven families, and `crates/sceneworks-worker/src/image_jobs/routing.rs`
 // says so in the source: `WIRED_MLX_POSE_FAMILIES` is documented as "the MLX twin of
 // `WIRED_CANDLE_POSE_FAMILIES` … and the SAME id set — every candle wired family has a matching MLX control
 // lane". A model listed here therefore has a control lane on whichever backends it supports at all; the
@@ -1519,7 +1520,7 @@ function rustStringSlice(source, name) {
   const match = source.match(
     new RegExp(`const\\s+${name}:\\s*&\\[&str\\]\\s*=\\s*&\\[([\\s\\S]*?)\\];`),
   );
-  if (!match) throw new Error(`memory-matrix: could not derive ${name} from image_jobs/base.rs`);
+  if (!match) throw new Error(`memory-matrix: could not derive ${name} from image_jobs/routing.rs`);
   return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
 }
 
@@ -2643,7 +2644,7 @@ export const SOURCE_PATHS = Object.freeze({
   routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
   routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
   engines: "crates/sceneworks-worker/src/engines.rs",
-  imageRouting: "crates/sceneworks-worker/src/image_jobs/base.rs",
+  imageRouting: "crates/sceneworks-worker/src/image_jobs/routing.rs",
   // sc-18815: the video lane's route resolvers. The image lane resolves a provider from ONE table
   // (`engines.rs#MODEL_TABLE`); the video lane has no such table — `resolve_video_route` /
   // `resolve_candle_video_route` (`video_jobs/mod.rs`) consult one `*_engine_id` function per family,
@@ -2794,7 +2795,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       canonicalSourceText(
         Object.hasOwn(sourceOverrides, name)
           ? sourceOverrides[name]
-          : await readFile(path.join(ROOT, relative), "utf8"),
+          : name === "mlxFitGate"
+            ? await rustSourceWithTests(path.join(ROOT, relative))
+            : relative.endsWith(".rs")
+              ? await rustFacadeSource(path.join(ROOT, relative))
+            : await readFile(path.join(ROOT, relative), "utf8"),
       ),
     ),
   );
