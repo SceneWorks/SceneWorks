@@ -18,7 +18,7 @@ fn candle_krea_pose_identity_matches_the_provider_evidence_probe_and_live_call_s
         gen_core::MemoryMode::ImageToImage
     );
 
-    let candle_lane = include_str!("image_jobs/krea_control_candle.rs");
+    let candle_lane = include_str!("../image_jobs/krea_control_candle.rs");
     assert!(
         candle_lane
             .contains("reference_count: crate::krea_control_fit::KREA_CONTROL_REFERENCE_COUNT"),
