@@ -641,7 +641,6 @@ impl CatalogFetchLease {
         Self::acquire_with_processing(catalog, Some(processing))
     }
 
-    #[allow(dead_code)]
     fn acquire_under_processing_lease(
         catalog: &Catalog,
         _processing: &CatalogProcessingLease,
@@ -664,13 +663,12 @@ impl CatalogFetchLease {
                 CatalogImageFetchError::Io(error)
             }
         })?;
-        let contended = fs2::lock_contended_error().raw_os_error();
         match FileLock::try_exclusive(file) {
             Ok(lock) => Ok(Self {
                 _processing: processing,
                 _file: lock,
             }),
-            Err(error) if error.raw_os_error() == contended => {
+            Err(error) if sceneworks_core::file_lock::is_contended(&error) => {
                 Err(CatalogImageFetchError::Busy(format!(
                     "Catalog {} already has an active image fetch.",
                     catalog.descriptor().id
@@ -706,7 +704,7 @@ pub async fn fetch_attached_catalog_images(
 /// Pipeline-only sibling that proves the caller already owns the shared
 /// catalog-processing lease. The fetch-specific compatibility lock remains
 /// held for the complete pass, while the shared lease can span later stages.
-#[allow(dead_code)]
+#[cfg(any(test, native_lane))]
 pub(crate) async fn fetch_attached_catalog_images_under_processing_lease(
     registry: &CatalogRegistry,
     catalog_id: &str,

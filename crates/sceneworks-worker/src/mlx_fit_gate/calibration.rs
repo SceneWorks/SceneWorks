@@ -15,11 +15,13 @@ use super::*;
 /// engine's `production_calibration_fingerprint`, so a move on either side is red at test time.
 /// The prior generation-peak token predated the shared ladder and caused every exact Mage request
 /// to fail the provider/gate handshake before selection.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) const MAGE_CALIBRATION_FINGERPRINT_SUFFIX: &str = "-mlx-shared-ladder-v1";
 
 /// The route label inside a Mage-Flow calibration string, mirroring
 /// `mlx_gen_mage::model::MageVariant::route_label` over the six registered ids. `None` for any id
 /// the engine does not serve: a plan naming one could only reach an unpaired estimator.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn mage_calibration_route_label(engine_id: &str) -> Option<&'static str> {
     Some(match engine_id {
         "mage_flow" => "mage-flow",
@@ -35,6 +37,7 @@ pub(super) fn mage_calibration_route_label(engine_id: &str) -> Option<&'static s
 /// The tier label inside a Mage-Flow calibration string, mirroring
 /// `mlx_gen_mage::model::calibration_tier_label`. `None` for a tier the family does not ship, so an
 /// unshipped tier is unnameable rather than collapsed onto a neighbour.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn mage_calibration_tier_label(quant: Option<gen_core::Quant>) -> Option<&'static str> {
     match quant {
         None => Some("bf16"),
@@ -46,6 +49,7 @@ pub(super) fn mage_calibration_tier_label(quant: Option<gen_core::Quant>) -> Opt
 
 /// The production calibration identity the loaded `mlx-gen-mage` route publishes for one
 /// (route, tier) cell, or `None` when no cell exists for the pair.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn mage_calibration_fingerprint(
     engine_id: &str,
     quant: Option<gen_core::Quant>,
@@ -58,6 +62,7 @@ pub(super) fn mage_calibration_fingerprint(
 }
 
 impl DecodeGeometryPolicyWire {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn into_core(self, model_id: &str) -> WorkerResult<MemoryDecodeGeometryPolicy> {
         if self.resolved_route != model_id {
             return Err(WorkerError::InvalidPayload(format!(
@@ -172,6 +177,7 @@ impl DecodeGeometryPolicyWire {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn manifest_declares_decode_quality_policies(
     manifest: &JsonObject<String, Value>,
 ) -> bool {
@@ -195,6 +201,7 @@ pub(crate) fn manifest_declares_decode_quality_policies(
 /// Read the semantic P9 table from the model's derived static contract. This does not read or
 /// mutate the performance/calibration bundle: quality rows have their own ABI, hashes, and runtime
 /// path. Missing policy preserves the historical provider contract and its estimated fallback.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn decode_quality_policies_from_manifest(
     manifest: &JsonObject<String, Value>,
     model_id: &str,
@@ -244,6 +251,7 @@ pub(crate) fn decode_quality_policies_from_manifest(
 /// Bind packaged semantic rows to provenance resolved independently beside the exact weights tree.
 /// An unavailable or mismatched identity refuses only the optimized decode table and is emitted as
 /// a typed audit decision; it never turns a valid model install into a dense-decode load failure.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn bind_decode_quality_policies_from_manifest(
     manifest: &JsonObject<String, Value>,
     model_id: &str,
@@ -600,6 +608,7 @@ impl MlxRequestPlan {
     /// Provider anchors are bare activation measurements. The request planner adds the remaining
     /// fixed OS/app reserve separately, so even an anchor larger than the generic fallback (Lens
     /// dense) keeps its whole measured value in the area term.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn generic_total_peak_bytes(&self, geometry: MemoryGeometry) -> u64 {
         self.asset_bytes
             .saturating_add(self.generic_headroom_bytes(geometry))
@@ -609,6 +618,7 @@ impl MlxRequestPlan {
     /// the area-scaled activation transient. Factored out (sc-18096) so the estimate-floor
     /// candidates charge the exact same headroom convention as the resident baseline — same fixed
     /// slice, same anchor, same area law — with only their weights term differing per rung.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn generic_headroom_bytes(&self, geometry: MemoryGeometry) -> u64 {
         let megapixel_scale =
             (f64::from(geometry.width) * f64::from(geometry.height) / (1024.0 * 1024.0)).max(1.0);
@@ -636,6 +646,7 @@ impl MlxRequestPlan {
     /// instant — where the evictable sub-stack is fully materialized — is inside it. The eviction is
     /// a steady-state fact and reaches the floor candidates through
     /// [`estimate_floor_weights_bytes`], never this leg.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn contract_base_peak_bytes(
         &self,
         legacy_total_peak_bytes: u64,

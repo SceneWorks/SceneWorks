@@ -483,7 +483,6 @@ fn enforce_owner_only_directory(path: &Path) -> WorkerResult<()> {
 /// the parent coordinator lock, so a new set cannot be observed between directory creation and owner
 /// lock acquisition. A contended owner lock identifies a live set and is always left alone.
 fn reclaim_abandoned_prepared_bundle_sets(parent: &Path) -> WorkerResult<()> {
-    let contended = fs2::lock_contended_error().raw_os_error();
     for entry in std::fs::read_dir(parent).map_err(|error| {
         WorkerError::Io(std::io::Error::new(
             error.kind(),
@@ -526,7 +525,7 @@ fn reclaim_abandoned_prepared_bundle_sets(parent: &Path) -> WorkerResult<()> {
                     ))
                 })?;
             }
-            Err(error) if error.raw_os_error() == contended => {}
+            Err(error) if sceneworks_core::file_lock::is_contended(&error) => {}
             Err(error) => {
                 return Err(WorkerError::Io(std::io::Error::new(
                     error.kind(),

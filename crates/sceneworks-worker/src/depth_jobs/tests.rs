@@ -1217,3 +1217,74 @@ fn a_depth_job_evicts_a_resident_generator_or_transform_before_loading() {
     assert_eq!(refused.load_calls, 0);
     assert!(refused.depth_files().is_empty());
 }
+
+/// Metadata construction must be infallible before either output name is published.
+/// Literal geometry and metadata only: no estimator, device, image decode or job execution.
+#[test]
+fn depth_asset_fact_is_infallible_and_preserves_release_and_trained_lineage() {
+    let temp = tempfile::tempdir().unwrap();
+    let outputs = DepthOutputPaths::reserve(temp.path());
+    let source = SourceGeometry {
+        exif_orientation: 1,
+        stored_width: 32,
+        stored_height: 24,
+        width: 32,
+        height: 24,
+    };
+    let plan = plan_depth_input(32, 24, DepthResolution::Native, 4).unwrap();
+    let metadata = DepthMetadata::new(
+        "metadata-stub",
+        "c".repeat(64),
+        "bfloat16",
+        DepthResolution::Native,
+        &plan,
+    );
+    for trained in [None, Some("trained-depth")] {
+        let request = ImageDepthJobPayload {
+            project_id: "project".into(),
+            project_name: None,
+            source_asset_id: "source".into(),
+            resolution: DepthResolutionRequest::Native,
+            display_name: None,
+            iris_model: trained.map(str::to_owned),
+        };
+        // This type assertion rejects the latent post-publication `Result`/`?` interface.
+        let fact: Value = depth_asset_fact(DepthFactInputs {
+            outputs: &outputs,
+            request: &request,
+            source_name: "Source",
+            source: &source,
+            metadata: &metadata,
+            trained_export_path: trained.map(|_| "models/finetunes/trained-depth/depth".into()),
+        });
+        assert_eq!(fact["assetId"], outputs.asset_id);
+        assert_eq!(fact["mediaPath"], outputs.npy_rel);
+        assert_eq!(fact["preview"]["path"], outputs.preview_rel);
+        assert_eq!(fact["mimeType"], NPY_MIME_TYPE);
+        assert_eq!(fact["depth"]["shape"], json!([24, 32]));
+        assert_eq!(fact["depth"]["layout"], "row-major");
+        assert_eq!(fact["depth"]["source"]["assetId"], "source");
+        if let Some(model) = trained {
+            assert_eq!(fact["model"], model);
+            assert_eq!(fact["depth"]["model"]["trainedModelId"], model);
+            assert_eq!(fact["depth"]["model"]["weightsSource"], "training");
+            assert!(fact["depth"]["model"]["weightsRepo"].is_null());
+            assert!(fact["depth"]["model"]["weightsRevision"].is_null());
+            assert_eq!(
+                fact["depth"]["model"]["exportPath"],
+                "models/finetunes/trained-depth/depth"
+            );
+        } else {
+            assert_eq!(fact["model"], DEPTH_MODEL_ID);
+            assert_eq!(fact["depth"]["model"]["weightsRepo"], UPSTREAM_WEIGHTS_REPO);
+            assert_eq!(
+                fact["depth"]["model"]["weightsRevision"],
+                UPSTREAM_WEIGHTS_REVISION
+            );
+        }
+    }
+    assert!(!outputs.npy.exists());
+    assert!(!outputs.preview.exists());
+    assert!(!outputs.partial_npy.exists());
+    assert!(!outputs.partial_preview.exists());
+}

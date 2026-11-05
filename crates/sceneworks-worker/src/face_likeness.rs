@@ -194,8 +194,9 @@ pub(crate) fn face_likeness_fact(
 /// skipped / not applicable / hard-failed before a [`LikenessResult`] was produced) leaves
 /// `rawAdapterSettings` untouched, so the field is OMITTED entirely from the sidecar — no `null`
 /// clutter, no crash. A `Some(result)` writes the [`face_likeness_fact`] block (including the
-/// explicit `detected: false` N/A block). The scoring surfaces call this once per generated asset
-/// just before [`write_image_asset`](crate::image_jobs::write_image_asset) builds its fact.
+/// explicit `detected: false` N/A block). This legacy metadata adapter is retained by the
+/// study and metadata-contract tests; production post-passes return the fact directly.
+#[cfg(test)]
 pub(crate) fn attach_face_likeness(
     raw_settings: &mut JsonObject,
     result: Option<&LikenessResult>,
@@ -387,6 +388,7 @@ pub(crate) struct FaceLikenessScorer {
     source_normalized: Option<Vec<f32>>,
     /// Count of source embeddings actually computed (always ≤ 1). Lets a test assert the source is
     /// embedded exactly once across N `score` calls — the explicit caching acceptance criterion.
+    #[cfg(test)]
     source_embed_count: usize,
 }
 
@@ -430,9 +432,12 @@ impl FaceLikenessScorer {
             Some((_det_score, raw)) => (l2_normalized(&raw), 1),
             None => (None, 1),
         };
+        #[cfg(not(test))]
+        let _ = source_embed_count;
         Ok(Self {
             backend,
             source_normalized,
+            #[cfg(test)]
             source_embed_count,
         })
     }
@@ -467,6 +472,7 @@ impl FaceLikenessScorer {
     }
 
     /// Whether the source face embedded — `false` ⇒ the whole job is N/A (no source face).
+    #[cfg(test)]
     pub(crate) fn has_source_face(&self) -> bool {
         self.source_normalized.is_some()
     }

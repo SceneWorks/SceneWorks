@@ -1,6 +1,7 @@
 //! mlx_fit_gate evidence owner.
 use super::*;
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn resident_evidence(
     contract: &MemoryProviderContract,
     tier: MemoryNumericTier,
@@ -43,6 +44,7 @@ pub(super) fn resident_evidence(
     (selection, evidence)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn mismatch_fallback_reason(reason: EvidenceMismatchReason) -> LegacyAdmissionReason {
     if reason == EvidenceMismatchReason::CalibrationFingerprint {
         LegacyAdmissionReason::FingerprintMismatch
@@ -51,6 +53,7 @@ pub(super) fn mismatch_fallback_reason(reason: EvidenceMismatchReason) -> Legacy
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn stronger_fallback_reason(
     current: LegacyAdmissionReason,
     candidate: LegacyAdmissionReason,
@@ -71,6 +74,7 @@ pub(super) fn stronger_fallback_reason(
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn evidence_strategy(rung: StrategyRung) -> MemoryStrategy {
     match rung {
         StrategyRung::Resident => MemoryStrategy::Resident,
@@ -187,6 +191,7 @@ pub(super) fn parse_evidence_parameters(
 /// and validates is the evidence, and there is no `StaleBundle` fallback any more — that arm
 /// demoted every MLX request to the legacy estimate on a harness-version drift, which is a
 /// re-capture signal for the probe tooling and not a runtime input.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn packaged_admission_route(
     plan: &MlxRequestPlan,
     inputs: &MlxRequestInputs,
@@ -207,6 +212,7 @@ pub(super) fn packaged_admission_route(
     evidence_admission_route(&bundle, plan, inputs, mode_key, budget)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn evidence_admission_route(
     bundle: &EvidenceBundle,
     plan: &MlxRequestPlan,
@@ -467,6 +473,7 @@ pub(super) fn evidence_admission_route(
 /// match the request but whose GEOMETRY does not, resolved to their own verified records at their
 /// own geometry. The per-phase peaks ride along so the binding-phase constraint can be applied at
 /// synthesis time. See [`MeasuredRungBasis`] for why the binding's closure is not a conjunct.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn collect_estimate_bases(
     bundle: &EvidenceBundle,
     plan: &MlxRequestPlan,
@@ -540,6 +547,7 @@ pub(super) fn collect_estimate_bases(
 /// `vram_gate::krea_anchor_store`'s: currency is the PACKAGED loader-closure declaration, which
 /// no argument can reach, so tests that grade the derivation itself inject a store stamped at the
 /// live declared digest.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn mlx_image_anchor_store(
 ) -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore> {
     #[cfg(test)]
@@ -567,6 +575,7 @@ pub(super) fn mlx_image_anchor_store(
 ///   single frame at batch 1; a differently-conditioned surface keeps its floor.
 /// * NOT currency (sc-22738) — the anchor's loader-closure digest is a re-capture signal for the
 ///   probe tooling; the anchor prices this request whether or not its loader has moved.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn mlx_image_anchor_derived_peak(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
@@ -598,6 +607,7 @@ pub(super) fn mlx_image_anchor_derived_peak(
 /// it needs of the anchor's measured regime (the lane shim wants the eager unbounded resident
 /// composition; the residue path lets the law's own regime guard decide), and hoisting the
 /// stricter of the two here would silently narrow the other.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn mlx_image_anchor_match(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
@@ -642,6 +652,7 @@ pub(super) fn mlx_image_anchor_match(
 /// The parameters are the ones the candidate will actually run with — on the estimate floor those
 /// are `estimate_floor_parameters`' most deeply bounding declared values, which is the same
 /// selection `validate_selection` admits and the same one the provider would be handed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn request_regime(
     engaged: &[MemoryStrategy],
     parameters: gen_core::MemoryStrategyParameters,
@@ -654,6 +665,7 @@ pub(super) fn request_regime(
 /// fused MLX attention or layer-wise decode. Exact executed reductions belong to phase facts.
 /// Cache bytes never enter this term; the selector prices recapture uncertainty separately.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn mlx_image_anchor_activation_residue(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
@@ -685,6 +697,7 @@ pub(super) fn mlx_image_anchor_activation_residue(
     Some((peak, anchor.id.clone()))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) const fn strategy_rung(strategy: MemoryStrategy) -> StrategyRung {
     match strategy {
         MemoryStrategy::Resident => StrategyRung::Resident,
@@ -698,6 +711,7 @@ pub(super) const fn strategy_rung(strategy: MemoryStrategy) -> StrategyRung {
 /// The phase carrying the peak of a `(conditioning, denoise, decode)` triple. Ties resolve to the
 /// LATER phase deterministically; the comparison below only ever contrasts two triples scaled by
 /// the same per-phase rule, so tie handling cannot manufacture a flip on its own.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn binding_phase(conditioning: u64, denoise: u64, decode: u64) -> EstimatePhase {
     let mut phase = EstimatePhase::Conditioning;
     let mut peak = conditioning;
@@ -925,6 +939,7 @@ pub(crate) fn estimate_floor_smallest_parameters(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn estimate_floor_parameters(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
@@ -1132,6 +1147,7 @@ pub(super) fn estimate_floor_parameters(
 /// only activation residues; changing the load shape here does not relabel it as a measured
 /// optimized run. Unsupported modes and auxiliary ownership retain the conservative fallback.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn mlx_selected_phase_peak(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
@@ -1274,6 +1290,7 @@ pub(super) fn synthesize_estimate_ladder(
 /// estimate. Unknown facts retain conservative weights and workspace. The selector owns margin
 /// widening, and every tiled candidate still requires its exact decode-quality policy.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn synthesize_estimate_ladder_with_conditioning(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
