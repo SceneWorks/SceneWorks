@@ -528,6 +528,8 @@ mod tests {
                         Err(error) => panic!("accept fixture request: {error}"),
                     }
                 };
+                // Accepted sockets may inherit the nonblocking listener mode.
+                socket.set_nonblocking(false).unwrap();
                 socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                 let mut request = [0; 4096];
                 assert!(socket.read(&mut request).unwrap() > 0);
