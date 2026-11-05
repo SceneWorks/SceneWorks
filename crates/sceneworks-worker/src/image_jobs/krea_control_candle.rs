@@ -49,8 +49,6 @@ use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::Progress;
-#[cfg(test)]
-use super::NVFP4_TIER;
 use crate::advanced;
 use crate::conditioning_fit::ConditioningAdmission;
 use crate::ensure_hf_cached_file;

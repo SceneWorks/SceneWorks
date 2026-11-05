@@ -61,6 +61,8 @@ use super::cached_lora_hash_for_file;
 use super::cached_model_hash_for_file;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::candle::resolve_candle_lane_inputs;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::candle_strict_control::CandleStrictControl;
 #[cfg(target_os = "macos")]
 use super::checkpoint_plan::checkpoint_plan_adapter;
 #[cfg(target_os = "macos")]
@@ -414,7 +416,7 @@ use super::krea_imported::krea_imported_available;
 use super::krea_imported::krea_imported_base_tier_complete;
 #[cfg(native_lane)]
 use super::krea_imported::krea_imported_conditioning;
-#[cfg(native_lane)]
+#[cfg(target_os = "macos")]
 use super::krea_imported::krea_imported_control_available;
 #[cfg(native_lane)]
 use super::krea_imported::krea_imported_img2img_requested;
@@ -879,7 +881,7 @@ use crate::safe_download_dir;
 use crate::strip_jsonc_comments;
 #[cfg(native_lane)]
 use crate::ApiClient;
-#[cfg(native_lane)]
+#[cfg(target_os = "macos")]
 use crate::Duration;
 #[cfg(native_lane)]
 use crate::JobSnapshot;
@@ -30244,10 +30246,18 @@ mod qwen_image_2_1_tiers {
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         {
             let request = request(&entry, None);
-            let gate = super::super::gate_tier_key(false, &dir, &request.advanced, &entry, false);
+            let gate = super::super::quantization::gate_tier_key(
+                false,
+                &dir,
+                &request.advanced,
+                &entry,
+                false,
+            );
             assert_eq!(gate, "bf16", "the VRAM gate prices the tier that loads");
             assert_eq!(
-                super::super::candle_quant_for_resolved_tier(&request, gate, &dir, true, false),
+                super::super::memory::candle_quant_for_resolved_tier(
+                    &request, gate, &dir, true, false
+                ),
                 (None, None),
                 "Candle never sends LoadSpec.quantize against the dense root"
             );
