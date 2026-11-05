@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, access, copyFile } f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanupSourceWorktree } from "./ci/memory-catalog/source-worktree.mjs";
+import { cleanupSourceWorktree, withSourceMetadata } from "./ci/memory-catalog/source-worktree.mjs";
 import { bindMetallib, readBoundAppMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 const run = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -113,6 +113,25 @@ test("legacy version-1 owned source remains cleanable and tampered version-2 ide
   assert.equal(git(current, "rev-parse", "HEAD"), pin);
   await cleanupSourceWorktree(current);
   assert.equal(git(cache, "rev-parse", "HEAD"), pin);
+});
+test("source metadata transactions are cache-local and release after failure", async (t) => {
+  const directory = await temporary(t), cache = path.join(directory, "one"), other = path.join(directory, "two");
+  for (const target of [cache, other]) { await mkdir(target); git(target, "init", "--quiet"); }
+  let enter, release;
+  const entered = new Promise((resolve) => { enter = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  const events = [];
+  const first = withSourceMetadata(cache, async () => { events.push("first"); enter(); await gate; events.push("released"); });
+  await entered;
+  const second = withSourceMetadata(cache, async () => { events.push("second"); });
+  try {
+    await withSourceMetadata(other, async () => { events.push("other cache"); });
+    assert.deepEqual(events, ["first", "other cache"], "another cache stays concurrent while this cache's metadata is incomplete");
+  } finally { release(); await Promise.all([first, second]); }
+  assert.deepEqual(events, ["first", "other cache", "released", "second"]);
+  await assert.rejects(withSourceMetadata(cache, async () => { throw new Error("fixture failure"); }), /fixture failure/);
+  await withSourceMetadata(cache, async () => { events.push("recovered"); });
+  assert.equal(events.at(-1), "recovered");
 });
 async function nativeFixture(t, prebuilt = false, profile = "release", consumer) {
   const artifactName = consumer === "app" ? "sceneworks-rust-api" : ["iris", "supra2"].includes(consumer) ? "sceneworks_worker" : profile === "release" ? "memory-mlx-adapter" : "dump-engine-capabilities";
