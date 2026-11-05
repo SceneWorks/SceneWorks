@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // that may not be fatal (a transient CUDA OOM, an unrecognized error), which the desktop
     // logs and steps over rather than locking the user out of the whole app. macOS keeps its
     // sc-8411 contract: every Metal failure is blocking, so it always exits 2 here.
-    if std::env::var("SCENEWORKS_GPU_CHECK").is_ok_and(|value| value.trim() == "1") {
+    if sceneworks_core::env_util::env_flag("SCENEWORKS_GPU_CHECK", false) {
         match sceneworks_rust_api::gpu_check() {
             Ok(()) => std::process::exit(0),
             Err(failure) => {
@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    if std::env::var("SCENEWORKS_WORKER_ONLY").is_ok_and(|value| value.trim() == "1") {
+    if sceneworks_core::env_util::env_flag("SCENEWORKS_WORKER_ONLY", false) {
         return sceneworks_worker::run_on_worker_entry_thread(|| async {
             sceneworks_rust_api::run_worker()
                 .await

@@ -77,12 +77,12 @@ const VERIFY_PROGRESS_MIN_BYTES: u64 = 256 * 1024 * 1024;
 /// overridable via `SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS`. An explicit `0`
 /// disables the watchdog (returns `None`), matching the "no total timeout" posture of
 /// the streaming clients.
-fn download_stall_timeout() -> Option<Duration> {
+fn download_stall_timeout() -> WorkerResult<Option<Duration>> {
     let seconds = crate::settings::env_u64_any(
         &["SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS"],
         DOWNLOAD_STALL_TIMEOUT.as_secs(),
-    );
-    (seconds > 0).then(|| Duration::from_secs(seconds))
+    )?;
+    Ok((seconds > 0).then(|| Duration::from_secs(seconds)))
 }
 
 pub(crate) use download_lock::DownloadLock;
@@ -931,13 +931,13 @@ struct DownloadResumeState {
 }
 
 impl DownloadResumeState {
-    fn new(allow_network_resume: bool) -> Self {
-        Self {
+    fn new(allow_network_resume: bool) -> WorkerResult<Self> {
+        Ok(Self {
             network_attempts_remaining: usize::from(allow_network_resume) * AUTO_RESUME_ATTEMPTS,
-            stall_timeout: download_stall_timeout(),
+            stall_timeout: download_stall_timeout()?,
             stall_resumes_without_progress: 0,
             last_stall_bytes: 0,
-        }
+        })
     }
 
     fn take_network_resume(&mut self) -> bool {
@@ -1169,13 +1169,13 @@ async fn download_file_inner(
 ) -> WorkerResult<Option<String>> {
     let mut expected_size = expected_size;
     let mut restarted_after_416 = false;
+    let mut resume = DownloadResumeState::new(!context.fresh_download)?;
     if context.fresh_download {
         let removed_bytes = remove_incomplete_download(dest, expected_size).await?;
         if removed_bytes > 0 {
             progress.discard_started_bytes(removed_bytes);
         }
     }
-    let mut resume = DownloadResumeState::new(!context.fresh_download);
     // Forward-progress watchdog (independent of the network-error resume budget above):
     // a hung-but-alive stream is abort-and-resumed as often as it keeps advancing, and
     // only a source wedged at the same offset for MAX_STALL_RESUMES_WITHOUT_PROGRESS

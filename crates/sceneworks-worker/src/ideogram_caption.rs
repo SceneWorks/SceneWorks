@@ -106,12 +106,7 @@ const DEFAULT_PLACEHOLDER_RETRIES: u32 = 3;
 
 /// Detection is on by default; `SCENEWORKS_IDEOGRAM_PLACEHOLDER_DETECT=0`/`false` disables it.
 fn detection_enabled() -> bool {
-    !matches!(
-        std::env::var("SCENEWORKS_IDEOGRAM_PLACEHOLDER_DETECT")
-            .ok()
-            .as_deref(),
-        Some("0") | Some("false")
-    )
+    sceneworks_core::env_util::env_flag("SCENEWORKS_IDEOGRAM_PLACEHOLDER_DETECT", true)
 }
 
 /// How many reseed-retries to attempt on a detected placeholder (`SCENEWORKS_IDEOGRAM_PLACEHOLDER_RETRIES`).

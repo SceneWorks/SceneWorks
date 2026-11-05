@@ -7043,3 +7043,5 @@ fn native_quant_none_preserves_static_prediction_and_requires_no_request_geometr
         VideoAdmissionOutcome::default()
     );
 }
+
+mod carrier_contracts;

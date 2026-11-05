@@ -2793,11 +2793,15 @@ fn is_our_sidecar(pid: u32) -> bool {
 
 #[cfg(unix)]
 fn worker_shutdown_grace_seconds() -> u64 {
-    std::env::var("SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(10)
-        .clamp(1, 30)
+    // Startup rejects this malformed setting. Teardown still needs a bounded grace
+    // if the environment changes later; the shared parser emits the key-only diagnostic.
+    sceneworks_core::env_util::env_u64_any(
+        &["SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS"],
+        10,
+        false,
+    )
+    .unwrap_or(10)
+    .clamp(1, 30)
 }
 
 /// Direct children of every thread in a Linux process. A Tokio worker thread can
