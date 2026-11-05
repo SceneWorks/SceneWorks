@@ -1958,7 +1958,7 @@ async fn terminal_image_side_effect_failure_preserves_published_assets_until_ide
     let ids = running["result"]["assetIds"].clone();
     assert_eq!(ids, json!(["published-output"]));
     assert_eq!(assets.as_array().unwrap().len(), 1);
-    *state.progress_side_effects_fail_once.lock() = true;
+    *state.test_hooks.progress_side_effects_fail_once.lock() = true;
     let (status, failed) = request(app.clone(), "POST", &endpoint, progress("completed")).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
     let (status, pending) = request(

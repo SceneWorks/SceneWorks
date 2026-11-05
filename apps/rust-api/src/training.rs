@@ -289,11 +289,11 @@ pub(crate) async fn upload_training_dataset_item(
         let item = project_call(state, move |store| {
             store.upload_training_dataset_item(&project_id, upload)
         })
-        .await
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&temp_path);
-        })?;
-        return Ok((StatusCode::CREATED, Json(item)));
+        .await;
+        if item.is_err() {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+        return Ok((StatusCode::CREATED, Json(item?)));
     }
     Err(ApiError::bad_request("Upload file field is required"))
 }
@@ -317,7 +317,7 @@ pub(crate) async fn upload_ltx_prepared_bundle(
             store.install_ltx_prepared_bundle(&project_id, &dataset_id, &item_id, &source_path)
         })
         .await;
-        let _ = std::fs::remove_file(&temp_path);
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return Ok((StatusCode::CREATED, Json(dataset?)));
     }
     Err(ApiError::bad_request("Upload file field is required"))
@@ -874,12 +874,15 @@ fn validate_parquet_import_request(
     let source = std::fs::canonicalize(&source).map_err(|error| {
         ApiError::bad_request(format!("Parquet sourcePath is unavailable: {error}"))
     })?;
-    if !source.is_file() && !source.is_dir() {
+    let metadata = std::fs::metadata(&source).map_err(|_| {
+        ApiError::bad_request("Parquet sourcePath must point to a file or directory.")
+    })?;
+    if !metadata.is_file() && !metadata.is_dir() {
         return Err(ApiError::bad_request(
             "Parquet sourcePath must point to a file or directory.",
         ));
     }
-    if source.is_file()
+    if metadata.is_file()
         && !source
             .extension()
             .and_then(|value| value.to_str())
@@ -902,7 +905,12 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
     ApiJson(payload): ApiJson<DatasetParquetImportJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     auth::local_only(connect_info.map(|axum::extract::ConnectInfo(addr)| addr))?;
-    let source_path = validate_parquet_import_request(&payload)?;
+    let (payload, source_path) = tokio::task::spawn_blocking(move || {
+        let source_path = validate_parquet_import_request(&payload)?;
+        Ok::<_, ApiError>((payload, source_path))
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))??;
     let (dataset, dataset_root, project_name) = project_call(state.clone(), {
         let project_id = project_id.clone();
         let dataset_id = dataset_id.clone();
@@ -1022,42 +1030,48 @@ pub(crate) async fn finalize_training_dataset_parquet_import(
         return Err(ApiError::bad_request("Invalid Parquet import jobId."));
     }
     let staging_root = dataset_root.join("parquet-imports").join(&payload.job_id);
-    let canonical_staging = std::fs::canonicalize(&staging_root).map_err(|error| {
-        ApiError::bad_request(format!(
-            "Parquet import staging directory is unavailable: {error}"
-        ))
-    })?;
     let project_root = dataset_root
         .ancestors()
         .nth(3)
-        .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?;
-    for item in &payload.items {
-        let relative = item
-            .path
-            .as_deref()
-            .ok_or_else(|| ApiError::bad_request("Parquet import item path is required."))?;
-        let candidate = project_root.join(relative);
-        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
-            ApiError::bad_request(format!("Parquet import item is unavailable: {error}"))
+        .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?
+        .to_path_buf();
+    let expected_version = payload.dataset_version;
+    let items = payload.items;
+    #[cfg(test)]
+    let test_gate = state
+        .test_hooks
+        .parquet_finalize_before_validation_once
+        .lock()
+        .take();
+    let items = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _test_scope = test_gate.map(|gate| gate.pause());
+        let canonical_staging = std::fs::canonicalize(&staging_root).map_err(|error| {
+            ApiError::bad_request(format!(
+                "Parquet import staging directory is unavailable: {error}"
+            ))
         })?;
-        if !canonical.starts_with(&canonical_staging) || !canonical.is_file() {
-            return Err(ApiError::bad_request(
-                "Parquet import item path escapes its job staging directory.",
-            ));
+        for item in &items {
+            let relative = item
+                .path
+                .as_deref()
+                .ok_or_else(|| ApiError::bad_request("Parquet import item path is required."))?;
+            let candidate = project_root.join(relative);
+            let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+                ApiError::bad_request(format!("Parquet import item is unavailable: {error}"))
+            })?;
+            if !canonical.starts_with(&canonical_staging) || !canonical.is_file() {
+                return Err(ApiError::bad_request(
+                    "Parquet import item path escapes its job staging directory.",
+                ));
+            }
         }
-    }
+        Ok::<_, ApiError>(items)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Parquet validation task failed: {error}")))??;
     let dataset = project_call(state, move |store| {
-        store.update_training_dataset(
-            &project_id,
-            &dataset_id,
-            TrainingDatasetUpdateInput {
-                name: None,
-                status: None,
-                character_id: None,
-                items: Some(payload.items),
-                preserve_caption_item_ids: Vec::new(),
-            },
-        )
+        store.finalize_training_dataset_import(&project_id, &dataset_id, expected_version, items)
     })
     .await?;
     Ok(Json(dataset))
@@ -1540,7 +1554,7 @@ pub(crate) async fn upload_training_dataset_subject_mask(
             )
         })
         .await;
-        let _ = std::fs::remove_file(&temp_path);
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return Ok(Json(report?));
     }
     Err(ApiError::typed(

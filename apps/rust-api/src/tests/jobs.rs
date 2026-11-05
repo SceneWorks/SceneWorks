@@ -46,7 +46,10 @@ async fn worker_termination_refreshes_warm_model_catalog_after_artifact_mutation
     single_model_manifest(&config_dir, "crashed_model", "crashed/model");
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
 
     let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
@@ -124,7 +127,10 @@ async fn stale_worker_sweep_refreshes_warm_model_catalog_after_artifact_mutation
     settings.worker_timeout_seconds = 1;
     let jobs_db_path = settings.jobs_db_path.clone();
     let (app, state) = create_app_with_state(settings).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
 
     let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
@@ -6777,7 +6783,7 @@ async fn in_flight_running_progress_cannot_resurrect_a_canceled_job() {
     claim_job_as_worker(&app, &job_id, "stream-worker", &["image_detail"]).await;
 
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    *state.progress_before_accept_once.lock() = Some(barrier.clone());
+    *state.test_hooks.progress_before_accept_once.lock() = Some(barrier.clone());
     let progress_app = app.clone();
     let progress_job_id = job_id.clone();
     let progress = tokio::spawn(async move {
@@ -11173,7 +11179,7 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
 
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.video_platform_override.lock() = Some("windows");
+    *state.test_hooks.video_platform_override.lock() = Some("windows");
     let (_, project) = request(
         app.clone(),
         "POST",
@@ -11221,7 +11227,7 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{base_job}");
-    *state.video_platform_override.lock() = Some("macos");
+    *state.test_hooks.video_platform_override.lock() = Some("macos");
     let (status, eros_job) = request(
         app.clone(),
         "POST",
@@ -11237,7 +11243,7 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
     assert_eq!(status, StatusCode::CREATED, "{eros_job}");
 
     // A legacy Eros job and a model-changing replay are both rejected before a new row is queued.
-    *state.video_platform_override.lock() = Some("linux");
+    *state.test_hooks.video_platform_override.lock() = Some("linux");
     for (job_id, payload_changes) in [
         (eros_job["id"].as_str().unwrap(), json!({})),
         (
