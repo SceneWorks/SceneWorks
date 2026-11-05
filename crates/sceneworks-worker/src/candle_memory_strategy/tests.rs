@@ -413,7 +413,7 @@ fn sdxl_explicit_staging_preserves_independent_bounded_compositions() {
 
 #[test]
 fn sdxl_staged_estimates_preserve_geometry_and_charge_actual_adapter_bytes() {
-    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
     let catalog: Value =
         serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
     let manifest = catalog["models"]
@@ -571,9 +571,7 @@ fn candle_parameters_follow_the_engaged_composition_not_the_rung_ordinal() {
 /// The reserve a production caller hands the ladder for `budget`: `vram_gate::ladder_reserve_gb`
 /// of the RAW probe (sc-22664 review, D2). The fixtures below probe no card, so their budget
 /// IS the raw probe.
-fn reserve_for(budget: Option<VramBudget>) -> f64 {
-    budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb)
-}
+use crate::vram_gate::test_fixtures::reserve_for;
 
 fn gib(value: u64) -> u64 {
     value.saturating_mul(BYTES_PER_GIB as u64)
@@ -6189,8 +6187,9 @@ fn optimized_candidates_reserve_the_actual_runtime_adapter_bytes() {
 /// fresh process (`coldStagedControl`) and the LOADED provider contract's component bytes,
 /// architecture facts and published rung parameters (`providerContract`), captured by the
 /// same binary in the same process as the measurement.
-const SC_22667_FALSIFICATION_FIXTURE: &str =
-    include_str!("../../../docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json");
+const SC_22667_FALSIFICATION_FIXTURE: &str = include_str!(
+    "../../../../docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json"
+);
 
 /// Over-prediction bound per cell (derived / measured), PER PHASE, every rung. Chosen from the
 /// fixture, not carried over from the prior art's 2.5, and bounded phase by phase because the
