@@ -161,7 +161,9 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     // Dispatches `run_model_download_job` / `run_lora_download_job` from the job loop.
     ("lib.rs", DownloadRole::Installer),
     // The Model Manager executor: model + LoRA installs, tier fetches, conversions.
-    ("model_jobs.rs", DownloadRole::Installer),
+    ("model_jobs/download.rs", DownloadRole::Installer),
+    ("model_jobs/convert.rs", DownloadRole::Installer),
+    ("model_jobs/import.rs", DownloadRole::Installer),
     // -- Job-time: the population epic 17625 is migrating. Only ever shrinks. --------------------
     // Video/image tier fetches via `model_jobs::ensure_hf_files_cached` at generation time.
     ("image_jobs/base.rs", DownloadRole::JobTime),
@@ -504,10 +506,15 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "keypoint-uploads",
         CacheRole::Upload,
     ),
-    ("worker", "model_jobs.rs", "lora-uploads", CacheRole::Upload),
     (
         "worker",
-        "model_jobs.rs",
+        "model_jobs/import.rs",
+        "lora-uploads",
+        CacheRole::Upload,
+    ),
+    (
+        "worker",
+        "model_jobs/import.rs",
         "model-uploads",
         CacheRole::Upload,
     ),
@@ -519,7 +526,7 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     // Cross-process model-conversion locks.
     (
         "worker",
-        "model_jobs.rs",
+        "model_jobs/conversion_publication.rs",
         "worker-locks",
         CacheRole::Runtime,
     ),
