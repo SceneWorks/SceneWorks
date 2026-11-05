@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Persistent object cache, private capture HEAD. Never checkout/reset/clean the cache or use FETCH_HEAD.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setTimeout as delay } from "node:timers/promises";
+
 const git = (root, args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const revision = (value) => { if (!/^[0-9a-f]{40}$/.test(value)) throw new Error("exact 40-hex source pin required"); return value; };
 // Git derives its common-directory worktree ID from the checkout's basename.
@@ -13,20 +13,55 @@ const revision = (value) => { if (!/^[0-9a-f]{40}$/.test(value)) throw new Error
 const ownedLeaf = (owner) => `source-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}`;
 // Git scans all worktree registrations while adding/removing one. Serialize only this cache's
 // short metadata transactions, never the capture/model lifetime or another object cache.
+// A persistent regular file names an OS-owned lock. It is never unlinked or replaced: the
+// kernel releases ownership when the helper exits, including after its parent's stdin closes.
+// Python is already a prerequisite of the native campaign lanes (stdlib only, no packages).
+const metadataLocker = `
+import errno, os, sys, time
+with open(sys.argv[1], "a+b", buffering=0) as handle:
+    if os.name == "nt":
+        import msvcrt
+        if os.fstat(handle.fileno()).st_size == 0: handle.write(b"\\0")
+        def lock():
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        def lock(): fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            lock()
+            break
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN): raise
+            if time.monotonic() >= deadline: raise TimeoutError("source-cache metadata transaction timed out")
+            time.sleep(0.01)
+    print("locked", flush=True)
+    sys.stdin.buffer.read()
+`;
 export async function withSourceMetadata(cache, operation) {
   const common = await realpath(git(cache, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
-  const lock = path.join(common, "sceneworks-source-metadata.lock");
-  const deadline = performance.now() + 10_000;
-  for (;;) {
-    try { await mkdir(lock, { mode: 0o700 }); break; }
-    catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      if (performance.now() >= deadline) throw new Error(`source-cache metadata transaction timed out; retained owner lock: ${lock}`);
-      await delay(10);
-    }
+  const lock = path.join(common, "sceneworks-source-metadata.kernel-lock");
+  const child = spawn(process.platform === "win32" ? "python" : "python3", ["-I", "-c", metadataLocker, lock], { stdio: ["pipe", "pipe", "pipe"] });
+  // Acquisition errors (including a missing Python) are reported through the helper result.
+  child.stdin.on("error", () => {});
+  let stderr = "", ready = "";
+  child.stderr.setEncoding("utf8").on("data", (data) => { stderr += data; });
+  const ended = new Promise((resolve, reject) => { child.once("error", reject); child.once("close", (code, signal) => resolve({ code, signal })); });
+  // Attach before awaiting readiness, so spawn failures never become unhandled rejections.
+  ended.catch(() => {});
+  try {
+    await Promise.race([
+      new Promise((resolve) => child.stdout.setEncoding("utf8").on("data", (data) => { ready += data; if (ready === "locked\n" || ready === "locked\r\n") resolve(); })),
+      ended.then(({ code, signal }) => { throw new Error(`source-cache metadata lock failed (${code ?? signal}): ${stderr}`); }),
+    ]);
+    return await operation();
+  } finally {
+    child.stdin.end();
+    const { code, signal } = await ended;
+    if (code !== 0 || signal) throw new Error(`source-cache metadata lock failed (${code ?? signal}): ${stderr}`);
   }
-  try { return await operation(); }
-  finally { await rmdir(lock); }
 }
 export async function prepareSourceWorktree(cache, pin, temporaryRoot) {
   revision(pin);
