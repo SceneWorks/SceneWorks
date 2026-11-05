@@ -23,7 +23,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 fn load_fixture(relative_path: &str) -> Value {
-    let path = fixture_path(relative_path);
+    let path = fixture_path(&format!("training/{relative_path}"));
     let payload = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     serde_json::from_str(&payload)
