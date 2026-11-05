@@ -10,7 +10,9 @@ use crate::file_lock::FileLock;
 use crate::hf_home::safe_repo_dir_name;
 use crate::store_util::{atomic_write, random_hex};
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(windows)]
+use std::fs::OpenOptions;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -723,12 +725,7 @@ impl ExternalLibraryBindingStore {
                 "external-library binding lock is a symlink".to_owned(),
             ));
         }
-        Ok(OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)?)
+        Ok(crate::file_lock::open_regular_lock_file(&path)?)
     }
 }
 

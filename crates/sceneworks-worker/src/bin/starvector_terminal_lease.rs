@@ -5,8 +5,7 @@
 //! overwrite a contended lock to "repair" an alleged stale owner.
 
 use std::{
-    env,
-    fs::{self, OpenOptions},
+    env, fs,
     io::{self, Read, Write},
     path::Path,
     process,
@@ -32,13 +31,8 @@ fn main() {
     let path = Path::new(&args[2]);
     fs::create_dir_all(parent(path))
         .unwrap_or_else(|error| fail(format!("create lease root: {error}")));
-    let mut file = OpenOptions::new()
-        .create(true)
-        // Preserve the current owner bytes until the exclusive lock succeeds.
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path)
+    // Preserve the current owner bytes until the exclusive lock succeeds.
+    let mut file = sceneworks_core::file_lock::open_regular_lock_file(path)
         .unwrap_or_else(|error| fail(format!("open {}: {error}", path.display())));
     if let Err(error) = file.try_lock_exclusive() {
         let owner = fs::read_to_string(path).unwrap_or_else(|_| "unreadable".to_owned());

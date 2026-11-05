@@ -250,7 +250,6 @@ pub(crate) enum Yue2Precision {
     StrictBf16,
     /// An explicit F32 load. The audio job loads with the default precision; priced so the
     /// accelerator F32 residency (14.52 GB) is never read as the BF16 one.
-    #[cfg_attr(not(test), allow(dead_code))]
     Fp32,
 }
 
@@ -983,7 +982,7 @@ impl Yue2Estimate {
     }
 
     /// The largest device-pool residency of any stage.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn device_peak(&self) -> (Yue2Stage, u64) {
         self.stages
             .iter()
@@ -993,7 +992,7 @@ impl Yue2Estimate {
     }
 
     /// The largest host-pool residency of any stage.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn host_peak(&self) -> (Yue2Stage, u64) {
         self.stages
             .iter()
@@ -1964,7 +1963,6 @@ fn decoder_bytes(manifest_entry: &Value, decoder: SongDecoder) -> Result<u64, St
 }
 
 /// SheetSage2 + MERT-v2's weights (the `requiredFor: ["cover"]` conditional components).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn transcriber_bytes(manifest_entry: &Value) -> Result<u64, String> {
     let rows = manifest_entry
         .get("conditionalComponents")
@@ -2099,11 +2097,9 @@ pub(crate) fn shape_of(
 }
 
 /// The transcription step of a cover from a recording (SheetSage2 + MERT-v2), priced on its own:
-/// the transcriber unloads before the MoT loads, so it is never summed with a render. No job calls
-/// it yet: the native transcriber is gated out of every runtime bundle until the owner records a
-/// basis for its port code (the catalog's `conditionalComponents[].blocked`), and the job that
-/// unblocks it prices its step here.
-#[cfg_attr(not(test), allow(dead_code))]
+/// the transcriber unloads before the MoT loads, so it is never summed with a render. This test
+/// shape exercises estimator arithmetic; production transcription uses `check_transcription`.
+#[cfg(test)]
 pub(crate) fn transcription_shape(
     manifest_entry: &Value,
     tier: Yue2Tier,
@@ -2497,7 +2493,7 @@ impl Yue2Lease {
     }
 
     /// The priced render this lease holds.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn estimate(&self) -> &Yue2Estimate {
         &self.estimate
     }

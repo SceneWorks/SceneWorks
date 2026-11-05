@@ -46,6 +46,7 @@ pub(crate) use evidence::*;
 
 #[path = "mlx_fit_gate/video.rs"]
 mod video;
+#[cfg_attr(not(native_lane), allow(unused_imports))]
 pub(crate) use video::*;
 
 #[path = "mlx_fit_gate/full_finetune.rs"]
@@ -88,6 +89,7 @@ use sceneworks_core::inference_provenance::INFERENCE_REVISION;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct DecodeQualityFixtureWire {
     seed: u64,
     production_latent_provenance: String,
@@ -99,6 +101,7 @@ struct DecodeQualityFixtureWire {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct DecodeQualityGeometryWire {
     width: u32,
     height: u32,
@@ -109,6 +112,7 @@ struct DecodeQualityGeometryWire {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct DecodeQualityArtifactWire {
     repository: String,
     revision: String,
@@ -118,6 +122,7 @@ struct DecodeQualityArtifactWire {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum DecodeQualityDispositionWire {
     Admitted,
     Refused { reason: String },
@@ -125,6 +130,7 @@ enum DecodeQualityDispositionWire {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct DecodeGeometryPolicyWire {
     quality_abi: u32,
     family: String,
@@ -150,6 +156,7 @@ struct DecodeGeometryPolicyWire {
 /// Typed load-time disposition for a packaged quality table. A refused binding removes semantic
 /// decode authority only; dense decode and independent higher memory rungs remain available.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum DecodeQualityBindingDecision {
     Legacy,
     Bound {
@@ -175,6 +182,7 @@ pub(crate) struct DecodeQualityPolicyBinding {
 /// Load-invariant inputs used to estimate each request without putting geometry or strategy in the
 /// generator cache key.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct MlxRequestPlan {
     engine_id: &'static str,
     model_id: String,
@@ -199,6 +207,7 @@ pub(crate) struct MlxRequestPlan {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct MlxCalibrationBinding {
     query: CalibrationBinding,
     provider: String,
@@ -212,12 +221,14 @@ struct MlxCalibrationBinding {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct MlxCalibrationSet {
     bindings: Vec<MlxCalibrationBinding>,
     resolved: ResolvedArtifactProvenance,
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum MlxCalibrationConfig {
     Absent,
     Valid(MlxCalibrationSet),
@@ -230,6 +241,7 @@ enum MlxCalibrationConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum AdmissionPath {
     Evidence,
     Legacy,
@@ -240,6 +252,7 @@ enum AdmissionPath {
 /// currency (sc-22738) — a binding whose provider closure has moved since capture is routed exactly
 /// as one whose closure has not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum LegacyAdmissionReason {
     PackagedEmpty,
     NoBinding,
@@ -256,6 +269,7 @@ enum LegacyAdmissionReason {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct VerifiedAdmissionCandidate {
     evidence: MemoryEvidence,
     /// Reserve enforced on this live host and passed to MLX as an absolute process ceiling.
@@ -267,6 +281,7 @@ struct VerifiedAdmissionCandidate {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct VerifiedGeometryAlternative {
     geometry: CalibrationGeometry,
     calibration_abi: u32,
@@ -296,6 +311,7 @@ struct VerifiedGeometryAlternative {
 /// Everything the extrapolation, the binding-phase constraint, and the loaded-provider identity
 /// gate need is captured here, so the synthesis step never re-reads the bundle.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct MeasuredRungBasis {
     rung: StrategyRung,
     parameters: gen_core::MemoryStrategyParameters,
@@ -321,6 +337,7 @@ struct MeasuredRungBasis {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct AdmissionRoute {
     path: AdmissionPath,
     fallback_reason: Option<LegacyAdmissionReason>,
@@ -336,6 +353,7 @@ struct AdmissionRoute {
 
 /// Exact request axes that must be reconsidered for both cold and warm cache runs.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct MlxRequestInputs {
     pub width: u32,
     pub height: u32,
@@ -375,12 +393,14 @@ pub(crate) struct MlxRequestInputs {
 
 /// A live pricing context, not a cached request cost: every tier probe binds its actual spec.
 #[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct ReferencePricing<'a> {
     spec: &'a LoadSpec,
     registry: &'a gen_core::ProviderRegistry,
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct MlxRequestEvaluation {
     pub memory: GenerationMemory,
     pub context: MemoryRunContext,
@@ -406,6 +426,7 @@ pub(crate) const FLUX3_BLOCK_LIVE_HIDDEN_BUFFERS: u64 = 28;
 
 /// One estimate-backed candidate synthesized for an implemented-but-unmeasured rung (sc-18096).
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct SynthesizedEstimate {
     selection: MemorySelection,
     evidence: MemoryEvidence,
@@ -423,6 +444,7 @@ struct SynthesizedEstimate {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum DecodeQualityRequestDecision {
     NotDeclared,
     NotEngaged {
@@ -448,12 +470,14 @@ pub(crate) enum DecodeQualityRequestDecision {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct EstimateParameterCandidate {
     parameters: gen_core::MemoryStrategyParameters,
     decode_quality: DecodeQualityRequestDecision,
 }
 
 #[derive(Default)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct SynthesizedEstimateLadder {
     estimates: Vec<SynthesizedEstimate>,
     decode_quality_decisions: Vec<DecodeQualityRequestDecision>,
@@ -461,6 +485,7 @@ struct SynthesizedEstimateLadder {
 
 /// The canonical measurement phases, in ladder order, used for the binding-phase comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum EstimatePhase {
     Conditioning,
     Denoise,
@@ -471,6 +496,7 @@ enum EstimatePhase {
 /// that decides where rung 4's window slice is charged when the facts state no block count (see
 /// the `transformer_blocks: None` regime on [`estimate_floor_weights_bytes`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum ImageFloorActivationTerm {
     /// The sc-22663 law's per-phase residue for the rung's regime
     /// ([`mlx_image_anchor_activation_residue`]): weights-free and window-free, so the weights
@@ -482,6 +508,7 @@ pub(crate) enum ImageFloorActivationTerm {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum MlxAdmissionPhase {
     TierProbe,
     Generation,
@@ -489,6 +516,7 @@ enum MlxAdmissionPhase {
 
 /// A budget refusal is distinct from invalid artifacts/contracts: only the former can try a
 /// lower installed tier. Keep the original request-scoped diagnostic through tier selection.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum MlxRequestAdmission {
     Admitted(Box<MlxRequestEvaluation>),
     Rejected(WorkerError),

@@ -1,20 +1,13 @@
 //! Shared installation-receipt identity and write coordination.
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
 use std::path::Path;
 
 /// Serialize receipt read/modify/write across discovery and the download worker.
 pub fn lock(managed: &Path) -> io::Result<crate::file_lock::FileLock> {
-    crate::file_lock::FileLock::exclusive(
-        OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(managed.join(".sceneworks-download-receipt.lock"))?,
-    )
+    crate::file_lock::FileLock::open_exclusive(&managed.join(".sceneworks-download-receipt.lock"))
 }
 
 /// Publish a complete receipt while holding [`lock`].

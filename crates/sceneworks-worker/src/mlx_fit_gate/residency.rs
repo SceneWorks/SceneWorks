@@ -5,6 +5,7 @@ pub(super) fn gib_to_bytes(gib: f64) -> u64 {
     sceneworks_core::memory_anchor::gib_to_bytes(gib)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn decimal_gb_to_bytes(gb: f64) -> u64 {
     (gb * 1_000_000_000.0).round().clamp(0.0, u64::MAX as f64) as u64
 }

@@ -1,6 +1,7 @@
 //! mlx_fit_gate request owner.
 use super::*;
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn budget_for_admission(
     mut budget: MemoryBudget,
     admission: &AdmissionRoute,
@@ -11,6 +12,7 @@ pub(super) fn budget_for_admission(
     budget
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn missing_reference_pricing(engine_id: &str) -> WorkerError {
     WorkerError::InvalidPayload(format!(
         "{engine_id}: owned reference resources require the reference-aware memory admission entry point and its resolved LoadSpec; unpriced references cannot be admitted"
@@ -106,6 +108,7 @@ pub(crate) fn flux3_source_workspaces(engine_id: &str, width: u32, height: u32) 
     )
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn flux3_cfg_additional_workspaces(
     engine_id: &str,
     width: u32,
@@ -122,6 +125,7 @@ pub(super) fn flux3_cfg_additional_workspaces(
     )
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn flux3_cfg_workspace(
     engine_id: &str,
     geometry: MemoryGeometry,
@@ -164,11 +168,13 @@ pub(crate) fn add_post_load_external_delta(baseline: u64, before: u64, after: u6
 /// provider call and keeps every finished image live until it returns, and no batched run has been
 /// measured (sc-25684 owns that), so the declared estimate scales the whole activation term by the
 /// image count — conservative by construction, never a batch admitted on a one-image budget.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn request_batch(inputs: &MlxRequestInputs) -> u32 {
     inputs.native_batch.max(1)
 }
 
 /// The provider-facing geometry of one forward pass. See [`request_batch`] for the `batch` rule.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn request_geometry(inputs: &MlxRequestInputs) -> MemoryGeometry {
     MemoryGeometry {
         width: inputs.width,
@@ -179,6 +185,7 @@ pub(super) fn request_geometry(inputs: &MlxRequestInputs) -> MemoryGeometry {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     match mode {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
@@ -203,6 +210,7 @@ pub(super) fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
 /// coordinate, but the provider executes that one-reference request through its latent-init
 /// image-to-image entrypoint. Keep that internal contract identity exact without inventing a new
 /// public route or a generic CFG axis.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn provider_request_mode(
     engine_id: &str,
     inputs: &MlxRequestInputs,
@@ -318,6 +326,7 @@ pub(crate) fn provider_overlay_for_load_spec(
     (!axes.is_empty()).then(|| axes.join("-"))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn is_krea_base_dit_reference_route(engine_id: &str, inputs: &MlxRequestInputs) -> bool {
     matches!(engine_id, "krea_2_raw" | "krea_2_turbo")
         && matches!(inputs.mode.as_str(), "image_generation" | "text_to_image")
@@ -329,6 +338,7 @@ pub(super) fn is_krea_base_dit_reference_route(engine_id: &str, inputs: &MlxRequ
 /// the complete `LoadSpec`. Krea always normalizes to None. Klein inputs already carry the exact
 /// provider overlay from [`provider_overlay_for_load_spec`]; reconstructing it here from only an
 /// adapter count would erase text-encoder and component axes on safe eager fallback routes.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn provider_request_inputs<'a>(
     engine_id: &str,
     inputs: &'a MlxRequestInputs,
@@ -368,6 +378,7 @@ pub(crate) fn memory_for_selection(
 /// The binding's provider closure is not a conjunct (sc-22738): the alternative is advice the very
 /// next request will price from the same record, and that request grades the record at its
 /// measured peak whatever closure it was captured under, so the advice is honoured either way.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn verified_lower_alternative(
     bundle: &EvidenceBundle,
     calibration: &MlxCalibrationSet,
@@ -499,6 +510,7 @@ pub(super) fn evaluate_request_with_budget(
 
 /// [`evaluate_request_with_budget`] carrying this request's warm-policy proposal (sc-18317).
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn evaluate_request_with_budget_and_warm_policy(
     generator: &dyn gen_core::Generator,
     plan: &MlxRequestPlan,
@@ -529,6 +541,7 @@ pub(super) fn evaluate_request_with_budget_and_warm_policy(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn evaluate_request_with_budget_using_bundle(
     generator: &dyn gen_core::Generator,
     plan: &MlxRequestPlan,
@@ -594,6 +607,7 @@ pub(super) fn evaluate_request_with_budget_using_bundle(
 /// every such rung's peak. Every admission that runs the shed ladder grades it: the prefill path,
 /// the cached path (corrected shed rung + cache surcharge) and the pre-load tier probe. Same
 /// 256-row conditioning assumption as the generator's own bound.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn mlx_prefix_kv_cache_shed_transient_bytes(
     engine_id: &str,
     tier_quant: Option<gen_core::Quant>,
@@ -631,6 +645,7 @@ pub(super) fn mlx_prefix_kv_cache_shed_transient_bytes(
 }
 
 impl MlxRequestAdmission {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn into_evaluation(self) -> WorkerResult<MlxRequestEvaluation> {
         match self {
             Self::Admitted(evaluation) => Ok(*evaluation),
@@ -640,6 +655,7 @@ impl MlxRequestAdmission {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn select_request_with_budget_using_bundle(
     phase: MlxAdmissionPhase,
     declared_floors: &'static [gen_core::ComponentPrecisionFloor],

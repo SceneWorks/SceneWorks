@@ -452,7 +452,6 @@ impl CatalogAnalysisLease {
         Self::acquire_with_processing(catalog, Some(processing))
     }
 
-    #[allow(dead_code)]
     fn acquire_under_processing_lease(
         catalog: &Catalog,
         _processing: &CatalogProcessingLease,
@@ -467,11 +466,9 @@ impl CatalogAnalysisLease {
         let mut files = Vec::new();
         for name in [FETCH_LOCK_FILE, ANALYSIS_LOCK_FILE] {
             let path = catalog.root().join(name);
-            let file = sceneworks_core::file_lock::open_regular_lock_file(&path)?;
-            let contended = fs2::lock_contended_error().raw_os_error();
-            match FileLock::try_exclusive(file) {
+            match FileLock::try_open_exclusive(&path) {
                 Ok(lock) => files.push(lock),
-                Err(error) if error.raw_os_error() == contended => {
+                Err(error) if sceneworks_core::file_lock::is_contended(&error) => {
                     return Err(CatalogAnalysisError::Busy(format!(
                         "Catalog {} already has active fetch or analysis work.",
                         catalog.descriptor().id
@@ -506,30 +503,9 @@ pub fn analyze_attached_catalog<A: CatalogAnalyzers>(
     analyze_attached_catalog_with_lease(registry, catalog_id, config, analyzers, None, None, None)
 }
 
-/// Pipeline-only sibling that keeps the caller's shared processing lease alive
-/// across fetch, structured analysis, and survivor-only semantic analysis.
-#[allow(dead_code)]
-pub(crate) fn analyze_attached_catalog_under_processing_lease<A: CatalogAnalyzers>(
-    registry: &CatalogRegistry,
-    catalog_id: &str,
-    config: &CatalogAnalysisConfig,
-    analyzers: &mut A,
-    processing: &CatalogProcessingLease,
-) -> CatalogAnalysisResult<CatalogAnalysisReport> {
-    analyze_attached_catalog_with_lease(
-        registry,
-        catalog_id,
-        config,
-        analyzers,
-        Some(processing),
-        None,
-        None,
-    )
-}
-
 /// Pipeline-only controlled sibling. The cancel flag is polled between every
 /// record and page, and the callback observes each durable keyset checkpoint.
-#[allow(dead_code)]
+#[cfg(any(test, native_lane))]
 pub(crate) fn analyze_attached_catalog_under_processing_lease_with_control<A: CatalogAnalyzers>(
     registry: &CatalogRegistry,
     catalog_id: &str,

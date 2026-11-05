@@ -81,7 +81,7 @@ tower = { workspace = true }
 # Dev-only stdout subscriber so the residency/fit-gate tests can surface their `tracing::info!`
 # events under --nocapture (e.g. `mlx_sequential_residency_selected`). sc-10863.
 tracing-subscriber = { workspace = true }
-# sc-6541 closed-loop study: the LoRA eval harness (test-only, src/lora_eval_harness.rs) reuses
+# sc-6541 closed-loop study: the LoRA eval harness (test-only, tests/studies/lora_eval_harness.rs) reuses
 # the canonical Dataset Doctor blur measurement (`scalars_from_image(..).blur_variance`) for the
 # output-sharpness Y axis. GPU-free path crate (image/imageproc/core), builds anywhere; dev-only
 # so it never enters the worker binary.

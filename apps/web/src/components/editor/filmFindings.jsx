@@ -3,7 +3,7 @@ import React from "react";
 // A refused film-document write comes back as `PlanDiagnostic`'s `Display` output — `[plan] <field>:
 // <message>`, or `[<shotId>] <field>: <message>` — and `ProjectStore::add_film_reference` joins
 // several of them with `"; "` (`crates/sceneworks-core/src/film_plan.rs`,
-// `crates/sceneworks-core/src/project_store.rs`).
+// `crates/sceneworks-core/src/project_store/film_drafts.rs`).
 //
 // The scope and field path are the INTERNAL half of that record. This repo shows an operator the
 // `error` and never the `requirement`, and every structured finding the workspace renders shows

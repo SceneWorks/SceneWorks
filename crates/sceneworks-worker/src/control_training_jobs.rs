@@ -18,9 +18,7 @@
 //! neural-inference builds (macOS, or an off-Mac `backend-candle` build). Today only the candle lane
 //! has a control trainer (`krea_2_control`), and routing (`training_job_is_candle_eligible`) keeps a
 //! `control_training` job on a candle worker; on a build with no native control trainer the stub at
-//! the bottom fails loudly. Bring-your-own prepared/COCO datasets (A3,
-//! [`crate::control_dataset_byo`]) are a separate source wired by a follow-up (see the module decl in
-//! `lib.rs`); B1 ships the render-from-an-existing-dataset path.
+//! the bottom fails loudly. B1 ships the render-from-an-existing-dataset path.
 
 #[cfg(native_lane)]
 mod imp {
