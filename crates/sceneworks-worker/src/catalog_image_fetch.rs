@@ -8,7 +8,7 @@ use crate::downloads::{fetch_public_source_url_bytes_with_options, PublicSourceU
 use crate::{WorkerError, WorkerResult};
 use futures_util::future::join_all;
 use image::codecs::jpeg::JpegEncoder;
-use image::{DynamicImage, ImageFormat, ImageReader};
+use image::{DynamicImage, ImageFormat};
 use rusqlite::{params, Connection, OptionalExtension};
 use sceneworks_core::catalog_store::{
     Catalog, CatalogError, CatalogProcessingLease, CatalogRecord, CatalogRegistry, NewCatalogRecord,
@@ -24,6 +24,7 @@ use std::fs::File;
 #[cfg(test)]
 use std::fs::OpenOptions;
 use std::future::Future;
+#[cfg(test)]
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -148,20 +149,19 @@ pub fn verify_catalog_image_bytes(
             ))
         }
     };
-    let decoded = image::load_from_memory_with_format(&bytes, format).map_err(|_| {
-        WorkerError::InvalidPayload("catalog image could not be decoded".to_owned())
+    let (decoded, _) = sceneworks_core::image_decode::decode_image_bounded(
+        &bytes,
+        catalog_decode_limits(
+            max_bytes,
+            MAX_IMAGE_EDGE,
+            MAX_IMAGE_EDGE,
+            MAX_DECODED_PIXELS,
+        ),
+    )
+    .map_err(|error| {
+        WorkerError::InvalidPayload(format!("catalog image could not be decoded: {error}"))
     })?;
     let (width, height) = (decoded.width(), decoded.height());
-    if width == 0
-        || height == 0
-        || width > MAX_IMAGE_EDGE
-        || height > MAX_IMAGE_EDGE
-        || u64::from(width).saturating_mul(u64::from(height)) > MAX_DECODED_PIXELS
-    {
-        return Err(WorkerError::InvalidPayload(
-            "catalog image dimensions exceed the materialization limit".to_owned(),
-        ));
-    }
     drop(decoded);
     Ok(VerifiedCatalogImage {
         content_hash: hex_digest(&bytes),
@@ -1125,41 +1125,39 @@ where
     }
 }
 
+fn catalog_decode_limits(
+    max_bytes: usize,
+    max_width: u32,
+    max_height: u32,
+    max_pixels: u64,
+) -> sceneworks_core::image_decode::ImageDecodeLimits {
+    sceneworks_core::image_decode::ImageDecodeLimits {
+        max_bytes,
+        max_width,
+        max_height,
+        max_pixels,
+        // Preserve the native image decoder's existing 512 MiB allocation ceiling.
+        max_alloc: 512 * 1024 * 1024,
+        catalog_formats_only: true,
+    }
+}
+
 fn validate_image(
     bytes: Vec<u8>,
     options: &CatalogImageFetchOptions,
     permit: OwnedSemaphorePermit,
 ) -> WorkerResult<FetchedImage> {
-    let reader = ImageReader::new(Cursor::new(&bytes))
-        .with_guessed_format()
-        .map_err(|error| WorkerError::InvalidPayload(format!("image format failed: {error}")))?;
-    let format = reader
-        .format()
-        .ok_or_else(|| WorkerError::InvalidPayload("image format is unknown".to_owned()))?;
-    if !matches!(
-        format,
-        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP
-    ) {
-        return Err(WorkerError::InvalidPayload(
-            "image format must be PNG, JPEG, or WebP".to_owned(),
-        ));
-    }
-    let (width, height) = reader.into_dimensions().map_err(|error| {
-        WorkerError::InvalidPayload(format!("image dimensions failed: {error}"))
-    })?;
-    let pixels = u64::from(width).saturating_mul(u64::from(height));
-    if width == 0
-        || height == 0
-        || width > options.max_width
-        || height > options.max_height
-        || pixels > options.max_pixels
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "image dimensions {width}x{height} exceed configured limits"
-        )));
-    }
-    let image = image::load_from_memory_with_format(&bytes, format)
-        .map_err(|error| WorkerError::InvalidPayload(format!("image decode failed: {error}")))?;
+    let (image, format) = sceneworks_core::image_decode::decode_image_bounded(
+        &bytes,
+        catalog_decode_limits(
+            options.max_file_bytes,
+            options.max_width,
+            options.max_height,
+            options.max_pixels,
+        ),
+    )
+    .map_err(|error| WorkerError::InvalidPayload(format!("image decode failed: {error}")))?;
+    let (width, height) = (image.width(), image.height());
     Ok(FetchedImage {
         bytes,
         format,

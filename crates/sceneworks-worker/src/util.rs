@@ -7,24 +7,8 @@ pub(crate) use sceneworks_core::display_util::quote_path;
 
 pub(crate) use sceneworks_core::time::utc_now as now_rfc3339;
 
-pub(crate) fn bounded_tail(value: &str, max_lines: usize, max_chars: usize) -> String {
-    let mut lines = value.lines().rev().take(max_lines).collect::<Vec<_>>();
-    lines.reverse();
-    let mut output = lines.join("\n");
-    let char_count = output.chars().count();
-    if char_count > max_chars {
-        if max_chars == 0 {
-            output.clear();
-        } else {
-            let start = output
-                .char_indices()
-                .nth(char_count - max_chars)
-                .map_or(output.len(), |(index, _)| index);
-            output = output[start..].to_owned();
-        }
-    }
-    output
-}
+#[cfg(test)]
+pub(crate) use sceneworks_core::media_process::bounded_tail;
 
 pub(crate) fn fresh_asset_id() -> String {
     format!("asset_{}", Uuid::new_v4().simple())
