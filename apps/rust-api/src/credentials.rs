@@ -18,9 +18,13 @@ fn credential_store(state: &AppState) -> CredentialFileStore {
 pub(crate) async fn list_credentials(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<CredentialStatus>>, ApiError> {
-    let list = credential_store(&state)
-        .list()
-        .map_err(|error| ApiError::internal(format!("Failed to read credentials: {error}")))?;
+    let store = credential_store(&state);
+    let list = credential_blocking(move || {
+        store
+            .list()
+            .map_err(|error| ApiError::internal(format!("Failed to read credentials: {error}")))
+    })
+    .await?;
     Ok(Json(list))
 }
 
@@ -53,12 +57,15 @@ pub(crate) async fn set_credential(
         ));
     }
     let store = credential_store(&state);
-    store
-        .set(&host, &payload.label, &payload.scheme, &payload.token)
-        .map_err(|error| ApiError::internal(format!("Failed to save credential: {error}")))?;
-    let list = store
-        .list()
-        .map_err(|error| ApiError::internal(format!("Failed to read credentials: {error}")))?;
+    let list = credential_blocking(move || {
+        store
+            .set(&host, &payload.label, &payload.scheme, &payload.token)
+            .map_err(|error| ApiError::internal(format!("Failed to save credential: {error}")))?;
+        store
+            .list()
+            .map_err(|error| ApiError::internal(format!("Failed to read credentials: {error}")))
+    })
+    .await?;
     Ok(Json(list))
 }
 
@@ -69,11 +76,22 @@ pub(crate) async fn delete_credential(
     Path(host): Path<String>,
 ) -> Result<Json<Vec<CredentialStatus>>, ApiError> {
     let store = credential_store(&state);
-    store
-        .delete(&host)
-        .map_err(|error| ApiError::internal(format!("Failed to delete credential: {error}")))?;
-    let list = store
-        .list()
-        .map_err(|error| ApiError::internal(format!("Failed to read credentials: {error}")))?;
+    let list = credential_blocking(move || {
+        store
+            .delete(&host)
+            .map_err(|error| ApiError::internal(format!("Failed to delete credential: {error}")))?;
+        store
+            .list()
+            .map_err(|error| ApiError::internal(format!("Failed to read credentials: {error}")))
+    })
+    .await?;
     Ok(Json(list))
+}
+
+async fn credential_blocking<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| ApiError::internal(format!("Credential operation failed: {error}")))?
 }
