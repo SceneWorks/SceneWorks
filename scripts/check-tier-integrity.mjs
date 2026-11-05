@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
 /**
  * TIER INTEGRITY checker + audit generator (sc-15799).
  *
@@ -945,7 +946,7 @@ async function readInputs() {
     await Promise.all([
       readFile(path.join(ROOT, LEDGER), "utf8"),
       readFile(path.join(ROOT, MANIFEST), "utf8"),
-      readFile(path.join(ROOT, MLX_FIT_GATE), "utf8"),
+      rustFacadeSource(path.join(ROOT, MLX_FIT_GATE)),
       readFile(path.join(ROOT, ROUTING_CATALOG), "utf8"),
       readFile(path.join(ROOT, ROUTING_CANDLE), "utf8"),
       readFile(path.join(ROOT, ROUTING_MLX), "utf8"),
