@@ -129,6 +129,12 @@ fallback can allocate more than the admitted route, bound it to the same budget
 or refuse that request before generation rather than risking a mid-render OOM.
 Keep MLX unified-memory accounting correct while changing shared types.
 
+Distinguish Veda sparse-to-dense fallback from fused-attention-unavailable
+materializing fallback: the Veda dense path can still dispatch FlashAttention.
+Force and identify both reachable routes in dedicated inference validation,
+including the selected query chunk sizes and their byte bounds. A forced Veda
+fallback alone does not establish materializing-fallback coverage.
+
 Acceptance criteria:
 
 1. Reported host and GPU byte bounds cover their respective allocations;
@@ -225,6 +231,21 @@ fallback. If the latter cannot also establish normal sparse execution within
 GPU or an enforceable allocation cap plus whole-device peak observation can
 establish the memory envelope; a Blackwell run must not be reported as RTX 3090
 hardware or performance validation.
+
+Establish the 24 GiB proof mechanism before the terminal campaign. Use a real
+24 GiB device or an enforceable allocation cap covering the process's CUDA
+allocation routes, with whole-device peaks including context, reserve, and
+other processes. Record the enforcement mechanism and its coverage.
+`SCENEWORKS_CUDA_VRAM_CAP_GB` changes admission budgets only; sampled telemetry
+with cooperative cancellation also does not enforce an allocation limit. An
+uncapped larger-card run cannot establish this envelope.
+
+Record Veda sparse-to-dense fallback and fused-unavailable materializing
+fallback as distinct executed routes; the first can still use FlashAttention.
+Reuse focused runtime validation for the materializing route, with its selected
+query chunk sizes and byte bounds. Add a full render only when the existing
+anchor cannot establish the required envelope. All inference computation stays
+in separate dedicated validation workflows.
 
 Check video dimensions, frame count, duration, changing nonblack frames, and
 the generated audio stream. Reuse fixed-input intermediate parity checks to
