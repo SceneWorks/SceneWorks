@@ -1,13 +1,14 @@
 import { rustCodeMask, withoutRustTestModules } from "./rust-source-slices.mjs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Read a Rust root and the #[path] modules it brings into its namespace with a glob.
  * Scoped family modules and external test modules retain their namespaces. This follows the
  * authored facade instead of mirroring its changing file list.
  */
 export async function rustFacadeSources(entry, seen = new Set()) {
-  const absolute = path.resolve(entry);
+  const absolute = path.resolve(entry instanceof URL ? fileURLToPath(entry) : entry);
   if (seen.has(absolute)) return [];
   seen.add(absolute);
   const source = await readFile(absolute, "utf8");
@@ -70,7 +71,7 @@ export async function rustFacadeFunction(entry, name) {
  * need the complete dependency tree rather than only the names flattened into a facade.
  */
 export async function rustProductionSources(entry, seen = new Set(), includeTests = false) {
-  const absolute = path.resolve(entry);
+  const absolute = path.resolve(entry instanceof URL ? fileURLToPath(entry) : entry);
   const initialEntry = seen.size === 0;
   if (seen.has(absolute)) return [];
   seen.add(absolute);
