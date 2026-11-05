@@ -3,6 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { rustFacadeSources, rustFacadeSource, rustFacadeFunction, rustProductionSources, rustProductionSource, rustSourceWithTests, rustFunctionSlices, rustFunctionSource } from "./lib/rust-facade-source.mjs";
 
 test("facade readers follow authored glob owners while keeping scoped/test namespaces separate", async (t) => {
@@ -81,4 +82,23 @@ test("a Cargo bin entry resolves ordinary sibling modules from its crate root", 
   await writeFile(entry, "#[cfg(test)] mod fixtures;\n");
   await writeFile(path.join(bin, "fixtures.rs"), "fn actual_fixture() {}\n");
   assert.match(await rustSourceWithTests(entry), /fn actual_fixture/);
+});
+
+
+test("file URL entries preserve escaped paths through facade and production traversal", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "rust facade #% snow☃-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entry = path.join(root, "main.rs");
+  const owner = path.join(root, "owner.rs");
+  await writeFile(entry, '#[path = "owner.rs"] mod owner; pub use owner::*;\n');
+  await writeFile(owner, "pub(crate) fn actual_owner() {}\n");
+  const url = pathToFileURL(entry);
+  assert.match(url.href, /%20/);
+  for (const read of [rustFacadeSources, rustProductionSources]) {
+    assert.deepEqual((await read(url)).map(({ path }) => path), [entry, owner]);
+  }
+  for (const read of [rustFacadeSource, rustProductionSource, rustSourceWithTests]) {
+    assert.match(await read(url), /fn actual_owner/);
+  }
+  assert.equal((await rustFacadeFunction(url, "actual_owner")).path, owner);
 });
