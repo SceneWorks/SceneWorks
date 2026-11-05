@@ -53,6 +53,8 @@ export const candleTierModelIds = new Set([
   "wan_2_2_t2v_14b",
   "wan_2_2_i2v_14b",
   "scail2_14b",
+  "minimax_h3",
+  "minimax_h3_ref",
   ltx25VideoModelId,
 ]);
 

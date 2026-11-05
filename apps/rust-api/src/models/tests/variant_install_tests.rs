@@ -47,6 +47,117 @@ fn quant_matrix_model(repo: &str) -> Value {
     })
 }
 
+/// H3 cards install independent DiT partitions. CUDA bf16's upstream layout is flat,
+/// while packed tiers (and the reference card) put the partition under the quant directory.
+fn assert_h3_quant_matrix_completeness(model_id: &str, partition: &str, flat_bf16: bool) {
+    let _env = isolate_hf_cache();
+    let data = tempfile::tempdir().unwrap();
+    let packed_repo = "fixture/h3-packed";
+    let upstream_repo = "fixture/h3-upstream";
+    let mut downloads = Vec::new();
+    let mut bf16_shard = None;
+    for tier in ["q4", "q8", "bf16"] {
+        let flat = flat_bf16 && tier == "bf16";
+        let repo = if flat { upstream_repo } else { packed_repo };
+        let prefix = if flat {
+            partition.to_owned()
+        } else {
+            format!("{tier}/{partition}")
+        };
+        let files = [
+            format!("{prefix}/config.json"),
+            format!("{prefix}/diffusion_pytorch_model.safetensors.index.json"),
+            format!("{prefix}/model-00001-of-00002.safetensors"),
+            format!("{prefix}/model-00002-of-00002.safetensors"),
+        ];
+        seed_cache(
+            data.path(),
+            repo,
+            &files.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let snapshot = huggingface_repo_cache_path(data.path(), repo)
+            .unwrap()
+            .join("snapshots/abc123");
+        std::fs::write(snapshot.join(&files[0]), b"{}").unwrap();
+        std::fs::write(
+            snapshot.join(&files[1]),
+            serde_json::to_vec(&json!({"weight_map": {
+                "first": "model-00001-of-00002.safetensors",
+                "second": "model-00002-of-00002.safetensors"
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        let receipt = ReceiptFileSet {
+            files: files.to_vec(),
+            revision: Some("abc123".into()),
+        };
+        assert!(
+            receipt_files_present(
+                data.path(),
+                repo,
+                &receipt,
+                no_model_index_family_predicate("minimax-h3", model_id),
+            ),
+            "{model_id} {tier}: complete partition must also pass receipt validation"
+        );
+        if tier == "bf16" {
+            bf16_shard = Some(snapshot.join(&files[3]));
+        }
+        downloads.push(json!({
+            "provider": "huggingface", "repo": repo, "variant": tier,
+            "default": tier == "q4", "files": [format!("{prefix}/*")]
+        }));
+    }
+    let model = json!({"id": model_id, "family": "minimax-h3", "downloads": downloads});
+    let assert_complete = || {
+        let variants = model_variant_states(&model, data.path());
+        assert_eq!(variants.len(), 3);
+        for variant in variants {
+            assert!(
+                variant.installed && !variant.cache_incomplete,
+                "{model_id} {} must be complete without the other card's partition: {:?}",
+                variant.variant,
+                variant.missing_required_files
+            );
+        }
+        let top = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(
+            top.installed && !top.cache_incomplete,
+            "complete tiers must clear the model-level Fix button: {:?}",
+            top.missing_required_files
+        );
+    };
+    assert_complete();
+
+    // A real missing shard must keep Fix available even while q4/q8 remain installed.
+    let bf16_shard = bf16_shard.unwrap();
+    std::fs::remove_file(&bf16_shard).unwrap();
+    let variants = model_variant_states(&model, data.path());
+    let bf16 = variants.iter().find(|v| v.variant == "bf16").unwrap();
+    assert!(!bf16.installed && bf16.cache_incomplete);
+    assert!(variants
+        .iter()
+        .filter(|v| v.variant != "bf16")
+        .all(|v| v.installed));
+    let top = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+    assert!(top.installed && top.cache_incomplete);
+
+    // Restoring that shard clears the repair flag on the next scan.
+    std::fs::write(bf16_shard, b"x").unwrap();
+    assert_complete();
+}
+
+#[test]
+fn minimax_h3_cuda_bf16_and_packed_tiers_clear_fix_after_repair() {
+    assert_h3_quant_matrix_completeness("minimax_h3", "transformer", true);
+}
+
+#[test]
+fn minimax_h3_reference_tiers_do_not_require_the_base_partition() {
+    assert_h3_quant_matrix_completeness("minimax_h3_ref", "transformer_ref", false);
+}
+
 #[test]
 fn tier_dependencies_cannot_be_borrowed_from_a_sibling_or_a_receipt() {
     let _env = isolate_hf_cache();

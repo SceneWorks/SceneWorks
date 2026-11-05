@@ -12221,6 +12221,12 @@ input.dataset-name-input.boxed:focus {
   cursor: not-allowed;
 }
 
+.veda-outcome {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .preview-modal footer {
   display: flex;
   flex-wrap: wrap;
@@ -12229,6 +12235,14 @@ input.dataset-name-input.boxed:focus {
   align-items: center;
   color: var(--text-muted);
   font-size: 13px;
+}
+
+/* Attention details belong below the media; an extra stage grid item would
+   take the next-arrow column and squeeze the video into the remaining space. */
+.preview-modal footer > .veda-outcome {
+  flex: 1 1 100%;
+  max-height: 20vh;
+  overflow: auto;
 }
 
 .preview-modal-meta {

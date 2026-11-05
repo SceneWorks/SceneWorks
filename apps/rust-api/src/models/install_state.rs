@@ -94,7 +94,9 @@ pub(super) fn snapshot_tier_is_loadable(
             let diffusers_ok = !path_is_readable_file(&tier_dir.join("model_index.json"))
                 || diffusers_snapshot_health(&tier_dir).installed;
             match family_complete {
-                Some(complete) => diffusers_ok && complete(&tier_dir),
+                Some(complete) => {
+                    diffusers_ok && complete(&no_model_index_tier_root(snapshot, &tier))
+                }
                 None => diffusers_ok,
             }
         }
@@ -1274,12 +1276,24 @@ pub(super) fn no_model_index_family_predicate(
         // not the family — picks the predicate. Dispatched through the SHARED id list the worker's tier
         // resolver uses, so an id the worker would not tighten is not tightened here either.
         "sensenova-u1" => tc::sensenova_tier_predicate(model_id),
-        // Both MiniMax-H3 entries load both DiT partitions. Each partition's glob can match
-        // an interrupted download, so require both indexed shard sets before advertising a tier.
-        "minimax-h3" if tc::minimax_h3_tier_predicate(model_id).is_some() => {
-            Some(|dir| tc::minimax_h3_tier_complete(dir) && tc::minimax_h3_ref_tier_complete(dir))
-        }
+        // Each H3 card owns one independent DiT partition. Requiring the other card's partition
+        // would leave a complete install permanently repairable.
+        "minimax-h3" => tc::minimax_h3_tier_predicate(model_id),
         _ => None,
+    }
+}
+
+// Packed H3 downloads live under `<tier>/<partition>/*`, but upstream CUDA bf16 uses
+// `<partition>/*` directly. A component directory is not a quant-tier root: the shared
+// predicate already appends its partition name. Use the same root for cache and receipt checks.
+fn no_model_index_tier_root(snapshot: &FsPath, leading_dir: &str) -> PathBuf {
+    if sceneworks_core::mlx_tier_completeness::MINIMAX_H3_PARTITIONS
+        .iter()
+        .any(|(_, partition)| *partition == leading_dir)
+    {
+        snapshot.to_path_buf()
+    } else {
+        snapshot.join(leading_dir)
     }
 }
 
@@ -1309,7 +1323,9 @@ pub(super) fn no_model_index_tier_is_torn(
         .map(huggingface_snapshot_dirs)
         .unwrap_or_default();
     tier_bases.push(managed_path.to_path_buf());
-    !tier_bases.iter().any(|base| complete(&base.join(&tier)))
+    !tier_bases
+        .iter()
+        .any(|base| complete(&no_model_index_tier_root(base, &tier)))
 }
 
 // The `missingRequiredFiles` marker for a torn no-`model_index` tier (`no_model_index_tier_is_torn`),

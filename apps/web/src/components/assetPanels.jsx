@@ -1364,7 +1364,6 @@ function FullscreenPreviewComponent({
           )}
           <LikenessBadge asset={asset} />
           <AudioTrackBadge asset={asset} />
-          <AssetVedaOutcome asset={asset} />
           <button
             aria-label="Next asset"
             className="preview-nav-button next"
@@ -1419,6 +1418,7 @@ function FullscreenPreviewComponent({
             <strong>{asset.displayName}</strong>
             <span>{asset.recipe?.model}</span>
           </div>
+          <AssetVedaOutcome asset={asset} />
           {hasUpscaleVariants ? (
             <div className="segmented-control compact-segment preview-variant-toggle" aria-label="Image variant">
               <button
