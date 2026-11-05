@@ -772,7 +772,7 @@ pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
     // `WORKFLOW_WRITE_SEAMS`.
     AdvancedBuilder {
         source: AdvancedKeySource::VideoStudioBuilder,
-        path: "apps/web/src/screens/VideoStudio.jsx",
+        path: "apps/web/src/screens/videoStudio/useVideoSubmission.js",
         function: "submit",
         shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
         lane: "POST /api/v1/jobs type=video_generate — the Video Studio, written by \
@@ -1195,7 +1195,7 @@ const VIDEO_UPSCALE_BUILDERS: &[WebBuilderRef] = &[WebBuilderRef {
 /// its own, and [`VIDEO_UPSCALE_BUILDERS`] is the seam behind it.
 const VIDEO_JOB_BUILDERS: &[WebBuilderRef] = &[
     WebBuilderRef {
-        path: "apps/web/src/screens/VideoStudio.jsx",
+        path: "apps/web/src/screens/videoStudio/useVideoSubmission.js",
         function: "submit",
     },
     WebBuilderRef {

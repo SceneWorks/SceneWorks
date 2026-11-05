@@ -9,12 +9,14 @@ use gen_core::{
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct WorkspaceAnchors {
     layerwise_decode: LayerwiseAnchor,
     sana: SanaAnchor,
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct LayerwiseAnchor {
     lower_peak_gib: f64,
     upper_peak_gib: f64,
@@ -26,6 +28,7 @@ struct LayerwiseAnchor {
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct SanaAnchor {
     conditioning_peak_bytes: u64,
     conditioning_weight_bytes: u64,
@@ -35,6 +38,7 @@ struct SanaAnchor {
     reference_edge: u32,
     reference_tile_edge: u32,
 }
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn workspace_anchors() -> &'static WorkspaceAnchors {
     static ANCHORS: std::sync::OnceLock<WorkspaceAnchors> = std::sync::OnceLock::new();
     ANCHORS.get_or_init(|| {
@@ -44,6 +48,7 @@ fn workspace_anchors() -> &'static WorkspaceAnchors {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct Workspace {
     pub conditioning: u64,
     pub denoise: u64,
@@ -55,6 +60,7 @@ pub(crate) struct Workspace {
 /// (2D), residuals (2D), MLP input/output (4D+4D+D), final output (D), rounded up to 20D.
 /// Also charge full attention scores although fused SDPA does not materialize them. Compute at
 /// f32, CFG batch two, for both the 12x768/12-head and 32x1280/20-head constructors.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn dual_clip_workspace(windows: u32) -> u64 {
     let layer_states = 20_u64 * 77 * (12 * 768 + 32 * 1280);
     let scores = 77_u64 * 77 * (12 * 12 + 32 * 20);
@@ -71,6 +77,7 @@ pub(crate) fn dual_clip_workspace(windows: u32) -> u64 {
 /// Printed peaks have three decimals; the upper endpoint includes the rounding interval.
 /// Below the measured output size retain the global term rather than inventing its fixed/area
 /// split. The model applies only to the identical four-stage decoder topology and compute width.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn layerwise_decode_workspace(
     facts: &DecoderWorkspaceFacts,
     geometry: MemoryGeometry,
@@ -110,6 +117,7 @@ pub(crate) fn layerwise_decode_workspace(
 /// A single point cannot identify head, tail and accumulation coefficients. Multiplying the whole
 /// decode workspace by max(image area ratio, tile area ratio, 1) upper-envelopes every nonnegative
 /// combination of those terms, preserving full-image head and output costs even at small tiles.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn sana_workspace(
     facts: &DecoderWorkspaceFacts,
     geometry: MemoryGeometry,
@@ -165,6 +173,7 @@ pub(crate) fn sana_workspace(
 /// during denoise; after its final evaluation all window blocks have been dropped. Two-stage
 /// providers still retain the trunk and decoder through decode. Unknown streaming facts earn no
 /// weight reduction, and TE-only streaming cannot reduce the denoiser's weights.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn peak(
     contract: &MemoryProviderContract,
     selection: &MemorySelection,
