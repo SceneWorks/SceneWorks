@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod adapter_test_support;
+
 #[cfg(not(target_os = "macos"))]
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
@@ -81,10 +84,11 @@ use mlx_gen::gen_core::{
     MemoryStrategyParameters, TransformerComponent,
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
+#[cfg(test)]
+use mlx_gen::AdapterKind;
 use mlx_gen::{
-    AdapterKind, AdapterSpec, Conditioning, ControlKind, GenerationOutput, GenerationRequest,
-    Generator, IdentityWeights, Image, LoadShape, LoadSpec, OffloadPolicy, Precision, Progress,
-    Quant, WeightsSource,
+    Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, IdentityWeights,
+    Image, LoadShape, LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
 };
 use mlx_rs::memory::{
     clear_cache, get_active_memory, get_cache_memory, get_memory_limit, get_peak_memory,
@@ -1996,34 +2000,9 @@ const QWEN_EDIT_LIGHTNING_ARM: QwenEditArm = QwenEditArm {
     slug: "qwen-edit-lightning",
 };
 
-/// Where the built-in Lightning distill snapshot lives, as the three
-/// `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*` values name it — lifted out of the environment so the
-/// attachment that makes the Lightning member Lightning is unit-testable.
-#[derive(Clone, Debug)]
-struct QwenEditLightningSource {
-    repository: String,
-    revision: String,
-    root: PathBuf,
-}
+use protocol::QwenEditArtifactSource;
 
-/// The three `SCENEWORKS_QWEN_IMAGE_EDIT_*` values naming the base snapshot one capture opens, plus
-/// the distill snapshot the Lightning member stacks — lifted out of the environment so both the tier
-/// binding and the adapter attachment are unit-testable.
-#[derive(Clone, Debug)]
-struct QwenEditArtifactSource {
-    repository: String,
-    revision: String,
-    root: PathBuf,
-    lightning: Option<QwenEditLightningSource>,
-}
-
-/// The artifact one Qwen edit capture loads: the canonical snapshot root, and the `LoadSpec` that
-/// opens it.
-#[derive(Debug)]
-struct QwenEditArtifact {
-    root: PathBuf,
-    spec: LoadSpec,
-}
+use protocol::QwenEditArtifact;
 
 // ---------------------------------------------------------------------------------------------
 // Mage-Flow (sc-22733) — six registered engine providers on ONE arm
@@ -2211,17 +2190,7 @@ const MAGE_ARMS: [MageArm; 6] = [
 const MAGE_PROMPT: &str = "a weathered brass astrolabe on a linen cloth, soft window light";
 const MAGE_EDIT_PROMPT: &str = "replace the background with a plain grey studio backdrop";
 
-/// The two artifact triples one Mage capture opens: the variant's own tier root, and the shared
-/// text-encoder/VAE components snapshot.
-#[derive(Clone, Debug)]
-struct MageArtifactSource {
-    repository: String,
-    revision: String,
-    root: PathBuf,
-    components_repository: String,
-    components_revision: String,
-    components_root: PathBuf,
-}
+use protocol::MageArtifactSource;
 
 /// The artifact one Mage capture loads: the canonical variant tier root, and the `LoadSpec` that
 /// opens it.
@@ -3536,10 +3505,7 @@ fn run_with(
             return Err(refusal);
         }
     }
-    let provider = protocol::planned(request)?
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let provider = protocol::planned_provider(request)?;
     // sc-18104: this used to be `else { run_qwen_provider(request) }`, so ANY provider the MLX
     // adapter does not implement was silently routed to the Qwen arm rather than refused. It then
     // failed further in on a Qwen-shaped complaint that named neither the provider nor the missing

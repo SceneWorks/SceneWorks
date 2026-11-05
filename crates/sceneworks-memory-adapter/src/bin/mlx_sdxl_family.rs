@@ -4,23 +4,14 @@ use super::*;
 /// Which family member the plan asks for. Refuses by name — a model id no member serves must not
 /// be measured as its nearest neighbour, and the engine id alone is NOT an artifact identity.
 pub(super) fn sdxl_arm(request: &Value) -> Result<SdxlArm, String> {
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let provider = target
-        .get("provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let target = protocol::planned_object(request, "/target")?;
+    let provider = protocol::target_str(target, "provider")?;
     if provider != SDXL_PROVIDER {
         return Err(format!(
             "MLX SDXL base calibration does not implement provider {provider:?}"
         ));
     }
-    let model_id = target
-        .get("modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let model_id = protocol::target_str(target, "modelId")?;
     SDXL_FAMILY
         .into_iter()
         .find(|arm| arm.model_id == model_id)
@@ -39,14 +30,8 @@ pub(super) fn sdxl_arm(request: &Value) -> Result<SdxlArm, String> {
 
 pub(super) fn validate_sdxl_target(request: &Value) -> Result<SdxlArm, String> {
     let arm = sdxl_arm(request)?;
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let mode = target
-        .get("mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let target = protocol::planned_object(request, "/target")?;
+    let mode = protocol::target_str(target, "mode")?;
     if mode != "text_to_image" {
         return Err(format!(
             "{} requires reference-free text_to_image mode, got {mode:?}",
@@ -136,10 +121,7 @@ pub(super) fn planned_sdxl_seed(
     tier: &str,
     width: u32,
 ) -> Result<u64, String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     // sc-22729: the fixture stem names the MODEL, not the engine, so a `realvisxl` capture can
     // never be attributed to `sdxl` (both load through the same `sdxl` provider id).
     let prefix = format!("{}-{tier}-{width}-seed", arm.fixture_prefix);
@@ -343,10 +325,7 @@ pub(super) fn run_sdxl(request: &Value) -> Result<Value, String> {
             calibration.fingerprint
         ));
     }
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

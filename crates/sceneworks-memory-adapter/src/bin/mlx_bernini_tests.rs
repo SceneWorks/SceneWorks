@@ -212,22 +212,8 @@ fn the_still_member_renders_the_one_frame_the_engine_returns() {
     );
 }
 
-fn snapshot_root(tier: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir()
-        .join(format!("sc-22737-bernini-{}-{nonce}", std::process::id()))
-        .join(format!(
-            "models--{}",
-            protocol::BERNINI_REPOSITORY.replace('/', "--")
-        ))
-        .join("snapshots")
-        .join(REVISION)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn snapshot_root(fixtures: &crate::adapter_test_support::Fixtures, tier: &str) -> PathBuf {
+    fixtures.snapshot(protocol::BERNINI_REPOSITORY, REVISION, Some(tier))
 }
 
 /// The tier is the PLAN's, the root must carry it, and the `LoadSpec` binds the root with NO
@@ -235,7 +221,9 @@ fn snapshot_root(tier: &str) -> PathBuf {
 /// a q8 export is refused NAMING the tier it wanted, the sc-17097 defect class.
 #[test]
 fn a_root_of_another_tier_is_refused_naming_the_planned_tier() {
-    let q8_root = snapshot_root("q8");
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
+    let q8_root = snapshot_root(fixtures, "q8");
     let error = bernini_load_spec_at(
         &request(BERNINI_VIDEO_ARM, "q4"),
         "q4",
@@ -251,7 +239,7 @@ fn a_root_of_another_tier_is_refused_naming_the_planned_tier() {
         "{error}"
     );
     for tier in BERNINI_TIERS {
-        let root = snapshot_root(tier);
+        let root = snapshot_root(fixtures, tier);
         let artifact = bernini_load_spec_at(
             &request(BERNINI_IMAGE_ARM, tier),
             tier,

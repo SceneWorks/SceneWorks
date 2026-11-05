@@ -3138,14 +3138,10 @@ fn the_ltx_runtime_context_binds_the_exact_video_route_and_selection() {
 /// The staged-residency bound is a real inequality over real byte counts, not a comment.
 #[test]
 fn safetensors_bytes_sums_only_weight_shards_and_fails_closed_when_empty() {
-    let root = std::env::temp_dir().join(format!(
-        "sc-18808-ltx-shards-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
+    let root =
+        fixtures.path("safetensors-bytes-sums-only-weight-shards-and-fails-closed-when-empty");
     std::fs::create_dir_all(&root).unwrap();
     assert!(safetensors_bytes(&root)
         .unwrap_err()
@@ -3158,5 +3154,4 @@ fn safetensors_bytes_sums_only_weight_shards_and_fails_closed_when_empty() {
     std::fs::write(root.join("model-00001-of-00002.safetensors"), vec![0_u8; 7]).unwrap();
     std::fs::write(root.join("model-00002-of-00002.safetensors"), vec![0_u8; 5]).unwrap();
     assert_eq!(safetensors_bytes(&root).unwrap(), 12);
-    std::fs::remove_dir_all(root).ok();
 }

@@ -35,28 +35,17 @@ pub(super) fn mlx_production_fingerprint(provider_id: &str, tier: &str) -> Optio
     }
 }
 
-/// Refuse a plan row whose `calibrationFingerprint` is not the string the production contract
-/// publishes for that `(provider, tier)`. Silent for a provider [`mlx_production_fingerprint`] does
-/// not model, so it can never turn into a blanket gate on providers this table has not learned.
 pub(super) fn validate_planned_fingerprint_is_producible(
     provider_id: &str,
     tier: &str,
     request: &Value,
 ) -> Result<(), String> {
-    let Some(expected) = mlx_production_fingerprint(provider_id, tier) else {
-        return Ok(());
-    };
-    let planned = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned != expected {
-        return Err(format!(
-            "planned.calibrationFingerprint {planned:?} is not the identity the pinned \
-             {provider_id} contract publishes at tier {tier:?}; expected {expected:?}"
-        ));
-    }
-    Ok(())
+    protocol::validate_production_fingerprint(
+        request,
+        provider_id,
+        tier,
+        mlx_production_fingerprint(provider_id, tier),
+    )
 }
 
 pub(super) fn command(program: &str, args: &[&str]) -> Result<String, String> {
@@ -478,14 +467,7 @@ pub(super) fn video_predicted_peak_bytes(
 }
 
 pub(super) fn planned_memory_strategy(request: &Value) -> Result<MemoryStrategy, String> {
-    match protocol::planned_rung(request)? {
-        "resident" => Ok(MemoryStrategy::Resident),
-        "staged_residency" => Ok(MemoryStrategy::StagedResidency),
-        "bounded_decode" => Ok(MemoryStrategy::BoundedDecode),
-        "bounded_attention" => Ok(MemoryStrategy::BoundedAttention),
-        "bounded_transformer_residency" => Ok(MemoryStrategy::BoundedTransformerResidency),
-        other => Err(format!("unsupported MLX fresh-reference rung {other:?}")),
-    }
+    protocol::planned_memory_strategy(request, "MLX")
 }
 
 /// The numeric tier's load shape: bf16 is the dense base and carries no quant (the worker's
@@ -548,15 +530,7 @@ pub(super) fn planned_selection(request: &Value) -> Result<MemorySelection, Stri
     })
 }
 
-pub(super) fn strategy_name(strategy: MemoryStrategy) -> &'static str {
-    match strategy {
-        MemoryStrategy::Resident => "resident",
-        MemoryStrategy::StagedResidency => "staged_residency",
-        MemoryStrategy::BoundedDecode => "bounded_decode",
-        MemoryStrategy::BoundedAttention => "bounded_attention",
-        MemoryStrategy::BoundedTransformerResidency => "bounded_transformer_residency",
-    }
-}
+pub(super) use protocol::strategy_name;
 
 pub(super) fn attested_strategy(
     request: &Value,
@@ -579,24 +553,13 @@ pub(super) fn attested_strategy(
     Ok(measured)
 }
 
-/// Persisted spelling of the materialization shape a run actually executed under. Derived from the
-/// same `LoadShape` handed to the `LoadSpec` (or, better, from the LOADED provider's calibration
-/// identity) — never from the plan, which only declares what it expects (sc-16482).
-pub(super) fn load_shape_key(load_shape: LoadShape) -> &'static str {
-    match load_shape {
-        LoadShape::EagerMaterialization => protocol::LOAD_SHAPE_EAGER,
-        LoadShape::DeferredMaterialization => protocol::LOAD_SHAPE_DEFERRED,
-    }
-}
+pub(super) use protocol::load_shape_key;
 
 /// Parse the load shape the capture plan requires. The adapter must execute this shape and then
 /// attest the loaded provider's calibration identity; deriving it from the selected rung silently
 /// rewrites a declared production-shaped capture (the sc-18237 Qwen q8 bounded-attention defect).
 pub(super) fn planned_load_shape(request: &Value) -> Result<LoadShape, String> {
-    match protocol::planned(request)?
-        .get("loadShape")
-        .and_then(Value::as_str)
-    {
+    match protocol::planned_optional_str(request, "/loadShape")? {
         Some(protocol::LOAD_SHAPE_EAGER) => Ok(LoadShape::EagerMaterialization),
         Some(protocol::LOAD_SHAPE_DEFERRED) => Ok(LoadShape::DeferredMaterialization),
         Some(other) => Err(format!(
@@ -945,7 +908,7 @@ pub(super) fn exceeded_bound_capture_refusal_in(
     let target = planned
         .get("target")
         .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let text = |pointer: &str| target.get(pointer).and_then(Value::as_str);
+    let text = |field: &str| protocol::plan_optional_str(target, &format!("/{field}"));
     let (Some(model_id), Some(provider), Some(tier), Some(mode)) = (
         text("modelId"),
         text("provider"),

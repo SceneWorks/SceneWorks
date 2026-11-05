@@ -6,14 +6,8 @@ use super::*;
 /// nearest neighbour.
 pub(super) fn sensenova_candle_arm(request: &Value) -> Result<SenseNovaCandleArm, String> {
     let planned = protocol::planned(request)?;
-    let provider = planned
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let model_id = planned
-        .pointer("/target/modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let provider = protocol::plan_str(planned, "/target/provider")?;
+    let model_id = protocol::plan_str(planned, "/target/modelId")?;
     SENSENOVA_CANDLE_FAMILY
         .into_iter()
         .find(|arm| arm.model_id == model_id && arm.provider == provider)
@@ -53,10 +47,7 @@ pub(super) fn validate_sensenova_candle_fixture(
     arm: SenseNovaCandleArm,
     tier: &str,
 ) -> Result<(), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let (width, _) = protocol::target_geometry(request)?;
     let prefix = format!("{}-candle-{tier}-{width}-seed", arm.slug);
     let remainder = fixture
@@ -197,11 +188,7 @@ pub(super) fn run_sensenova_capture(request: &Value) -> Result<Value, String> {
             arm.still_calibration
         ));
     }
-    let planned_shape = protocol::planned(request)?
-        .get("loadShape")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?
-        .to_owned();
+    let planned_shape = protocol::planned_load_shape(request)?.to_owned();
     if planned_shape != load_shape_key(LoadShape::EagerMaterialization) {
         return Err(format!(
             "{} must use the eager_materialization load shape the worker loads this family under; \
@@ -217,11 +204,7 @@ pub(super) fn run_sensenova_capture(request: &Value) -> Result<Value, String> {
     // checked BEFORE the load, so a stale row fails in milliseconds instead of after a
     // multi-gigabyte load. `run` re-checks it against the real contract below, which is what keeps
     // the two copies from drifting.
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
-        .to_owned();
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?.to_owned();
     let expected_fingerprint = sensenova_candle_calibration_fingerprint(arm, tier);
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(

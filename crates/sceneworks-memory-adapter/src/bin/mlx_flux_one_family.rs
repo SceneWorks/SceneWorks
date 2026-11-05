@@ -8,14 +8,8 @@ use super::*;
 /// its nearest neighbour.
 pub(super) fn flux_one_arm(request: &Value) -> Result<FluxOneArm, String> {
     let planned = protocol::planned(request)?;
-    let provider = planned
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let mode = planned
-        .pointer("/target/mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let provider = protocol::plan_str(planned, "/target/provider")?;
+    let mode = protocol::plan_str(planned, "/target/mode")?;
     match (provider, mode) {
         (FLUX1_DEV_PROVIDER, "text_to_image") => Ok(FLUX1_DEV_ARM),
         (FLUX1_SCHNELL_PROVIDER, "text_to_image") => Ok(FLUX1_SCHNELL_ARM),
@@ -197,10 +191,7 @@ pub(super) fn validate_flux_one_fixture(
     arm: FluxOneArm,
     tier: &str,
 ) -> Result<(), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let (width, _) = protocol::target_geometry(request)?;
     let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
     let remainder = fixture
@@ -308,11 +299,7 @@ pub(super) fn run_flux_one(request: &Value) -> Result<Value, String> {
     // The plan row must name the production identity this cell's loaded generator publishes —
     // checked against the weights-free table BEFORE the load, so a row still carrying a
     // conformance string fails in milliseconds rather than after a multi-gigabyte load.
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
-        .to_owned();
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?.to_owned();
     let expected_fingerprint = flux_one_calibration_fingerprint(arm, tier);
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(

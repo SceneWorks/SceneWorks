@@ -157,14 +157,8 @@ pub(super) fn image_predicted_peak_bytes(
 /// measured as its nearest neighbour.
 pub(super) fn z_image_arm(request: &Value) -> Result<ZImageArm, String> {
     let planned = protocol::planned(request)?;
-    let provider = planned
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let mode = planned
-        .pointer("/target/mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let provider = protocol::plan_str(planned, "/target/provider")?;
+    let mode = protocol::plan_str(planned, "/target/mode")?;
     match (provider, mode) {
         (Z_IMAGE_PROVIDER, "text_to_image") => Ok(Z_IMAGE_TURBO_ARM),
         (Z_IMAGE_PROVIDER, "edit_image") => Ok(Z_IMAGE_EDIT_ARM),
@@ -319,10 +313,7 @@ pub(super) fn run_z_image_reference_loaded(
         .calibration
         .as_ref()
         .ok_or_else(|| "pinned Z-Image provider has no calibration identity".to_owned())?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
@@ -1040,28 +1031,17 @@ pub(super) fn mage_peak_below_weights_error(
     })
 }
 
-/// The plan row must name the production identity this cell's loaded generator publishes —
-/// checked against the weights-free table BEFORE the load, so a row still carrying the retired
-/// single string (or a conformance string) fails in milliseconds rather than after a
-/// multi-gigabyte load.
 pub(super) fn validate_mage_plan_identity(
     request: &Value,
     arm: MageArm,
     tier: &str,
 ) -> Result<(), String> {
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    let expected_fingerprint = mage_calibration_fingerprint(arm, tier);
-    if planned_fingerprint != expected_fingerprint {
-        return Err(format!(
-            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
-             production identity is {expected_fingerprint}",
-            arm.provider
-        ));
-    }
-    Ok(())
+    protocol::validate_plan_identity(
+        request,
+        arm.provider,
+        tier,
+        &mage_calibration_fingerprint(arm, tier),
+    )
 }
 
 /// Which family member the plan asks for. Refuses by name: the six checkpoints are
@@ -1070,14 +1050,8 @@ pub(super) fn validate_mage_plan_identity(
 /// mis-keyed plan row could notice that Turbo's peaks had been recorded as Base's.
 pub(super) fn mage_arm(request: &Value) -> Result<MageArm, String> {
     let planned = protocol::planned(request)?;
-    let provider = planned
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let model_id = planned
-        .pointer("/target/modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let provider = protocol::plan_str(planned, "/target/provider")?;
+    let model_id = protocol::plan_str(planned, "/target/modelId")?;
     MAGE_ARMS
         .into_iter()
         .find(|arm| arm.provider == provider && arm.provider == model_id)
@@ -1092,10 +1066,7 @@ pub(super) fn mage_arm(request: &Value) -> Result<MageArm, String> {
 /// The seed and step count this member's fixture binds, checked against the arm's own prefix, the
 /// planned tier, the rendered edge and the recipe's step count.
 pub(super) fn planned_mage_seed(request: &Value, arm: MageArm, tier: &str) -> Result<u64, String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let (width, _) = protocol::target_geometry(request)?;
     let prefix = format!("{}-{tier}-{width}-seed", arm.fixture_prefix);
     let remainder = fixture
@@ -1119,14 +1090,8 @@ pub(super) fn planned_mage_seed(request: &Value, arm: MageArm, tier: &str) -> Re
     Ok(seed)
 }
 
-/// The mode the ARM will actually render — `edit_image` on the three instruction editors and
-/// `text_to_image` on the other three, from `MageVariant::is_edit`.
 pub(super) fn mage_mode(arm: MageArm) -> &'static str {
-    if arm.edit {
-        "edit_image"
-    } else {
-        "text_to_image"
-    }
+    protocol::mage_mode(arm.edit)
 }
 
 /// The plan's declared mode must be the one this member renders.
@@ -1137,10 +1102,7 @@ pub(super) fn mage_mode(arm: MageArm) -> &'static str {
 /// label — and the pinned provider would not object, because the context it grades is built from the
 /// arm and is internally consistent.
 pub(super) fn validate_mage_mode(request: &Value, arm: MageArm) -> Result<(), String> {
-    let declared = protocol::planned(request)?
-        .pointer("/target/mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let declared = protocol::planned_mode(request)?;
     let expected = mage_mode(arm);
     if declared != expected {
         return Err(format!(
@@ -1469,10 +1431,7 @@ pub(super) fn run_mage_provider(request: &Value) -> Result<Value, String> {
             arm.provider
         )
     })?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

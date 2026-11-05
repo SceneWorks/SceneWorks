@@ -22,10 +22,7 @@ pub(super) fn validate_flux_one_fixture(
             ))
         }
     };
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let (width, _) = protocol::target_geometry(request)?;
     let prefix = format!("{prefix}-{tier}-{width}-seed");
     let remainder = fixture

@@ -175,10 +175,7 @@ pub(super) fn mage_arm(request: &Value) -> Result<Option<MageArm>, String> {
     let Some(arm) = MAGE_ARMS.into_iter().find(|arm| arm.provider == provider) else {
         return Ok(None);
     };
-    let model_id = protocol::planned(request)?
-        .pointer("/target/modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let model_id = protocol::planned_model_id(request)?;
     if model_id != arm.provider {
         return Err(format!(
             "the Candle Mage-Flow arm does not implement provider {provider:?} for model \
@@ -188,13 +185,8 @@ pub(super) fn mage_arm(request: &Value) -> Result<Option<MageArm>, String> {
     Ok(Some(arm))
 }
 
-/// The mode the ARM will actually render — `edit_image` on the three instruction editors.
 pub(super) fn mage_mode(arm: MageArm) -> &'static str {
-    if arm.edit {
-        "edit_image"
-    } else {
-        "text_to_image"
-    }
+    protocol::mage_mode(arm.edit)
 }
 
 /// The plan's declared mode must be the one this member renders. The record's `mode` comes from the
@@ -218,10 +210,7 @@ pub(super) fn validate_mage_fixture(
     arm: MageArm,
     tier: &str,
 ) -> Result<(), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let (width, _) = protocol::target_geometry(request)?;
     let prefix = format!("{}-{tier}-{width}-seed", arm.fixture_prefix);
     let remainder = fixture
@@ -326,39 +315,24 @@ pub(super) fn mage_calibration_fingerprint(arm: MageArm, tier: &str) -> String {
 /// re-assert against the loaded contract's identity. Deriving it from the selected rung would
 /// silently rewrite the per-tier shape the worker binds (see [`mage_load_spec`]).
 pub(super) fn mage_planned_load_shape(request: &Value) -> Result<LoadShape, String> {
-    match protocol::planned(request)?
-        .get("loadShape")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?
-    {
+    match protocol::planned_load_shape(request)? {
         protocol::LOAD_SHAPE_EAGER => Ok(LoadShape::EagerMaterialization),
         protocol::LOAD_SHAPE_DEFERRED => Ok(LoadShape::DeferredMaterialization),
         other => Err(format!("unsupported planned.loadShape {other:?}")),
     }
 }
 
-/// The plan row must name the production identity this cell's loaded generator publishes —
-/// checked against the weights-free table BEFORE the load, so a row still carrying the retired
-/// tier-free `-v2` string (or an MLX identity) fails in milliseconds rather than after a
-/// multi-gigabyte load.
 pub(super) fn validate_mage_plan_identity(
     request: &Value,
     arm: MageArm,
     tier: &str,
 ) -> Result<(), String> {
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    let expected_fingerprint = mage_calibration_fingerprint(arm, tier);
-    if planned_fingerprint != expected_fingerprint {
-        return Err(format!(
-            "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
-             production identity is {expected_fingerprint}",
-            arm.provider
-        ));
-    }
-    Ok(())
+    protocol::validate_plan_identity(
+        request,
+        arm.provider,
+        tier,
+        &mage_calibration_fingerprint(arm, tier),
+    )
 }
 
 /// The generation request one Mage capture renders — the worker's request shape for this member.

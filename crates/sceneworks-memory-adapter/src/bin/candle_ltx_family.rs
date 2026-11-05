@@ -5,10 +5,7 @@ pub(super) fn ltx25_planned_load_shape(
     request: &Value,
     transformer_variant: protocol::Ltx25TransformerVariant,
 ) -> Result<LoadShape, String> {
-    let declared = protocol::planned(request)?
-        .get("loadShape")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?;
+    let declared = protocol::planned_load_shape(request)?;
     transformer_variant.validate_load_shape(declared)?;
     match declared {
         protocol::LOAD_SHAPE_EAGER => Ok(LoadShape::EagerMaterialization),
@@ -144,10 +141,7 @@ pub(super) fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
         .calibration
         .as_ref()
         .ok_or_else(|| format!("loaded {LTX25_ID} has no calibration identity"))?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

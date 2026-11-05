@@ -300,17 +300,8 @@ pub(super) fn validate_ltx_geometry(
 /// rather than asserting it away; `batch` is still pinned to 1 because LTX's descriptor advertises
 /// `max_count: 1` and the arm renders exactly one clip.
 pub(super) fn ltx_target_geometry(request: &Value) -> Result<LtxGeometry, String> {
-    let geometry = protocol::planned(request)?
-        .pointer("/target/geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
+    let geometry = protocol::planned_object(request, "/target/geometry")?;
+    let axis = |name: &str| protocol::geometry_axis_u32(geometry, name);
     let batch = axis("batch")?;
     if batch != 1 {
         return Err(format!(
@@ -325,32 +316,20 @@ pub(super) fn ltx_target_geometry(request: &Value) -> Result<LtxGeometry, String
 /// `run` dispatcher routes by provider id today, but this arm hardcodes the LTX contract, so a
 /// foreign caller must be refused BY NAME here rather than misrouted into it.
 pub(super) fn validate_ltx_target(request: &Value) -> Result<LtxGeometry, String> {
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let provider = target
-        .get("provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let target = protocol::planned_object(request, "/target")?;
+    let provider = protocol::target_str(target, "provider")?;
     if provider != LTX_PROVIDER {
         return Err(format!(
             "MLX LTX-2.3 calibration does not implement provider {provider:?}"
         ));
     }
-    let model_id = target
-        .get("modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let model_id = protocol::target_str(target, "modelId")?;
     if model_id != LTX_PROVIDER {
         return Err(format!(
             "MLX LTX-2.3 calibration requires modelId {LTX_PROVIDER:?}, got {model_id:?}"
         ));
     }
-    let mode = target
-        .get("mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let mode = protocol::target_str(target, "mode")?;
     if mode != "text_to_video" {
         return Err(format!(
             "MLX LTX-2.3 calibration requires reference-free text_to_video mode, got {mode:?}"
@@ -386,10 +365,7 @@ pub(super) fn planned_ltx_capture(
     tier: &str,
     geometry: LtxGeometry,
 ) -> Result<(u32, u64), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let prefix = format!(
         "ltx-2-3-mlx-{tier}-{}x{}-f{}-fps",
         geometry.width, geometry.height, geometry.frames
@@ -1782,13 +1758,13 @@ pub(super) fn validate_ltx_canary_plan_for(
         ));
     }
     let planned = protocol::planned(request)?;
-    if planned.get("_diagnosticOnly").and_then(Value::as_bool) != Some(true) {
+    if protocol::plan_optional_bool(planned, "/_diagnosticOnly") != Some(true) {
         return Err("LTX safety canary requires planned._diagnosticOnly == true".to_owned());
     }
-    if planned.get("evidenceScope").and_then(Value::as_str) != Some("fixture") {
+    if protocol::plan_optional_str(planned, "/evidenceScope") != Some("fixture") {
         return Err("LTX safety canary requires non-promotable fixture evidenceScope".to_owned());
     }
-    if planned.get("backend").and_then(Value::as_str) != Some("mlx") {
+    if protocol::plan_optional_str(planned, "/backend") != Some("mlx") {
         return Err("LTX safety canary requires planned.backend == mlx".to_owned());
     }
     let engaged_rungs = planned
@@ -1806,20 +1782,17 @@ pub(super) fn validate_ltx_canary_plan_for(
         );
     }
     protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
-    let target = planned
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let target = protocol::plan_object(planned, "/target")?;
     for field in ["provider", "modelId"] {
-        if target.get(field).and_then(Value::as_str) != Some(LTX_PROVIDER) {
+        if protocol::target_optional_str(target, field) != Some(LTX_PROVIDER) {
             return Err(format!(
                 "LTX safety canary target.{field} must be {LTX_PROVIDER:?}"
             ));
         }
     }
-    if target.get("tier").and_then(Value::as_str) != Some("q4")
-        || target.get("mode").and_then(Value::as_str) != Some("text_to_video")
-        || target.get("overlay").and_then(Value::as_str) != Some("none")
+    if protocol::target_optional_str(target, "tier") != Some("q4")
+        || protocol::target_optional_str(target, "mode") != Some("text_to_video")
+        || protocol::target_optional_str(target, "overlay") != Some("none")
     {
         return Err("LTX safety canary requires q4 text_to_video with overlay none".to_owned());
     }
@@ -1840,7 +1813,7 @@ pub(super) fn validate_ltx_canary_plan_for(
             ));
         }
     }
-    if planned.get("fixture").and_then(Value::as_str) != Some(profile.fixture()) {
+    if protocol::plan_optional_str(planned, "/fixture") != Some(profile.fixture()) {
         return Err(format!(
             "LTX safety canary fixture must be {:?}",
             profile.fixture()
@@ -1849,10 +1822,7 @@ pub(super) fn validate_ltx_canary_plan_for(
     // The canary is the frozen q4 row — the `target.tier` check above refuses anything else — so
     // the identity it must name is the q4 member of the family, never the calibrated tier's key.
     let expected_fingerprint = ltx_calibration_fingerprint("q4")?;
-    let planned_fingerprint = planned
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::plan_str(planned, "/calibrationFingerprint")?;
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "LTX safety canary fingerprint does not match the pinned provider: plan={planned_fingerprint}, q4 identity={expected_fingerprint}"
@@ -1861,9 +1831,7 @@ pub(super) fn validate_ltx_canary_plan_for(
     if planned_load_shape(request)? != LoadShape::EagerMaterialization {
         return Err("LTX safety canary requires eager_materialization".to_owned());
     }
-    if planned
-        .pointer("/_watchdog/maxFootprintBytes")
-        .and_then(Value::as_u64)
+    if protocol::plan_optional_u64(planned, "/_watchdog/maxFootprintBytes")
         != Some(LTX_CANARY_MAX_FOOTPRINT_BYTES)
     {
         return Err(format!(
@@ -2420,10 +2388,7 @@ pub(super) fn run_ltx_with_admission(
     // The identity is derived from the PLANNED tier: the engine keys calibration on
     // `(provider, artifact-proven tier)`, so a q4 plan may not name the q8 cell's key.
     let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX LTX-2.3 arm \
@@ -3196,10 +3161,7 @@ pub(super) fn prevalidate_ltx_campaign_entry(request: &Value) -> Result<(), Stri
     }
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
@@ -3218,10 +3180,7 @@ pub(super) fn prevalidate_ltx_bounded_campaign_entry(request: &Value) -> Result<
     }
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
@@ -3242,10 +3201,7 @@ pub(super) fn prevalidate_ltx_bounded_carrier_proof(
     }
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     let expected_fingerprint = ltx_calibration_fingerprint(tier)?;
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
@@ -3553,9 +3509,7 @@ pub(super) fn run_ltx_campaign_entry(request: &Value) -> Result<Value, String> {
 
 pub(super) fn run_ltx_bounded_campaign_entry(request: &Value) -> Result<Value, String> {
     prevalidate_ltx_bounded_campaign_entry(request)?;
-    let tier = protocol::planned(request)?
-        .pointer("/target/tier")
-        .and_then(Value::as_str)
+    let tier = protocol::planned_optional_str(request, "/target/tier")?
         .ok_or_else(|| "bounded campaign target tier must be a string".to_owned())?;
     let bounded_spec = ltx_bounded_campaign_spec(tier)?;
     let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;

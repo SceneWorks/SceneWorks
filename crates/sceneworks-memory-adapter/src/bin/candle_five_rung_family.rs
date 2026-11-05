@@ -110,10 +110,7 @@ pub(super) fn validate_five_rung_family_fixture(
     slug: &str,
     tier: &str,
 ) -> Result<(), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let (width, _) = protocol::target_geometry(request)?;
     let prefix = format!("{FIVE_RUNG_FIXTURE_PREFIX}{slug}-{tier}-{width}-seed");
     let remainder = fixture
@@ -653,10 +650,7 @@ pub(super) fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRung
     // of after a multi-gigabyte load (`run_five_rung_reference_loaded` still re-checks it against
     // the real contract afterwards, which is what keeps the two copies from drifting).
     if let Some(expected) = five_rung_calibration_fingerprint(provider_id, tier) {
-        let planned = protocol::planned(request)?
-            .get("calibrationFingerprint")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+        let planned = protocol::planned_calibration_fingerprint(request)?;
         if planned != expected {
             return Err(format!(
                 "plan/provider calibration mismatch: plan={planned}, the {provider_id} {tier} \
@@ -772,20 +766,14 @@ pub(super) fn run_five_rung_reference_loaded(
         .calibration
         .as_ref()
         .ok_or_else(|| format!("pinned {provider_id} provider has no calibration identity"))?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
             calibration.fingerprint
         ));
     }
-    let planned_load_shape = protocol::planned(request)?
-        .get("loadShape")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?;
+    let planned_load_shape = protocol::planned_load_shape(request)?;
     let actual_load_shape = match calibration.load_shape {
         LoadShape::EagerMaterialization => "eager_materialization",
         LoadShape::DeferredMaterialization => "deferred_materialization",
@@ -1390,9 +1378,7 @@ pub(super) fn run_five_rung_batch(request: &Value) -> Result<Value, String> {
 /// produced the byte-identical message. Five shipped Candle plan rows answer `false`
 /// (`krea-q4-1024-seed42` and its q8/bf16/768/v2 siblings).
 pub(super) fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
-    let is_five_rung_fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
+    let is_five_rung_fixture = protocol::planned_optional_str(request, "/fixture")?
         .is_some_and(|fixture| fixture.starts_with(FIVE_RUNG_FIXTURE_PREFIX));
     // Qwen, Z-Image-Turbo and the Z-Image base have no inline arm at all, so every fixture on
     // them is a five-rung reference capture regardless of its spelling.

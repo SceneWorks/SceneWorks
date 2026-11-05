@@ -6,10 +6,7 @@ use super::*;
 /// dispatch already provides, restated here so a direct caller cannot measure one member's weights
 /// against another member's contract.
 pub(super) fn krea_base_arm(request: &Value) -> Result<KreaBaseArm, String> {
-    let provider = protocol::planned(request)?
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let provider = protocol::planned_provider(request)?;
     match provider {
         KREA_BASE_PROVIDER => Ok(KREA_TURBO_ARM),
         KREA_RAW_PROVIDER => Ok(KREA_RAW_ARM),
@@ -32,24 +29,15 @@ pub(super) fn krea_base_pinned_fingerprint(arm: KreaBaseArm, tier: &str) -> Opti
 pub(super) fn validate_krea_base_target(request: &Value) -> Result<KreaBaseArm, String> {
     let arm = krea_base_arm(request)?;
     let label = arm.still_calibration;
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let model_id = target
-        .get("modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let target = protocol::planned_object(request, "/target")?;
+    let model_id = protocol::target_str(target, "modelId")?;
     if model_id != arm.provider {
         return Err(format!(
             "{label} requires modelId {:?}, got {model_id:?}",
             arm.provider
         ));
     }
-    let mode = target
-        .get("mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let mode = protocol::target_str(target, "mode")?;
     if mode != "text_to_image" {
         return Err(format!(
             "{label} requires reference-free text_to_image mode, got {mode:?}"
@@ -80,10 +68,7 @@ pub(super) fn planned_krea_base_seed(
     tier: &str,
     width: u32,
 ) -> Result<u64, String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let prefix = format!("{}-{tier}-{width}-seed", arm.fixture_stem);
     let remainder = fixture
         .strip_prefix(&prefix)
@@ -483,10 +468,7 @@ pub(super) fn run_krea_base(request: &Value) -> Result<Value, String> {
             ));
         }
     }
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

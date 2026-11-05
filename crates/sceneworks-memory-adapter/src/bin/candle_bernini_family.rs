@@ -10,10 +10,7 @@ use super::*;
 /// `text_to_image` mode key, which is a different admission key from the one the video route asks
 /// under. Refused BY NAME rather than defaulted.
 pub(super) fn bernini_candle_still_member(request: &Value) -> Result<&'static str, String> {
-    let model_id = protocol::planned(request)?
-        .pointer("/target/modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let model_id = protocol::planned_model_id(request)?;
     if model_id != BERNINI_CANDLE_IMAGE_MODEL_ID {
         return Err(format!(
             "the Candle Bernini still path serves catalog entry \

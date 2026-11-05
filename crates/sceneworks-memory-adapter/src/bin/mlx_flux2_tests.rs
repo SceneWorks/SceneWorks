@@ -610,10 +610,12 @@ fn run_flux2_refuses_a_plan_whose_load_shape_is_not_the_members_worker_shape() {
 /// a base-klein plan even though both load through `flux2_klein_9b`.
 #[test]
 fn flux2_root_must_carry_the_planned_tier_and_the_members_own_repository() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     const REVISION: &str = "acf05e8d5103838baba6a5e32dc91d6997a56023";
     for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
         let selection = resident_selection(Some(Quant::Q4));
-        let q4_root = flux2_snapshot_root(arm.expected_repository, REVISION, "q4");
+        let q4_root = flux2_snapshot_root(fixtures, arm.expected_repository, REVISION, "q4");
         let error = flux2_load_spec_at(
             arm,
             "q8",
@@ -629,7 +631,7 @@ fn flux2_root_must_carry_the_planned_tier_and_the_members_own_repository() {
             arm.model_id
         );
         for tier in ["q4", "q8", "bf16"] {
-            let root = flux2_snapshot_root(arm.expected_repository, REVISION, tier);
+            let root = flux2_snapshot_root(fixtures, arm.expected_repository, REVISION, tier);
             let (repository, revision, _) = flux2_load_spec_at(
                 arm,
                 tier,
@@ -665,19 +667,13 @@ fn flux2_root_must_carry_the_planned_tier_and_the_members_own_repository() {
     }
 }
 
-fn flux2_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir()
-        .join(format!("sc-22727-flux2-{}-{nonce}", std::process::id()))
-        .join(format!("models--{}", repository.replace('/', "--")))
-        .join("snapshots")
-        .join(revision)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn flux2_snapshot_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    repository: &str,
+    revision: &str,
+    tier: &str,
+) -> PathBuf {
+    fixtures.snapshot(repository, revision, Some(tier))
 }
 
 #[test]

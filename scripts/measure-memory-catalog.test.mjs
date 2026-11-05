@@ -1626,7 +1626,13 @@ test("the extra artifacts declared per family are the ones the adapter source na
     QWEN_EDIT_LIGHTNING_LORA.file,
     "the declared distill LoRA is the file the arm joins",
   );
-  assert.match(mlx, /join\(protocol::QWEN_EDIT_LIGHTNING_FILE\)/);
+  const common = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/adapter_common.rs"), "utf8");
+  assert.match(lib, /mod adapter_common;[\s\S]*pub use adapter_common::\*/);
+  assert.match(common, /join\(crate::QWEN_EDIT_LIGHTNING_FILE\)/);
+  for (const lane of [mlx, candle]) {
+    assert.match(lane, /use protocol::qwen_edit_lightning_adapter;/);
+    assert.match(lane, /qwen_edit_lightning_adapter\(lightning\)\?/);
+  }
 });
 
 // The catalog's `physical` flag and the harness's receipt predicate are two spellings of one rule,
@@ -1847,6 +1853,10 @@ test("every family's derived env names are read back by each arm it declares", a
       ),
     );
   }
+  const common = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/adapter_common.rs"), "utf8");
+  const commonProduction = common.slice(0, common.indexOf("#[cfg(test)]"));
+  assert.ok(commonProduction.includes("fn qwen_edit_artifact_source("));
+  assert.match(commonProduction, /lightning\.then\(qwen_edit_lightning_source\)/);
   let checked = 0;
   for (const [id, family] of Object.entries(PROVIDER_FAMILIES)) {
     // The LTX-2.5 families carry no env family at all: the harness binds their snapshot root
@@ -1889,10 +1899,16 @@ test("every family's derived env names are read back by each arm it declares", a
         ...envFamilies.filter((env) => env !== family.env),
       ];
       for (const env of laneEnvFamilies) {
+        let fieldSource = source;
+        if (["QWEN_IMAGE_EDIT", "QWEN_EDIT_LIGHTNING_LORA"].includes(env)) {
+          assert.match(source, /protocol::qwen_edit_artifact_source\(arm\.lightning\)/,
+            `${arm} must consume the shared Qwen artifact source`);
+          fieldSource = commonProduction;
+        }
         for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
           const name = `SCENEWORKS_${env}_${suffix}`;
           assert.ok(
-            source.includes(`"${name}"`),
+            fieldSource.includes(`"${name}"`),
             `${arm}.rs never reads ${name}, which ${id} exports into it`,
           );
           checked += 1;

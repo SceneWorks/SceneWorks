@@ -19,10 +19,7 @@ pub(super) fn validate_sd35_fixture(
         .ok_or_else(|| {
             format!("the Candle SD3.5 fixture binding does not implement provider {provider:?}")
         })?;
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let (width, _) = protocol::target_geometry(request)?;
     let prefix = format!("{FIVE_RUNG_FIXTURE_PREFIX}{slug}-{tier}-{width}-seed");
     let remainder = fixture

@@ -31,33 +31,25 @@ fn flux_one_planned(provider: &str, mode: &str, tier: &str) -> Value {
     })
 }
 
-fn flux_one_temp_dir(label: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("sc-22726-{label}-{}-{nonce}", std::process::id()))
+fn flux_one_temp_dir(fixtures: &crate::adapter_test_support::Fixtures, label: &str) -> PathBuf {
+    fixtures.path(label)
 }
 
-fn flux_one_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
-    let root = flux_one_temp_dir("flux1")
-        .join(format!("models--{}", repository.replace('/', "--")))
-        .join("snapshots")
-        .join(revision)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn flux_one_snapshot_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    repository: &str,
+    revision: &str,
+    tier: &str,
+) -> PathBuf {
+    fixtures.snapshot(repository, revision, Some(tier))
 }
 
 /// A complete staged PuLID bundle: all five loose files in ONE directory, which is what both
 /// worker lanes stage under `SCENEWORKS_PULID_WEIGHTS` and what both engines require.
-fn staged_pulid_bundle() -> protocol::PulidIdentityBundle {
-    let root = flux_one_temp_dir("pulid-bundle");
-    std::fs::create_dir_all(&root).unwrap();
-    for file in protocol::PULID_IDENTITY_BUNDLE_FILES {
-        std::fs::write(root.join(file), b"weights").unwrap();
-    }
-    protocol::pulid_identity_bundle_at(root).unwrap()
+fn staged_pulid_bundle(
+    fixtures: &crate::adapter_test_support::Fixtures,
+) -> protocol::PulidIdentityBundle {
+    fixtures.pulid_bundle()
 }
 
 /// The family member is read off the plan's `(provider, mode)`, and a pair no member serves is
@@ -192,11 +184,13 @@ fn every_flux_one_member_refuses_a_multi_frame_geometry_under_its_own_label() {
 /// class). All three tiers must round-trip, so the arm cannot be quietly capped at one.
 #[test]
 fn flux_one_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
     for arm in [FLUX1_DEV_ARM, FLUX1_SCHNELL_ARM, PULID_FLUX_ARM] {
         let repository = arm.expected_repository;
-        let identity = || arm.identity.then(staged_pulid_bundle);
-        let q4_root = flux_one_snapshot_root(repository, REVISION, "q4");
+        let identity = || arm.identity.then(|| staged_pulid_bundle(fixtures));
+        let q4_root = flux_one_snapshot_root(fixtures, repository, REVISION, "q4");
         let error = flux_one_load_spec_at(
             &flux_one_planned(arm.provider, arm.mode, "q8"),
             LoadShape::DeferredMaterialization,
@@ -216,7 +210,7 @@ fn flux_one_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
             ("q8", Some(Quant::Q8)),
             ("bf16", None),
         ] {
-            let root = flux_one_snapshot_root(repository, REVISION, tier);
+            let root = flux_one_snapshot_root(fixtures, repository, REVISION, tier);
             let artifact = flux_one_load_spec_at(
                 &flux_one_planned(arm.provider, arm.mode, tier),
                 LoadShape::DeferredMaterialization,
@@ -263,9 +257,11 @@ fn flux_one_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
 /// backbone are two different measurements.
 #[test]
 fn the_pulid_route_binds_the_identity_stack_and_the_base_routes_do_not() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
-    let bundle = staged_pulid_bundle();
-    let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+    let bundle = staged_pulid_bundle(fixtures);
+    let root = flux_one_snapshot_root(fixtures, protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
     let artifact = flux_one_load_spec_at(
         &flux_one_planned(PULID_FLUX_PROVIDER, "character_image", "q4"),
         LoadShape::DeferredMaterialization,
@@ -314,7 +310,7 @@ fn the_pulid_route_binds_the_identity_stack_and_the_base_routes_do_not() {
         Some(bundle.composite_sha256.as_str())
     );
     // Same bytes at another path: the same identity. Different bytes: a different one.
-    let restaged = staged_pulid_bundle();
+    let restaged = staged_pulid_bundle(fixtures);
     assert_ne!(restaged.root, bundle.root);
     assert_eq!(restaged.composite_sha256, bundle.composite_sha256);
     std::fs::write(restaged.root.join(protocol::PULID_BISENET_FILE), b"other").unwrap();
@@ -363,13 +359,15 @@ fn the_pulid_route_binds_the_identity_stack_and_the_base_routes_do_not() {
 /// reads an env var, so nothing else needs the lock.
 #[test]
 fn the_env_bound_load_spec_reads_the_identity_bundle_from_its_env_on_the_pulid_route_only() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
     let _guard = FLUX_ONE_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let restore = FluxOneEnv::capture();
-    let bundle = staged_pulid_bundle();
-    let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+    let bundle = staged_pulid_bundle(fixtures);
+    let root = flux_one_snapshot_root(fixtures, protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
     std::env::set_var(
         "SCENEWORKS_FLUX1_DEV_REPOSITORY",
         protocol::FLUX1_DEV_REPOSITORY,
@@ -459,7 +457,9 @@ impl Drop for FluxOneEnv {
 /// gigabytes into a capture as an opaque loader error.
 #[test]
 fn an_incomplete_pulid_bundle_is_refused_naming_the_missing_files() {
-    let root = flux_one_temp_dir("pulid-partial");
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
+    let root = flux_one_temp_dir(fixtures, "pulid-partial");
     std::fs::create_dir_all(&root).unwrap();
     for skipped in protocol::PULID_IDENTITY_BUNDLE_FILES {
         for file in protocol::PULID_IDENTITY_BUNDLE_FILES {
@@ -482,8 +482,10 @@ fn an_incomplete_pulid_bundle_is_refused_naming_the_missing_files() {
 /// the other's overlay coverage.
 #[test]
 fn the_flux_one_overlay_axis_is_bound_to_the_declared_target() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
-    let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+    let root = flux_one_snapshot_root(fixtures, protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
     let mut base = flux_one_planned(FLUX1_DEV_PROVIDER, "text_to_image", "q4");
     base["planned"]["target"]["overlay"] = json!("identity");
     let error = flux_one_load_spec_at(
@@ -505,7 +507,7 @@ fn the_flux_one_overlay_axis_is_bound_to_the_declared_target() {
         protocol::FLUX1_DEV_REPOSITORY.to_owned(),
         REVISION.to_owned(),
         root,
-        Some(staged_pulid_bundle()),
+        Some(staged_pulid_bundle(fixtures)),
     )
     .expect_err("the identity route must require its own overlay");
     assert!(error.contains("executes exactly \"identity\""), "{error}");

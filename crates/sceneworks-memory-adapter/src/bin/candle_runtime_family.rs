@@ -88,10 +88,7 @@ pub(super) fn sweep(
     parameters: &Map<String, Value>,
     result: &str,
 ) -> Result<Value, String> {
-    let fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let fingerprint = protocol::planned_calibration_fingerprint(request)?;
     let candidates: &[(u64, u64, u64, u64)] = match fingerprint {
         "krea-turbo-cuda-phase-curves-v1" => &[(512, 128, 134_217_728, 1)],
         "krea-turbo-cuda-phase-curves-v2" => {
@@ -460,52 +457,17 @@ pub(super) fn preflight_fragment(
     Ok(fragment)
 }
 
-/// Persisted spelling of `gen_core::LoadShape` for the schema-v4 receipt field.
-///
-/// Callers pass the shape the run actually executed under — in practice
-/// `contract.calibration.load_shape` from the LOADED provider, never the plan's declared value and
-/// never a literal. A receipt may only testify to its own run (sc-16482).
-pub(super) fn load_shape_key(load_shape: LoadShape) -> &'static str {
-    match load_shape {
-        LoadShape::EagerMaterialization => protocol::LOAD_SHAPE_EAGER,
-        LoadShape::DeferredMaterialization => protocol::LOAD_SHAPE_DEFERRED,
-    }
-}
+pub(super) use protocol::load_shape_key;
 
-pub(super) fn strategy_name(strategy: MemoryStrategy) -> &'static str {
-    match strategy {
-        MemoryStrategy::Resident => "resident",
-        MemoryStrategy::StagedResidency => "staged_residency",
-        MemoryStrategy::BoundedDecode => "bounded_decode",
-        MemoryStrategy::BoundedAttention => "bounded_attention",
-        MemoryStrategy::BoundedTransformerResidency => "bounded_transformer_residency",
-    }
-}
+pub(super) use protocol::strategy_name;
 
 pub(super) fn planned_memory_strategy(request: &Value) -> Result<MemoryStrategy, String> {
-    match protocol::planned_rung(request)? {
-        "resident" => Ok(MemoryStrategy::Resident),
-        "staged_residency" => Ok(MemoryStrategy::StagedResidency),
-        "bounded_decode" => Ok(MemoryStrategy::BoundedDecode),
-        "bounded_attention" => Ok(MemoryStrategy::BoundedAttention),
-        "bounded_transformer_residency" => Ok(MemoryStrategy::BoundedTransformerResidency),
-        other => Err(format!("unsupported Candle fresh-reference rung {other:?}")),
-    }
+    protocol::planned_memory_strategy(request, "Candle")
 }
 
-pub(super) fn planned_provider(request: &Value) -> Result<&str, String> {
-    protocol::planned(request)?
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())
-}
+pub(super) use protocol::planned_provider;
 
-pub(super) fn planned_mode(request: &Value) -> Result<&str, String> {
-    protocol::planned(request)?
-        .pointer("/target/mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())
-}
+pub(super) use protocol::planned_mode;
 
 pub(super) fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
     match planned_provider(request)? {
@@ -655,11 +617,7 @@ pub(super) fn still_calibration_label(request: &Value) -> Result<&'static str, S
 /// that, and [`planned_tier_variant`] keeps the on-disk artifact bound to the same token so a q8 plan
 /// can never be satisfied by q4 weights.
 pub(super) fn planned_tier(request: &Value) -> Result<&str, String> {
-    match protocol::planned(request)?
-        .pointer("/target/tier")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.tier must be a string".to_owned())?
-    {
+    match protocol::planned_tier(request)? {
         tier @ ("bf16" | "q4" | "q8") => Ok(tier),
         tier => Err(format!("unsupported Candle numeric tier {tier:?}")),
     }
@@ -694,10 +652,7 @@ pub(super) fn validate_fixture_binds_tier_and_geometry(request: &Value) -> Resul
         return Ok(());
     }
     let planned = protocol::planned(request)?;
-    let fixture = planned
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::plan_str(planned, "/fixture")?;
     let tier = planned_tier(request)?;
     let (width, height) = protocol::target_geometry(request)?;
     if width != height {
@@ -971,29 +926,17 @@ pub(super) fn candle_production_fingerprint(provider_id: &str, tier: &str) -> Op
         .then(|| format!("krea-2-{route}-{tier}-cuda-staged-residency-v1"))
 }
 
-/// Refuse a plan row whose `calibrationFingerprint` is not the string the production contract
-/// publishes for that `(provider, tier)`. Silent for a provider [`candle_production_fingerprint`]
-/// does not model, so it can never turn into a blanket gate on providers this table has not
-/// learned.
 pub(super) fn validate_planned_fingerprint_is_producible(
     provider_id: &str,
     tier: &str,
     request: &Value,
 ) -> Result<(), String> {
-    let Some(expected) = candle_production_fingerprint(provider_id, tier) else {
-        return Ok(());
-    };
-    let planned = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
-    if planned != expected {
-        return Err(format!(
-            "planned.calibrationFingerprint {planned:?} is not the identity the pinned \
-             {provider_id} contract publishes at tier {tier:?}; expected {expected:?}"
-        ));
-    }
-    Ok(())
+    protocol::validate_production_fingerprint(
+        request,
+        provider_id,
+        tier,
+        candle_production_fingerprint(provider_id, tier),
+    )
 }
 
 /// The env-free half of [`pulid_flux_binding`], so the tier and identity bindings are provable
@@ -1173,20 +1116,14 @@ pub(super) fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
         .calibration
         .as_ref()
         .ok_or_else(|| "the pinned PuLID-FLUX contract has no calibration identity".to_owned())?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
             calibration.fingerprint
         ));
     }
-    let planned_load_shape = protocol::planned(request)?
-        .get("loadShape")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?;
+    let planned_load_shape = protocol::planned_load_shape(request)?;
     if planned_load_shape != load_shape_key(calibration.load_shape) {
         return Err(format!(
             "plan/provider load-shape mismatch: plan={planned_load_shape}, pinned provider={}",
@@ -1449,11 +1386,7 @@ pub(super) fn loaded_contract_facts(
 /// residency, so `memory_route_registry::evaluate_declared_candle_load_shape` hands its spec
 /// straight back and the shape is simply what the plan says.
 pub(super) fn planned_video_load_shape(request: &Value) -> Result<LoadShape, String> {
-    match protocol::planned(request)?
-        .get("loadShape")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?
-    {
+    match protocol::planned_load_shape(request)? {
         protocol::LOAD_SHAPE_EAGER => Ok(LoadShape::EagerMaterialization),
         protocol::LOAD_SHAPE_DEFERRED => Ok(LoadShape::DeferredMaterialization),
         other => Err(format!("unsupported Candle video loadShape {other:?}")),
@@ -1474,10 +1407,7 @@ pub(super) fn sc22737_video_arm(request: &Value) -> Result<Option<Sc22737VideoAr
     {
         return Ok(None);
     }
-    let model_id = protocol::planned(request)?
-        .pointer("/target/modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let model_id = protocol::planned_model_id(request)?;
     // The still Bernini entry rides the shared five-rung reference arm below, not this one: it is an
     // image route with an image geometry, and `run_five_rung_reference` already implements exactly
     // that shape. Reported as "no video arm" so the caller falls through rather than erroring.
@@ -1511,14 +1441,8 @@ pub(super) fn sc22737_video_target(
     arm: Sc22737VideoArm,
 ) -> Result<Sc22737VideoTarget, String> {
     let planned = protocol::planned(request)?;
-    let target = planned
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let mode = target
-        .get("mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let target = protocol::plan_object(planned, "/target")?;
+    let mode = protocol::target_str(target, "mode")?;
     if mode != arm.mode {
         return Err(format!(
             "{} is measured in {:?} mode, got {mode:?}",
@@ -1526,7 +1450,7 @@ pub(super) fn sc22737_video_target(
         ));
     }
     if matches!(arm.engine_id, BERNINI_CANDLE_ID | LTX23_CANDLE_ID)
-        && target.get("referenceCount").and_then(Value::as_u64) != Some(1)
+        && protocol::target_optional_u64(target, "referenceCount") != Some(1)
     {
         return Err(format!(
             "{} requires an explicit referenceCount of 1",
@@ -1550,13 +1474,7 @@ pub(super) fn sc22737_video_target(
         .get("geometry")
         .and_then(Value::as_object)
         .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
+    let axis = |name: &str| protocol::geometry_axis_u32(geometry, name);
     let batch = axis("batch")?;
     if batch != 1 {
         return Err(format!(
@@ -1574,10 +1492,7 @@ pub(super) fn sc22737_video_target(
         ));
     }
     (arm.validate_geometry)(width, height, frames)?;
-    let fixture = planned
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::plan_str(planned, "/fixture")?;
     let prefix = format!(
         "{}-{tier}-{width}x{height}-f{frames}-fps",
         arm.fixture_prefix
@@ -1748,10 +1663,7 @@ pub(super) fn run_sc22737_video_capture(
             arm.engine_id
         )
     })?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

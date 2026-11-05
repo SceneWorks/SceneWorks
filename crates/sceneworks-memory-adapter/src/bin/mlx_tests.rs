@@ -712,19 +712,13 @@ fn sdxl_planned(model_id: &str, tier: &str, width: u32) -> Value {
     })
 }
 
-fn sdxl_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir()
-        .join(format!("sc-22729-sdxl-{}-{nonce}", std::process::id()))
-        .join(format!("models--{}", repository.replace('/', "--")))
-        .join("snapshots")
-        .join(revision)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn sdxl_snapshot_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    repository: &str,
+    revision: &str,
+    tier: &str,
+) -> PathBuf {
+    fixtures.snapshot(repository, revision, Some(tier))
 }
 
 /// sc-22729: the family member is read off the plan's `modelId`, and a model id no member
@@ -791,6 +785,8 @@ fn sdxl_arm_is_resolved_from_the_plans_model_id() {
 /// satisfied by a q4 export.
 #[test]
 fn sdxl_spec_binds_the_route_the_tier_and_the_worker_load_shape() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     const REVISION: &str = "36699bb8a6353e61c920e3bf19f0e6f8e4151c55";
     for arm in SDXL_FAMILY {
         for (tier, quant) in [
@@ -798,7 +794,7 @@ fn sdxl_spec_binds_the_route_the_tier_and_the_worker_load_shape() {
             ("q8", Some(Quant::Q8)),
             ("bf16", None),
         ] {
-            let root = sdxl_snapshot_root(arm.expected_repository, REVISION, tier);
+            let root = sdxl_snapshot_root(fixtures, arm.expected_repository, REVISION, tier);
             let selection = MemorySelection {
                 strategy: MemoryStrategy::Resident,
                 parameters: MemoryStrategyParameters::default(),
@@ -821,7 +817,7 @@ fn sdxl_spec_binds_the_route_the_tier_and_the_worker_load_shape() {
         }
         // A selection whose quant disagrees with the planned tier is refused, so a q8 plan can
         // never be satisfied by a q4 selection that merely reused the tier string.
-        let root = sdxl_snapshot_root(arm.expected_repository, REVISION, "q8");
+        let root = sdxl_snapshot_root(fixtures, arm.expected_repository, REVISION, "q8");
         let mismatched = MemorySelection {
             strategy: MemoryStrategy::Resident,
             parameters: MemoryStrategyParameters::default(),
@@ -836,7 +832,7 @@ fn sdxl_spec_binds_the_route_the_tier_and_the_worker_load_shape() {
     }
     // Staging is independent of scratch bounds. SDXL rung 4 requires staging; bounded decode
     // keeps the heavy components resident before the measured request begins.
-    let root = sdxl_snapshot_root(protocol::REALVISXL_REPOSITORY, REVISION, "bf16");
+    let root = sdxl_snapshot_root(fixtures, protocol::REALVISXL_REPOSITORY, REVISION, "bf16");
     let staged = MemorySelection {
         strategy: MemoryStrategy::StagedResidency,
         parameters: MemoryStrategyParameters::default(),
@@ -1014,7 +1010,7 @@ fn instantid_artifact_fingerprint_is_ordered_and_separated() {
 /// path out of the digest, reddened nothing.
 #[test]
 fn instantid_binding_names_the_missing_identitynet_weight_and_covers_five_ordered_paths() {
-    use protocol::staging::StagedInstantId;
+    use crate::adapter_test_support::staging::StagedInstantId;
 
     let staged = StagedInstantId::install("mlx-instantid", protocol::REALVISXL_REPOSITORY, "bf16");
     let error = match instantid_binding("bf16") {
@@ -1239,19 +1235,13 @@ fn z_image_arm_is_resolved_from_the_plans_provider_and_mode() {
     );
 }
 
-fn z_image_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir()
-        .join(format!("sc-22724-z-image-{}-{nonce}", std::process::id()))
-        .join(format!("models--{}", repository.replace('/', "--")))
-        .join("snapshots")
-        .join(revision)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn z_image_snapshot_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    repository: &str,
+    revision: &str,
+    tier: &str,
+) -> PathBuf {
+    fixtures.snapshot(repository, revision, Some(tier))
 }
 
 /// sc-22724: the tier is the PLAN's, the root must carry it, and the `LoadSpec` re-asserts it
@@ -1260,6 +1250,8 @@ fn z_image_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBu
 /// lane at one tier (the sc-17097 defect class on the other adapter).
 #[test]
 fn z_image_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     const REVISION: &str = "bb2bc9893b3c49ae96c813350775f791a2e8bc80";
     for (provider, mode, repository) in [
         (
@@ -1274,7 +1266,7 @@ fn z_image_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
             protocol::Z_IMAGE_BASE_REPOSITORY,
         ),
     ] {
-        let q4_root = z_image_snapshot_root(repository, REVISION, "q4");
+        let q4_root = z_image_snapshot_root(fixtures, repository, REVISION, "q4");
         let error = z_image_load_spec_at(
             &z_image_planned(provider, mode, "q8"),
             LoadShape::EagerMaterialization,
@@ -1292,7 +1284,7 @@ fn z_image_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
             ("q8", Some(Quant::Q8)),
             ("bf16", None),
         ] {
-            let root = z_image_snapshot_root(repository, REVISION, tier);
+            let root = z_image_snapshot_root(fixtures, repository, REVISION, tier);
             let artifact = z_image_load_spec_at(
                 &z_image_planned(provider, mode, tier),
                 LoadShape::DeferredMaterialization,
@@ -1591,49 +1583,12 @@ fn qwen_fixture_seed_is_bound_to_the_planned_tier() {
 
 const QWEN_EDIT_TEST_REVISION: &str = "bb2bc9893b3c49ae96c813350775f791a2e8bc80";
 
-fn scratch_dir(label: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("sc-22728-{label}-{}-{nonce}", std::process::id()))
-}
-
-/// A `models--<repo>/snapshots/<revision>/<tier>` root laid out exactly as the HF cache does, so
-/// the tier suffix the validator pins is real rather than mocked.
-fn qwen_edit_snapshot_root(tier: &str) -> PathBuf {
-    let root = scratch_dir("qwen-edit-root")
-        .join(format!(
-            "models--{}",
-            protocol::QWEN_EDIT_REPOSITORY.replace('/', "--")
-        ))
-        .join("snapshots")
-        .join(QWEN_EDIT_TEST_REVISION)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
-}
-
-/// The distill snapshot, with the one pinned file actually on disk — the adapter helper refuses
-/// any other file name, so a fixture that skipped this would assert nothing.
-fn qwen_edit_lightning_fixture() -> QwenEditLightningSource {
-    let root = scratch_dir("qwen-edit-lightning");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join(protocol::QWEN_EDIT_LIGHTNING_FILE), b"distill").unwrap();
-    QwenEditLightningSource {
-        repository: protocol::QWEN_EDIT_LIGHTNING_REPOSITORY.to_owned(),
-        revision: QWEN_EDIT_TEST_REVISION.to_owned(),
-        root,
-    }
-}
-
-fn qwen_edit_source(arm: QwenEditArm, tier: &str) -> QwenEditArtifactSource {
-    QwenEditArtifactSource {
-        repository: protocol::QWEN_EDIT_REPOSITORY.to_owned(),
-        revision: QWEN_EDIT_TEST_REVISION.to_owned(),
-        root: qwen_edit_snapshot_root(tier),
-        lightning: arm.lightning.then(qwen_edit_lightning_fixture),
-    }
+fn qwen_edit_source(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    arm: QwenEditArm,
+    tier: &str,
+) -> QwenEditArtifactSource {
+    fixtures.qwen_edit_source(arm.lightning, tier, QWEN_EDIT_TEST_REVISION)
 }
 
 fn qwen_edit_request_for(arm: QwenEditArm, model_id: &str, tier: &str) -> Value {
@@ -1653,6 +1608,8 @@ const QWEN_EDIT_MEMBERS: [(QwenEditArm, &str); 2] = [
 /// stack itself is therefore asserted here, on BOTH members and at every shipped tier.
 #[test]
 fn the_qwen_edit_load_spec_carries_the_distill_on_exactly_the_lightning_member() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     for (arm, model_id) in QWEN_EDIT_MEMBERS {
         for (tier, quant) in [
             ("q4", Some(Quant::Q4)),
@@ -1661,7 +1618,7 @@ fn the_qwen_edit_load_spec_carries_the_distill_on_exactly_the_lightning_member()
         ] {
             let request = qwen_edit_request_for(arm, model_id, tier);
             let selection = planned_selection(&request).unwrap();
-            let source = qwen_edit_source(arm, tier);
+            let source = qwen_edit_source(fixtures, arm, tier);
             let artifact = qwen_edit_load_spec(
                 arm,
                 tier,
@@ -1713,11 +1670,13 @@ fn the_qwen_edit_load_spec_carries_the_distill_on_exactly_the_lightning_member()
 /// `z_image_root_must_carry_the_planned_tier_and_the_spec_binds_it`.
 #[test]
 fn a_qwen_edit_root_of_another_tier_is_refused_naming_the_planned_tier() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     for (arm, model_id) in QWEN_EDIT_MEMBERS {
         let request = qwen_edit_request_for(arm, model_id, "q8");
         let selection = planned_selection(&request).unwrap();
         // The plan is q8; the root on disk is the q4 export.
-        let source = qwen_edit_source(arm, "q4");
+        let source = qwen_edit_source(fixtures, arm, "q4");
         let error = qwen_edit_load_spec(
             arm,
             "q8",
@@ -1732,7 +1691,7 @@ fn a_qwen_edit_root_of_another_tier_is_refused_naming_the_planned_tier() {
             "{model_id}: {error}"
         );
         // The wrong artifact family is refused before the root is even looked at.
-        let mut foreign = qwen_edit_source(arm, "q8");
+        let mut foreign = qwen_edit_source(fixtures, arm, "q8");
         foreign.repository = protocol::QWEN_EDIT_LIGHTNING_REPOSITORY.to_owned();
         let error = qwen_edit_load_spec(
             arm,

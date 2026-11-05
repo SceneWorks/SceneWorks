@@ -636,14 +636,14 @@ fn the_sensenova_arm_cuts_every_declared_phase_on_an_engine_boundary() {
 
 // ---- sc-22738: the identity the pinned engine publishes ---------------------------------
 
-fn preflight_root(arm: SenseNovaArm, tier: &str) -> (PathBuf, &'static str, &'static str) {
+fn preflight_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    arm: SenseNovaArm,
+    tier: &str,
+) -> (PathBuf, &'static str, &'static str) {
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir()
-        .join(format!("sc-22738-sensenova-{}-{nonce}", std::process::id()))
+    let root = fixtures
+        .path("preflight-root")
         .join(format!(
             "models--{}",
             arm.expected_repository.replace('/', "--")
@@ -704,8 +704,10 @@ fn write_sharded_dense_root(root: &Path, indexed: &[(&str, &str)]) {
 /// why the three quality bf16 cells never captured.
 #[test]
 fn an_indexed_shard_set_passes_the_preflight_and_publishes_the_identity() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     use runtime_macos::providers::sensenova::memory_strategy as engine;
-    let (root, repository, revision) = preflight_root(SENSENOVA_BASE_ARM, "bf16");
+    let (root, repository, revision) = preflight_root(fixtures, SENSENOVA_BASE_ARM, "bf16");
     write_sharded_dense_root(&root, &SHARD_TENSORS);
     let spec =
         sensenova_load_spec_at(SENSENOVA_BASE_ARM, repository, revision, root, "bf16").unwrap();
@@ -723,7 +725,7 @@ fn an_indexed_shard_set_passes_the_preflight_and_publishes_the_identity() {
     );
 
     // The same shards under a q4 plan: the artifact-proven tier disagrees with the knob.
-    let (root, repository, revision) = preflight_root(SENSENOVA_BASE_ARM, "q4");
+    let (root, repository, revision) = preflight_root(fixtures, SENSENOVA_BASE_ARM, "q4");
     write_sharded_dense_root(&root, &SHARD_TENSORS);
     let spec =
         sensenova_load_spec_at(SENSENOVA_BASE_ARM, repository, revision, root, "q4").unwrap();
@@ -740,8 +742,10 @@ fn an_indexed_shard_set_passes_the_preflight_and_publishes_the_identity() {
 /// a packed plan, an unreadable single file.
 #[test]
 fn a_root_the_pinned_engine_cannot_pin_is_refused_before_the_load_naming_the_layout() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     // Two shards, an index naming only one of them.
-    let (root, repository, revision) = preflight_root(SENSENOVA_BASE_ARM, "bf16");
+    let (root, repository, revision) = preflight_root(fixtures, SENSENOVA_BASE_ARM, "bf16");
     write_sharded_dense_root(&root, &SHARD_TENSORS[..1]);
     let spec =
         sensenova_load_spec_at(SENSENOVA_BASE_ARM, repository, revision, root, "bf16").unwrap();
@@ -761,7 +765,7 @@ fn a_root_the_pinned_engine_cannot_pin_is_refused_before_the_load_naming_the_lay
     assert!(!error.contains("SCENEWORKS_"), "{error}");
 
     // Two shards and no index at all.
-    let (root, repository, revision) = preflight_root(SENSENOVA_BASE_ARM, "bf16");
+    let (root, repository, revision) = preflight_root(fixtures, SENSENOVA_BASE_ARM, "bf16");
     write_sharded_dense_root(&root, &SHARD_TENSORS);
     std::fs::remove_file(root.join("model.safetensors.index.json")).unwrap();
     let spec =
@@ -772,7 +776,7 @@ fn a_root_the_pinned_engine_cannot_pin_is_refused_before_the_load_naming_the_lay
 
     // The single dense `model.safetensors` the fast turnkeys ship: pinned, proven dense, and
     // the engine's own table names the identity the plan carries for it.
-    let (root, repository, revision) = preflight_root(SENSENOVA_FAST_ARM, "bf16");
+    let (root, repository, revision) = preflight_root(fixtures, SENSENOVA_FAST_ARM, "bf16");
     std::fs::write(
         root.join("model.safetensors"),
         dense_backbone_safetensors(SHARD_TENSORS[0].1),
@@ -796,7 +800,7 @@ fn a_root_the_pinned_engine_cannot_pin_is_refused_before_the_load_naming_the_lay
 
     // The same dense file under a q4 plan: the artifact-proven tier disagrees with the knob,
     // and the engine keys the identity on the artifact.
-    let (root, repository, revision) = preflight_root(SENSENOVA_FAST_ARM, "q4");
+    let (root, repository, revision) = preflight_root(fixtures, SENSENOVA_FAST_ARM, "q4");
     std::fs::write(
         root.join("model.safetensors"),
         dense_backbone_safetensors(SHARD_TENSORS[0].1),
@@ -811,7 +815,7 @@ fn a_root_the_pinned_engine_cannot_pin_is_refused_before_the_load_naming_the_lay
     assert!(error.contains("None") && error.contains("Q4"), "{error}");
 
     // A single file whose headers cannot be read fails closed on the tier proof.
-    let (root, repository, revision) = preflight_root(SENSENOVA_BASE_ARM, "q8");
+    let (root, repository, revision) = preflight_root(fixtures, SENSENOVA_BASE_ARM, "q8");
     std::fs::write(root.join("model.safetensors"), b"not a checkpoint").unwrap();
     let spec =
         sensenova_load_spec_at(SENSENOVA_BASE_ARM, repository, revision, root, "q8").unwrap();

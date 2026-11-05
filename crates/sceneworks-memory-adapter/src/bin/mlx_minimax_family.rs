@@ -100,17 +100,8 @@ pub(super) fn validate_minimax_geometry(
 /// Read the four declared geometry axes. Like the LTX arm this reads `frames` as a real value rather
 /// than asserting it away, and pins `batch` to 1 before anything derived is computed.
 pub(super) fn minimax_target_geometry(request: &Value) -> Result<MinimaxGeometry, String> {
-    let geometry = protocol::planned(request)?
-        .pointer("/target/geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
+    let geometry = protocol::planned_object(request, "/target/geometry")?;
+    let axis = |name: &str| protocol::geometry_axis_u32(geometry, name);
     let batch = axis("batch")?;
     if batch != 1 {
         return Err(format!(
@@ -133,23 +124,14 @@ pub(super) fn minimax_target_geometry(request: &Value) -> Result<MinimaxGeometry
 pub(super) fn validate_minimax_target(
     request: &Value,
 ) -> Result<(MinimaxMember, MinimaxGeometry), String> {
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let provider = target
-        .get("provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let target = protocol::planned_object(request, "/target")?;
+    let provider = protocol::target_str(target, "provider")?;
     if provider != MINIMAX_PROVIDER {
         return Err(format!(
             "{MINIMAX_LABEL} does not implement provider {provider:?}"
         ));
     }
-    let model_id = target
-        .get("modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let model_id = protocol::target_str(target, "modelId")?;
     let member = MINIMAX_MEMBERS
         .iter()
         .copied()
@@ -160,10 +142,7 @@ pub(super) fn validate_minimax_target(
                 MINIMAX_MEMBERS.map(|member| member.model_id)
             )
         })?;
-    let mode = target
-        .get("mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let mode = protocol::target_str(target, "mode")?;
     if mode != member.mode {
         return Err(format!(
             "{MINIMAX_LABEL} measures {model_id} in {:?} mode, got {mode:?}",
@@ -206,10 +185,7 @@ pub(super) fn planned_minimax_capture(
     tier: &str,
     geometry: MinimaxGeometry,
 ) -> Result<(u32, u64), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let prefix = format!(
         "{}-{tier}-{}x{}-f{}-fps",
         member.fixture_prefix, geometry.width, geometry.height, geometry.frames
@@ -516,10 +492,7 @@ pub(super) fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     let (fps, seed) = planned_minimax_capture(request, member, tier, geometry)?;
     // Fingerprint check 1 of 3: the PLAN against this arm's own expectation, before any environment
     // or weight work. A provider re-fingerprint must not silently reuse the epic's plan.
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX MiniMax-H3 arm \

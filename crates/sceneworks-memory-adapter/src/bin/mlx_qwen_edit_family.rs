@@ -6,14 +6,8 @@ use super::*;
 /// publish the distilled stack's peaks as the production path's (or the reverse).
 pub(super) fn qwen_edit_arm(request: &Value) -> Result<QwenEditArm, String> {
     let planned = protocol::planned(request)?;
-    let provider = planned
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let model_id = planned
-        .pointer("/target/modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let provider = protocol::plan_str(planned, "/target/provider")?;
+    let model_id = protocol::plan_str(planned, "/target/modelId")?;
     match (provider, model_id) {
         (QWEN_EDIT_PROVIDER, QWEN_EDIT_MODEL) => Ok(QWEN_EDIT_ARM),
         (QWEN_EDIT_PROVIDER, QWEN_EDIT_LIGHTNING_MODEL) => Ok(QWEN_EDIT_LIGHTNING_ARM),
@@ -31,77 +25,19 @@ pub(super) fn planned_qwen_edit_seed(
     arm: QwenEditArm,
     tier: &str,
 ) -> Result<u64, String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
-    let prefix = format!("{}-{tier}-seed", arm.fixture_prefix);
-    let remainder = fixture
-        .strip_prefix(&prefix)
-        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
-    let (seed, steps) = remainder
-        .split_once("-step")
-        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
-    let seed = seed
-        .parse::<u64>()
-        .map_err(|error| format!("parse Qwen edit fixture seed {seed:?}: {error}"))?;
-    let steps = steps
-        .parse::<u32>()
-        .map_err(|error| format!("parse Qwen edit fixture step count {steps:?}: {error}"))?;
-    if steps != arm.steps {
-        return Err(format!(
-            "planned.fixture {fixture:?} must use this arm's {}-step calibration request",
-            arm.steps
-        ));
-    }
-    Ok(seed)
+    protocol::qwen_edit_fixture_seed(
+        request,
+        &format!("{}-{tier}-seed", arm.fixture_prefix),
+        arm.steps,
+    )
 }
 
-pub(super) fn qwen_edit_lightning_source() -> Result<QwenEditLightningSource, String> {
-    Ok(QwenEditLightningSource {
-        repository: protocol::required_env("SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REPOSITORY")?,
-        revision: protocol::required_env("SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_REVISION")?,
-        root: PathBuf::from(protocol::required_env(
-            "SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT",
-        )?),
-    })
-}
-
-/// The built-in Lightning distill adapter, exactly as the worker stacks it: the one pinned file in
-/// the pinned snapshot, as a single LoRA at scale 1.0 ahead of any user adapters (of which a
-/// calibration capture has none). The Candle engine refuses any other path, scale or kind by name;
-/// the MLX engine consumes whatever `spec.adapters` carries, so the pin is asserted HERE too rather
-/// than assumed from the environment.
-pub(super) fn qwen_edit_lightning_adapter(
-    source: &QwenEditLightningSource,
-) -> Result<AdapterSpec, String> {
-    protocol::validate_artifact_identity(
-        &source.repository,
-        &source.revision,
-        protocol::QWEN_EDIT_LIGHTNING_REPOSITORY,
-    )?;
-    let root = std::fs::canonicalize(&source.root).map_err(|error| {
-        format!("canonicalize SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_ROOT: {error}")
-    })?;
-    let path = root.join(protocol::QWEN_EDIT_LIGHTNING_FILE);
-    if !path.is_file() {
-        return Err(format!(
-            "the Lightning distill LoRA is not at {}",
-            path.display()
-        ));
-    }
-    Ok(AdapterSpec::new(path, 1.0, AdapterKind::Lora))
-}
+pub(super) use protocol::qwen_edit_lightning_adapter;
 
 pub(super) fn qwen_edit_artifact_source(
     arm: QwenEditArm,
-) -> Result<QwenEditArtifactSource, String> {
-    Ok(QwenEditArtifactSource {
-        repository: protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_REPOSITORY")?,
-        revision: protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_REVISION")?,
-        root: PathBuf::from(protocol::required_env("SCENEWORKS_QWEN_IMAGE_EDIT_ROOT")?),
-        lightning: arm.lightning.then(qwen_edit_lightning_source).transpose()?,
-    })
+) -> Result<protocol::QwenEditArtifactSource, String> {
+    protocol::qwen_edit_artifact_source(arm.lightning)
 }
 
 /// The env-free half of the Qwen edit load, so both of its load-time bindings are unit-testable:
@@ -244,10 +180,7 @@ pub(super) fn run_qwen_edit_provider(request: &Value) -> Result<Value, String> {
         .calibration
         .as_ref()
         .ok_or_else(|| "pinned Qwen edit provider has no calibration identity".to_owned())?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
