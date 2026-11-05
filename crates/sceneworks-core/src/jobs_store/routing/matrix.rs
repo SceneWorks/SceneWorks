@@ -5006,103 +5006,115 @@ mod tests {
         assert!(!source_has_ordered_fragments("model.generate(&request); drive_gen_items(tx, work, let request = GenerationRequest { preview,", &fragments));
     }
 
+    // Match the real neighboring code fields rather than one rustfmt indentation. Every needle
+    // is ASCII, so its matched start/end bytes are valid UTF-8 boundaries even after Unicode text.
+    fn replace_preview_code_fragment(source: &str, needle: &str, replacement: &str) -> String {
+        assert!(needle.is_ascii());
+        let needle: Vec<_> = needle
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect();
+        assert!(!needle.is_empty());
+        let offsets: Vec<_> = source
+            .bytes()
+            .enumerate()
+            .filter_map(|(index, byte)| (!byte.is_ascii_whitespace()).then_some(index))
+            .collect();
+        let start = offsets
+            .windows(needle.len())
+            .position(|window| {
+                window
+                    .iter()
+                    .zip(&needle)
+                    .all(|(&index, &byte)| source.as_bytes()[index] == byte)
+            })
+            .expect("production preview code fragment must exist independent of layout");
+        let first = offsets[start];
+        let end = offsets[start + needle.len() - 1] + 1;
+        format!("{}{}{}", &source[..first], replacement, &source[end..])
+    }
+
+    #[test]
+    fn preview_sink_mutations_keep_their_code_anchor_across_layouts_and_utf8_prefixes() {
+        for width in [8, 20, 24, 36] {
+            let indent = " ".repeat(width);
+            let source = format!("// π\nlet request = GenerationRequest {{\n{indent}preview,\n{indent}cancel: cancel.clone(),\n{indent}..Default::default()\n}}");
+            let changed = replace_preview_code_fragment(
+                &source,
+                "preview, cancel: cancel.clone(), ..Default::default()",
+                "cancel: cancel.clone(), ..Default::default()",
+            );
+            assert!(!changed.contains("preview,"));
+            assert!(changed.starts_with("// π\n"));
+            assert!(changed.contains("cancel: cancel.clone()"));
+        }
+    }
+
     #[test]
     fn imported_preview_rows_fail_closed_when_the_production_sink_is_removed() {
-        // The indent is part of the fixture, not decoration: it is what pins the mutation to the
-        // real request literal instead of some similarly-worded block. Imported Krea builds its
-        // request inside a helper function (8 spaces); the SDXL lane builds it inline in the
-        // per-item closure (24). A mutation that silently fails to apply would make this test pass
-        // while proving nothing, which is why the "mutation must apply" assertion is here.
-        for (family, source, indent) in [
-            ("krea_2", WORKER_IMAGE_KREA_IMPORTED, "        "),
-            (
-                "sdxl",
-                WORKER_IMAGE_SDXL_IMPORTED,
-                "                        ",
-            ),
+        // Neighboring request fields anchor the mutation to actual request construction. A
+        // missing fragment fails before the negative claim, and all mutations must remove support.
+        for (family, source) in [
+            ("krea_2", WORKER_IMAGE_KREA_IMPORTED),
+            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED),
         ] {
             assert!(imported_preview_sink(family, source));
-            let normalized = source.replace("\r\n", "\n");
-            let without_request_sink = normalized.replacen(
-                &format!(
-                    "{indent}preview,\n{indent}cancel: cancel.clone(),\n{indent}..Default::default()"
-                ),
-                &format!("{indent}cancel: cancel.clone(),\n{indent}..Default::default()"),
-                1,
-            );
-            assert_ne!(
-                without_request_sink, normalized,
-                "{family} mutation must apply"
+            let without_request_sink = replace_preview_code_fragment(
+                source,
+                "preview, cancel: cancel.clone(), ..Default::default()",
+                "cancel: cancel.clone(), ..Default::default()",
             );
             assert!(
                 !imported_preview_sink(family, &without_request_sink),
                 "{family} must not inherit preview from comments or unrelated helpers"
             );
         }
-
         assert!(imported_preview_sink(
             "mage-flow",
             WORKER_IMAGE_MAGE_FINETUNED
         ));
-        let normalized_mage = WORKER_IMAGE_MAGE_FINETUNED.replace("\r\n", "\n");
-        let without_mage_sink = normalized_mage.replacen(
-            "                        guidance,\n                        preview,\n                        &cancel,",
-            "                        guidance,\n                        &cancel,",
-            1,
+        let without_mage_sink = replace_preview_code_fragment(
+            WORKER_IMAGE_MAGE_FINETUNED,
+            "guidance, preview, &cancel,",
+            "guidance, &cancel,",
         );
-        assert_ne!(without_mage_sink, normalized_mage);
         assert!(!imported_preview_sink("mage-flow", &without_mage_sink));
-
-        let without_mage_scope = normalized_mage.replacen(
+        let without_mage_scope = replace_preview_code_fragment(
+            WORKER_IMAGE_MAGE_FINETUNED,
             "crate::memory_strategy::generate_with_scope(",
             "removed_memory_scope(",
-            1,
         );
-        assert_ne!(without_mage_scope, normalized_mage);
         assert!(
             !imported_preview_sink("mage-flow", &without_mage_scope),
-            "Mage preview support must remain bound to the request-scoped production generator",
+            "Mage preview support must remain bound to the request-scoped production generator"
         );
-
-        let crossed_mage_request = normalized_mage.replacen(
-            "crate::memory_strategy::generate_with_scope(\n                        model,\n                        &mut request,",
-            "crate::memory_strategy::generate_with_scope(\n                        model,\n                        &mut unrelated_request,",
-            1,
+        let crossed_mage_request = replace_preview_code_fragment(
+            WORKER_IMAGE_MAGE_FINETUNED,
+            "crate::memory_strategy::generate_with_scope(model, &mut request,",
+            "crate::memory_strategy::generate_with_scope(model, &mut unrelated_request,",
         );
-        assert_ne!(crossed_mage_request, normalized_mage);
         assert!(
             !imported_preview_sink("mage-flow", &crossed_mage_request),
-            "Mage preview support must not borrow a scope that generates another request",
+            "Mage preview support must not borrow a scope that generates another request"
         );
-
-        // flux2 rides the plan-driven route (sc-11045): one shared request literal, two drivers.
-        // Dropping `preview,` from the literal — anchored on its `cancel:` neighbour at the
-        // literal's 12-space indent — must fail the claim; a comment or the drivers' own closure
-        // parameters must not preserve it.
         assert!(imported_preview_sink("flux2", WORKER_IMAGE_CHECKPOINT_PLAN));
-        let normalized_plan = WORKER_IMAGE_CHECKPOINT_PLAN.replace("\r\n", "\n");
-        let without_plan_sink = normalized_plan.replacen(
-            "            preview,\n            cancel: cancel.clone(),",
-            "            cancel: cancel.clone(),",
-            1,
-        );
-        assert_ne!(
-            without_plan_sink, normalized_plan,
-            "flux2 mutation must apply"
+        let without_plan_sink = replace_preview_code_fragment(
+            WORKER_IMAGE_CHECKPOINT_PLAN,
+            "preview, cancel: cancel.clone(),",
+            "cancel: cancel.clone(),",
         );
         assert!(
             !imported_preview_sink("flux2", &without_plan_sink),
             "flux2 must not inherit preview from the drivers' closure parameters"
         );
-        let without_plan_scope = normalized_plan.replacen(
+        let without_plan_scope = replace_preview_code_fragment(
+            WORKER_IMAGE_CHECKPOINT_PLAN,
             "crate::memory_strategy::generate_with_scope(",
             "removed_memory_scope(",
-            1,
         );
-        assert_ne!(without_plan_scope, normalized_plan);
         assert!(
             !imported_preview_sink("flux2", &without_plan_scope),
-            "flux2 preview support must remain bound to the request-scoped production generator",
+            "flux2 preview support must remain bound to the request-scoped production generator"
         );
     }
 
