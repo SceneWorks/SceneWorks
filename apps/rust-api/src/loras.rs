@@ -1457,35 +1457,18 @@ pub(crate) async fn write_lora_upload_field_to_staged_file(
     field: axum::extract::multipart::Field<'_>,
     filename: &str,
 ) -> Result<PathBuf, ApiError> {
-    let upload_dir = state
-        .settings
-        .data_dir
-        .join("cache")
-        .join("lora-uploads")
-        .join(format!("upload-{}", Uuid::new_v4().simple()));
-    tokio::fs::create_dir_all(&upload_dir)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let temp_path = upload_dir.join(filename);
-    // sc-8886 (F-084): shared streaming writer. Cleanup removes the staged file AND its
-    // per-upload parent directory, so an aborted upload leaves no `upload-<uuid>/` dir.
-    stream_multipart_field_to_file(
+    crate::uploads::stage_upload(
+        state,
         field,
-        &temp_path,
+        "lora-uploads",
+        Some(filename),
         max_lora_upload_bytes(),
         || "Uploaded LoRA file exceeds the 2GB limit".to_owned(),
-        || cleanup_staged_lora_upload(&temp_path),
     )
-    .await?;
-    Ok(temp_path)
+    .await
 }
 
-pub(crate) async fn cleanup_staged_lora_upload(path: &FsPath) {
-    let _ = tokio::fs::remove_file(path).await;
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::remove_dir(parent).await;
-    }
-}
+pub(crate) use crate::uploads::cleanup_staged_upload as cleanup_staged_lora_upload;
 
 pub(crate) fn max_lora_upload_bytes() -> usize {
     #[cfg(test)]

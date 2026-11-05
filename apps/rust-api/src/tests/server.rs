@@ -548,13 +548,8 @@ async fn upload_route_accepts_body_larger_than_json_cap() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Large Upload Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Large Upload Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // 12 MiB PNG payload — over the 10 MiB JSON cap, under the 2 GiB upload cap.

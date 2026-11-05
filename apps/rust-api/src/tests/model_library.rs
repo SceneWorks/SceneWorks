@@ -97,13 +97,7 @@ async fn a_disconnected_library_rejects_with_typed_context_and_a_reconnect_resum
     let detached = install_then_disconnect(&data_dir, "owner/model");
     let app = create_app(settings).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Library Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Library Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let submission = json!({
         "projectId": project_id,

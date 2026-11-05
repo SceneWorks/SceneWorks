@@ -276,10 +276,31 @@ impl<'a> SceneWorksLlm<'a> {
     }
 }
 
+/// Run synchronous planner callbacks and bounded preparation away from async executor threads.
+/// Awaiting each call keeps durable journal writes ordered before the next dispatch/checkpoint.
+pub(crate) async fn planner_blocking<T, F>(operation: F) -> Result<T, HarnessError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| HarnessError::Io(error.to_string()))
+}
+
+async fn planning_canceled(
+    callback: &Option<CancelRequestedCallback>,
+) -> Result<bool, HarnessError> {
+    let Some(callback) = callback.clone() else {
+        return Ok(false);
+    };
+    planner_blocking(move || callback()).await
+}
+
 impl PlannerLlm for SceneWorksLlm<'_> {
     fn complete(&self, request: LlmRequest) -> LlmFuture<'_> {
         Box::pin(async move {
-            if self.cancel_requested.as_ref().is_some_and(|check| check()) {
+            if planning_canceled(&self.cancel_requested).await? {
                 return Err(HarnessError::Refused(
                     "planning canceled before the next local model request".to_owned(),
                 ));
@@ -327,13 +348,15 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                     })?
                     .to_owned();
                 if let Some(callback) = &self.on_job_created {
-                    callback(&job_id);
+                    let callback = callback.clone();
+                    let callback_job_id = job_id.clone();
+                    planner_blocking(move || callback(&callback_job_id)).await?;
                 }
                 (job_id, false)
             };
             let deadline = Instant::now() + self.job_timeout;
             loop {
-                if self.cancel_requested.as_ref().is_some_and(|check| check()) {
+                if planning_canceled(&self.cancel_requested).await? {
                     let _ = crate::film_harness::expect_ok_on(
                         self.transport,
                         "POST",
@@ -360,7 +383,10 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                     &self.on_job_progress,
                     snapshot.get("progress").and_then(Value::as_f64),
                 ) {
-                    callback(&job_id, progress.clamp(0.0, 1.0));
+                    let callback = callback.clone();
+                    let callback_job_id = job_id.clone();
+                    planner_blocking(move || callback(&callback_job_id, progress.clamp(0.0, 1.0)))
+                        .await?;
                 }
                 match status {
                     "completed" => {
@@ -465,7 +491,9 @@ impl PlannerLlm for SceneWorksLlm<'_> {
                             .to_owned();
                         adopted = false;
                         if let Some(callback) = &self.on_job_created {
-                            callback(&job_id);
+                            let callback = callback.clone();
+                            let callback_job_id = job_id.clone();
+                            planner_blocking(move || callback(&callback_job_id)).await?;
                         }
                     }
                     "failed" | "canceled" | "interrupted" => {
@@ -1948,5 +1976,25 @@ mod tests {
         let mut hand_authored = plan.clone();
         hand_authored.shots[0].beat_id = None;
         assert!(plan_coverage_findings(&brief, &hand_authored, &pack).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod blocking_callback_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_callback_runs_off_executor_and_is_awaited() {
+        let executor = std::thread::current().id();
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_observed = observed.clone();
+        let callback: CancelRequestedCallback = std::sync::Arc::new(move || {
+            assert_ne!(std::thread::current().id(), executor);
+            callback_observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            true
+        });
+        assert!(planning_canceled(&Some(callback)).await.unwrap());
+        assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!planning_canceled(&None).await.unwrap());
     }
 }

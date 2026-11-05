@@ -757,10 +757,10 @@ async fn validate_vector_source_asset(
     project_id: String,
     source_asset_id: String,
 ) -> Result<(), ApiError> {
-    let (asset, media_path) = project_call(state, move |store| {
+    let (asset, media_exists) = project_call(state, move |store| {
         let asset = store.get_asset(&project_id, &source_asset_id)?;
         let media_path = store.resolve_asset_media_path(&project_id, &source_asset_id)?;
-        Ok((asset, media_path))
+        Ok((asset, media_path.is_file()))
     })
     .await?;
     let media_type = asset
@@ -771,12 +771,12 @@ async fn validate_vector_source_asset(
         .pointer("/file/mimeType")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if media_type != "image" || !mime.starts_with("image/") || mime == "image/svg+xml" {
+    if !sceneworks_core::contracts::is_raster_image_asset(media_type, mime) {
         return Err(ApiError::bad_request(
             "sourceAssetId must name a raster image owned by projectId",
         ));
     }
-    if !media_path.is_file() {
+    if !media_exists {
         return Err(ApiError::bad_request(
             "sourceAssetId media is missing from its project",
         ));
@@ -840,10 +840,10 @@ pub(crate) async fn validate_ordered_image_references(
         let ordinal = index + 1;
         let project = project_id.clone();
         let id = asset_id.clone();
-        let (asset, media_path) = project_call(state.clone(), move |store| {
+        let (asset, media_exists) = project_call(state.clone(), move |store| {
             let asset = store.get_asset(&project, &id)?;
             let media_path = store.resolve_asset_media_path(&project, &id)?;
-            Ok((asset, media_path))
+            Ok((asset, media_path.is_file()))
         })
         .await
         .map_err(|_| {
@@ -859,12 +859,12 @@ pub(crate) async fn validate_ordered_image_references(
             .pointer("/file/mimeType")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if media_type != "image" || !mime.starts_with("image/") || mime == "image/svg+xml" {
+        if !sceneworks_core::contracts::is_raster_image_asset(media_type, mime) {
             return Err(ApiError::bad_request(format!(
                 "reference {ordinal} ({asset_id}) must name a raster image owned by projectId"
             )));
         }
-        if !media_path.is_file() {
+        if !media_exists {
             return Err(ApiError::bad_request(format!(
                 "reference {ordinal} ({asset_id}) media is missing from its project"
             )));
@@ -3152,13 +3152,8 @@ mod plan_backed_video_enqueue_tests {
     const IMPORT_PLAN: &str = r#","importPlan": { "checkpointId": "ckpt_wan_abc123" }"#;
 
     async fn create_project(app: &axum::Router) {
-        let (status, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({ "name": "Imported Wan" }),
-        )
-        .await;
+        let (status, project) =
+            crate::tests::support::create_project(app.clone(), &"Imported Wan").await;
         assert_eq!(status, StatusCode::CREATED, "project create: {project}");
     }
 
@@ -3331,13 +3326,8 @@ mod imported_minimax_h3_video_tests {
     }
 
     async fn create_project(app: &axum::Router) {
-        let (status, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({ "name": "Imported H3" }),
-        )
-        .await;
+        let (status, project) =
+            crate::tests::support::create_project(app.clone(), &"Imported H3").await;
         assert_eq!(status, StatusCode::CREATED, "project create: {project}");
     }
 

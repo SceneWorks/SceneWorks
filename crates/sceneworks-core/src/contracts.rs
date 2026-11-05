@@ -628,6 +628,16 @@ string_enum! {
     }
 }
 
+/// A source image must have both the image asset identity and raster image media.
+/// Preview PNGs attached to vectors, depth maps, poses or documents are not source images.
+pub fn is_raster_image_asset(asset_type: &str, mime_type: &str) -> bool {
+    let mime_type = mime_type.split(';').next().unwrap_or_default().trim();
+    asset_type == AssetType::Image.as_str()
+        && mime_type.starts_with("image/")
+        && mime_type.len() > "image/".len()
+        && mime_type != "image/svg+xml"
+}
+
 string_enum! {
     pub enum CharacterType {
         Person => "person",
@@ -2120,6 +2130,26 @@ pub struct ModelInstallMarker {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn raster_asset_identity_requires_image_type_and_raster_media() {
+        for mime in ["image/png", "image/jpeg", "image/webp", "image/png; x=test"] {
+            assert!(is_raster_image_asset("image", mime), "{mime}");
+        }
+        for (kind, mime) in [
+            ("", "image/png"),
+            ("vector", "image/png"),
+            ("depth", "image/png"),
+            ("document", "image/png"),
+            ("image", ""),
+            ("image", "image/"),
+            ("image", "application/octet-stream"),
+            ("image", "image/svg+xml"),
+            ("image", "image/svg+xml; charset=utf-8"),
+        ] {
+            assert!(!is_raster_image_asset(kind, mime), "{kind}: {mime}");
+        }
+    }
 
     #[test]
     fn image_upscale_request_round_trips_when_present() {

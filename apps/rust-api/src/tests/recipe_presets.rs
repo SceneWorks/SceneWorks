@@ -247,13 +247,7 @@ async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
     assert_eq!(duplicate["name"], "Soft Glow Copy");
     assert_eq!(duplicate["loras"][0]["id"], "style_lora");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Preset Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Preset Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
     let (status, project_preset) = request(
