@@ -227,6 +227,7 @@ pub(crate) enum WarmPolicyDecision {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) enum ServedAsIsReason {
     /// Only `gen_core::LoadShapeDeclarationResult` differs. That is a declaration-authority marker,
     /// not an execution shape, so nothing about the run changes.
@@ -443,6 +444,7 @@ pub(crate) struct WarmPolicyProposal {
 /// copy reports. Rationing the decision itself would have been the wrong fix: items 2..N would have
 /// silently lost the staging the request asked for and run at the higher peak the switch existed to
 /// avoid.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct WarmPolicyOnce {
     engine_id: &'static str,
     /// The reporting copy, until it is handed out.
@@ -452,6 +454,7 @@ pub(crate) struct WarmPolicyOnce {
 }
 
 impl WarmPolicyOnce {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn new(proposal: WarmPolicyProposal) -> Self {
         Self {
             engine_id: proposal.engine_id,
@@ -461,6 +464,7 @@ impl WarmPolicyOnce {
     }
 
     /// The decision, reporting on the first call and silent on every call after it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn take(&mut self) -> WarmPolicyProposal {
         match self.proposal.take() {
             Some(proposal) => {
@@ -477,6 +481,7 @@ impl WarmPolicyOnce {
 
 /// What the request-scoped selection did with a granted proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum GrantOutcome {
     /// The grant changed the selection: the request now engages staged residency where the baseline
     /// candidate set would have run it resident. This is the only outcome that reports
@@ -513,6 +518,7 @@ impl WarmPolicyProposal {
     }
 
     /// The same decision, settling silently. See the `report` field.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn silenced(self) -> Self {
         Self {
             report: false,
@@ -522,6 +528,7 @@ impl WarmPolicyProposal {
 
     /// A proposal with nothing to decide, for a route or test seam whose execution policy never
     /// varies from the loaded one. Settling it is silent.
+    #[cfg_attr(not(native_lane), allow(dead_code))]
     pub(crate) fn inert(engine_id: &'static str) -> Self {
         let policy = ExecutionPolicy {
             offload_policy: OffloadPolicy::Resident,
@@ -559,6 +566,7 @@ impl WarmPolicyProposal {
     /// move the `OffloadPolicy` axis (`NoExecutionSeamForLoadShapeAlone`), precisely because the floor
     /// is the only seam a grant executes through. The policy comparison is kept as a debug assertion so
     /// the two cannot drift apart silently.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn requires_staged_residency(self) -> bool {
         let granted = self.decision.grants_requested_policy();
         debug_assert!(
@@ -573,6 +581,7 @@ impl WarmPolicyProposal {
     /// Settle a proposal against what the request-scoped selection actually did.
     ///
     /// `outcome` is ignored for a non-granted proposal: its decision was already final at the seam.
+    #[cfg_attr(not(native_lane), allow(dead_code))]
     pub(crate) fn settle_with_selection(self, outcome: GrantOutcome) {
         let decision = if self.decision.grants_requested_policy() {
             match outcome {
@@ -859,6 +868,7 @@ pub(crate) fn plan_request_execution_domains(
 /// shed. Recorded beside what the render REPORTS it ran, which may differ: the engine sheds a
 /// cached selection whose real prefix exceeds the priced bound (`PrefixKvCacheReport::overflow`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) struct PrefixKvCachePlan {
     pub(crate) mode: PrefixKvCacheMode,
     pub(crate) priced_bytes: u64,
@@ -869,6 +879,7 @@ impl PrefixKvCachePlan {
     /// cached selection, nothing for a shed one. This is what a lane adds to the
     /// `MemoryRunContext::predicted_peak_bytes` it hands the provider, so the context states the
     /// demand the admission actually approved.
+    #[cfg_attr(not(native_lane), allow(dead_code))]
     pub(crate) const fn admitted_surcharge_bytes(self) -> u64 {
         match self.mode {
             PrefixKvCacheMode::Cached => self.priced_bytes,
@@ -878,6 +889,7 @@ impl PrefixKvCachePlan {
 
     /// Write an admitted cached selection onto the memory block the lane hands the provider. A shed
     /// selection writes nothing: the unset field is the prefill path.
+    #[cfg_attr(not(native_lane), allow(dead_code))]
     pub(crate) fn write_onto(self, memory: &mut GenerationMemory) {
         if self.mode.is_cached() {
             memory.prefix_kv_cache = Some(PrefixKvCacheMode::Cached);
@@ -909,6 +921,7 @@ impl PrefixKvCachePlan {
 /// `select` itself is not called per candidate because it compares raw bytes with
 /// `MemoryBudget::fits`, which knows nothing of the per-candidate estimate margins and reserve
 /// charge the selector applies.
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn plan_prefix_kv_cache<T>(
     surcharge_bytes: Option<u64>,
     shed: T,
@@ -950,6 +963,7 @@ pub(crate) fn plan_prefix_kv_cache<T>(
 ///
 /// Gated on the provider's declaration as well as its id, so a provider that stops declaring
 /// `Cached` stops being priced for it.
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn prefix_kv_cache_surcharge_bytes(
     engine_id: &str,
     surface: &ExecutionSurface,
@@ -1006,6 +1020,7 @@ pub(crate) fn prefix_kv_cache_surcharge_bytes(
 /// Whether a request evaluates the true-CFG NEGATIVE prompt branch, the input the prefix-KV-cache
 /// pricing doubles on: a non-empty negative prompt AND a CFG scale (true-CFG or guidance) above
 /// 1.0. Either alone runs one branch.
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn evaluates_negative_branch(
     negative_prompt: &str,
     true_cfg: Option<f32>,
@@ -1017,6 +1032,7 @@ pub(crate) fn evaluates_negative_branch(
 /// The job-record shape of one render's prefix-KV-cache outcome (`docs/observability.md`): what
 /// the admission SELECTED and priced, and what the render REPORTS it ran. Keys are camelCase JSON
 /// for the asset provenance and the job result.
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn prefix_kv_cache_record(
     plan: Option<PrefixKvCachePlan>,
     report: Option<&gen_core::PrefixKvCacheReport>,

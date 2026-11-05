@@ -159,7 +159,10 @@ mod tests {
         let owner = FileLock::open_exclusive(&path).unwrap();
         let error = FileLock::try_open_exclusive(&path).unwrap_err();
         assert!(is_contended(&error));
-        assert_eq!(std::fs::read(&path).unwrap(), b"existing lock metadata");
+        let mut reader = owner.file();
+        let mut metadata = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut metadata).unwrap();
+        assert_eq!(metadata, b"existing lock metadata");
         let inherited = owner.inherited_descriptor().unwrap();
         drop(owner);
         let next = FileLock::try_open_exclusive(&path).unwrap();

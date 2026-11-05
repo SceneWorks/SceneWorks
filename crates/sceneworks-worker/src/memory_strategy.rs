@@ -52,6 +52,7 @@ pub(crate) fn reference_workspace_bytes(
 }
 
 // The pure MLX selector also compiles in the no-backend worker and CPU tests.
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn reference_workspace_bytes_using(
     registry: &gen_core::ProviderRegistry,
     provider_id: &str,
@@ -74,6 +75,7 @@ pub(crate) fn reference_workspace_bytes_using(
 /// Bridge a calibration receipt's persisted materialization shape to the gen-core contract type.
 /// The two enums are the same axis; `sceneworks-core` keeps its own spelling because it
 /// deliberately has no gen-core dependency.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn load_shape_from_receipt(
     key: sceneworks_core::memory_calibration::LoadShapeKey,
 ) -> gen_core::LoadShape {

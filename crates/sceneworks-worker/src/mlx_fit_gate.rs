@@ -74,11 +74,13 @@ use sceneworks_core::inference_provenance::INFERENCE_REVISION;
 // engine's `production_calibration_fingerprint`, so a move on either side is red at test time.
 // The prior generation-peak token predated the shared ladder and caused every exact Mage request
 // to fail the provider/gate handshake before selection.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MAGE_CALIBRATION_FINGERPRINT_SUFFIX: &str = "-mlx-shared-ladder-v1";
 
 /// The route label inside a Mage-Flow calibration string, mirroring
 /// `mlx_gen_mage::model::MageVariant::route_label` over the six registered ids. `None` for any id
 /// the engine does not serve: a plan naming one could only reach an unpaired estimator.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mage_calibration_route_label(engine_id: &str) -> Option<&'static str> {
     Some(match engine_id {
         "mage_flow" => "mage-flow",
@@ -94,6 +96,7 @@ fn mage_calibration_route_label(engine_id: &str) -> Option<&'static str> {
 /// The tier label inside a Mage-Flow calibration string, mirroring
 /// `mlx_gen_mage::model::calibration_tier_label`. `None` for a tier the family does not ship, so an
 /// unshipped tier is unnameable rather than collapsed onto a neighbour.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mage_calibration_tier_label(quant: Option<gen_core::Quant>) -> Option<&'static str> {
     match quant {
         None => Some("bf16"),
@@ -105,6 +108,7 @@ fn mage_calibration_tier_label(quant: Option<gen_core::Quant>) -> Option<&'stati
 
 /// The production calibration identity the loaded `mlx-gen-mage` route publishes for one
 /// (route, tier) cell, or `None` when no cell exists for the pair.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mage_calibration_fingerprint(engine_id: &str, quant: Option<gen_core::Quant>) -> Option<String> {
     let route = mage_calibration_route_label(engine_id)?;
     let tier = mage_calibration_tier_label(quant)?;
@@ -115,6 +119,7 @@ fn mage_calibration_fingerprint(engine_id: &str, quant: Option<gen_core::Quant>)
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct DecodeQualityFixtureWire {
     seed: u64,
     production_latent_provenance: String,
@@ -126,6 +131,7 @@ struct DecodeQualityFixtureWire {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct DecodeQualityGeometryWire {
     width: u32,
     height: u32,
@@ -136,6 +142,7 @@ struct DecodeQualityGeometryWire {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct DecodeQualityArtifactWire {
     repository: String,
     revision: String,
@@ -145,6 +152,7 @@ struct DecodeQualityArtifactWire {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum DecodeQualityDispositionWire {
     Admitted,
     Refused { reason: String },
@@ -152,6 +160,7 @@ enum DecodeQualityDispositionWire {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct DecodeGeometryPolicyWire {
     quality_abi: u32,
     family: String,
@@ -175,6 +184,7 @@ struct DecodeGeometryPolicyWire {
 }
 
 impl DecodeGeometryPolicyWire {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn into_core(self, model_id: &str) -> WorkerResult<MemoryDecodeGeometryPolicy> {
         if self.resolved_route != model_id {
             return Err(WorkerError::InvalidPayload(format!(
@@ -292,6 +302,7 @@ impl DecodeGeometryPolicyWire {
 /// Typed load-time disposition for a packaged quality table. A refused binding removes semantic
 /// decode authority only; dense decode and independent higher memory rungs remain available.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum DecodeQualityBindingDecision {
     Legacy,
     Bound {
@@ -314,6 +325,7 @@ pub(crate) struct DecodeQualityPolicyBinding {
     pub(crate) decision: DecodeQualityBindingDecision,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn manifest_declares_decode_quality_policies(
     manifest: &JsonObject<String, Value>,
 ) -> bool {
@@ -337,6 +349,7 @@ pub(crate) fn manifest_declares_decode_quality_policies(
 /// Read the semantic P9 table from the model's derived static contract. This does not read or
 /// mutate the performance/calibration bundle: quality rows have their own ABI, hashes, and runtime
 /// path. Missing policy preserves the historical provider contract and its estimated fallback.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn decode_quality_policies_from_manifest(
     manifest: &JsonObject<String, Value>,
     model_id: &str,
@@ -386,6 +399,7 @@ pub(crate) fn decode_quality_policies_from_manifest(
 /// Bind packaged semantic rows to provenance resolved independently beside the exact weights tree.
 /// An unavailable or mismatched identity refuses only the optimized decode table and is emitted as
 /// a typed audit decision; it never turns a valid model install into a dense-decode load failure.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn bind_decode_quality_policies_from_manifest(
     manifest: &JsonObject<String, Value>,
     model_id: &str,
@@ -476,6 +490,7 @@ pub(crate) fn attach_decode_quality_binding(
 /// Load-invariant inputs used to estimate each request without putting geometry or strategy in the
 /// generator cache key.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct MlxRequestPlan {
     engine_id: &'static str,
     model_id: String,
@@ -768,6 +783,7 @@ impl MlxRequestPlan {
     /// Provider anchors are bare activation measurements. The request planner adds the remaining
     /// fixed OS/app reserve separately, so even an anchor larger than the generic fallback (Lens
     /// dense) keeps its whole measured value in the area term.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn generic_total_peak_bytes(&self, geometry: MemoryGeometry) -> u64 {
         self.asset_bytes
             .saturating_add(self.generic_headroom_bytes(geometry))
@@ -777,6 +793,7 @@ impl MlxRequestPlan {
     /// the area-scaled activation transient. Factored out (sc-18096) so the estimate-floor
     /// candidates charge the exact same headroom convention as the resident baseline — same fixed
     /// slice, same anchor, same area law — with only their weights term differing per rung.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn generic_headroom_bytes(&self, geometry: MemoryGeometry) -> u64 {
         let megapixel_scale =
             (f64::from(geometry.width) * f64::from(geometry.height) / (1024.0 * 1024.0)).max(1.0);
@@ -804,6 +821,7 @@ impl MlxRequestPlan {
     /// instant — where the evictable sub-stack is fully materialized — is inside it. The eviction is
     /// a steady-state fact and reaches the floor candidates through
     /// [`estimate_floor_weights_bytes`], never this leg.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn contract_base_peak_bytes(
         &self,
         legacy_total_peak_bytes: u64,
@@ -853,6 +871,7 @@ fn declared_component_floors(_: &str) -> &'static [gen_core::ComponentPrecisionF
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct MlxCalibrationBinding {
     query: CalibrationBinding,
     provider: String,
@@ -866,12 +885,14 @@ struct MlxCalibrationBinding {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct MlxCalibrationSet {
     bindings: Vec<MlxCalibrationBinding>,
     resolved: ResolvedArtifactProvenance,
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum MlxCalibrationConfig {
     Absent,
     Valid(MlxCalibrationSet),
@@ -1159,6 +1180,7 @@ pub(crate) fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum AdmissionPath {
     Evidence,
     Legacy,
@@ -1169,6 +1191,7 @@ enum AdmissionPath {
 /// currency (sc-22738) — a binding whose provider closure has moved since capture is routed exactly
 /// as one whose closure has not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum LegacyAdmissionReason {
     PackagedEmpty,
     NoBinding,
@@ -1185,6 +1208,7 @@ enum LegacyAdmissionReason {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct VerifiedAdmissionCandidate {
     evidence: MemoryEvidence,
     /// Reserve enforced on this live host and passed to MLX as an absolute process ceiling.
@@ -1196,6 +1220,7 @@ struct VerifiedAdmissionCandidate {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct VerifiedGeometryAlternative {
     geometry: CalibrationGeometry,
     calibration_abi: u32,
@@ -1225,6 +1250,7 @@ struct VerifiedGeometryAlternative {
 /// Everything the extrapolation, the binding-phase constraint, and the loaded-provider identity
 /// gate need is captured here, so the synthesis step never re-reads the bundle.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct MeasuredRungBasis {
     rung: StrategyRung,
     parameters: gen_core::MemoryStrategyParameters,
@@ -1250,6 +1276,7 @@ struct MeasuredRungBasis {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct AdmissionRoute {
     path: AdmissionPath,
     fallback_reason: Option<LegacyAdmissionReason>,
@@ -1263,6 +1290,7 @@ struct AdmissionRoute {
     lower_alternative: Option<VerifiedGeometryAlternative>,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn budget_for_admission(mut budget: MemoryBudget, admission: &AdmissionRoute) -> MemoryBudget {
     if let Some(process_limit_bytes) = admission.process_limit_bytes {
         budget.reserved_headroom_bytes = budget.total_bytes.saturating_sub(process_limit_bytes);
@@ -1272,6 +1300,7 @@ fn budget_for_admission(mut budget: MemoryBudget, admission: &AdmissionRoute) ->
 
 /// Exact request axes that must be reconsidered for both cold and warm cache runs.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct MlxRequestInputs {
     pub width: u32,
     pub height: u32,
@@ -1311,11 +1340,13 @@ pub(crate) struct MlxRequestInputs {
 
 /// A live pricing context, not a cached request cost: every tier probe binds its actual spec.
 #[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct ReferencePricing<'a> {
     spec: &'a LoadSpec,
     registry: &'a gen_core::ProviderRegistry,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn missing_reference_pricing(engine_id: &str) -> WorkerError {
     WorkerError::InvalidPayload(format!(
         "{engine_id}: owned reference resources require the reference-aware memory admission entry point and its resolved LoadSpec; unpriced references cannot be admitted"
@@ -1368,6 +1399,7 @@ pub(crate) fn clip_windows_for_spec(
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct MlxRequestEvaluation {
     pub memory: GenerationMemory,
     pub context: MemoryRunContext,
@@ -1435,6 +1467,7 @@ pub(crate) fn flux3_source_workspaces(engine_id: &str, width: u32, height: u32) 
     )
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn flux3_cfg_additional_workspaces(engine_id: &str, width: u32, height: u32) -> (u64, u64) {
     if engine_id != "flux3_klein_base" {
         return (0, 0);
@@ -1447,6 +1480,7 @@ fn flux3_cfg_additional_workspaces(engine_id: &str, width: u32, height: u32) -> 
     )
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn flux3_cfg_workspace(
     engine_id: &str,
     geometry: MemoryGeometry,
@@ -1464,6 +1498,7 @@ fn gib_to_bytes(gib: f64) -> u64 {
     sceneworks_core::memory_anchor::gib_to_bytes(gib)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn decimal_gb_to_bytes(gb: f64) -> u64 {
     (gb * 1_000_000_000.0).round().clamp(0.0, u64::MAX as f64) as u64
 }
@@ -1497,11 +1532,13 @@ pub(crate) fn add_post_load_external_delta(baseline: u64, before: u64, after: u6
 /// provider call and keeps every finished image live until it returns, and no batched run has been
 /// measured (sc-25684 owns that), so the declared estimate scales the whole activation term by the
 /// image count — conservative by construction, never a batch admitted on a one-image budget.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn request_batch(inputs: &MlxRequestInputs) -> u32 {
     inputs.native_batch.max(1)
 }
 
 /// The provider-facing geometry of one forward pass. See [`request_batch`] for the `batch` rule.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn request_geometry(inputs: &MlxRequestInputs) -> MemoryGeometry {
     MemoryGeometry {
         width: inputs.width,
@@ -1512,6 +1549,7 @@ fn request_geometry(inputs: &MlxRequestInputs) -> MemoryGeometry {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     match mode {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
@@ -1536,6 +1574,7 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
 /// coordinate, but the provider executes that one-reference request through its latent-init
 /// image-to-image entrypoint. Keep that internal contract identity exact without inventing a new
 /// public route or a generic CFG axis.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn provider_request_mode(engine_id: &str, inputs: &MlxRequestInputs) -> (MemoryMode, &'static str) {
     if (engine_id == "flux1_dev_control"
         && matches!(
@@ -1648,6 +1687,7 @@ pub(crate) fn provider_overlay_for_load_spec(
     (!axes.is_empty()).then(|| axes.join("-"))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn is_krea_base_dit_reference_route(engine_id: &str, inputs: &MlxRequestInputs) -> bool {
     matches!(engine_id, "krea_2_raw" | "krea_2_turbo")
         && matches!(inputs.mode.as_str(), "image_generation" | "text_to_image")
@@ -1659,6 +1699,7 @@ fn is_krea_base_dit_reference_route(engine_id: &str, inputs: &MlxRequestInputs) 
 /// the complete `LoadSpec`. Krea always normalizes to None. Klein inputs already carry the exact
 /// provider overlay from [`provider_overlay_for_load_spec`]; reconstructing it here from only an
 /// adapter count would erase text-encoder and component axes on safe eager fallback routes.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn provider_request_inputs<'a>(
     engine_id: &str,
     inputs: &'a MlxRequestInputs,
@@ -1690,6 +1731,7 @@ pub(crate) fn memory_for_selection(
     contract.generation_memory(&selection).unwrap_or_default()
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn resident_evidence(
     contract: &MemoryProviderContract,
     tier: MemoryNumericTier,
@@ -1732,6 +1774,7 @@ fn resident_evidence(
     (selection, evidence)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mismatch_fallback_reason(reason: EvidenceMismatchReason) -> LegacyAdmissionReason {
     if reason == EvidenceMismatchReason::CalibrationFingerprint {
         LegacyAdmissionReason::FingerprintMismatch
@@ -1740,6 +1783,7 @@ fn mismatch_fallback_reason(reason: EvidenceMismatchReason) -> LegacyAdmissionRe
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn stronger_fallback_reason(
     current: LegacyAdmissionReason,
     candidate: LegacyAdmissionReason,
@@ -1760,6 +1804,7 @@ fn stronger_fallback_reason(
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn evidence_strategy(rung: StrategyRung) -> MemoryStrategy {
     match rung {
         StrategyRung::Resident => MemoryStrategy::Resident,
@@ -1876,6 +1921,7 @@ fn parse_evidence_parameters(
 /// and validates is the evidence, and there is no `StaleBundle` fallback any more — that arm
 /// demoted every MLX request to the legacy estimate on a harness-version drift, which is a
 /// re-capture signal for the probe tooling and not a runtime input.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn packaged_admission_route(
     plan: &MlxRequestPlan,
     inputs: &MlxRequestInputs,
@@ -1896,6 +1942,7 @@ fn packaged_admission_route(
     evidence_admission_route(&bundle, plan, inputs, mode_key, budget)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn evidence_admission_route(
     bundle: &EvidenceBundle,
     plan: &MlxRequestPlan,
@@ -2156,6 +2203,7 @@ fn evidence_admission_route(
 /// match the request but whose GEOMETRY does not, resolved to their own verified records at their
 /// own geometry. The per-phase peaks ride along so the binding-phase constraint can be applied at
 /// synthesis time. See [`MeasuredRungBasis`] for why the binding's closure is not a conjunct.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn collect_estimate_bases(
     bundle: &EvidenceBundle,
     plan: &MlxRequestPlan,
@@ -2229,6 +2277,7 @@ fn collect_estimate_bases(
 /// `vram_gate::krea_anchor_store`'s: currency is the PACKAGED loader-closure declaration, which
 /// no argument can reach, so tests that grade the derivation itself inject a store stamped at the
 /// live declared digest.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mlx_image_anchor_store() -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore> {
     #[cfg(test)]
     if let Some(store) = tests::injected_image_anchor_store() {
@@ -2255,6 +2304,7 @@ fn mlx_image_anchor_store() -> Option<&'static sceneworks_core::memory_anchor::M
 ///   single frame at batch 1; a differently-conditioned surface keeps its floor.
 /// * NOT currency (sc-22738) — the anchor's loader-closure digest is a re-capture signal for the
 ///   probe tooling; the anchor prices this request whether or not its loader has moved.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mlx_image_anchor_derived_peak(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
@@ -2286,6 +2336,7 @@ fn mlx_image_anchor_derived_peak(
 /// it needs of the anchor's measured regime (the lane shim wants the eager unbounded resident
 /// composition; the residue path lets the law's own regime guard decide), and hoisting the
 /// stricter of the two here would silently narrow the other.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mlx_image_anchor_match(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
@@ -2330,6 +2381,7 @@ fn mlx_image_anchor_match(
 /// The parameters are the ones the candidate will actually run with — on the estimate floor those
 /// are `estimate_floor_parameters`' most deeply bounding declared values, which is the same
 /// selection `validate_selection` admits and the same one the provider would be handed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn request_regime(
     engaged: &[MemoryStrategy],
     parameters: gen_core::MemoryStrategyParameters,
@@ -2342,6 +2394,7 @@ fn request_regime(
 /// fused MLX attention or layer-wise decode. Exact executed reductions belong to phase facts.
 /// Cache bytes never enter this term; the selector prices recapture uncertainty separately.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mlx_image_anchor_activation_residue(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
@@ -2375,6 +2428,7 @@ fn mlx_image_anchor_activation_residue(
 
 /// One estimate-backed candidate synthesized for an implemented-but-unmeasured rung (sc-18096).
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct SynthesizedEstimate {
     selection: MemorySelection,
     evidence: MemoryEvidence,
@@ -2392,6 +2446,7 @@ struct SynthesizedEstimate {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum DecodeQualityRequestDecision {
     NotDeclared,
     NotEngaged {
@@ -2417,17 +2472,20 @@ pub(crate) enum DecodeQualityRequestDecision {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct EstimateParameterCandidate {
     parameters: gen_core::MemoryStrategyParameters,
     decode_quality: DecodeQualityRequestDecision,
 }
 
 #[derive(Default)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct SynthesizedEstimateLadder {
     estimates: Vec<SynthesizedEstimate>,
     decode_quality_decisions: Vec<DecodeQualityRequestDecision>,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const fn strategy_rung(strategy: MemoryStrategy) -> StrategyRung {
     match strategy {
         MemoryStrategy::Resident => StrategyRung::Resident,
@@ -2440,6 +2498,7 @@ const fn strategy_rung(strategy: MemoryStrategy) -> StrategyRung {
 
 /// The canonical measurement phases, in ladder order, used for the binding-phase comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum EstimatePhase {
     Conditioning,
     Denoise,
@@ -2449,6 +2508,7 @@ enum EstimatePhase {
 /// The phase carrying the peak of a `(conditioning, denoise, decode)` triple. Ties resolve to the
 /// LATER phase deterministically; the comparison below only ever contrasts two triples scaled by
 /// the same per-phase rule, so tie handling cannot manufacture a flip on its own.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn binding_phase(conditioning: u64, denoise: u64, decode: u64) -> EstimatePhase {
     let mut phase = EstimatePhase::Conditioning;
     let mut peak = conditioning;
@@ -2546,6 +2606,7 @@ pub(crate) fn estimate_floor_weights_bytes(
 /// that decides where rung 4's window slice is charged when the facts state no block count (see
 /// the `transformer_blocks: None` regime on [`estimate_floor_weights_bytes`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum ImageFloorActivationTerm {
     /// The sc-22663 law's per-phase residue for the rung's regime
     /// ([`mlx_image_anchor_activation_residue`]): weights-free and window-free, so the weights
@@ -2690,6 +2751,7 @@ pub(crate) fn estimate_floor_smallest_parameters(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn estimate_floor_parameters(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
@@ -2897,6 +2959,7 @@ fn estimate_floor_parameters(
 /// only activation residues; changing the load shape here does not relabel it as a measured
 /// optimized run. Unsupported modes and auxiliary ownership retain the conservative fallback.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mlx_selected_phase_peak(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
@@ -3039,6 +3102,7 @@ fn synthesize_estimate_ladder(
 /// estimate. Unknown facts retain conservative weights and workspace. The selector owns margin
 /// widening, and every tiled candidate still requires its exact decode-quality policy.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn synthesize_estimate_ladder_with_conditioning(
     contract: &MemoryProviderContract,
     plan: &MlxRequestPlan,
@@ -3426,6 +3490,7 @@ fn synthesize_estimate_ladder_with_conditioning(
 /// The binding's provider closure is not a conjunct (sc-22738): the alternative is advice the very
 /// next request will price from the same record, and that request grades the record at its
 /// measured peak whatever closure it was captured under, so the advice is honoured either way.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn verified_lower_alternative(
     bundle: &EvidenceBundle,
     calibration: &MlxCalibrationSet,
@@ -3557,6 +3622,7 @@ fn evaluate_request_with_budget(
 
 /// [`evaluate_request_with_budget`] carrying this request's warm-policy proposal (sc-18317).
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn evaluate_request_with_budget_and_warm_policy(
     generator: &dyn gen_core::Generator,
     plan: &MlxRequestPlan,
@@ -3587,6 +3653,7 @@ fn evaluate_request_with_budget_and_warm_policy(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn evaluate_request_with_budget_using_bundle(
     generator: &dyn gen_core::Generator,
     plan: &MlxRequestPlan,
@@ -3652,6 +3719,7 @@ fn evaluate_request_with_budget_using_bundle(
 /// every such rung's peak. Every admission that runs the shed ladder grades it: the prefill path,
 /// the cached path (corrected shed rung + cache surcharge) and the pre-load tier probe. Same
 /// 256-row conditioning assumption as the generator's own bound.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mlx_prefix_kv_cache_shed_transient_bytes(
     engine_id: &str,
     tier_quant: Option<gen_core::Quant>,
@@ -3689,6 +3757,7 @@ fn mlx_prefix_kv_cache_shed_transient_bytes(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum MlxAdmissionPhase {
     TierProbe,
     Generation,
@@ -3696,12 +3765,14 @@ enum MlxAdmissionPhase {
 
 /// A budget refusal is distinct from invalid artifacts/contracts: only the former can try a
 /// lower installed tier. Keep the original request-scoped diagnostic through tier selection.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum MlxRequestAdmission {
     Admitted(Box<MlxRequestEvaluation>),
     Rejected(WorkerError),
 }
 
 impl MlxRequestAdmission {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn into_evaluation(self) -> WorkerResult<MlxRequestEvaluation> {
         match self {
             Self::Admitted(evaluation) => Ok(*evaluation),
@@ -3711,6 +3782,7 @@ impl MlxRequestAdmission {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn select_request_with_budget_using_bundle(
     phase: MlxAdmissionPhase,
     declared_floors: &'static [gen_core::ComponentPrecisionFloor],
