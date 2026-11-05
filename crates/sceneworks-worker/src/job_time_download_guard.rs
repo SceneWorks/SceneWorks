@@ -570,7 +570,12 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         CacheRole::Upload,
     ),
     ("rust-api", "loras.rs", "lora-uploads", CacheRole::Upload),
-    ("rust-api", "models.rs", "model-uploads", CacheRole::Upload),
+    (
+        "rust-api",
+        "models/import.rs",
+        "model-uploads",
+        CacheRole::Upload,
+    ),
     // Ownership-aware reclamation of model upload retry inputs; never a model-weight download.
     ("rust-api", "lib.rs", "model-uploads", CacheRole::Upload),
     ("rust-api", "poses.rs", "pose-uploads", CacheRole::Upload),

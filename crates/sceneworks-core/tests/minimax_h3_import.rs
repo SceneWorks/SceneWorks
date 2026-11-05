@@ -4,6 +4,8 @@
 //! transformer component directory — fixture-scale bytes, the published key grammar — and asserts
 //! that each ownership mode persists a plan the shared assembly validator binds.
 
+mod common;
+use common::write_safetensors;
 use std::fs;
 use std::path::Path;
 
@@ -34,29 +36,6 @@ const H3_DIT_KEYS: &[(&str, &str)] = &[
     ("proj_in.weight", "BF16"),
     ("proj_out.weight", "BF16"),
 ];
-
-fn write_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
-    let mut header = Map::new();
-    let mut offset = 0_u64;
-    for (name, dtype) in entries {
-        let width = match *dtype {
-            "F16" | "BF16" => 2,
-            "F32" => 4,
-            _ => 1,
-        };
-        header.insert(
-            (*name).to_owned(),
-            json!({"dtype": dtype, "shape": [1], "data_offsets": [offset, offset + width]}),
-        );
-        offset += width;
-    }
-    let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
-    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
-    bytes.extend(encoded);
-    bytes.resize(bytes.len() + offset as usize, fill);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, bytes).unwrap();
-}
 
 fn write_h3_dit_dir(dir: &Path) {
     let mut config = sceneworks_core::minimax_h3_codec::H3Config::published().0;
@@ -120,7 +99,7 @@ fn an_h3_dit_is_identified_by_its_tensors_not_by_its_name() {
     // The family is a property of the bytes: an arbitrary file name changes nothing.
     let dir = tempfile::tempdir().unwrap();
     let renamed = dir.path().join("singularity-merge-final.safetensors");
-    write_safetensors(&renamed, H3_DIT_KEYS, 0x11);
+    write_safetensors(&renamed, H3_DIT_KEYS, None, 0x11);
     let BaseWeightDetection::Recognized(renamed_verdict) =
         detect_base_weight_file(&renamed).unwrap()
     else {
@@ -180,7 +159,7 @@ fn the_import_gate_admits_only_a_complete_dense_h3_component_directory() {
     // A second weight file would be mapped by the provider without being planned or bound.
     let stray = dir.path().join("stray-shard");
     write_h3_dit_dir(&stray);
-    write_safetensors(&stray.join("extra.safetensors"), H3_DIT_KEYS, 0x01);
+    write_safetensors(&stray.join("extra.safetensors"), H3_DIT_KEYS, None, 0x01);
     assert!(!is_minimax_h3_transformer_dir(&stray));
     // `imported_model_primary_weight_file` still names the diffusers weight file here (the
     // Mage-Flow directory shape shares the file names), so the H3 directory predicate above is the

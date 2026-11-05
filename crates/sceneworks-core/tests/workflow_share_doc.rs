@@ -25,9 +25,10 @@
 //! ([`the_privacy_callout_counts_its_own_prose_fields`]) and the pose coordinate arrays it names
 //! twice ([`the_doc_names_exactly_the_pose_fields_that_travel`]).
 
+mod common;
+use common::repo_root;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
 
 use sceneworks_core::contracts::{Asset, JsonObject};
 use sceneworks_core::workflow_parameters::{
@@ -59,12 +60,6 @@ const LINT_TEST_PATH: &str = "crates/sceneworks-core/tests/workflow_share.rs";
 /// The module the contributor section sends people to edit.
 const SHARE_SOURCE_PATH: &str = "crates/sceneworks-core/src/workflow_share.rs";
 const REGISTRY_SOURCE_PATH: &str = "crates/sceneworks-core/tests/common/workflow_registry.rs";
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
 
 fn read_repo_file(relative_path: &str) -> String {
     let path = repo_root().join(relative_path);

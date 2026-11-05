@@ -129,15 +129,9 @@ pub(crate) fn detect_people_blocking(
     // prior detection panicked mid-run holding this lock, take the inner guard and
     // drop the possibly-corrupt cached model so the block below reloads a fresh one
     // (sc-4277 / F-MLXW-13).
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        *guard = Some(load_yolo(&weights_path)?);
-    }
-    let detector = guard.as_ref().expect("detector loaded");
+    let mut guard = crate::cache_thread::lock_resetting(cell, |slot| *slot = None);
+    let detector =
+        crate::cache_thread::get_or_load(&mut guard, |_| true, || load_yolo(&weights_path))?;
     let detections = detector.detect_people(&img, conf)?;
     Ok(DetectResult {
         width,
@@ -173,20 +167,23 @@ pub(crate) fn detect_people_blocking(
     let cell = DETECTOR.get_or_init(|| Mutex::new(None));
     // Recover from a poisoned lock instead of panicking every subsequent job (mirrors the
     // macOS path): drop the possibly-corrupt cached session so the block below reloads.
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if !guard.as_ref().is_some_and(|(cached_path, _)| {
-        crate::util::resolved_cache_paths_match([cached_path.as_path()], [weights_path.as_path()])
-    }) {
-        *guard = Some((
-            weights_path.clone(),
-            OrtYolo::load(&weights_path, &mut crate::cv::ModelIoLoader)?,
-        ));
-    }
-    let detector = &mut guard.as_mut().expect("detector loaded").1;
+    let mut guard = crate::cache_thread::lock_resetting(cell, |slot| *slot = None);
+    let detector = &mut crate::cache_thread::get_or_load(
+        &mut guard,
+        |(cached_path, _)| {
+            crate::util::resolved_cache_paths_match(
+                [cached_path.as_path()],
+                [weights_path.as_path()],
+            )
+        },
+        || {
+            Ok((
+                weights_path.clone(),
+                OrtYolo::load(&weights_path, &mut crate::cv::ModelIoLoader)?,
+            ))
+        },
+    )?
+    .1;
     let device = detector.device;
     let detections = detector.detect_people(&img, conf)?;
     Ok(DetectResult {

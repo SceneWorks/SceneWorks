@@ -14,8 +14,10 @@
 //! CHUNK contents therefore differ in byte order between the two configurations while being the
 //! same envelope, which is why nothing here asserts on chunk bytes (sc-15946).
 
+mod common;
+use common::repo_root;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use image::{ImageFormat, Rgb, RgbImage};
 use sceneworks_core::contracts::{Asset, JsonObject};
@@ -29,12 +31,6 @@ use sceneworks_core::workflow_share::{
     build_workflow_share, WorkflowShare, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
 
 /// The sc-15946 golden envelope — a full Krea edit with LoRAs, inputs, an upscale pass and twelve
 /// allow-listed `advanced` keys. Reused rather than re-invented so "representative recipe" means
