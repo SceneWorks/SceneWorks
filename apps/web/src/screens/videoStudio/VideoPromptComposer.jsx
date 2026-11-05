@@ -1,3 +1,4 @@
+import { StudioGuideButton } from "../../components/StudioFields.jsx";
 import { MOTIONS } from "./videoTierHelpers.js";
 import React from "react";
 import { Icon } from "../../components/Icons.jsx";
@@ -10,7 +11,7 @@ export function VideoPromptComposer({
   setMode,
   modeTabBlocked,
   modeTabBlockedText,
-  setGuideOpen,
+  openGuide,
   onOpenPresets,
   setPrompt,
   promptless,
@@ -40,9 +41,7 @@ export function VideoPromptComposer({
                 : null}
             />
             <div className="prompt-hero-links">
-              <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
-                <Icon.Book size={14} /> Prompt guide
-              </button>
+              <StudioGuideButton onOpen={openGuide} />
               {onOpenPresets ? (
                 <button className="hero-link" onClick={onOpenPresets} type="button">
                   <Icon.Folder size={14} /> Saved presets

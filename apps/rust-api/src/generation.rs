@@ -290,9 +290,9 @@ pub(crate) async fn create_image_job(
         // The declared sampler / scheduler MENU (sc-24114): a name no lane advertises is one the
         // worker silently falls back from, so it is refused here, naming the menu.
         if let Some(advanced) = job_payload.get("advanced").and_then(Value::as_object) {
-            if let Some(message) = sceneworks_core::video_request::image_sampling_knob_error(
-                &model_id, advanced, entry,
-            ) {
+            if let Some(message) =
+                sceneworks_core::image_limits::image_sampling_knob_error(&model_id, advanced, entry)
+            {
                 return Err(ApiError::bad_request(message));
             }
         }
@@ -374,7 +374,7 @@ pub(crate) async fn create_image_job(
         // Read off `job_payload` rather than the DTO so the count reflects what is actually
         // enqueued after preset/style patching. ABSENT ⇒ no cap, so every other image model is
         // byte-for-byte unchanged.
-        if let Some(message) = sceneworks_core::video_request::image_reference_limit_error(
+        if let Some(message) = sceneworks_core::image_limits::image_reference_limit_error(
             &model_id,
             sceneworks_core::image_request::ordered_image_reference_ids_for_model(
                 &model_id,
@@ -445,7 +445,7 @@ pub(crate) async fn create_image_job(
         // The PER-ENTRY half: each ordered reference must actually BE a raster image this project
         // owns. Needs the asset store, so it cannot live in the pure core helper. Only runs for a
         // model that declares the cap — no other image model pays an asset read it never paid.
-        if sceneworks_core::video_request::image_max_reference_assets(entry).is_some() {
+        if sceneworks_core::image_limits::image_max_reference_assets(entry).is_some() {
             let ordered = sceneworks_core::image_request::ordered_image_reference_ids_for_model(
                 &model_id,
                 &job_payload,

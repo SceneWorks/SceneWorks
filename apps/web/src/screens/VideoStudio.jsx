@@ -1,3 +1,6 @@
+import { useStudioAdvancedSettings } from "../hooks/useStudioAdvancedSettings.js";
+import { useStudioPromptGuide } from "../hooks/useStudioPromptGuide.js";
+import { StudioPromptGuide } from "../components/StudioFields.jsx";
 import { VideoSourcePanel } from "./videoStudio/VideoSourcePanel.jsx";
 import { VideoPromptComposer } from "./videoStudio/VideoPromptComposer.jsx";
 import { VideoReviewPanel } from "./videoStudio/VideoReviewPanel.jsx";
@@ -21,8 +24,6 @@ import React, { useEffect, useMemo, useState } from "react";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
 
 import { WorkPanel } from "../components/WorkPanel.jsx";
-
-import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { styleTextForId } from "../data/styleCatalog.js";
@@ -146,7 +147,25 @@ export function VideoStudio() {
   // installed tier the current model would normally seed.
   const [recipeTierRequest, setRecipeTierRequest] = useState(null);
   const [veda, setVeda] = useState(() => restoreVedaSettings(saved));
-  const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
+  const {
+    advancedOpen,
+    setAdvancedOpen,
+    seed,
+    setSeed,
+    negativePrompt,
+    setNegativePrompt,
+    sampler,
+    setSampler,
+    scheduler,
+    setScheduler,
+    schedulerShift,
+    setSchedulerShift,
+    stepsOverride,
+    setStepsOverride,
+    guidanceOverride,
+    setGuidanceOverride,
+    toggleAdvanced
+  } = useStudioAdvancedSettings(saved, { schedulerShift: 3.0 });
   const {
     model,
     setModel,
@@ -175,8 +194,6 @@ export function VideoStudio() {
   models,
   jobs
   });
-
-  const [guideOpen, setGuideOpen] = useState(false);
 
   const {
     ltxPipeline,
@@ -237,23 +254,18 @@ export function VideoStudio() {
 
   // Prompt guide for the selected model; fall back to the generic video guide
   // when a model declares none, so the button is always useful (sc-1817).
-  const promptGuide = selectedModel?.ui?.promptGuide ?? {
+  const { guideOpen, openGuide, closeGuide, promptGuide } = useStudioPromptGuide(selectedModel, {
     title: "Video Prompt Guide",
     path: "/prompt-guides/generic-video.md",
-  };
+  });
   const [duration, setDuration] = useState(saved.duration ?? selectedModel?.defaults?.duration ?? 6);
   const [resolution, setResolution] = useState(saved.resolution ?? selectedModel?.defaults?.resolution ?? "768x512");
   const [fps, setFps] = useState(saved.fps ?? selectedModel?.defaults?.fps ?? 25);
-  const [seed, setSeed] = useState(saved.seed ?? "");
-  const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
+
   // Configurable sampler / scheduler (epic 1753). The Wan diffusers (torch)
   // adapter applies these; MLX-backed video paths advertise default-only via
   // mlx.limits and the picker hides itself there.
-  const [sampler, setSampler] = useState(saved.sampler ?? "default");
-  const [scheduler, setScheduler] = useState(saved.scheduler ?? "default");
-  const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? 3.0);
-  const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
-  const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
+
   // Lightning fast-4-step toggle for Wan2.2 A14B MoE (T2V + I2V) — epic 10043, sc-10048.
   // Default ON: the worker (sc-10047) reads `advanced.lightning` and, when on, derives the
   // 4-step / CFG-off distilled recipe; when off it honors the user's steps/guidance (or the
@@ -1181,7 +1193,7 @@ export function VideoStudio() {
             setMode={setMode}
             modeTabBlocked={modeTabBlocked}
             modeTabBlockedText={modeTabBlockedText}
-            setGuideOpen={setGuideOpen}
+            openGuide={openGuide}
             onOpenPresets={onOpenPresets}
             setPrompt={setPrompt}
             promptless={promptless}
@@ -1335,7 +1347,7 @@ export function VideoStudio() {
 
           <AdvancedSection
             hint="cleared values → model default"
-            onToggle={() => setAdvancedOpen((value) => !value)}
+            onToggle={toggleAdvanced}
             open={advancedOpen}
           >
             <VideoAdvancedPanel
@@ -1485,9 +1497,7 @@ export function VideoStudio() {
             setAbSide={setAbSide}
           />
       </form>
-      {guideOpen ? (
-        <PromptGuideModal guide={promptGuide} modelName={selectedModel?.name} onClose={() => setGuideOpen(false)} />
-      ) : null}
+      <StudioPromptGuide open={guideOpen} guide={promptGuide} modelName={selectedModel?.name} onClose={closeGuide} />
     </section>
     </ModelAvailabilityGate>
   );

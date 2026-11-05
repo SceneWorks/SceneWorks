@@ -1,3 +1,5 @@
+import { GpuSelect } from "../../components/StudioFields.jsx";
+import { CharacterLookFields } from "../../components/StudioFields.jsx";
 import { humanizedNumberMenu, ltxVideoModelId, ltx25VideoModelId, LTX25_AUTO_DURATION_MIN_SECONDS, LTX25_AUTO_DURATION_MAX_SECONDS, clampLtx25AutoDurationSeconds, clampLtx25TemporalUpsampleRounds } from "./videoTierHelpers.js";
 import { SamplerSchedulerFields, SamplingSeedField, SamplingStepsField } from "../../components/SamplerSchedulerFields.jsx";
 import React from "react";
@@ -465,16 +467,7 @@ export function VideoAdvancedPanel({
                   </select>
                 </label>
               ) : null}
-              <label>
-                GPU
-                <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
-                  {gpuOptions.map((gpu) => (
-                    <option key={gpu} value={gpu}>
-                      {gpu === "auto" ? "Auto" : gpu}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <GpuSelect options={gpuOptions} value={requestedGpu} onChange={setRequestedGpu} />
               <SamplingSeedField
                 value={seed}
                 onChange={(value) => setSeed(value)}
@@ -563,28 +556,9 @@ export function VideoAdvancedPanel({
                   />
                 </label>
               ) : null}
-              <label>
-                Character
-                <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
-                  <option value="">No character</option>
-                  {characters.map((character) => (
-                    <option key={character.id} value={character.id}>
-                      {character.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Look
-                <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
-                  <option value="">Default look</option>
-                  {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
-                    <option key={look.id} value={look.id}>
-                      {look.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <CharacterLookFields characters={characters} characterId={characterId} lookId={characterLookId}
+                    onCharacterChange={setCharacterId} onLookChange={setCharacterLookId} />
+
               {supportsNegativePrompt ? (
                 <label className="prompt-field">
                   Negative prompt
