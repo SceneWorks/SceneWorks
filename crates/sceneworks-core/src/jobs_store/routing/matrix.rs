@@ -160,6 +160,9 @@ const WEB_VIDEO_STUDIO: &str = concat!(
     include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoSubmission.js"),
     include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoTurboControls.js"),
     include_str!("../../../../../apps/web/src/screens/videoStudio/videoTierHelpers.js"),
+    include_str!("../../../../../apps/web/src/components/StudioFields.jsx"),
+    include_str!("../../../../../apps/web/src/hooks/useStudioAdvancedSettings.js"),
+    include_str!("../../../../../apps/web/src/hooks/useStudioPromptGuide.js"),
 );
 const WEB_SIMPLE_AUDIO: &str =
     include_str!("../../../../../apps/web/src/simple/simpleAudioParts.jsx");
