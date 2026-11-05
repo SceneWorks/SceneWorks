@@ -471,7 +471,7 @@ fn shared_helpers_preserve_slug_defaults_and_fail_closed_local_policy() {
         .unwrap();
     let error =
         crate::auth::require_local_peer(Some("[::ffff:192.168.1.1]:1234".parse().unwrap()), || {
-            ApiError::bad_request("caller-owned local-path refusal")
+            crate::ApiError::bad_request("caller-owned local-path refusal")
         })
         .unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
