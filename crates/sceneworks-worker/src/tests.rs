@@ -98,9 +98,11 @@ include!("tests/hf_and_family.rs");
 // GPU/capability advertisement (nvidia-smi parsing, MLX vs CPU capability sets) and manifest gating
 // (model-table descriptor flags, SD3.5 / SANA manifest entries) + the builtin-manifest builders.
 include!("tests/gpu_and_manifest.rs");
-// ImageEdit dispatch + child-supervisor lifecycle (restart/backoff, signal-death attribution) and the
+// Child-supervisor lifecycle (restart/backoff, signal-death attribution) and the
 // model-install marker write.
 include!("tests/supervisor_lifecycle.rs");
+// Utility routing and the always-compiled placeholder shutdown reference contract.
+include!("tests/utility_dispatch.rs");
 // LoRA import/upload semantics + HuggingFace snapshot downloads (digest verify, resume, cache layout)
 // and the derived-tokenizer overlay path (with its overlay stub server).
 include!("tests/lora_and_downloads.rs");
