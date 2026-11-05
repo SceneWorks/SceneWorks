@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 const CONTRACTS: &str = include_str!("../../sceneworks-core/src/contracts.rs");
-const WORKER: &str = include_str!("lib.rs");
+const UTILITY_DISPATCH: &str = include_str!("utility_dispatch.rs");
 const ARCHITECTURE: &str = include_str!("../ARCHITECTURE.md");
 const FACE_ANALYSIS_JOBS: &str = include_str!("face_analysis_jobs.rs");
 
@@ -1126,9 +1126,9 @@ fn the_family_allow_list_scanner_recognises_the_shapes_it_must_judge() {
 /// in the wrapper's own test; this pins the WIRING at the one admission call site.
 #[test]
 fn the_source_guard_await_is_wrapped_in_the_heartbeat_keepalive() {
-    let code = code_without_comments_or_literals(WORKER);
+    let code = code_without_comments_or_literals(UTILITY_DISPATCH);
     let function = code
-        .split_once("async fn run_utility_job(")
+        .split_once("async fn run_utility_job_inner(")
         .expect("worker must declare run_utility_job")
         .1;
     let after_guard_spawn = function
@@ -1136,7 +1136,7 @@ fn the_source_guard_await_is_wrapped_in_the_heartbeat_keepalive() {
         .expect("run_utility_job must admit every job through the source guard")
         .1;
     let between_guard_and_dispatch = after_guard_spawn
-        .split_once("match job.job_type {")
+        .split_once("dispatch_utility_job(")
         .expect("the guard must run before the job-type dispatch")
         .0;
     let after_wrapper = between_guard_and_dispatch

@@ -6,15 +6,7 @@ const SCENEWORKS_DMABUF_OPT_IN: &str = "SCENEWORKS_WEBKIT_DMABUF";
 const WEBKIT_DISABLE_DMABUF_RENDERER: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 
 fn opt_in_enabled(value: Option<&OsStr>) -> bool {
-    value
-        .and_then(OsStr::to_str)
-        .map(str::trim)
-        .is_some_and(|value| {
-            value.eq_ignore_ascii_case("1")
-                || value.eq_ignore_ascii_case("true")
-                || value.eq_ignore_ascii_case("yes")
-                || value.eq_ignore_ascii_case("on")
-        })
+    sceneworks_core::env_util::flag_os("SCENEWORKS_WEBKIT_DMABUF", value, false)
 }
 
 pub(crate) fn should_disable_dmabuf(
@@ -56,7 +48,7 @@ mod tests {
 
     #[test]
     fn sceneworks_opt_in_accepts_common_truthy_values() {
-        for value in ["1", "true", "YES", "on"] {
+        for value in ["1", "true", "YES", "on", "On", " tRuE "] {
             assert!(!should_disable_dmabuf(Some(OsStr::new(value)), None));
         }
         assert!(should_disable_dmabuf(Some(OsStr::new("0")), None));

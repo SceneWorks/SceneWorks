@@ -1,87 +1,75 @@
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
-import { JOB_PATHS, submitJobRequest } from "../api/jobs.js";
+import {
+  useMoveToolPanel,
+  useTransformToolPanel,
+  useCropToolPanel,
+  useUpscaleToolPanel,
+  useDetailToolPanel,
+  useColorToolPanel,
+  useCutoutToolPanel,
+  useEditToolPanel,
+  useBoxesToolPanel
+} from "./imageEditor/useImageEditorPanels.js";
+import { useEditorSave } from "./imageEditor/useEditorSave.js";
+import { useEditorAiOps } from "./imageEditor/useEditorAiOps.js";
+import { useLayerOps } from "./imageEditor/useLayerOps.js";
+import { useEditorHistory } from "./imageEditor/useEditorHistory.js";
+import { MIN_SCALE, MAX_SCALE, ZOOM_STEP, MIN_CROP_PX, EDITOR_LAYOUT_KEY, readStoredEditorLayout, EDITOR_TOOL_ORDER, EDITOR_TOOL_META, EDITOR_TOOL_ICONS, IeChevron, IeEyeOpen, IeEyeOff, EDITOR_SHORTCUTS } from "./imageEditor/metadata.jsx";
+export { EDITOR_LAYOUTS, readStoredEditorLayout, EDITOR_TOOL_ORDER, EDITOR_TOOL_META, EDITOR_TOOL_ICONS } from "./imageEditor/metadata.jsx";
+import { leaveGuardArming, closeConfirmMessage, saveStatusIndicator } from "./imageEditor/leaveGuard.js";
+export { leaveGuardMessage, leaveGuardArming, closeConfirmMessage, saveStatusIndicator } from "./imageEditor/leaveGuard.js";
+import { createEditorLaunchGuard } from "./imageEditor/launchGuard.js";
+export { createEditorLaunchGuard } from "./imageEditor/launchGuard.js";
+import { MAX_EDIT_REFERENCES, importEditorReferenceFiles, modelIsInpaintCapable } from "./imageEditor/references.js";
+export { MAX_EDIT_REFERENCES, editReferenceIds, importEditorReferenceFiles, modelIsInpaintCapable } from "./imageEditor/references.js";
+
+export { editedFilename, buildSaveProvenance } from "./imageEditor/provenance.js";
+import { EDIT_OUTPUT_ASPECTS, clamp, cropRatioForKey, centeredCropRect, cropOverlayRects, BLANK_CANVAS_SIZES, blankCanvasDims } from "./imageEditor/geometry.js";
+export { EDIT_OUTPUT_ASPECTS, editOutputAspectRatio, editOutputDims, cropRatioForKey, centeredCropRect, BLANK_CANVAS_MIN, BLANK_CANVAS_MAX, BLANK_CANVAS_SIZES, blankCanvasDims } from "./imageEditor/geometry.js";
+import { compositeWorkingToCanvas, downloadSizeSentence, colorKeyMaskCanvasForImage, maskCutoutCanvasForImage, canvasToPngBlob, blobToEditorImage, revokeLayerUrls, collectCropLayers } from "./imageEditor/export.js";
+export { EDITOR_CANVAS_MAX_SIDE, EDITOR_CANVAS_MAX_AREA, boundedEditorCanvasDimensions, compositeWorkingToCanvas, workingToPngFile, exportEditorFile, MAX_DESKTOP_EXPORT_BYTES, RASTER_REASON_EDITED, RASTER_REASON_DESKTOP_CAP, editorDownloadPlan, downloadSizeSentence, editorDownloadNote, collectCropLayers } from "./imageEditor/export.js";
+
+export { HISTORY_LIMIT, emptyHistory, historyCheckpoint, historyUndo, historyRedo, canUndo, canRedo, runGuardedRestore } from "./imageEditor/history.js";
+import { InlineLayerName } from "./imageEditor/InlineLayerName.jsx";
+export { InlineLayerName } from "./imageEditor/InlineLayerName.jsx";
+import { JOB_PATHS } from "../api/jobs.js";
 import { mediaResponseWithTicketRetry } from "../api/media.js";
 import { blobToImage } from "../imageDimensions.js";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useInsertionEffect, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Stage, Layer, Group, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
-import { inspectWorkflowFile, isAbortError } from "../api.js";
-import { nonCanvasJobOutputs } from "../editorScratch.js";
-import { terminalStatuses } from "../jobTypes.js";
+import { isAbortError } from "../api.js";
+
 import { useAppContext } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { appConfirm } from "../appConfirm.jsx";
-import { isDesktop } from "../runtime.js";
-import { saveExportFile } from "../saveExportFile.js";
+
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 // sc-24113 — the per-model ordered-reference ceiling. See `imageReferenceLimits.js`.
 import { maxReferencesForModel } from "../imageReferenceLimits.js";
-import {
-  SOURCE_WORKFLOW_ABSENT,
-  SOURCE_WORKFLOW_PENDING,
-  SOURCE_WORKFLOW_PRESENT,
-  SOURCE_WORKFLOW_UNKNOWN,
-  describeOpenedImage,
-  workflowStateFromInspect,
-} from "../editorSourceWorkflow.js";
-import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbedPreferences.js";
+import { describeOpenedImage } from "../editorSourceWorkflow.js";
+
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
-import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
+
 import { useLoraSelection } from "../components/LoraPickerField.jsx";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
-import { guidanceDefaultFromModel } from "../samplerOptions.js";
+
 import { mossAdvancedDefaults } from "../mossImageAdvanced.js";
 import { mossAdvancedIssue } from "../mossImageAdvancedValidation.js";
 import { isMossImage, mossEditDefaults, mossEditGenerationDefaults, mossComponentState, mossEditWireOptions, mossEditControlsError } from "../mossImage.js";
-import {
-  BLEND_MODES,
-  DEFAULT_BLEND_MODE,
-  activeLayerOf,
-  addLayer,
-  compositeLayersToCanvas,
-  createLayer,
-  drawLayerIntoCrop,
-  duplicateLayer,
-  identityTransform,
-  layerById,
-  moveLayer,
-  removeLayer,
-  replaceLayerBitmap,
-  replaceLayerWithCroppedBitmap,
-  sameLayerStack,
-  setActiveLayer,
-  setLayerProps,
-  singleLayerWorking,
-  snapshotLayers,
-} from "../imageLayers.js";
-import { CurveEditor } from "../components/CurveEditor.jsx";
-import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
+import { BLEND_MODES, activeLayerOf, drawLayerIntoCrop, identityTransform, layerById, replaceLayerBitmap, replaceLayerWithCroppedBitmap, singleLayerWorking } from "../imageLayers.js";
+
 // Pure job builders + model/engine helpers (sc-6112) — extracted to a konva-free module
 // so the Library batch flow can reuse them; imported for internal use and re-exported
 // below to keep this module's public surface (and its tests) unchanged.
-import {
-  buildDetailJobBody,
-  buildEditJobBody,
-  buildUpscaleJobBody,
-  detailCapableModels,
-  editCapableModels,
-  tileControlNetInstalled,
-  tileControlNetModel,
-  TILE_CONTROLNET_MODEL_ID,
-  sam3SegmentInstalled,
-  sam3SegmentModel,
-  SAM3_SEGMENT_MODEL_ID,
-  upscaleEngineHasSoftness,
-  upscaleEngineIsRestoration,
-  upscaleFactorsForEngine,
-} from "../imageJobs.js";
+import { buildDetailJobBody, buildEditJobBody, buildUpscaleJobBody, detailCapableModels, editCapableModels, tileControlNetInstalled, tileControlNetModel, TILE_CONTROLNET_MODEL_ID, sam3SegmentInstalled, sam3SegmentModel, SAM3_SEGMENT_MODEL_ID, upscaleEngineHasSoftness, upscaleFactorsForEngine } from "../imageJobs.js";
 import {
   availableUpscaleEngines as upscaleEnginesForPlatform,
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
-import { IRIS_RESTORE_DEFAULTS, irisRestoreControls } from "../irisRestore.js";
-import { IrisRestoreControls } from "../components/IrisRestoreControls.jsx";
+import { IRIS_RESTORE_DEFAULTS } from "../irisRestore.js";
+
 // Per-tool logic extracted to dedicated hooks + pure helper modules (sc-9752, F-052
 // follow-up). Each hook owns its tool's state/refs/handlers and is wired below; the pure
 // helpers are re-exported here so this module's public surface (and ImageEditor.test.jsx's
@@ -89,7 +77,7 @@ import { IrisRestoreControls } from "../components/IrisRestoreControls.jsx";
 import { useColorGradeTool } from "./imageEditor/useColorGradeTool.js";
 import { useBoxesTool } from "./imageEditor/useBoxesTool.js";
 import { useMaskTool } from "./imageEditor/useMaskTool.js";
-import { maskAlphaFromRgba } from "../maskRefine.js";
+
 import {
   COLOR_ADJUSTMENTS,
   IDENTITY_COLOR_ADJUST,
@@ -130,26 +118,13 @@ import {
   MASK_PREVIEW_RGBA,
   maskHasContent,
 } from "./imageEditor/maskShared.js";
-import {
-  applyColorKeyToRgba,
-  applyMaskSelectionToRgba,
-  colorKeySelectionMaskRgba,
-  documentPointToLayerPoint,
-} from "./imageEditor/colorKeyMath.js";
+import { applyColorKeyToRgba, colorKeySelectionMaskRgba, documentPointToLayerPoint } from "./imageEditor/colorKeyMath.js";
 import {
   ImageEditorToolPanel,
-  useStableImageEditorToolPanelScope,
 } from "./imageEditor/ImageEditorToolPanel.jsx";
 import { EditorDepthPanel } from "./imageEditor/EditorDepthPanel.jsx";
-import { EditorLoraPanel } from "./imageEditor/EditorLoraPanel.jsx";
-import { editTransparencyFor, imageBytesCarryAlpha } from "../qwenAlpha.js";
 
-const UPSCALE_ENGINE_DESC = {
-  "real-esrgan": "Fast, faithful general-purpose upscaler. Great default.",
-  seedvr2: "Detail-restoring diffusion upscaler for degraded sources.",
-  iris: "Iris-3B restoration: any scale (1× restores only), tiled.",
-  "aura-sr": "Sharpest output, best for print. Slower.",
-};
+import { editTransparencyFor, imageBytesCarryAlpha } from "../qwenAlpha.js";
 
 export {
   buildDetailJobBody,
@@ -208,1005 +183,6 @@ export {
   colorKeySelectionMaskRgba,
   documentPointToLayerPoint,
 };
-
-const MIN_SCALE = 0.05;
-const MAX_SCALE = 16;
-const ZOOM_STEP = 1.2;
-const MIN_CROP_PX = 8;
-
-// Redesign panel layout (epic 10243): accordion (default) / right / left / bottom,
-// persisted across sessions. Invalid/absent → accordion.
-export const EDITOR_LAYOUTS = ["accordion", "right", "left", "bottom"];
-const EDITOR_LAYOUT_KEY = "sceneworks-ie-layout";
-export function readStoredEditorLayout() {
-  try {
-    const saved = window.localStorage.getItem(EDITOR_LAYOUT_KEY);
-    if (EDITOR_LAYOUTS.includes(saved)) return saved;
-  } catch {
-    /* ignore (private mode etc.) */
-  }
-  return "accordion";
-}
-
-// Tool identity for the rail / accordion headers / inspector header (epic 10243).
-export const EDITOR_TOOL_ORDER = ["move", "transform", "crop", "upscale", "detail", "color", "cutout", "edit", "boxes", "depth"];
-export const EDITOR_TOOL_META = {
-  move: { label: "Move", desc: "Pan and inspect the canvas" },
-  transform: { label: "Transform", desc: "Move, scale & rotate the layer" },
-  crop: { label: "Crop", desc: "Trim to a size or ratio" },
-  upscale: { label: "Upscale", desc: "Increase resolution with AI" },
-  detail: { label: "Detail", desc: "Refine texture with tile ControlNet" },
-  color: { label: "Color grade", desc: "Adjust tone, levels & curves" },
-  cutout: { label: "Cutout", desc: "Remove a color-keyed background" },
-  edit: { label: "AI Edit", desc: "Prompt-driven edit & inpaint" },
-  boxes: { label: "Boxes", desc: "Region layout & color-keyed edit" },
-  depth: { label: "Depth map", desc: "Estimate relative depth (Iris-3B)" },
-};
-
-// Inline stroke icons ported from the design handoff `ICONS` map (epic 10243).
-const strokeSvg = (props, children) => (
-  <svg fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.9} viewBox="0 0 24 24" {...props}>
-    {children}
-  </svg>
-);
-export const EDITOR_TOOL_ICONS = {
-  move: strokeSvg({ key: "move" }, [
-    <polyline key="a" points="5 9 2 12 5 15" />, <polyline key="b" points="9 5 12 2 15 5" />,
-    <polyline key="c" points="15 19 12 22 9 19" />, <polyline key="d" points="19 9 22 12 19 15" />,
-    <line key="e" x1="2" x2="22" y1="12" y2="12" />, <line key="f" x1="12" x2="12" y1="2" y2="22" />,
-  ]),
-  transform: strokeSvg({ key: "transform" }, [
-    <rect key="a" height="16" rx="1" width="16" x="4" y="4" />,
-    <circle key="b" cx="4" cy="4" fill="currentColor" r="2" />, <circle key="c" cx="20" cy="4" fill="currentColor" r="2" />,
-    <circle key="d" cx="4" cy="20" fill="currentColor" r="2" />, <circle key="e" cx="20" cy="20" fill="currentColor" r="2" />,
-  ]),
-  crop: strokeSvg({ key: "crop" }, [
-    <path key="a" d="M6 2v14a2 2 0 0 0 2 2h14" />, <path key="b" d="M18 22V8a2 2 0 0 0-2-2H2" />,
-  ]),
-  upscale: strokeSvg({ key: "upscale" }, [
-    <polyline key="a" points="15 3 21 3 21 9" />, <polyline key="b" points="9 21 3 21 3 15" />,
-    <line key="c" x1="21" x2="14" y1="3" y2="10" />, <line key="d" x1="3" x2="10" y1="21" y2="14" />,
-  ]),
-  detail: strokeSvg({ key: "detail" }, [
-    <path key="a" d="M12 3l1.9 4.8L19 9.5l-4.1 2.9L16 18l-4-2.7L8 18l1.1-5.6L5 9.5l5.1-1.7z" />,
-  ]),
-  color: strokeSvg({ key: "color" }, [
-    <circle key="a" cx="12" cy="12" r="9" />, <path key="b" d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" />,
-  ]),
-  cutout: strokeSvg({ key: "cutout" }, [
-    <path key="a" d="M4 5h16v14H4z" />, <path key="b" d="M7 15l3-4 2 2 2-3 3 5" />,
-    <circle key="c" cx="9" cy="9" r="1.2" />,
-  ]),
-  edit: strokeSvg({ key: "edit" }, [
-    <path key="a" d="M15 4l5 5" />, <path key="b" d="M4 20l4-1 10-10-3-3L5 16z" />,
-    <path key="c" d="M14 5l1.5-1.5a2 2 0 0 1 3 3L17 8" />,
-  ]),
-  boxes: strokeSvg({ key: "boxes" }, [
-    <rect key="a" height="7" rx="1" width="8" x="3" y="4" />, <rect key="b" height="12" rx="1" width="8" x="13" y="4" />,
-    <rect key="c" height="6" rx="1" width="8" x="3" y="14" />,
-  ]),
-  depth: strokeSvg({ key: "depth" }, [
-    <path key="a" d="M3 20l6-9 4 5 3-4 5 8z" />, <path key="b" d="M3 20h18" />,
-  ]),
-};
-const IeChevron = () => (
-  <svg fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} viewBox="0 0 24 24" width="15">
-    <path d="M6 9l6 6 6-6" />
-  </svg>
-);
-const IeEyeOpen = () => (
-  <svg fill="none" height="15" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" width="15">
-    <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
-    <circle cx="12" cy="12" r="3" />
-  </svg>
-);
-const IeEyeOff = () => (
-  <svg className="ie-vis-off" fill="none" height="15" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" width="15">
-    <path d="M17.9 17.9A10.4 10.4 0 0 1 12 19C5 19 1 12 1 12a19 19 0 0 1 5.1-5.9M9.9 4.2A10.9 10.9 0 0 1 12 4c7 0 11 7 11 7a19 19 0 0 1-2.2 3.2M1 1l22 22" />
-  </svg>
-);
-
-// Modifier glyph for the shortcut reference (the handler accepts both ⌘ and Ctrl).
-const IS_MAC =
-  typeof navigator !== "undefined" && /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
-const MOD_KEY = IS_MAC ? "⌘" : "Ctrl";
-
-// Keyboard shortcut reference (sc-6111). Single source of truth for the in-editor
-// quick reference; the keydown handler implements these exact bindings.
-const EDITOR_SHORTCUTS = [
-  {
-    group: "Tools",
-    items: [
-      { keys: ["M"], label: "Move / pan" },
-      { keys: ["T"], label: "Transform layer" },
-      { keys: ["C"], label: "Crop" },
-      { keys: ["U"], label: "Upscale" },
-      { keys: ["D"], label: "Detail enhance" },
-      { keys: ["G"], label: "Color grade" },
-      { keys: ["E"], label: "AI edit" },
-      { keys: ["B"], label: "Boxes" },
-    ],
-  },
-  {
-    group: "View",
-    items: [
-      { keys: ["+"], label: "Zoom in" },
-      { keys: ["−"], label: "Zoom out" },
-      { keys: ["0"], label: "Fit to view" },
-      { keys: ["1"], label: "Actual size (100%)" },
-    ],
-  },
-  {
-    group: "Edit",
-    items: [
-      { keys: [MOD_KEY, "Z"], label: "Undo" },
-      { keys: ["⇧", MOD_KEY, "Z"], label: "Redo" },
-      { keys: ["Delete"], label: "Delete selected box" },
-      { keys: ["Esc"], label: "Cancel / deselect" },
-      { keys: ["?"], label: "Toggle this help" },
-    ],
-  },
-];
-
-// Upper bound on images in a FLUX.2 multi-reference edit, matching the worker's MAX_EDIT_REFERENCES
-// (image_jobs/flux2.rs). The working image takes one slot, so the editor allows up to 3 user refs.
-export const MAX_EDIT_REFERENCES = 4;
-
-// The browser CLOSE/REFRESH (beforeunload) warning shown while there is unsaved work, or
-// null when a real unload would lose nothing (sc-2434 / sc-8850). Under keep-alive the
-// editor stays mounted across in-app navigation, so a plain nav is non-destructive and gets
-// NO prompt (see leaveGuardArming); only a genuine browser unload drops the in-memory state,
-// which is what this wording addresses. Unsaved edits win the message. It also fires while an
-// AI op is in flight — starting one does NOT set `dirty` (its result only lands on success) —
-// so an unload mid-op is still flagged (its result would be lost).
-export function leaveGuardMessage({ dirty, aiOpPending }) {
-  if (dirty) return "You have unsaved edits in the Image Editor that will be lost if you close or reload.";
-  if (aiOpPending) return "An image edit is still running; its result will be lost if you close or reload.";
-  return null;
-}
-
-// Decide which leave-guard to arm (sc-11959 / sc-11968). Under selective keep-alive an in-app
-// navigation away does NOT unmount the editor — unsaved edits, undo history, and an in-flight
-// AI op all survive on the still-resident editor and the op's result lands back on return — so
-// a plain nav is NON-DESTRUCTIVE and the in-app nav guard is permanently disarmed (`inApp:
-// false`); prompting there would falsely warn users of loss that won't happen, undermining the
-// keep-alive promise. Only a real browser close/refresh drops the in-memory state, so the
-// beforeunload guard still arms whenever there are unsaved edits or an in-flight op — EVEN when
-// the editor is backgrounded under keep-alive (an app close/refresh would otherwise silently
-// discard a backgrounded editor's unsaved edits, a safeguard that predates keep-alive).
-export function leaveGuardArming({ dirty, aiOpPending }) {
-  const message = leaveGuardMessage({ dirty, aiOpPending });
-  return {
-    message,
-    beforeUnload: Boolean(message),
-    inApp: false,
-  };
-}
-
-// The confirm prompt shown when the user EXPLICITLY closes/discards the working image
-// (the Close button, sc-11968). Unlike the passive leave guard, a deliberate close of a
-// CLEAN document loses nothing, so it needs no confirm (null → proceed silently). Unsaved
-// edits win the wording; an in-flight AI op is the fallback (its result would be abandoned).
-export function closeConfirmMessage({ dirty, aiOpPending }) {
-  if (dirty) return "Discard your unsaved edits and close this image?";
-  if (aiOpPending) return "An image edit is still running. Close and abandon it?";
-  return null;
-}
-
-export function createEditorLaunchGuard() {
-  let activeId = null;
-  return {
-    async consume({ launch, isCurrent, confirmDiscard, openAsset, clearLaunch }) {
-      if (!launch?.assetId || activeId === launch.id) return false;
-      const launchId = launch.id;
-      activeId = launchId;
-      try {
-        if (!(await confirmDiscard()) || activeId !== launchId || !isCurrent(launchId)) return false;
-        await openAsset(launch.assetId);
-        if (activeId !== launchId || !isCurrent(launchId)) return false;
-        clearLaunch?.();
-        return true;
-      } finally {
-        if (activeId === launchId) activeId = null;
-      }
-    },
-  };
-}
-
-export function InlineLayerName({ layer, onRename }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(layer.name);
-
-  if (!editing) {
-    return (
-      <button
-        className="ie-layer-name"
-        onClick={(event) => {
-          event.stopPropagation();
-          setDraft(layer.name);
-          setEditing(true);
-        }}
-        title="Rename layer"
-        type="button"
-      >
-        {layer.name}
-      </button>
-    );
-  }
-
-  return (
-    <input
-      aria-label={`Rename ${layer.name}`}
-      autoFocus
-      className="ie-input ie-layer-name-input"
-      onBlur={() => {
-        const name = draft.trim();
-        if (name) onRename(layer.id, name);
-        setEditing(false);
-      }}
-      onChange={(event) => setDraft(event.target.value)}
-      onClick={(event) => event.stopPropagation()}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") event.currentTarget.blur();
-        if (event.key === "Escape") setEditing(false);
-      }}
-      value={draft}
-    />
-  );
-}
-
-// Which save-state indicator the top bar shows (sc-11968): the unsaved-edits pill while
-// `dirty`, the "Saved ✓" hint once a Save has landed and nothing has changed since, else
-// nothing. Pure so the badge logic is unit-testable without a mounted canvas.
-export function saveStatusIndicator({ dirty, savedAssetId }) {
-  if (dirty) return "unsaved";
-  if (savedAssetId) return "saved";
-  return null;
-}
-
-// Compose the multi-reference edit's `referenceAssetIds`: the working image (staged as the scratch
-// source) FIRST so it anchors the edit, then the user's reference images — trimmed, de-duped, and
-// capped at `max` total. The worker prefers a non-empty `referenceAssetIds` list over `sourceAssetId`
-// (image_jobs/flux2.rs `flux2_edit_reference_ids`), so the working scratch id must lead the list or
-// the working image is dropped from the joint conditioning. Pure. Empty source → empty list.
-export function editReferenceIds(sourceAssetId, refIds, max = MAX_EDIT_REFERENCES) {
-  const ids = [sourceAssetId, ...(refIds ?? [])]
-    .map((id) => (typeof id === "string" ? id.trim() : ""))
-    .filter(Boolean);
-  return Array.from(new Set(ids)).slice(0, max);
-}
-
-// Import every selected reference independently so one bad file does not discard
-// the successful imports. importAsset normally reports request errors itself; the
-// dialog still needs an exact failure count instead of silently filtering them.
-export async function importEditorReferenceFiles(files, importAsset) {
-  const results = await Promise.allSettled(
-    Array.from(files ?? []).map((file) => importAsset(file, { throwOnError: true })),
-  );
-  const assets = [];
-  let failureCount = 0;
-  for (const result of results) {
-    if (result.status === "fulfilled" && result.value?.id) {
-      assets.push(result.value);
-    } else {
-      failureCount += 1;
-    }
-  }
-  return { assets, failureCount };
-}
-
-// Output aspect presets for the editor's canvas-extend / outpaint control (sc-2556).
-// "match" keeps the working size, so the fit mode then has no border to act on.
-export const EDIT_OUTPUT_ASPECTS = [
-  { key: "match", label: "Match canvas", ratio: null },
-  { key: "1:1", label: "1:1", ratio: 1 },
-  { key: "16:9", label: "16:9", ratio: 16 / 9 },
-  { key: "9:16", label: "9:16", ratio: 9 / 16 },
-  { key: "4:3", label: "4:3", ratio: 4 / 3 },
-  { key: "3:4", label: "3:4", ratio: 3 / 4 },
-  { key: "3:2", label: "3:2", ratio: 3 / 2 },
-  { key: "2:3", label: "2:3", ratio: 2 / 3 },
-];
-
-export function editOutputAspectRatio(key) {
-  return EDIT_OUTPUT_ASPECTS.find((aspect) => aspect.key === key)?.ratio ?? null;
-}
-
-// Snap an edit-output pixel dimension to a multiple of 16 (min 16). Every image engine
-// requires dims divisible by 16 (VAE ×8 · patch ×2 — e.g. mlx-gen z-image's SIZE_MULTIPLE
-// guard); an imported/cropped source at arbitrary dims (e.g. 832×1165) would otherwise be
-// forwarded verbatim and hard-fail at generation. Mirrors snapCanvasDim's rounding, without
-// its blank-canvas [256, 2048] clamp — an edit must not force-grow a small source to 256.
-function alignEditDim(px) {
-  return Math.max(16, Math.round(px / 16) * 16);
-}
-
-// Output W×H for an editor edit given the target aspect + fit mode, keeping the working
-// image at native scale (never upscales). "match"/unknown aspect → working size. crop =
-// largest target-aspect rect INSIDE the image (trim the overflow); pad/outpaint =
-// smallest target-aspect canvas CONTAINING the image (extend → border to fill). Result dims
-// are always snapped to a multiple of 16 so the engine's size guard accepts them; the worker
-// crop/pad-fits the source to these dims (never stretches). Pure.
-export function editOutputDims(workingW, workingH, aspectKey, fitMode) {
-  const ratio = editOutputAspectRatio(aspectKey);
-  if (!ratio || !workingW || !workingH) {
-    return { width: alignEditDim(workingW), height: alignEditDim(workingH) };
-  }
-  const imageRatio = workingW / workingH;
-  let width;
-  let height;
-  if (fitMode === "crop") {
-    // Cover: shrink to the target aspect within the image (trim).
-    if (ratio >= imageRatio) {
-      width = workingW;
-      height = Math.round(workingW / ratio);
-    } else {
-      height = workingH;
-      width = Math.round(workingH * ratio);
-    }
-  } else {
-    // Pad / outpaint: extend to the target aspect around the image (add border).
-    if (ratio >= imageRatio) {
-      height = workingH;
-      width = Math.round(workingH * ratio);
-    } else {
-      width = workingW;
-      height = Math.round(workingW / ratio);
-    }
-  }
-  return { width: alignEditDim(width), height: alignEditDim(height) };
-}
-
-// Whether a model accepts an inpaint mask — the manifest tags it `image_inpaint`
-// (sc-2476). Gates the mask tool in the editor. Pure.
-export function modelIsInpaintCapable(model) {
-  return (model?.capabilities ?? []).includes("image_inpaint");
-}
-
-// Filename for a Save / Download export (sc-2434): the source name with an
-// "-edited" suffix before the extension, always .png — the working image is
-// rasterized to PNG, so the original extension would be misleading. Pure.
-export function editedFilename(source) {
-  const base = (source?.name || "image").replace(/\.[^./\\]+$/, "").trim() || "image";
-  return `${base}-edited.png`;
-}
-
-// Provenance for a saved edit, stored under the new asset's top-level `extra`
-// (sc-2434): which source it was derived from + the ordered edit chain
-// (crop/upscale/…) applied this session. Pure for unit testing.
-export function buildSaveProvenance({ source, edits, width, height, layers }) {
-  const provenance = {
-    editor: "image_editor",
-    source: source?.assetId
-      ? { kind: "asset", assetId: source.assetId, name: source.name ?? null }
-      : { kind: "upload", name: source?.name ?? null },
-    edits: edits ?? [],
-    width: width ?? null,
-    height: height ?? null,
-  };
-  // Layer summary (sc-6121): record what the flattened asset was composited from —
-  // bottom→top name / opacity / blend / visibility. Omitted for the degenerate
-  // single-layer document (it adds nothing over the flat bitmap, and keeps a plain
-  // non-layered save's provenance byte-for-byte as it was before layers).
-  if (Array.isArray(layers) && layers.length > 1) {
-    provenance.layers = layers.map((layer) => ({
-      name: layer.name,
-      opacity: layer.opacity,
-      blendMode: layer.blendMode,
-      visible: layer.visible,
-    }));
-  }
-  return provenance;
-}
-
-// Predefined crop ratios (width / height). Rotate swaps to the transpose; 1:1 and
-// Freeform are unaffected.
-const CROP_RATIOS = [
-  { key: "free", label: "Freeform", ratio: null },
-  { key: "1:1", label: "1:1", ratio: 1 },
-  { key: "3:4", label: "3:4", ratio: 3 / 4 },
-  { key: "5:7", label: "5:7", ratio: 5 / 7 },
-  { key: "8:10", label: "8:10", ratio: 8 / 10 },
-  { key: "16:9", label: "16:9", ratio: 16 / 9 },
-];
-
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-
-// Resolve a ratio key (+ rotate) to a concrete width/height ratio, or null for
-// freeform. Rotating transposes non-square ratios (3:4 → 4:3); 1:1 is a no-op.
-export function cropRatioForKey(key, rotated) {
-  const found = CROP_RATIOS.find((entry) => entry.key === key);
-  const base = found ? found.ratio : null;
-  if (base == null || base === 1) return base;
-  return rotated ? 1 / base : base;
-}
-
-// Largest rect of the given ratio that fits in the image, centered. Freeform
-// (null ratio) defaults to a centered 80% box. Returns image-pixel coords.
-export function centeredCropRect(imgW, imgH, ratio) {
-  if (ratio == null) {
-    const w = imgW * 0.8;
-    const h = imgH * 0.8;
-    return { x: (imgW - w) / 2, y: (imgH - h) / 2, width: w, height: h };
-  }
-  let w = imgW;
-  let h = w / ratio;
-  if (h > imgH) {
-    h = imgH;
-    w = h * ratio;
-  }
-  return { x: (imgW - w) / 2, y: (imgH - h) / 2, width: w, height: h };
-}
-
-// The four dim rectangles that mask everything outside the crop rect (image coords).
-function cropOverlayRects(imgW, imgH, rect) {
-  const right = rect.x + rect.width;
-  const bottom = rect.y + rect.height;
-  return [
-    { x: 0, y: 0, width: imgW, height: rect.y },
-    { x: 0, y: bottom, width: imgW, height: imgH - bottom },
-    { x: 0, y: rect.y, width: rect.x, height: rect.height },
-    { x: right, y: rect.y, width: imgW - right, height: rect.height },
-  ];
-}
-
-// ── Blank-canvas "New layout" (Workstream A, sc-6092) ────────────────────────
-// A from-scratch substrate for layout-from-nothing (Ideogram text-to-image). The
-// dimensions obey Ideogram's constraints: multiples of 16 within [256, 2048].
-export const BLANK_CANVAS_MIN = 256;
-export const BLANK_CANVAS_MAX = 2048;
-export const BLANK_CANVAS_SIZES = [512, 768, 1024, 1536, 2048];
-// A conservative cross-WebKit ceiling. WebKitGTK builds and GPU drivers vary in
-// their exact canvas allocation limit; keeping both the longest side and total
-// area bounded prevents the silent transparent-canvas failure seen above these
-// values while retaining the largest normal SceneWorks generation size.
-export const EDITOR_CANVAS_MAX_SIDE = 4096;
-export const EDITOR_CANVAS_MAX_AREA =
-  EDITOR_CANVAS_MAX_SIDE * EDITOR_CANVAS_MAX_SIDE;
-
-export function boundedEditorCanvasDimensions(width, height) {
-  const sourceWidth = Math.max(1, Math.round(Number(width) || 0));
-  const sourceHeight = Math.max(1, Math.round(Number(height) || 0));
-  const sideScale = Math.min(
-    1,
-    EDITOR_CANVAS_MAX_SIDE / sourceWidth,
-    EDITOR_CANVAS_MAX_SIDE / sourceHeight,
-  );
-  const areaScale = Math.min(
-    1,
-    Math.sqrt(EDITOR_CANVAS_MAX_AREA / (sourceWidth * sourceHeight)),
-  );
-  const scale = Math.min(sideScale, areaScale);
-  return {
-    width: Math.max(1, Math.floor(sourceWidth * scale)),
-    height: Math.max(1, Math.floor(sourceHeight * scale)),
-    scaled: scale < 1,
-    sourceWidth,
-    sourceHeight,
-  };
-}
-
-// Flatten the visible layer stack onto a fresh canvas at the document size (sc-6117). The layers'
-// images are already decoded, so this is synchronous; callers toBlob it (Save / Download / AI-op
-// source) or paint overlays on top first (the box-keyed edit). The shared composite behind every
-// editor export.
-//
-// Module-level and exported since sc-24111 so the alpha round-trip test can drive the REAL export
-// rather than a copy of it. It used to be a closure over `working`, which meant every assertion
-// about "the exported PNG still has its transparency" was an assertion about the test's own
-// reimplementation: switching this to `{ alpha: false }` or the encode below to `image/jpeg` left
-// the suite green. `documentRef` is the seam that lets a test supply a canvas that actually holds
-// pixels — jsdom's throws.
-export function compositeWorkingToCanvas(work, { documentRef = globalThis.document } = {}) {
-  const canvas = documentRef.createElement("canvas");
-  canvas.width = work.width;
-  canvas.height = work.height;
-  // No `{ alpha: false }` and no fill before the first `drawImage`: either one composites every
-  // transparent pixel onto black before the encode can see it.
-  compositeLayersToCanvas(canvas.getContext("2d"), work.layers, { visibleOnly: true });
-  return canvas;
-}
-
-// The working document as one PNG File. Behind BOTH Save (which imports it as a Library asset) and
-// Download (in its re-encoding mode), so this single `image/png` is what keeps an edited cut-out a
-// cut-out.
-export function workingToPngFile(work, filename, { documentRef = globalThis.document } = {}) {
-  return new Promise((resolve, reject) => {
-    if (!work) {
-      reject(new Error("No working image."));
-      return;
-    }
-    const canvas = compositeWorkingToCanvas(work, { documentRef });
-    const base = (work.source.name || "image").replace(/\.[^./\\]+$/, "");
-    const name = filename || `${base}.png`;
-    canvas.toBlob((blob) => {
-      canvas.width = 0;
-      canvas.height = 0;
-      if (!blob) {
-        reject(new Error("Could not encode the working image."));
-        return;
-      }
-      resolve(new File([blob], name, { type: "image/png" }));
-    }, "image/png");
-  });
-}
-
-// The shared desktop-dialog / browser-anchor save (sc-6554), under the editor's historical name.
-export const exportEditorFile = saveExportFile;
-
-// ── What Download will actually contain (sc-15954, epic 15945) ───────────────
-//
-// sc-15948 puts the sanitized recipe INSIDE every generated PNG. Every other way a file leaves
-// this app hands those bytes through unchanged, so the chunk survives for free. The editor was
-// the exception: `Download` always went through `canvas.toBlob`, which re-encodes the composite
-// and keeps nothing but pixels — so a user who opened a generated image, changed nothing, and
-// downloaded it got a file with the recipe silently gone.
-//
-// The decision recorded on sc-15954, in one sentence:
-//
-//   An untouched PNG downloads the file you opened, byte for byte. A changed document downloads a
-//   fresh PNG of what you see, with no recipe in it — and the header says which one you will get.
-//
-// # Why no `editedAfterGeneration` flag on the envelope
-//
-// The story's leaning was to re-embed the original envelope marked as provenance. Three reasons
-// not to, in order of weight.
-//
-// 1. The envelope's extension rule is "adding a field does not need a version bump: an older
-//    reader drops what it does not recognize" (docs/workflow-share-envelope.md). That rule holds
-//    for fields whose absence is benign, and inverts for this one: an older build drops the flag
-//    and then presents the envelope as a recipe that reproduces the image — the exact
-//    misstatement this epic exists to stop, shipped by construction. Making it safe needs a
-//    `schemaVersion` bump (which stops every older build reading every shared file, edited or
-//    not) or a new marker kind that older builds refuse as `UnsupportedKind`. Either is a
-//    contract change of the same size as the video lane, for a provenance note.
-// 2. "The recipe this came from" is not well defined here. The document composites N layers from
-//    N sources while `working.source` names one; an AI op replaces the base layer with the output
-//    of a DIFFERENT job with its own model, prompt and seed; a crop changes the content and the
-//    geometry.
-// 3. It would be a new prompt egress, not a preserved one. The prompt is in the file as authored;
-//    attaching it to a hand-edited composite the user believes is a fresh rasterization is a
-//    surprise in the privacy direction too.
-//
-// # Why the geometry in the last AC cannot lie
-//
-// Structurally, not by a check. The only branch that ships an envelope ships the ORIGINAL FILE,
-// so its `width`/`height` and its pixels are the same file's by definition. The branch that can
-// be a different size — `boundedEditorCanvasDimensions` downscaling on load, a crop, an outpaint
-// — is the branch that writes no envelope at all.
-//
-// # Why the untouched test is blob identity and not `dirty`
-//
-// `dirty` is not a statement about the bitmap: `runSave` clears it on a thoroughly edited
-// document, so "not dirty" would let an edited composite take the passthrough branch. `edits` is
-// not one either — layer transforms, opacity and blend changes never append to it. The one thing
-// that IS a statement about the bitmap is reference identity between the single layer's blob and
-// the blob the layer stack was installed from: every mutation the editor has (crop, colour grade,
-// AI write-back, added layer, transform) replaces or supplements that object. Undo restores the
-// same blob by reference (`snapshotLayers` shares it), so undoing back to the opened image
-// correctly re-enables the passthrough.
-//
-// # Who decides whether the source carries a recipe
-//
-// `POST /api/v1/workflows/inspect`, which runs the one reader
-// (`sceneworks_core::workflow_png::read_workflow_chunk`). Not a chunk walker in this app — see the
-// header of `editorSourceWorkflow.js` for the five files a second implementation got wrong. The
-// consequence for the plan is that the verdict is one of FOUR states and arrives late, so both
-// `pending` and `unknown` have to survive all the way to the pill rather than being flattened into
-// "no recipe" on the way.
-
-/// The desktop shell's export ceiling, mirrored from `MAX_EXPORT_BYTES` in
-/// `apps/desktop/src/settings.rs` and pinned to it by
-/// `the_desktop_export_ceiling_matches_the_editors_mirror_of_it`.
-///
-/// It has to be known HERE rather than discovered from the error, because the byte-exact
-/// passthrough is what can exceed it: before sc-15954 every editor download was a bounded canvas
-/// raster and this limit was unreachable, and afterwards an untouched 300 MB source would hand the
-/// shell 300 MB and get a hard "exceeds the 256 MB desktop limit" on a file that used to download
-/// fine. So the plan falls back to the raster for those — the pre-sc-15954 behaviour, which still
-/// works — and the pill says so BEFORE the click rather than the shell erroring after it. The
-/// browser path has no such ceiling (it writes through an object URL) and keeps the passthrough.
-export const MAX_DESKTOP_EXPORT_BYTES = 256 * 1024 * 1024;
-
-/// Whether a layer sits 1:1 over the document with nothing done to it.
-function layerIsUntouched(layer, working) {
-  const transform = layer.transform ?? identityTransform();
-  return (
-    layer.visible !== false &&
-    layer.opacity === 1 &&
-    (layer.blendMode || DEFAULT_BLEND_MODE) === DEFAULT_BLEND_MODE &&
-    transform.x === 0 &&
-    transform.y === 0 &&
-    transform.scaleX === 1 &&
-    transform.scaleY === 1 &&
-    transform.rotation === 0 &&
-    working.width === (layer.image?.naturalWidth ?? -1) &&
-    working.height === (layer.image?.naturalHeight ?? -1)
-  );
-}
-
-/// Why an untouched document is being rasterized anyway. Null when it is not.
-export const RASTER_REASON_EDITED = null;
-export const RASTER_REASON_DESKTOP_CAP = "desktop-export-cap";
-
-/// What `Download` will produce for this document. Pure, so the claim the header prints and the
-/// bytes the export writes are decided in ONE place and cannot drift.
-///
-/// * `mode: "original"` — hand the opened file through untouched.
-/// * `mode: "raster"` — flatten the layer stack to a new PNG, which carries no recipe ever.
-///   `reason` says why, since one of the two reasons is not "you edited it".
-///
-/// `sourceWorkflow` is the reader's verdict about the OPENED file, one of the four
-/// `SOURCE_WORKFLOW_*` states. It is a parameter and not a field on `working` because it resolves
-/// asynchronously and must not be baked into an undo snapshot: the pill, the export branch and the
-/// banner all read this one value, and `pending` / `unknown` reach all three intact.
-export function editorDownloadPlan(
-  working,
-  sourceWorkflow = SOURCE_WORKFLOW_UNKNOWN,
-  { desktop = isDesktop } = {},
-) {
-  const original = working?.source?.originalExport ?? null;
-  // With no `originalExport` the source is not a PNG this editor can hand back — a JPEG, a blank
-  // canvas, an AI result. None of those can carry an envelope, so the question is ANSWERED rather
-  // than open, and `absent` is the honest state instead of `unknown`.
-  const workflow = original ? sourceWorkflow : SOURCE_WORKFLOW_ABSENT;
-  const present = workflow === SOURCE_WORKFLOW_PRESENT;
-  const layers = working?.layers ?? [];
-  const untouched =
-    Boolean(original) &&
-    layers.length === 1 &&
-    layers[0].blob === original.installedBlob &&
-    layerIsUntouched(layers[0], working);
-  const overDesktopCap =
-    untouched && desktop && Number(original.blob?.size) > MAX_DESKTOP_EXPORT_BYTES;
-  if (untouched && !overDesktopCap) {
-    return {
-      mode: "original",
-      reason: RASTER_REASON_EDITED,
-      filename: original.filename,
-      workflow,
-      carriesWorkflow: present,
-      hadWorkflow: present,
-    };
-  }
-  return {
-    mode: "raster",
-    reason: overDesktopCap ? RASTER_REASON_DESKTOP_CAP : RASTER_REASON_EDITED,
-    filename: editedFilename(working?.source),
-    workflow,
-    carriesWorkflow: false,
-    hadWorkflow: present,
-  };
-}
-
-/// The sentence about RESOLUTION, for a source the editor resampled on load — or "" when it did
-/// not resample.
-///
-/// This exists because sc-15954 made the old banner false. `boundedEditorCanvasDimensions`
-/// downscales anything over `EDITOR_CANVAS_MAX_SIDE`, and the banner used to say the scaling was
-/// "for reliable WebKit editing and export" — true until the untouched branch started exporting
-/// the ORIGINAL file at its original size. One sentence, rendered in both places that talk about
-/// it (the canvas banner and the pill beside Download), so the two cannot say different things.
-export function downloadSizeSentence(plan, downscaled) {
-  if (!plan || !downscaled?.scaled) return "";
-  const source = `${downscaled.sourceWidth} × ${downscaled.sourceHeight}`;
-  const working = `${downscaled.width} × ${downscaled.height}`;
-  if (plan.mode === "original") {
-    return `Download saves the original file at ${source}, not the ${working} working copy on the canvas.`;
-  }
-  if (plan.reason === RASTER_REASON_DESKTOP_CAP) {
-    return `Download writes a new PNG at the ${working} working size, not the original ${source}.`;
-  }
-  return `This image has been edited, so Download writes a new PNG at the ${working} working size rather than the original ${source}.`;
-}
-
-/// The desktop-ceiling sentence, or "".
-function desktopCapSentence(plan) {
-  if (plan?.reason !== RASTER_REASON_DESKTOP_CAP) return "";
-  return (
-    `This file is larger than the ${Math.round(MAX_DESKTOP_EXPORT_BYTES / (1024 * 1024))} MB ` +
-    "the desktop save dialog accepts, so Download writes a new PNG of the working copy instead of " +
-    "handing the original file through."
-  );
-}
-
-function joinSentences(...parts) {
-  return parts.filter(Boolean).join(" ");
-}
-
-/// The line beside the Download button, or null when there is genuinely nothing to say — an
-/// ordinary-sized image the reader confirmed carries no recipe, which is most images in the world.
-///
-/// Every other combination gets a sentence, including the two that a first cut left silent:
-///
-/// * **`pending` / `unknown`** render rather than reading as "no recipe". A verdict that has not
-///   arrived, or one the reader could not produce, is a different fact from a verdict of "no", and
-///   collapsing the three is what let an over-ceiling export ship a recipe with no pill at all.
-/// * **A resampled source with no recipe** renders too, because sc-15954 changed which RESOLUTION
-///   the file downloads at and `hadWorkflow` has nothing to do with that.
-export function editorDownloadNote(plan, { downscaled = null } = {}) {
-  if (!plan) return null;
-  const size = downloadSizeSentence(plan, downscaled);
-  const cap = desktopCapSentence(plan);
-  if (plan.workflow === SOURCE_WORKFLOW_PRESENT) {
-    if (plan.mode === "original") {
-      return {
-        tone: "included",
-        label: "Recipe included",
-        detail: joinSentences(
-          "Nothing has been changed, so Download saves the file you opened byte for byte — " +
-            "including the SceneWorks recipe embedded in it.",
-          `To send a copy without the recipe, use “${SAVE_WITHOUT_WORKFLOW_LABEL}” on this image ` +
-            "in the Library — saving from the editor rasterizes, so it drops the recipe along " +
-            "with everything else the file carries.",
-          size,
-        ),
-      };
-    }
-    return {
-      tone: "dropped",
-      label: "Recipe not carried",
-      detail: joinSentences(
-        cap ||
-          "This image has been edited, so Download writes a new PNG of what you see. The " +
-            "SceneWorks recipe from the image you opened is not in it — it describes a run that " +
-            "did not produce these pixels.",
-        cap && "The SceneWorks recipe embedded in the original is not in it.",
-        size,
-      ),
-    };
-  }
-  if (plan.workflow === SOURCE_WORKFLOW_PENDING) {
-    return {
-      tone: "pending",
-      label: "Checking for a recipe…",
-      detail: joinSentences(
-        "SceneWorks is reading the file you opened to find out whether it carries an embedded " +
-          "recipe. Until that answers, what Download will contain is not yet known.",
-        size,
-      ),
-    };
-  }
-  if (plan.workflow === SOURCE_WORKFLOW_UNKNOWN) {
-    return {
-      tone: "unknown",
-      label: "Recipe unknown",
-      detail: joinSentences(
-        "SceneWorks could not read the file you opened, so whether it carries an embedded recipe " +
-          "is unknown — not that it has none.",
-        plan.mode === "original"
-          ? "Nothing has been changed, so Download saves the file byte for byte and anything in " +
-              "it travels."
-          : joinSentences(
-              cap ||
-                "This image has been edited, so Download writes a new PNG of what you see and " +
-                  "anything the original carried is not in it.",
-              cap && "Anything the original carried is not in it.",
-            ),
-        size,
-      ),
-    };
-  }
-  // `absent`: the reader walked the file and found nothing, so there is no recipe to speak about.
-  // What is left is what sc-15954 changed about the FILE ITSELF — which resolution it downloads
-  // at, and whether it is the original at all. Both are silent otherwise.
-  if (!size && !cap) return null;
-  return {
-    tone: "size",
-    label: cap
-      ? "Not the original file"
-      : plan.mode === "original"
-        ? "Original size"
-        : "Working size",
-    detail: joinSentences(cap, size),
-  };
-}
-
-// Snap a pixel dimension to a multiple of 16 within [256, 2048] (Ideogram limits).
-function snapCanvasDim(px) {
-  return clamp(Math.round(px / 16) * 16, BLANK_CANVAS_MIN, BLANK_CANVAS_MAX);
-}
-
-// Target W×H for a blank layout from an aspect preset + a long-side size. Both
-// dims are multiples of 16 in [256, 2048]. "match"/unknown aspect → square. Pure.
-export function blankCanvasDims(aspectKey, longSide) {
-  const ratio = editOutputAspectRatio(aspectKey) ?? 1;
-  let width;
-  let height;
-  if (ratio >= 1) {
-    width = longSide;
-    height = longSide / ratio;
-  } else {
-    height = longSide;
-    width = longSide * ratio;
-  }
-  return { width: snapCanvasDim(width), height: snapCanvasDim(height) };
-}
-
-// Decode a blob into an HTMLImageElement via a same-origin object: URL. Asset
-// files are served cross-origin from the API in local dev, so loading the bytes
-// this way (rather than an <img crossOrigin> against the file URL) guarantees the
-// Konva canvas is never tainted — later crop/export (sc-2430/sc-2434) need to read
-// pixels back. Resolves { image, objectUrl }; caller owns revoking objectUrl.
-
-function colorKeyMaskCanvasForImage(image, seed, options) {
-  const canvas = document.createElement("canvas");
-  canvas.width = image.naturalWidth;
-  canvas.height = image.naturalHeight;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(image, 0, 0);
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  imageData.data.set(colorKeySelectionMaskRgba(imageData.data, canvas.width, canvas.height, { ...options, ...seed }));
-  ctx.putImageData(imageData, 0, 0);
-  return canvas;
-}
-
-function maskCutoutCanvasForImage(image, maskCanvas, keepSelected) {
-  const canvas = document.createElement("canvas");
-  canvas.width = image.naturalWidth;
-  canvas.height = image.naturalHeight;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(image, 0, 0);
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const mask = maskCanvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
-  imageData.data.set(applyMaskSelectionToRgba(imageData.data, maskAlphaFromRgba(mask.data), keepSelected));
-  ctx.putImageData(imageData, 0, 0);
-  return canvas;
-}
-
-function canvasToPngBlob(canvas) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Could not encode the cutout."))), "image/png");
-  });
-}
-
-// Decode an editor source and, only when it exceeds the conservative WebKit
-// canvas ceiling, rasterize it directly into a bounded surface before any Konva
-// or export canvas is allocated. The caller owns the returned object URL.
-async function blobToEditorImage(blob, options) {
-  const decoded = await blobToImage(blob, options);
-  const dimensions = boundedEditorCanvasDimensions(
-    decoded.image.naturalWidth,
-    decoded.image.naturalHeight,
-  );
-  if (!dimensions.scaled) {
-    return { ...decoded, blob, downscaled: null };
-  }
-
-  const canvas = document.createElement("canvas");
-  canvas.width = dimensions.width;
-  canvas.height = dimensions.height;
-  let resizedBlob;
-  try {
-    const context = canvas.getContext("2d");
-    if (!context) {
-      throw new Error("Could not create a 2D editor canvas.");
-    }
-    context.drawImage(
-      decoded.image,
-      0,
-      0,
-      dimensions.width,
-      dimensions.height,
-    );
-    resizedBlob = await new Promise((resolve) =>
-      canvas.toBlob(resolve, "image/png"),
-    );
-  } finally {
-    URL.revokeObjectURL(decoded.objectUrl);
-    canvas.width = 0;
-    canvas.height = 0;
-  }
-  if (!resizedBlob) {
-    throw new Error("Could not prepare this large image for the editor.");
-  }
-  const resized = await blobToImage(resizedBlob, options);
-  return {
-    ...resized,
-    blob: resizedBlob,
-    downscaled: dimensions,
-  };
-}
-
-// ── Undo/redo history (sc-6106) ────────────────────────────────────────────
-// A bounded, backend-free history over opaque working-image snapshots. The
-// reducer is pure — it only shuffles snapshots between the past (undo) and future
-// (redo) stacks; the caller owns capturing a snapshot (the working bitmap blob +
-// box/provenance overlay state) and restoring one (decode + install). Snapshots
-// hold a Blob, never a live object URL, so an evicted snapshot is plain garbage —
-// there is nothing to revoke, which keeps the "no leak of evicted snapshots"
-// guarantee trivial. The stack depth is bounded so retained bitmaps stay capped.
-export const HISTORY_LIMIT = 30;
-
-export function emptyHistory() {
-  return { past: [], future: [] };
-}
-
-// Push the current snapshot onto the undo stack and drop the redo stack. Call at
-// the START of an operation, before the working state mutates, with a snapshot of
-// the pre-operation state. Bounded to the `limit` most-recent entries.
-export function historyCheckpoint(history, snapshot, limit = HISTORY_LIMIT) {
-  return { past: [...history.past, snapshot].slice(-limit), future: [] };
-}
-
-// Step back one operation. `present` is the current on-screen snapshot, captured
-// fresh by the caller so a later redo restores exactly what is on screen now.
-// Returns the next history plus the snapshot to restore (`restore` is null when
-// there is nothing to undo, in which case `history` is returned unchanged).
-export function historyUndo(history, present, limit = HISTORY_LIMIT) {
-  if (!history.past.length) return { history, restore: null };
-  const restore = history.past[history.past.length - 1];
-  return {
-    history: { past: history.past.slice(0, -1), future: [present, ...history.future].slice(0, limit) },
-    restore,
-  };
-}
-
-// Step forward one operation, symmetric to historyUndo.
-export function historyRedo(history, present, limit = HISTORY_LIMIT) {
-  if (!history.future.length) return { history, restore: null };
-  const [restore, ...rest] = history.future;
-  return {
-    history: { past: [...history.past, present].slice(-limit), future: rest },
-    restore,
-  };
-}
-
-export const canUndo = (history) => history.past.length > 0;
-export const canRedo = (history) => history.future.length > 0;
-
-// Serialize a single undo/redo step so a rapid second invocation can't race a
-// restore that is still in flight (sc-8852). Restoring is async — each changed
-// layer is decoded via `blobToImage` before the working stack is re-installed —
-// so without a guard a key-repeat Cmd-Z would run `step()` again while the first
-// restore is mid-flight, capturing the STALE working state as "present" and
-// pushing a duplicate onto the redo (`future`) branch. Both undo AND redo route
-// through here and share one `guardRef`: while a restore is in flight, any
-// further undo/redo is ignored (the finding's simplest fix — holding Cmd-Z steps
-// back predictably rather than dropping-then-jumping). The guard is set BEFORE
-// the reducer step runs and cleared in a `finally`, so a mid-restore error can't
-// wedge undo/redo forever. Returns true when a step actually ran.
-//   - guardRef:     a mutable ref-like `{ current: boolean }` shared by undo/redo.
-//   - step:         () => ({ history, restore }) — the pure reducer step, called
-//                   only once we hold the guard, capturing the live "present".
-//   - commitHistory:(nextHistory) => void — install the new history + sync flags.
-//   - restore:      async (snapshot) => void — the async snapshot re-install.
-export async function runGuardedRestore({ guardRef, step, commitHistory, restore }) {
-  if (guardRef.current) return false;
-  guardRef.current = true;
-  try {
-    const { history: next, restore: target } = step();
-    if (!target) return false;
-    commitHistory(next);
-    await restore(target);
-    return true;
-  } finally {
-    guardRef.current = false;
-  }
-}
-
-// Revoke the object URLs of a set of live layers (sc-6117). Undo snapshots hold
-// only blobs (no URLs), so the only URLs that ever need revoking are the live
-// ones, when their layer is evicted — on delete, on a session replace, and on
-// unmount. Tolerant of null/missing URLs so callers don't have to guard.
-function revokeLayerUrls(layers) {
-  for (const layer of layers ?? []) {
-    if (layer?.objectUrl) URL.revokeObjectURL(layer.objectUrl);
-  }
-}
-
-// Wait for every layer so successful decodes remain owned even if another fails.
-export async function collectCropLayers(layers, decode, isCurrent) {
-  const results = await Promise.allSettled(layers.map(decode));
-  const cropped = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
-  const failure = results.find((result) => result.status === "rejected");
-  if (failure || !isCurrent()) {
-    revokeLayerUrls(cropped);
-    if (failure && isCurrent()) throw failure.reason;
-    return null;
-  }
-  return cropped;
-}
 
 export function ImageEditor() {
   useMediaTicket();
@@ -1285,7 +261,7 @@ export function ImageEditor() {
   const launchGuardRef = useRef(null);
   if (!launchGuardRef.current) launchGuardRef.current = createEditorLaunchGuard();
   const editorLaunchRef = useRef(editorLaunch);
-  editorLaunchRef.current = editorLaunch;
+  useInsertionEffect(() => { editorLaunchRef.current = editorLaunch; }, [editorLaunch]);
   const editorMountedRef = useRef(true);
   useEffect(() => {
     editorMountedRef.current = true;
@@ -1308,9 +284,6 @@ export function ImageEditor() {
   }, []);
   const [accCollapsed, setAccCollapsed] = useState(false);
   const [layersOpen, setLayersOpen] = useState(true);
-  // One undo checkpoint per opacity DRAG: the first change of
-  // a gesture snapshots; subsequent ticks coalesce until pointer-up resets it.
-  const layerOpacityGestureRef = useRef(false);
 
   // Crop tool (sc-2430): client-side, rasterized into a new working image on Apply.
   const [tool, setTool] = useState("move");
@@ -1328,8 +301,6 @@ export function ImageEditor() {
   // Straighten (sc-10255): degrees the image is rotated before the axis-aligned crop
   // is rasterized on Apply (−15..15). 0 = no rotation (identical to the plain crop).
   const [straighten, setStraighten] = useState(0);
-  // One undo checkpoint per Transform slider DRAG (mirrors the opacity gesture).
-  const transformGestureRef = useRef(false);
 
   // Upscale tool (sc-2433): engine + factor for the in-flight request.
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
@@ -1548,7 +519,7 @@ export function ImageEditor() {
   // for the bar's "Saved" hint. A fresh open clears all three.
   const [dirty, setDirty] = useState(false);
   const [edits, setEdits] = useState([]);
-  const [saving, setSaving] = useState(false);
+
   const [savedAssetId, setSavedAssetId] = useState(null);
   // An in-flight AI op (upscale now; AI-edit / detail later) on the working image.
   // The seam (sc-2432): stage the working bitmap as a scratch asset, run a worker
@@ -1566,17 +537,6 @@ export function ImageEditor() {
   const layerTransformerRef = useRef(null); // Konva transformer bound to the active layer (sc-6120)
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
 
-  // Undo/redo (sc-6106): a bounded snapshot history over the working-image session.
-  // The stacks live in a ref for synchronous reads inside the commit handlers; the
-  // can-undo/redo flags are mirrored into state so the toolbar buttons re-render.
-  const historyRef = useRef(emptyHistory());
-  // Serializes undo/redo (sc-8852): a restore is async (it decodes changed layers
-  // via blobToImage before re-installing the stack), so a rapid second Cmd-Z would
-  // otherwise race the in-flight restore and corrupt the redo branch. Shared by
-  // both undo() and redo() via runGuardedRestore — set while restoring, cleared in
-  // a finally so a mid-restore error can't wedge history forever.
-  const isRestoringRef = useRef(false);
-  const [historyFlags, setHistoryFlags] = useState({ canUndo: false, canRedo: false });
   // Live mirror of the working document for synchronous reads inside the commit
   // handlers (a checkpoint captures the pre-operation stack; restore reuses the
   // live decoded images for unchanged layers and revokes the URLs it drops).
@@ -1897,171 +857,34 @@ export function ImageEditor() {
     [resetEditorOverlays],
   );
 
-  // ── Undo/redo plumbing (sc-6106, extended to the layer stack sc-6117) ──────
-  // A snapshot is the layer stack (each layer as metadata + its shared blob, no
-  // live image/URL) plus the overlay/provenance state that a re-install would
-  // otherwise reset (boxes, edit chain, dirty flag). Blobs are shared by reference
-  // across snapshots, so retained bitmaps stay bounded like the single-bitmap days.
-  const captureSnapshot = useCallback(() => {
-    const work = workingRef.current;
-    return {
-      layers: snapshotLayers(work?.layers),
-      activeLayerId: work?.activeLayerId ?? null,
-      width: work?.width ?? 0,
-      height: work?.height ?? 0,
-      source: work?.source ?? null,
-      layerIdSeq: layerIdRef.current,
-      edits: editsRef.current,
-      dirty: dirtyRef.current,
-      savedAssetId: savedAssetIdRef.current,
-      boxes: boxesRef.current,
-      boxColor: boxColorRef.current,
-      boxIdSeq: boxIdRef.current,
-    };
-    // boxesRef / boxColorRef / boxIdRef are stable refs (from useBoxesTool); empty deps
-    // preserve the pre-extraction behavior (a checkpoint reads them live, sc-9752).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const syncHistoryFlags = useCallback(() => {
-    setHistoryFlags({ canUndo: canUndo(historyRef.current), canRedo: canRedo(historyRef.current) });
-  }, []);
-
-  // Record a step: push the pre-operation snapshot onto the undo stack. Call this
-  // BEFORE the working state mutates (crop/color/AI result, layer op, or a box change).
-  const checkpoint = useCallback(() => {
-    if (!workingRef.current) return;
-    historyRef.current = historyCheckpoint(historyRef.current, captureSnapshot());
-    syncHistoryFlags();
-  }, [captureSnapshot, syncHistoryFlags]);
-  // Keep the tool hooks' bridge pointed at the latest checkpoint (sc-9752).
-  checkpointRef.current = checkpoint;
-
-  // Start a fresh history for a newly opened session (clears both stacks).
-  const resetHistory = useCallback(() => {
-    historyRef.current = emptyHistory();
-    syncHistoryFlags();
-  }, [syncHistoryFlags]);
-
-  // Re-apply a snapshot's overlay/provenance state, keeping the live mirrors in
-  // sync immediately so an undo→undo chain reads the right "present" each step.
-  const applyHistoryAux = useCallback((snap) => {
-    setEdits(snap.edits);
-    editsRef.current = snap.edits;
-    setDirty(snap.dirty);
-    dirtyRef.current = snap.dirty;
-    setSavedAssetId(snap.savedAssetId);
-    savedAssetIdRef.current = snap.savedAssetId;
-    setBoxes(snap.boxes);
-    boxesRef.current = snap.boxes;
-    setBoxColor(snap.boxColor);
-    boxColorRef.current = snap.boxColor;
-    setSelectedBoxId(null);
-    boxIdRef.current = snap.boxIdSeq;
-    // Restore the layer-id counter so a layer added after this undo can't recycle
-    // an id that a redo would bring back (mirrors boxIdSeq).
-    if (typeof snap.layerIdSeq === "number") layerIdRef.current = snap.layerIdSeq;
-    // The box setters + refs come from useBoxesTool but are stable (useState setters +
-    // useRefs); empty deps preserve the pre-extraction behavior (sc-9752).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const restoreSnapshot = useCallback(
-    async (snap) => {
-      if (!snap) return;
-      try {
-        const live = workingRef.current;
-        // Overlay-only steps (box edits) keep the stack pixel- and metadata-identical
-        // → skip the rebuild, the decode, and the view refit; only a bitmap/structure
-        // change (crop/color/AI/layer op) re-installs the stack.
-        const stackChanged =
-          !live ||
-          !sameLayerStack(live.layers, snap.layers) ||
-          live.activeLayerId !== snap.activeLayerId ||
-          live.width !== snap.width ||
-          live.height !== snap.height;
-        if (stackChanged) {
-          // Rebuild the live stack from the snapshot: reuse a live layer's decoded
-          // image when its blob is unchanged (decode ONLY changed/new layers), and
-          // revoke the object URLs of live layers the restore drops.
-          const liveById = new Map((live?.layers ?? []).map((layer) => [layer.id, layer]));
-          const reused = new Set();
-          const layers = [];
-          for (const sl of snap.layers) {
-            const prev = liveById.get(sl.id);
-            if (prev && prev.blob === sl.blob && prev.image) {
-              reused.add(sl.id);
-              layers.push({
-                ...prev,
-                name: sl.name,
-                visible: sl.visible,
-                opacity: sl.opacity,
-                blendMode: sl.blendMode,
-                transform: { ...sl.transform },
-              });
-            } else {
-              const { image, objectUrl } = await blobToImage(sl.blob);
-              layers.push(createLayer({ ...sl, image, objectUrl }));
-            }
-          }
-          for (const layer of live?.layers ?? []) {
-            if (!reused.has(layer.id) && layer.objectUrl) URL.revokeObjectURL(layer.objectUrl);
-          }
-          // A true PIXEL change = dims changed, a layer added/removed, or a layer's
-          // blob differs. Metadata-only undos (opacity / visibility / blend / transform
-          // / reorder — same id→blob set, same dims) keep the current tool, mask, boxes
-          // and view; only a pixel change resets the per-bitmap overlays + refits.
-          const dimsChanged = !live || live.width !== snap.width || live.height !== snap.height;
-          const liveBlobs = new Map((live?.layers ?? []).map((layer) => [layer.id, layer.blob]));
-          const bitmapChanged =
-            dimsChanged ||
-            liveBlobs.size !== snap.layers.length ||
-            snap.layers.some((sl) => liveBlobs.get(sl.id) !== sl.blob);
-          if (bitmapChanged) resetEditorOverlays();
-          if (dimsChanged) needsFitRef.current = true;
-          const nextWorking = {
-            width: snap.width,
-            height: snap.height,
-            source: snap.source,
-            layers,
-            activeLayerId: snap.activeLayerId,
-          };
-          workingRef.current = nextWorking;
-          setWorking(nextWorking);
-        }
-        applyHistoryAux(snap);
-      } catch (err) {
-        setStatus({ loading: false, error: err.message || "Could not restore that step." });
-      }
-    },
-    [resetEditorOverlays, applyHistoryAux],
-  );
-
-  const undo = useCallback(async () => {
-    if (aiOpRef.current || !workingRef.current) return;
-    await runGuardedRestore({
-      guardRef: isRestoringRef,
-      step: () => historyUndo(historyRef.current, captureSnapshot()),
-      commitHistory: (next) => {
-        historyRef.current = next;
-        syncHistoryFlags();
-      },
-      restore: restoreSnapshot,
-    });
-  }, [captureSnapshot, restoreSnapshot, syncHistoryFlags]);
-
-  const redo = useCallback(async () => {
-    if (aiOpRef.current || !workingRef.current) return;
-    await runGuardedRestore({
-      guardRef: isRestoringRef,
-      step: () => historyRedo(historyRef.current, captureSnapshot()),
-      commitHistory: (next) => {
-        historyRef.current = next;
-        syncHistoryFlags();
-      },
-      restore: restoreSnapshot,
-    });
-  }, [captureSnapshot, restoreSnapshot, syncHistoryFlags]);
+  const {
+    historyFlags,
+    checkpoint,
+    resetHistory,
+    undo,
+    redo
+  } = useEditorHistory({
+    workingRef,
+  layerIdRef,
+  editsRef,
+  dirtyRef,
+  savedAssetIdRef,
+  boxesRef,
+  boxColorRef,
+  boxIdRef,
+  checkpointRef,
+  setEdits,
+  setDirty,
+  setSavedAssetId,
+  setBoxes,
+  setBoxColor,
+  setSelectedBoxId,
+  resetEditorOverlays,
+  needsFitRef,
+  setWorking,
+  setStatus,
+  aiOpRef
+  });
 
   // ── Keyboard shortcuts (sc-6111) ───────────────────────────────────────────
   // One editor-scoped window keydown handler. Held behind a ref so the listener is
@@ -2072,12 +895,12 @@ export function ImageEditor() {
   // modified combos we own; the rest are single keys that mirror the toolbar and the
   // zoom bar. `?` toggles the quick reference and works before an image is open.
   const onEditorKeyDownRef = useRef(null);
-  onEditorKeyDownRef.current = (event) => {
+  const onEditorKeyDown = (event) => {
     // Under selective keep-alive (sc-11959) this editor stays mounted and this window
     // listener stays subscribed even when another view is foregrounded, so gate every
     // shortcut on the active flag — a backgrounded editor must never undo/redo, delete a
     // box, switch tools, or toggle the reference in response to keys meant for the visible
-    // screen (sc-13589). The handler is reassigned each render, so `screenActive` is fresh.
+    // screen (sc-13589). The handler is refreshed after each commit, so `screenActive` is current.
     if (!screenActive) return;
     const tag = event.target?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.target?.isContentEditable) return;
@@ -2159,6 +982,8 @@ export function ImageEditor() {
     else if (key === "e") setTool("edit");
     else if (key === "b") selectBoxTool();
   };
+
+  useInsertionEffect(() => { onEditorKeyDownRef.current = onEditorKeyDown; }, [onEditorKeyDown]);
 
   useEffect(() => {
     const handler = (event) => onEditorKeyDownRef.current?.(event);
@@ -2491,7 +1316,7 @@ export function ImageEditor() {
     setWorking((cur) => replaceLayerBitmap(cur, id, { image, objectUrl, blob }));
   }, []);
   // Keep the color-grade hook's bridge pointed at the latest replaceLayerImage (sc-9752).
-  replaceLayerImageRef.current = replaceLayerImage;
+  useInsertionEffect(() => { replaceLayerImageRef.current = replaceLayerImage; }, [replaceLayerImage]);
 
   // Commit the currently refined color-key or SAM3 mask to its originating
   // active layer only. The mask is
@@ -2642,175 +1467,35 @@ export function ImageEditor() {
     transformer.getLayer()?.batchDraw();
   }, [tool, working]);
 
-  // ── Layer stack ops (sc-6118) ─────────────────────────────────────────────
-  // Wire the layers panel to the pure layer-stack ops (../imageLayers.js). Each
-  // mutating op checkpoints first (sc-6106 → undoable) and marks the session dirty.
-  // Structural ops manage object URLs: delete revokes the evicted layer's URL;
-  // add/duplicate decode a fresh blob into the new layer's own image + URL.
-  function selectLayer(id) {
-    setWorking((prev) => (prev ? setActiveLayer(prev, id) : prev));
-  }
-
-  function toggleLayerVisible(id) {
-    if (!workingRef.current) return;
-    checkpoint();
-    setWorking((prev) => {
-      const layer = layerById(prev, id);
-      return layer ? setLayerProps(prev, id, { visible: !layer.visible }) : prev;
-    });
-    setDirty(true);
-  }
-
-  // One undo step per opacity DRAG: the panel flags the first change of a gesture
-  // (`isGestureStart`) → checkpoint once, then the rest of the drag just updates.
-  function changeLayerOpacity(id, opacity, isGestureStart) {
-    if (!workingRef.current) return;
-    if (isGestureStart) checkpoint();
-    setWorking((prev) => setLayerProps(prev, id, { opacity }));
-    setDirty(true);
-  }
-
-  function renameLayer(id, name) {
-    const work = workingRef.current;
-    const layer = work && layerById(work, id);
-    if (!layer || layer.name === name) return;
-    checkpoint();
-    setWorking((prev) => setLayerProps(prev, id, { name }));
-    setDirty(true);
-  }
-
-  function reorderLayer(id, toIndex) {
-    if (!workingRef.current) return;
-    checkpoint();
-    setWorking((prev) => moveLayer(prev, id, toIndex));
-    setDirty(true);
-  }
-
-  function deleteLayer(id) {
-    const work = workingRef.current;
-    if (!work || work.layers.length <= 1) return;
-    checkpoint();
-    const { working: next, removed } = removeLayer(work, id);
-    if (!removed) return;
-    setWorking(next);
-    if (removed.objectUrl) URL.revokeObjectURL(removed.objectUrl);
-    setDirty(true);
-  }
-
-  async function duplicateLayerById(id) {
-    const work = workingRef.current;
-    const src = work && layerById(work, id);
-    if (!src) return;
-    const { image, objectUrl } = await blobToImage(src.blob);
-    checkpoint();
-    setWorking((prev) => duplicateLayer(prev, id, { id: nextLayerId(), image, objectUrl }));
-    setDirty(true);
-  }
-
-  async function addBlankLayer() {
-    const work = workingRef.current;
-    if (!work) return;
-    // A new transparent layer at the document size — a fresh surface above the
-    // active layer. The tools begin targeting it with the sc-6119 per-layer matrix.
-    const canvas = document.createElement("canvas");
-    canvas.width = work.width;
-    canvas.height = work.height;
-    let blob;
-    try {
-      blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-    } finally {
-      canvas.width = 0;
-      canvas.height = 0;
-    }
-    if (!blob) {
-      setStatus({ loading: false, error: "Could not create the layer." });
-      return;
-    }
-    const { image, objectUrl } = await blobToImage(blob);
-    checkpoint();
-    setWorking((prev) =>
-      addLayer(
-        prev,
-        createLayer({ id: nextLayerId(), name: `Layer ${prev.layers.length + 1}`, image, objectUrl, blob }),
-      ),
-    );
-    setDirty(true);
-  }
-
-  // Per-layer blend mode (sc-6120): metadata only — the layer's <KonvaImage> node +
-  // the flatten compositor both apply it via globalCompositeOperation.
-  function setLayerBlend(id, blendMode) {
-    if (!workingRef.current) return;
-    checkpoint();
-    setWorking((prev) => setLayerProps(prev, id, { blendMode }));
-    setDirty(true);
-  }
-
-  // ── Per-layer transform (sc-6120) ─────────────────────────────────────────
-  // The Transform tool binds a Konva Transformer to the ACTIVE layer's node. The
-  // node renders from `layer.transform` (x/y/scale/rotation); on drag/transform end
-  // we read the node back into the layer's transform metadata. The bitmap is never
-  // resampled — the transform is baked only at flatten time (compositeLayersToCanvas
-  // already honors it, matching the live node 1:1).
-  function startTransform() {
-    if (working) setTool("transform");
-  }
-
-  function commitActiveLayerTransform() {
-    const node = imageNodeRef.current;
-    const layer = activeLayerOf(workingRef.current);
-    if (!node || !layer) return;
-    const transform = {
-      x: node.x(),
-      y: node.y(),
-      scaleX: node.scaleX(),
-      scaleY: node.scaleY(),
-      rotation: node.rotation(),
-    };
-    checkpoint();
-    setWorking((prev) => setLayerProps(prev, layer.id, { transform }));
-    setDirty(true);
-  }
-
-  function resetActiveLayerTransform() {
-    const layer = activeLayerOf(workingRef.current);
-    if (!layer) return;
-    checkpoint();
-    setWorking((prev) => setLayerProps(prev, layer.id, { transform: identityTransform() }));
-    setDirty(true);
-  }
-
-  // Numeric Transform controls (sc-10255): merge a patch into the active layer's
-  // transform. Bound two-way to the same {x,y,scaleX,scaleY,rotation} the canvas
-  // handles drive, so typing/sliding moves the layer and dragging updates the fields.
-  // `gestureStart` gates the undo checkpoint so a slider drag is one step, not many.
-  function setActiveTransform(patch, { gestureStart = true } = {}) {
-    const layer = activeLayerOf(workingRef.current);
-    if (!layer) return;
-    if (gestureStart) checkpoint();
-    setWorking((prev) => setLayerProps(prev, layer.id, { transform: { ...layer.transform, ...patch } }));
-    setDirty(true);
-  }
-  const onTransformSlider = (patch) => {
-    const start = !transformGestureRef.current;
-    transformGestureRef.current = true;
-    setActiveTransform(patch, { gestureStart: start });
-  };
-  const endTransformGesture = () => {
-    transformGestureRef.current = false;
-  };
-  function flipActiveLayer(axis) {
-    const layer = activeLayerOf(workingRef.current);
-    if (!layer) return;
-    const t = layer.transform;
-    // Flip in place: negate the axis scale AND shift the origin by the scaled extent so
-    // the layer keeps its local bounding box instead of mirroring off its top-left pivot.
-    const patch =
-      axis === "h"
-        ? { scaleX: -t.scaleX, x: t.x + (layer.image?.naturalWidth ?? 0) * t.scaleX }
-        : { scaleY: -t.scaleY, y: t.y + (layer.image?.naturalHeight ?? 0) * t.scaleY };
-    setActiveTransform(patch);
-  }
+  const {
+    layerOpacityGestureRef,
+    selectLayer,
+    toggleLayerVisible,
+    changeLayerOpacity,
+    renameLayer,
+    reorderLayer,
+    deleteLayer,
+    duplicateLayerById,
+    addBlankLayer,
+    setLayerBlend,
+    startTransform,
+    commitActiveLayerTransform,
+    resetActiveLayerTransform,
+    setActiveTransform,
+    onTransformSlider,
+    endTransformGesture,
+    flipActiveLayer
+  } = useLayerOps({
+    setWorking,
+  workingRef,
+  checkpoint,
+  setDirty,
+  nextLayerId,
+  setStatus,
+  working,
+  setTool,
+  imageNodeRef
+  });
 
   // The module-level `compositeWorkingToCanvas`, bound to the current document. Kept as a thin
   // wrapper so the many call sites below read unchanged while the flatten itself is exported and
@@ -2913,7 +1598,7 @@ export function ImageEditor() {
       y: clamp((pointer.y - view.y) / view.scale, 0, working.height),
     };
   }
-  stagePointToImageRef.current = stagePointToImage;
+  useInsertionEffect(() => { stagePointToImageRef.current = stagePointToImage; }, [stagePointToImage]);
 
   // SAM3 receives a scratch image of the active layer, not the composited
   // document. Convert the visible-stage drag through that layer's transform so
@@ -2953,436 +1638,89 @@ export function ImageEditor() {
     setColorKeyLayerId(layer.id);
   }
 
-  // ── AI ops on the working image (sc-2432 seam) ────────────────────────────
-  // Flatten the composited document to a PNG File. `filename` overrides the name
-  // (Save/Download use the "-edited" name; the AI-op scratch upload doesn't care).
-  const workingImageToFile = useCallback(
-    (filename) => workingToPngFile(working, filename),
-    [working],
-  );
+  const {
+    workingImageToFile,
+    runAiOp,
+    runUpscale,
+    runDetail,
+    runEdit
+  } = useEditorAiOps({
+    working,
+  aiOp,
+  activeProject,
+  confirmFlatten,
+  setStatus,
+  confirmWorkflowEmbeddingBeforeGeneration,
+  mountedRef,
+  activeLayerToFile,
+  importAsset,
+  purgeAsset,
+  token,
+  trackEditorScratchOp,
+  setAiOp,
+  setTool,
+  runAiOpRef,
+  upscaleEngine,
+  irisPlanStatus,
+  irisRestore,
+  requestedGpu,
+  upscaleFactor,
+  upscaleSoftness,
+  detailModel,
+  detailStrength,
+  detailCnScale,
+  mossEdit,
+  editPrompt,
+  mossEditSettings,
+  editModel,
+  editLoraRequiredMissing,
+  mossEditReady,
+  mossEditError,
+  editFitMode,
+  canMask,
+  editAspect,
+  maskLines,
+  maskBaseImage,
+  rasterizeMaskToFile,
+  editTransparent,
+  selectedEditModel,
+  multiRefCapable,
+  refAssetIds,
+  maxEditReferences,
+  editSeed,
+  editLoraSelection,
+  managedEditLoraId,
+  editLora,
+  editGuidance,
+  mossImageEdit,
+  jobs,
+  setNativeEditResults,
+  checkpoint,
+  workingRef,
+  replaceLayerImage,
+  installWorkingImage,
+  setEdits,
+  setDirty,
+  releaseEditorScratchOp
+  });
 
-  // Stage the working image as a scratch asset, start a worker job against it, and
-  // track it. The watcher below loads the result back and purges scratch + result —
-  // intermediates never persist; only Save (sc-2434) lands a Library asset.
-  const runAiOp = useCallback(
-    async ({
-      buildBody,
-      label,
-      edit,
-      endpoint = JOB_PATHS.generic,
-      maskFile = null,
-      sourceFile = null,
-      onComplete = null,
-      // The tool-interaction matrix (sc-6119): "activeLayer" ops stage the active
-      // layer and write the result back to it (dims unchanged); "composite" ops
-      // stage the flattened document and the result becomes a single new base layer.
-      layerSource = "activeLayer",
-    }) => {
-      if (!working || aiOp || !activeProject) return false;
-      // A composite-source writeback flattens the stack. Read-only consumers such
-      // as Smart Select may stage the composite without changing the document.
-      if (layerSource === "composite" && !onComplete && !(await confirmFlatten())) return false;
-      setStatus({ loading: false, error: "" });
-      const targetLayerId = activeLayerOf(working)?.id ?? null;
-      // Stage the source (and, for a masked edit, the mask) as scratch assets. An
-      // explicit sourceFile (e.g. the box-baked pass-through, sc-6093) wins; else
-      // stage the composite (flatten ops) or just the active layer (active-layer ops).
-      let scratch;
-      let maskScratch = null;
-      try {
-        // Share the durable recipe choice while retaining this scratch job's
-        // original transport and cleanup (no deferred library-retry callback).
-        if (endpoint === JOB_PATHS.image) {
-          if ((await confirmWorkflowEmbeddingBeforeGeneration()) === false || !mountedRef.current) return false;
-        }
-        const staged =
-          sourceFile ?? (layerSource === "composite" ? await workingImageToFile() : await activeLayerToFile());
-        scratch = await importAsset(staged, { throwOnError: true });
-        if (maskFile) maskScratch = await importAsset(maskFile, { throwOnError: true });
-      } catch (err) {
-        if (scratch) purgeAsset(scratch).catch(() => {});
-        setStatus({ loading: false, error: `Could not stage image: ${err.message || err}` });
-        return false;
-      }
-      try {
-        const job = await submitJobRequest(endpoint, token, {
-          method: "POST",
-          body: JSON.stringify(buildBody(scratch, maskScratch)),
-        });
-        if (!job?.id) throw new Error("The job was not created.");
-        // Register the scratch op with App so its scratch/mask (and later result) assets
-        // are purged even if the user navigates away mid-job and this editor unmounts
-        // before the completion watcher below runs (sc-8850).
-        trackEditorScratchOp?.(job.id, [scratch, maskScratch]);
-        setAiOp({
-          jobId: job.id,
-          scratch,
-          maskScratch,
-          source: working.source,
-          label,
-          edit,
-          onComplete,
-          // How the watcher writes the result back: active-layer ops replace the
-          // target layer's bitmap; composite ops flatten the stack to one layer.
-          writeBack: onComplete ? null : layerSource === "composite" ? "document" : "activeLayer",
-          targetLayerId,
-        });
-        setTool("move");
-        return true;
-      } catch (err) {
-        purgeAsset(scratch).catch(() => {});
-        if (maskScratch) purgeAsset(maskScratch).catch(() => {});
-        setStatus({ loading: false, error: `Could not start ${label}: ${err.message || err}` });
-        return false;
-      }
-    },
-    [working, aiOp, activeProject, workingImageToFile, activeLayerToFile, confirmFlatten, importAsset, confirmWorkflowEmbeddingBeforeGeneration, token, purgeAsset, trackEditorScratchOp],
-  );
-  // Keep the mask hook's bridge pointed at the latest runAiOp (sc-9752) — runSmartSelect
-  // stages a scratch image_segment job through this exact seam.
-  runAiOpRef.current = runAiOp;
-
-  function runUpscale() {
-    if (upscaleEngineIsRestoration(upscaleEngine)) {
-      // Iris restoration (sc-25683): sized by scale; the preview must have planned it (a refused
-      // plan is never submitted, and the request is never silently changed).
-      if (!irisPlanStatus.ready) return;
-      const restore = irisRestoreControls(irisRestore);
-      runAiOp({
-        label: "restore",
-        layerSource: "composite",
-        edit: { op: "upscale", engine: upscaleEngine, ...restore },
-        buildBody: (scratch) =>
-          buildUpscaleJobBody({
-            project: activeProject,
-            requestedGpu,
-            sourceAssetId: scratch.id,
-            engine: upscaleEngine,
-            displayName: working?.source?.name,
-            restore,
-          }),
-      });
-      return;
-    }
-    const valid = upscaleFactorsForEngine(upscaleEngine);
-    const factor = valid.includes(upscaleFactor) ? upscaleFactor : valid[0];
-    const softness = upscaleEngineHasSoftness(upscaleEngine) ? upscaleSoftness : undefined;
-    runAiOp({
-      label: "upscale",
-      // Upscale changes dimensions → document-level: flatten the stack, upscale once.
-      layerSource: "composite",
-      edit: {
-        op: "upscale",
-        engine: upscaleEngine,
-        factor,
-        ...(softness !== undefined ? { softness } : {}),
-      },
-      buildBody: (scratch) =>
-        buildUpscaleJobBody({
-          project: activeProject,
-          requestedGpu,
-          sourceAssetId: scratch.id,
-          factor,
-          engine: upscaleEngine,
-          displayName: working?.source?.name,
-          softness,
-        }),
-    });
-  }
-
-  function runDetail() {
-    if (!detailModel) return;
-    runAiOp({
-      label: "detail",
-      edit: { op: "detail", model: detailModel, strength: detailStrength, cnScale: detailCnScale },
-      buildBody: (scratch) =>
-        buildDetailJobBody({
-          project: activeProject,
-          requestedGpu,
-          sourceAssetId: scratch.id,
-          model: detailModel,
-          strength: detailStrength,
-          cnScale: detailCnScale,
-          displayName: working?.source?.name,
-        }),
-    });
-  }
-
-  async function runEdit() {
-    const prompt = mossEdit ? editPrompt : editPrompt.trim();
-    if ((!prompt && !(mossEdit && mossEditSettings.mossImageAdvanced?.positive)) || !editModel || !working) return;
-    // A required image-edit LoRA that isn't downloaded yet blocks the run (worker R5): the source
-    // band renders the actionable Download note (epic 10871, sc-11069). Defensive — the Generate
-    // button is already disabled on this condition.
-    if (editLoraRequiredMissing) return;
-    if (!mossEditReady || mossEditError) return;
-    // Canvas-extend / outpaint (sc-2556): resolve the output W×H from the chosen aspect
-    // and fit mode (outpaint coerced away when the model can't inpaint). "match" keeps
-    // the working size, so the existing same-size edit behavior is unchanged.
-    const fitMode = effectiveFitMode(editFitMode, canMask);
-    const { width: outWidth, height: outHeight } = mossEdit ? mossEditSettings : editOutputDims(working.width, working.height, editAspect, fitMode);
-    // Same-size edit → active layer; a canvas-extend / outpaint (dims change) →
-    // document-level flatten (sc-6119 tool matrix).
-    const dimsChange = outWidth !== working.width || outHeight !== working.height;
-    // A mask is sent only for inpaint-capable models; otherwise it's a whole-image edit (the mask
-    // stays as a local guide but isn't uploaded). The mask is brush strokes (sc-2436) and/or a
-    // smart-select base (sc-3751), composited together by rasterizeMaskToFile.
-    const masked = canMask && (maskHasContent(maskLines) || Boolean(maskBaseImage));
-    let maskFile = null;
-    if (masked) {
-      try {
-        maskFile = await rasterizeMaskToFile();
-      } catch (err) {
-        setStatus({ loading: false, error: `Could not prepare the mask: ${err.message || err}` });
-        return;
-      }
-    }
-    runAiOp({
-      label: "edit",
-      endpoint: JOB_PATHS.image,
-      layerSource: dimsChange ? "composite" : "activeLayer",
-      edit: { op: "edit", model: editModel, prompt, ...(masked ? { masked: true } : {}) },
-      maskFile,
-      buildBody: (scratch, maskScratch) =>
-        buildEditJobBody({
-          project: activeProject,
-          requestedGpu,
-          sourceAssetId: scratch.id,
-          maskAssetId: maskScratch?.id,
-          // sc-24114: keep the alpha channel on an alpha-capable model when asked (or when the
-          // working image carries alpha and the user has not turned it off).
-          transparentBackground: editTransparent,
-          modelEntry: selectedEditModel,
-          // Multi-reference edit (sc-6107): lead with the working scratch image, then the user's
-          // references. Only for a multiReference model with at least one attached reference.
-          referenceAssetIds:
-            multiRefCapable && refAssetIds.length
-              // sc-24113: cap at the MODEL's ceiling, not the module constant. The working scratch
-              // image occupies the first slot, so the list is (1 + attached) and both halves are
-              // bounded by the same per-model number.
-              ? mossEdit ? [scratch.id, ...refAssetIds] : editReferenceIds(scratch.id, refAssetIds, maxEditReferences)
-              : null,
-          model: editModel,
-          prompt,
-          seed: editSeed,
-          width: outWidth,
-          height: outHeight,
-          fitMode,
-          loras: mossEdit ? [] : editLoraSelection.serializedLoras,
-          // Auto-apply the model's managed image-edit LoRA (R5) when installed — deduped inside
-          // buildEditJobBody, so a run needs no manual picking (epic 10871, sc-11069).
-          editLora: managedEditLoraId ? editLora : null,
-          // Identity strength (sc-11798): the user's edit-LoRA weight override, or the default.
-          editLoraWeight: managedEditLoraId ? editLoraSelection.weightFor(editLora) : null,
-          guidanceScale: editGuidance,
-          mossImageEdit,
-          mossEditSettings,
-        }),
-    });
-  }
-
-  // When the in-flight op's job terminates, load the result back into the working
-  // image (on success) and purge the ephemeral scratch + result assets.
-  useEffect(() => {
-    if (!aiOp?.jobId) return;
-    const job = jobs?.find((item) => item.id === aiOp.jobId);
-    if (!job || !terminalStatuses.has(job.status)) return;
-    const { jobId, source, edit, onComplete, writeBack, targetLayerId } = aiOp;
-    setAiOp(null); // stop tracking immediately so this can't re-enter on the next jobs tick
-    const resultAsset = job.status === "completed" ? job.result?.assets?.[0] ?? null : null;
-    (async () => {
-      try {
-        if (!resultAsset) {
-          setStatus({ loading: false, error: job.error ?? job.message ?? "The operation failed." });
-          return;
-        }
-        const outputs = nonCanvasJobOutputs(job);
-        setNativeEditResults(outputs);
-        if (outputs.length) {
-          if (outputs.every((asset) => asset.type === "tensor")) {
-            // Real tensors remain downloadable Library assets. They never enter the image
-            // decoder, canvas writeback, or generic ephemeral-result purge path.
-            setStatus({ loading: false, error: "" });
-            return;
-          }
-        }
-        // Smart-select (sc-3751): the caller's `onComplete` consumes the result asset itself (loads
-        // the mask into the mask layer) — it does NOT replace the working image, so skip the install
-        // / history / dirty path entirely.
-        if (onComplete) {
-          await onComplete(resultAsset);
-          return;
-        }
-        const res = await mediaResponseWithTicketRetry(() => assetUrl(resultAsset));
-        if (!res.ok) throw new Error(`Failed to load result (${res.status})`);
-        const blob = await res.blob();
-        const prepared = await blobToEditorImage(blob);
-        if (!mountedRef.current) {
-          URL.revokeObjectURL(prepared.objectUrl);
-          return;
-        }
-        checkpoint();
-        // Active-layer op (same-size edit / detail) → write the result back into the
-        // target layer, preserving the rest of the stack; document op (upscale /
-        // outpaint / box edit) → flatten the stack into one new base layer (sc-6119).
-        if (writeBack === "activeLayer" && targetLayerId && layerById(workingRef.current, targetLayerId)) {
-          replaceLayerImage(
-            targetLayerId,
-            prepared.image,
-            prepared.objectUrl,
-            prepared.blob,
-          );
-        } else {
-          const preparedSource = prepared.downscaled
-            ? { ...source, editorDownscaled: prepared.downscaled }
-            : source;
-          installWorkingImage(
-            prepared.image,
-            prepared.objectUrl,
-            prepared.blob,
-            preparedSource,
-          );
-        }
-        if (edit) setEdits((prev) => [...prev, edit]);
-        setDirty(true);
-      } catch (err) {
-        if (mountedRef.current) {
-          setStatus({ loading: false, error: err.message || "The operation failed." });
-        }
-      } finally {
-        // Hand the purge to App (sc-8850): it owns the scratch registry, so it purges the
-        // scratch + mask + result assets through the single survivor path. This also drops
-        // the registry entry so the App-level sweep won't double-purge. The result is
-        // loaded into the canvas above BEFORE this releases it — intermediates never persist.
-        releaseEditorScratchOp?.(jobId, job);
-      }
-    })();
-  }, [aiOp, jobs, installWorkingImage, replaceLayerImage, releaseEditorScratchOp, checkpoint]);
-
-  // ── Save / export (sc-2434) ───────────────────────────────────────────────
-  // Persist the working image as a NEW Library asset, never overwriting the
-  // source. Lineage links it back to the asset it was opened from (uploads have
-  // no source to link); the edit chain rides along as provenance.
-  const runSave = useCallback(async () => {
-    if (!working || saving) return;
-    setSaving(true);
-    setStatus({ loading: false, error: "" });
-    try {
-      const file = await workingImageToFile(editedFilename(working.source));
-      const saved = await importAsset(file, {
-        throwOnError: true,
-        sourceAssetId: working.source.assetId,
-        provenance: buildSaveProvenance({
-          source: working.source,
-          edits,
-          width: working.width,
-          height: working.height,
-          layers: working.layers,
-        }),
-      });
-      setSavedAssetId(saved?.id ?? null);
-      setDirty(false);
-    } catch (err) {
-      setStatus({ loading: false, error: `Could not save: ${err.message || err}` });
-    } finally {
-      setSaving(false);
-    }
-  }, [working, saving, workingImageToFile, importAsset, edits]);
-
-  // ── Does the opened file carry a recipe? Ask the one reader (sc-15954) ─────
-  //
-  // `POST /api/v1/workflows/inspect` runs `read_workflow_chunk`, the same function the import path
-  // and the sc-15951 drop panel use. Nothing in this app parses PNG chunks.
-  //
-  // The verdict lives HERE and not on `working.source`, for two reasons. It resolves after the
-  // document is installed, so writing it back through `setWorking` would either race the user's
-  // first edit or bake a stale `pending` into every undo snapshot taken before it landed. And it
-  // is keyed by the source blob, which undo restores BY REFERENCE — so undoing back to the opened
-  // image reuses the answer instead of asking again.
-  const [sourceWorkflow, setSourceWorkflow] = useState({ blob: null, state: SOURCE_WORKFLOW_UNKNOWN });
-  const openedExport = working?.source?.originalExport ?? null;
-  const openedBlob = openedExport?.blob ?? null;
-  const openedStartState = openedExport?.workflow ?? SOURCE_WORKFLOW_UNKNOWN;
-  const openedFilename = openedExport?.filename ?? null;
-  const activeProjectId = activeProject?.id ?? null;
-
-  useEffect(() => {
-    // `describeOpenedImage` already decided whether asking is possible at all: a PNG past the
-    // endpoint's own cap starts `unknown` and is never uploaded, because staging half a gigabyte
-    // server-side to be handed a 413 is a slower way to learn nothing.
-    if (!openedBlob || openedStartState !== SOURCE_WORKFLOW_PENDING) return undefined;
-    let live = true;
-    const controller = new AbortController();
-    setSourceWorkflow({ blob: openedBlob, state: SOURCE_WORKFLOW_PENDING });
-    (async () => {
-      let state = SOURCE_WORKFLOW_UNKNOWN;
-      try {
-        const body = await inspectWorkflowFile(
-          // Named so the multipart part carries a filename, exactly as the drop path's `File`
-          // does. `projectId` only widens the LoRA/preset lookups the resolution report is built
-          // against, and this caller reads `status` alone — but it is passed anyway so the server
-          // does one kind of work for one kind of request.
-          new File([openedBlob], openedFilename ?? "image.png", { type: "image/png" }),
-          { projectId: activeProjectId, token, signal: controller.signal },
-        );
-        state = workflowStateFromInspect(body);
-      } catch (err) {
-        // Offline, a 413, a 500, a 422 for a file this build refuses to read — none of those is
-        // "no recipe", and reporting them as one is the silent loss the AC forbids. `unknown` is
-        // rendered, not swallowed.
-        if (isAbortError(err)) return;
-        state = SOURCE_WORKFLOW_UNKNOWN;
-      }
-      if (live) setSourceWorkflow({ blob: openedBlob, state });
-    })();
-    return () => {
-      live = false;
-      controller.abort();
-    };
-  }, [openedBlob, openedStartState, openedFilename, activeProjectId, token]);
-
-  // The verdict for THIS document. Before the effect has run — and for any blob the store is not
-  // holding an answer for — it falls back to the state the open stamped, which is `pending` for a
-  // file on its way to the reader and `unknown` for one that will never go. Never `absent`.
-  const sourceWorkflowState =
-    sourceWorkflow.blob && sourceWorkflow.blob === openedBlob
-      ? sourceWorkflow.state
-      : openedStartState;
-
-  // The one decision the pill, the banner and the export branch all read.
-  const downloadPlan = useMemo(
-    () => (working ? editorDownloadPlan(working, sourceWorkflowState) : null),
-    [working, sourceWorkflowState],
-  );
-  const downloadNote = useMemo(
-    () =>
-      downloadPlan
-        ? editorDownloadNote(downloadPlan, { downscaled: working?.source?.editorDownscaled ?? null })
-        : null,
-    [downloadPlan, working],
-  );
-
-  // Export straight to disk (no project involvement). An untouched PNG goes out as the file it
-  // came in as — same bytes, same recipe chunk, same colour profile — and anything else is
-  // flattened to a fresh PNG with no recipe in it (sc-15954). `downloadNote`, rendered beside the
-  // button, says which of the two the click will produce — and the click reads the SAME plan
-  // object the pill was rendered from, so the two cannot disagree about the file that lands.
-  const runDownload = useCallback(async () => {
-    if (!working || !downloadPlan) return;
-    try {
-      const file =
-        downloadPlan.mode === "original"
-          ? // The File wraps the SAME blob — no re-encode, so this is the one export path in the
-            // editor whose bytes are the source's bytes.
-            new File([working.source.originalExport.blob], downloadPlan.filename, {
-              type: "image/png",
-            })
-          : await workingImageToFile(downloadPlan.filename);
-      await exportEditorFile(file);
-    } catch (err) {
-      setStatus({ loading: false, error: `Could not export: ${err.message || err}` });
-    }
-  }, [working, downloadPlan, workingImageToFile]);
+  const {
+    saving,
+    runSave,
+    downloadPlan,
+    downloadNote,
+    runDownload
+  } = useEditorSave({
+    working,
+  setStatus,
+  workingImageToFile,
+  importAsset,
+  edits,
+  setSavedAssetId,
+  setDirty,
+  activeProject,
+  token
+  });
 
   // Confirm before an action that would discard unsaved edits (Open / drag-drop a
   // new image while dirty). Resolves true when it's safe to proceed. Async + desktop-safe
@@ -3551,70 +1889,136 @@ export function ImageEditor() {
     });
   }, [cropRect, working]);
 
-  const toolPanelScope = {
-    BOX_PALETTE,
-    COLOR_ADJUSTMENTS,
-    CROP_RATIOS,
-    CurveEditor,
-    EDIT_OUTPUT_ASPECTS,
-    EditorLoraPanel,
-    FitModeControl,
-    MAX_BOX_PALETTE,
-    MAX_EDIT_REFERENCES,
-    maxEditReferences,
-    StudioUpdateBadge,
-    StudioUpdateNotice,
-    UPSCALE_ENGINE_DESC,
-    IrisRestoreControls,
-    irisPlanStatus,
-    irisRestore,
-    setIrisPlanStatus,
-    setIrisRestore,
-    token,
-    upscaleEngineIsRestoration,
-    activeGradeIsIdentity,
-    activeLayerOf,
-    actualSize,
-    addPaletteColor,
-    aiOp,
-    applyColorGrade,
-    applyMaskCutout,
-    applyCrop,
-    assetUrl,
-    availableUpscaleEngines,
-    boxColor,
-    boxMetadataGaps,
-    boxes,
-    canMask,
-    cancelCrop,
-    channelStroke,
-    chooseBoxColor,
+  const movePanel = useMoveToolPanel({
+    working,
+    layerCount,
+    fitToView,
+    actualSize
+  });
+  const transformPanel = useTransformToolPanel({
+    working,
+    setActiveTransform,
+    endTransformGesture,
+    onTransformSlider,
+    flipActiveLayer,
+    resetActiveLayerTransform,
+    setTool
+  });
+  const cropPanel = useCropToolPanel({
+    ratioKey,
+    rotated,
+    cropRect,
+    straighten,
     chooseRatio,
-    clearBoxes,
-    clearMask,
+    toggleRotate,
+    setCropDim,
+    setStraighten,
+    applyCrop,
+    cancelCrop
+  });
+  const upscalePanel = useUpscaleToolPanel({
+    availableUpscaleEngines,
+    upscaleEngine,
+    upscaleFactor,
+    aiOp,
+    working,
+    token,
+    irisRestore,
+    upscaleSoftness,
+    irisPlanStatus,
+    setUpscaleEngine,
+    setUpscaleFactor,
+    setIrisRestore,
+    setIrisPlanStatus,
+    setUpscaleSoftness,
+    runUpscale,
+    setTool
+  });
+  const detailPanel = useDetailToolPanel({
+    detailModels,
+    detailModel,
+    selectedDetailModel,
+    detailStrength,
+    detailCnScale,
+    tileControlNetReady,
+    tileControlNet,
+    tileControlNetDownloadRequested,
+    aiOp,
+    createModelDownloadJob,
+    setDetailModel,
+    setDetailStrength,
+    setDetailCnScale,
+    requestTileControlNetDownload,
+    runDetail,
+    setTool
+  });
+  const colorPanel = useColorToolPanel({
+    colorMode,
     colorAdjust,
     colorChannel,
-    colorKeyGlobal,
-    colorKeySeed,
-    colorKeySoftness,
-    colorKeyTolerance,
-    colorMode,
-    composedPrompt,
-    createLoraDownloadJob,
-    createModelDownloadJob,
-    cropRect,
-    cutoutKeepSelected,
+    histogramRef,
+    levels,
     curves,
-    deleteBox,
-    detailCnScale,
-    detailModel,
-    detailModels,
-    detailStrength,
+    channelStroke,
+    activeGradeIsIdentity,
+    setColorMode,
+    setAdjustValue,
+    resetAdjust,
+    setColorChannel,
+    setLevelsValue,
+    setCurves,
+    resetActiveColorMode,
+    applyColorGrade
+  });
+  const cutoutPanel = useCutoutToolPanel({
+    colorKeySeed,
+    colorKeyGlobal,
+    colorKeyTolerance,
+    colorKeySoftness,
+    smartSelectSupported,
+    maskMode,
+    maskSubTool,
+    aiOp,
+    smartSelectCapabilitySupported,
+    smartSelectModel,
+    smartSelectDownloadRequested,
+    maskBrush,
+    maskErase,
+    maskRefineRadius,
+    maskLines,
+    maskBaseImage,
+    cutoutKeepSelected,
+    maskSource,
+    setColorKeyGlobal,
+    setColorKeyTolerance,
+    setColorKeySoftness,
+    setColorKeySeed,
+    clearMask,
+    setCutoutKeepSelected,
+    setMaskMode,
+    setMaskSubTool,
+    setMaskErase,
+    requestSmartSelectDownload,
+    setMaskBrush,
+    setMaskRefineRadius,
+    refineMask,
+    applyMaskCutout,
+    setTool
+  });
+  const editPanel = useEditToolPanel({
+    mossEdit,
+    mossEditReady,
+    mossEditError,
+    mossImageEdit,
+    mossEditSettings,
+    token,
+    jobs,
+    maxEditReferences,
+    aiOp,
+    canMask,
     editAspect,
     editFitMode,
     editGuidance,
-    mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, tensorAssets: assets, importTensorAsset: importAsset, characters, projectId: activeProject?.id,
-    jobs,
     editLora,
     editLoraDownloadRequested,
     editLoraInstalled,
@@ -3625,72 +2029,44 @@ export function ImageEditor() {
     editPrompt,
     editSeed,
     editorPickerLoras,
-    effectiveFitMode,
-    endTransformGesture,
-    fitToView,
-    flipActiveLayer,
-    guidanceDefaultFromModel,
-    histogramRef,
-    identityTransform,
     imageAssets,
-    layerCount,
-    levels,
     maskActive,
     maskBaseImage,
     maskBrush,
     maskErase,
-    maskHasContent,
     maskLines,
     maskMode,
     maskRefineRadius,
-    maskSource,
     maskSubTool,
     multiRefCapable,
-    editTransparent,
-    setEditTransparent: setEditTransparentChoice,
-    onTransformSlider,
-    ratioKey,
     refAssetIds,
-    refineMask,
-    removePaletteColor,
-    requestEditLoraDownload,
-    requestSmartSelectDownload,
-    requestTileControlNetDownload,
-    resetActiveColorMode,
-    resetActiveLayerTransform,
-    resetAdjust,
-    rotated,
-    runBoxEdit,
-    runDetail,
-    runEdit,
-    runUpscale,
-    selectedBox,
-    selectedBoxGaps,
-    selectedBoxId,
-    selectedDetailModel,
+    editTransparent,
     selectedEditLoras,
     selectedEditModel,
-    setActiveTransform,
-    setAdjustValue,
-    setColorChannel,
-    setColorKeyGlobal,
-    setColorKeySeed,
-    setColorKeySoftness,
-    setColorKeyTolerance,
-    setColorMode,
-    setCropDim,
-    setCurves,
-    setCutoutKeepSelected,
-    setDetailCnScale,
-    setDetailModel,
-    setDetailStrength,
+    showIncompatibleEditLoras,
+    smartSelectCapabilitySupported,
+    smartSelectDownloadRequested,
+    smartSelectModel,
+    smartSelectSupported,
+    tensorAssets: assets,
+    characters,
+    projectId: activeProject?.id,
+    createLoraDownloadJob,
+    createModelDownloadJob,
+    setMossImageEdit,
+    setMossEditSettings,
+    clearMask,
+    refineMask,
+    setEditTransparent: setEditTransparentChoice,
+    requestEditLoraDownload,
+    requestSmartSelectDownload,
+    runEdit,
     setEditAspect,
     setEditFitMode,
     setEditGuidance,
     setEditModel,
     setEditPrompt,
     setEditSeed,
-    setLevelsValue,
     setMaskBrush,
     setMaskErase,
     setMaskMode,
@@ -3698,38 +2074,54 @@ export function ImageEditor() {
     setMaskSubTool,
     setRefAssetIds,
     setRefPickerOpen,
-    setSelectedBoxId,
     setShowIncompatibleEditLoras,
-    setStraighten,
-    setTool,
-    setUpscaleEngine,
-    setUpscaleFactor,
-    setUpscaleSoftness,
-    showIncompatibleEditLoras,
-    smartSelectCapabilitySupported,
-    smartSelectDownloadRequested,
-    smartSelectModel,
-    smartSelectSupported,
-    straighten,
-    tileControlNet,
-    tileControlNetDownloadRequested,
-    tileControlNetReady,
-    toggleRotate,
+    importTensorAsset: importAsset
+  });
+  const boxesPanel = useBoxesToolPanel({
+    mossEdit,
+    mossEditReady,
+    mossEditError,
+    mossImageEdit,
+    mossEditSettings,
+    token,
+    jobs,
+    imageAssets,
+    refAssetIds,
+    maxEditReferences,
+    aiOp,
+    boxColor,
+    boxes,
+    composedPrompt,
+    editModel,
+    editModels,
+    editPrompt,
+    selectedBox,
+    selectedBoxGaps,
+    selectedBoxId,
+    selectedEditModel,
+    tensorAssets: assets,
+    characters,
+    projectId: activeProject?.id,
+    createModelDownloadJob,
     updateBox,
-    updateOptionLabel,
-    upscaleEngine,
-    upscaleEngineHasSoftness,
-    upscaleFactor,
-    upscaleFactorsForEngine,
-    upscaleSoftness,
-    working,
-  };
-  const stableToolPanelScope = useStableImageEditorToolPanelScope(toolPanelScope);
+    setMossImageEdit,
+    setMossEditSettings,
+    setRefAssetIds,
+    chooseBoxColor,
+    clearBoxes,
+    deleteBox,
+    runBoxEdit,
+    setEditModel,
+    setEditPrompt,
+    setSelectedBoxId,
+    importTensorAsset: importAsset
+  });
+  const toolPanels = { move: movePanel, transform: transformPanel, crop: cropPanel, upscale: upscalePanel, detail: detailPanel, color: colorPanel, cutout: cutoutPanel, edit: editPanel, boxes: boxesPanel };
   const renderToolPanel = (key) =>
     key === "depth" ? (
       <EditorDepthPanel dirty={dirty} working={working} />
     ) : (
-      <ImageEditorToolPanel panelKey={key} scope={stableToolPanelScope} />
+      <ImageEditorToolPanel panelKey={key} {...toolPanels[key]} />
     );
 
   const handleLayerOpacityInput = (id, raw) => {

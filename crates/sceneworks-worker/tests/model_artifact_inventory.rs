@@ -149,7 +149,10 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
-        source_files: &["crates/sceneworks-worker/src/prompt_refine_jobs.rs"],
+        source_files: &[
+            "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
+            "crates/sceneworks-worker/src/prompt_refine_parse.rs",
+        ],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
             entrypoint: TypedResolverEntrypoint::ManagedModelPath,

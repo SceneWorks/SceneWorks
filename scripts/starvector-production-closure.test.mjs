@@ -71,9 +71,9 @@ test("packaged production closure retains integrity independently of source curr
   // Preserve the recorded provenance; source currency is advisory. Controlled
   // fixtures above and below verify that source drift changes the closure.
   validateProductionClosureShape(closure);
-  // Historical closure membership/digests predate helper, model-job and sanitizer extractions.
+  // Historical closure membership/digests predate helper, model-job, sanitizer and prompt-refine extractions.
   // Future captures include the new dependencies; the recorded candidate stays immutable.
-  const addedDependencies = ["scripts/lib/canonical-json.mjs", "scripts/lib/exec-file-with-fds.mjs", "crates/sceneworks-worker/src/svg_sanitize.rs"];
+  const addedDependencies = ["scripts/lib/canonical-json.mjs", "scripts/lib/exec-file-with-fds.mjs", "crates/sceneworks-worker/src/svg_sanitize.rs", "crates/sceneworks-worker/src/prompt_refine_parse.rs", "crates/sceneworks-worker/src/prompt_refine_finalize.rs"];
   for (const dependency of addedDependencies) assert.ok(PRODUCTION_CLOSURE_PATHS.includes(dependency));
   const recordedPaths = PRODUCTION_CLOSURE_PATHS.filter(sourcePath =>
     !addedDependencies.includes(sourcePath) && !MODEL_JOB_SPLIT_PATHS.includes(sourcePath));
