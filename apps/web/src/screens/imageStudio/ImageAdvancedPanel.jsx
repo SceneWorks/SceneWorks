@@ -1,3 +1,4 @@
+import { GpuSelect } from "../../components/StudioFields.jsx";
 import { SamplerSchedulerFields, SamplingSeedField, SamplingStepsField } from "../../components/SamplerSchedulerFields.jsx";
 import { MossOrdinaryControls } from "./MossOrdinaryControls.jsx";
 import React from "react";
@@ -11,7 +12,7 @@ import { IrisRestoreControls } from "../../components/IrisRestoreControls.jsx";
 import { GUIDANCE_METHOD_LABELS, guidanceDefaultFromModel, maxStepsForModel, stepsDefaultFromModel } from "../../samplerOptions.js";
 
 export function ImageAdvancedPanel({
-  setAdvancedOpen,
+  toggleAdvanced,
   advancedOpen,
   setRequestedGpu,
   requestedGpu,
@@ -133,20 +134,11 @@ export function ImageAdvancedPanel({
   return (
 <AdvancedSection
             hint="cleared values → model default"
-            onToggle={() => setAdvancedOpen((value) => !value)}
+            onToggle={toggleAdvanced}
             open={advancedOpen}
           >
             <div className="advanced-panel">
-              <label>
-                GPU
-                <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
-                  {gpuOptions.map((gpu) => (
-                    <option key={gpu} value={gpu}>
-                      {gpu === "auto" ? "Auto" : gpu}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <GpuSelect options={gpuOptions} value={requestedGpu} onChange={setRequestedGpu} />
               <SamplingSeedField
                 value={seed}
                 onChange={(value) => setSeed(value)}
