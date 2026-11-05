@@ -402,7 +402,7 @@ fn every_planned_bernini_mlx_row_names_the_identity_this_arm_mints_for_its_tier(
 /// decision, so the production side has to come from production. `sceneworks-worker` is not a
 /// dependency of this crate (and making the whole worker a dev-dependency to reach one private
 /// `fn` would be a build-time cost out of all proportion), so the predicate is read off
-/// `crates/sceneworks-worker/src/video_admission.rs` at test time — the same workspace-source
+/// `crates/sceneworks-worker/src/video_admission/bernini.rs` at test time — the same workspace-source
 /// technique `every_cited_workspace_source_path_exists` uses. A worker that widens its admitted
 /// route list therefore widens this test's expectation with it.
 struct WorkerBerniniAttempt {
@@ -428,7 +428,7 @@ impl WorkerBerniniAttempt {
             .parent()
             .and_then(std::path::Path::parent)
             .expect("the workspace root is two levels above this crate");
-        let path = root.join("crates/sceneworks-worker/src/video_admission.rs");
+        let path = root.join("crates/sceneworks-worker/src/video_admission/bernini.rs");
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         let start = source
