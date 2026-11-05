@@ -112,8 +112,10 @@ use super::WAN_ADAPTER;
 use super::WAN_VACE_ADAPTER;
 #[cfg(target_os = "macos")]
 use super::WAN_VACE_FUN_ADAPTER;
+#[cfg(target_os = "macos")]
+use crate::WorkerError;
 #[cfg(native_lane)]
-use crate::{ApiClient, JobSnapshot, Settings, WorkerError, WorkerResult};
+use crate::{ApiClient, JobSnapshot, Settings, WorkerResult};
 #[cfg(native_lane)]
 use std::path::Path;
 #[cfg(target_os = "macos")]
