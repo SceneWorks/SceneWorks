@@ -43,6 +43,8 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "crates/sceneworks-worker/src/model_jobs.rs",
   ...MODEL_JOB_SPLIT_PATHS,
   "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
+  "crates/sceneworks-worker/src/prompt_refine_parse.rs",
+  "crates/sceneworks-worker/src/prompt_refine_finalize.rs",
   "crates/sceneworks-worker/src/refine_model_cache.rs",
   "crates/sceneworks-worker/src/svg_sanitize.rs",
   "crates/sceneworks-worker/src/vector_admission.rs",
