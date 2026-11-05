@@ -1,3 +1,5 @@
+import { SamplerSchedulerFields, SamplingSeedField, SamplingStepsField } from "../components/SamplerSchedulerFields.jsx";
+import { useSamplerControls } from "../hooks/useSamplerControls.js";
 import { VedaOutcome } from "../components/VedaOutcome.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
@@ -107,17 +109,7 @@ import {
   recipeLoraSelection,
   recipeRequestedResolution,
 } from "../recipeFields.js";
-import {
-  SAMPLER_LABELS,
-  SCHEDULER_LABELS,
-  guidanceDefaultFromModel,
-  samplerDefaultFromModel,
-  samplerOptionsFromModel,
-  schedulerDefaultFromModel,
-  schedulerOptionsFromModel,
-  stepsDefaultFromModel,
-  stepsMenuFromModel,
-} from "../samplerOptions.js";
+import { guidanceDefaultFromModel, stepsDefaultFromModel, stepsMenuFromModel } from "../samplerOptions.js";
 import {
   formatDurationOption,
   minStepsForModel,
@@ -1045,43 +1037,8 @@ export function VideoStudio() {
   const selectedTierQuantize =
     nativeTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
   const tierHasMemoryRisk = showTierPicker && ["q8", "bf16"].includes(quantTier);
-  const samplerOptions = useMemo(
-    () => samplerOptionsFromModel(selectedModel, activeBackend),
-    [selectedModel, activeBackend],
-  );
-  const schedulerOptions = useMemo(
-    () => schedulerOptionsFromModel(selectedModel, activeBackend),
-    [selectedModel, activeBackend],
-  );
-  const showSamplerPicker = samplerOptions.length > 1;
-  const showSchedulerPicker = schedulerOptions.length > 1;
-  // Guard on a resolved model (sc-11962): before the video catalog loads `samplerOptions`
-  // falls back to ["default"], so an un-guarded snap would revert a restored non-default
-  // sampler during the restart-restore window and never recover once the catalog lands.
-  useEffect(() => {
-    if (!selectedModel) {
-      return;
-    }
-    if (samplerOptions.includes(sampler)) {
-      return;
-    }
-    const preferred = samplerOptions.includes(samplerDefaultFromModel(selectedModel))
-      ? samplerDefaultFromModel(selectedModel)
-      : samplerOptions[0];
-    setSampler(preferred);
-  }, [samplerOptions, sampler, selectedModel]);
-  useEffect(() => {
-    if (!selectedModel) {
-      return;
-    }
-    if (schedulerOptions.includes(scheduler)) {
-      return;
-    }
-    const preferred = schedulerOptions.includes(schedulerDefaultFromModel(selectedModel))
-      ? schedulerDefaultFromModel(selectedModel)
-      : schedulerOptions[0];
-    setScheduler(preferred);
-  }, [schedulerOptions, scheduler, selectedModel]);
+  const { samplerOptions, schedulerOptions, showSchedulerPicker } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler });
+
   const requiresLtxIcLora = ltxIcLoraModelIds.has(selectedModel?.id) && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = selectedLoras.some((lora) => loraLooksLikeIcLora(lora));
 
@@ -3052,34 +3009,22 @@ export function VideoStudio() {
                   ))}
                 </select>
               </label>
-              <label>
-                Seed
-                <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
-              </label>
-              {showSamplerPicker ? (
-                <label>
-                  Sampler
-                  <select onChange={(event) => setSampler(event.target.value)} value={sampler}>
-                    {samplerOptions.map((key) => (
-                      <option key={key} value={key}>
-                        {SAMPLER_LABELS[key] ?? key}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : null}
-              {showSchedulerPicker ? (
-                <label>
-                  Scheduler
-                  <select onChange={(event) => setScheduler(event.target.value)} value={scheduler}>
-                    {schedulerOptions.map((key) => (
-                      <option key={key} value={key}>
-                        {SCHEDULER_LABELS[key] ?? key}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : null}
+              <SamplingSeedField
+                value={seed}
+                onChange={(value) => setSeed(value)}
+                inputProps={{
+                  placeholder: "Random",
+                  type: "number"
+                }}
+              />
+              <SamplerSchedulerFields
+                sampler={sampler}
+                scheduler={scheduler}
+                samplerOptions={samplerOptions}
+                schedulerOptions={schedulerOptions}
+                onSamplerChange={setSampler}
+                onSchedulerChange={setScheduler}
+              />
               {showSchedulerPicker && scheduler !== "default" ? (
                 <label>
                   Schedule shift
@@ -3093,83 +3038,46 @@ export function VideoStudio() {
                   />
                 </label>
               ) : null}
-              <label>
-                Steps
-                {stepsChoice && !ltx25Dev ? (
-                  <select
-                    disabled={lightningActive}
-                    onChange={(event) => setStepsOverride(event.target.value)}
-                    title={
-                      lightningActive
-                        ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
-                        : `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it renders at ${humanizedNumberMenu(stepsChoice)} steps only.`
-                    }
-                    value={lightningActive || stepsOffMenu ? "" : stepsOverride}
-                  >
-                    {/* The cleared state, exactly as for the free-text box above and as the panel's
-                        own "cleared values → model default" hint promises: no `advanced.steps` is
-                        sent and the engine runs `defaults.steps`. It is deliberately NOT
-                        `stepsChoice[0]` — `limits.steps[0]` is not a default — and it is safe
-                        because the manifest invariant pins `defaults.steps` onto the menu. */}
-                    <option value="">
-                      {stepsDefaultFromModel(selectedModel) == null
+              <SamplingStepsField
+                value={(stepsChoice && !ltx25Dev) ? lightningActive || stepsOffMenu ? "" : stepsOverride : lightningActive || stepsPinned ? "" : stepsOverride}
+                onChange={(value) => setStepsOverride(value)}
+                menu={(stepsChoice && !ltx25Dev) ? stepsChoice : null}
+                defaultLabel={stepsDefaultFromModel(selectedModel) == null
                         ? "Model default"
                         : `${stepsDefaultFromModel(selectedModel)} (model default)`}
-                    </option>
-                    {stepsChoice.map((value) => (
-                      <option key={value} value={String(value)}>
-                        {value}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  /* The `min` floor is the MODEL's, not a blanket 1 (sc-19426 / sc-17161).
-                     MiniMax-H3 declares 2: the unit is model evaluations (NFE — the engine appends
-                     the terminal sigma itself), and a 1-evaluation schedule is a single Euler jump
-                     from pure noise, so the floor is the corrected sc-18726 product judgement,
-                     REFUSED rather than raised — the form has to say so instead of letting it be
-                     typed and then 400'd at enqueue. `hardMinSteps` and `limits.steps` are INDEPENDENT axes
-                     (sc-19502): the floor bounds an open range, the menu enumerates a closed set,
-                     and this branch is the one a model reaches when it declares no menu — so the
-                     floor still has to be honoured here even though the pinned/menu cases above
-                     express their own, tighter constraint. */
-                  <input
-                    min={String(minSteps)}
-                    max="80"
-                    disabled={lightningActive || stepsPinned}
-                    onChange={(event) => setStepsOverride(event.target.value)}
-                    placeholder={
-                      lightningActive
-                        ? "4 (Lightning)"
-                        : stepsPinned
-                          ? `${stepsPinnedValue} (fixed schedule)`
-                          : /* Turbo supplies a step count but does NOT seize the control, unlike
-                               Lightning above: upstream's own spec table lists the 8-step MiniMax-H3
-                               adapter as "8 / 4", so a caller who knows the checkpoint may run it
-                               shorter, and `minimax_h3_sampling` honours an explicit
-                               `advanced.steps` over the variant's default for exactly that reason.
-                               So the placeholder REPORTS the recipe's count while the box stays
-                               editable — a knob honoured rather than rejected. */
-                            activeTurboVariant
-                            ? `${activeTurboVariant.sampling.steps} (Turbo)`
-                            : String(stepsDefaultFromModel(selectedModel) ?? "")
-                    }
-                    title={
-                      lightningActive
+                inputProps={{
+                  min: String(minSteps),
+                  max: "80",
+                  disabled: lightningActive || stepsPinned,
+                  placeholder: lightningActive
+                    ? "4 (Lightning)"
+                    : stepsPinned
+                    ? `${stepsPinnedValue} (fixed schedule)`
+                    : /* Turbo supplies a step count but does NOT seize the control, unlike
+                    Lightning above: upstream's own spec table lists the 8-step MiniMax-H3
+                    adapter as "8 / 4", so a caller who knows the checkpoint may run it
+                    shorter, and `minimax_h3_sampling` honours an explicit
+                    `advanced.steps` over the variant's default for exactly that reason.
+                    So the placeholder REPORTS the recipe's count while the box stays
+                    editable — a knob honoured rather than rejected. */
+                    activeTurboVariant
+                    ? `${activeTurboVariant.sampling.steps} (Turbo)`
+                    : String(stepsDefaultFromModel(selectedModel) ?? ""),
+                  title: lightningActive
+                    ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
+                    : stepsPinned
+                    ? `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it runs a fixed ${stepsPinnedValue}-step schedule baked into its weights and cannot render any other step count.`
+                    : activeTurboVariant
+                    ? `${activeTurboVariant.name} is distilled for ${activeTurboVariant.sampling.steps} steps, which is what runs when this is blank. You can still set your own count.`
+                    : minSteps > 1
+                    ? `${selectedModel?.name ?? "This model"} needs at least ${minSteps} steps.`
+                    : undefined,
+                  type: "number"
+                }}
+                selectProps={(stepsChoice && !ltx25Dev) ? { disabled: lightningActive, title: lightningActive
                         ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
-                        : stepsPinned
-                          ? `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it runs a fixed ${stepsPinnedValue}-step schedule baked into its weights and cannot render any other step count.`
-                          : activeTurboVariant
-                            ? `${activeTurboVariant.name} is distilled for ${activeTurboVariant.sampling.steps} steps, which is what runs when this is blank. You can still set your own count.`
-                            : minSteps > 1
-                              ? `${selectedModel?.name ?? "This model"} needs at least ${minSteps} steps.`
-                              : undefined
-                    }
-                    type="number"
-                    value={lightningActive || stepsPinned ? "" : stepsOverride}
-                  />
-                )}
-              </label>
+                        : `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it renders at ${humanizedNumberMenu(stepsChoice)} steps only.` } : undefined}
+              />
               {supportsGuidance ? (
                 <label>
                   Guidance

@@ -1,3 +1,4 @@
+import { formatResolutionLabel } from "../studioDefaults.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { AssetPickerModal } from "../components/AssetPicker.jsx";
@@ -125,10 +126,6 @@ function modelSupportsInterleave(model) {
   return Array.isArray(model?.capabilities) && model.capabilities.includes("interleave");
 }
 
-function formatResolutionLabel(value) {
-  const [width, height] = String(value).split("x");
-  return height ? `${width} × ${height}` : value;
-}
 
 function documentSegments(job) {
   const segments = job.result?.segments;

@@ -164,7 +164,7 @@ fn dispatch_and_both_routing_oracles_decide_every_known_job_kind() {
         .collect::<BTreeSet<_>>();
     let gaps = include_str!("../../sceneworks-core/src/jobs_store/routing/gaps.rs");
     for (source, name) in [
-        (super::WORKER, "run_utility_job_inner"),
+        (super::UTILITY_DISPATCH, "dispatch_utility_job"),
         (gaps, "mac_rust_supported"),
         (gaps, "candle_supported"),
     ] {
@@ -191,29 +191,38 @@ fn dispatch_and_both_routing_oracles_decide_every_known_job_kind() {
     .map(str::to_owned)
     .collect();
     assert_eq!(
-        dispatch_variants_for(super::WORKER, "run_utility_job_inner", false, false),
+        dispatch_variants_for(
+            super::UTILITY_DISPATCH,
+            "dispatch_utility_job",
+            false,
+            false
+        ),
         expected.difference(&native_only).cloned().collect()
     );
 }
 
 #[test]
 fn worker_entry_delegates_to_the_guarded_dispatcher() {
-    struct Calls(usize);
+    struct Calls {
+        target: &'static str,
+        count: usize,
+    }
     impl<'ast> Visit<'ast> for Calls {
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-            if matches!(call.func.as_ref(), Expr::Path(path) if path.path.is_ident("run_utility_job_inner"))
-            {
-                self.0 += 1;
+            if matches!(call.func.as_ref(), Expr::Path(path) if path.path.is_ident(self.target)) {
+                self.count += 1;
             }
             visit::visit_expr_call(self, call);
         }
     }
-    let mut calls = Calls(0);
-    calls.visit_item_fn(&function(super::WORKER, "run_utility_job"));
-    assert_eq!(
-        calls.0, 1,
-        "the load-progress wrapper must execute the checked dispatcher"
-    );
+    for (caller, target) in [
+        ("run_utility_job", "run_utility_job_inner"),
+        ("run_utility_job_inner", "dispatch_utility_job"),
+    ] {
+        let mut calls = Calls { target, count: 0 };
+        calls.visit_item_fn(&function(super::UTILITY_DISPATCH, caller));
+        assert_eq!(calls.count, 1, "{caller} must execute the checked {target}");
+    }
 }
 
 #[test]
@@ -234,10 +243,13 @@ fn dispatch_ast_ignores_comments_strings_nested_matches_and_guarded_arms() {
         dispatch_variants(source, "run_utility_job"),
         BTreeSet::from(["First".into(), "Second".into()])
     );
-    let missing =
-        super::WORKER.replacen("JobType::PromptRefine =>", "_removed_prompt_refine =>", 1);
-    assert_ne!(missing, super::WORKER);
-    assert!(!dispatch_variants(&missing, "run_utility_job_inner").contains("PromptRefine"));
+    let missing = super::UTILITY_DISPATCH.replacen(
+        "JobType::PromptRefine =>",
+        "_removed_prompt_refine =>",
+        1,
+    );
+    assert_ne!(missing, super::UTILITY_DISPATCH);
+    assert!(!dispatch_variants(&missing, "dispatch_utility_job").contains("PromptRefine"));
 }
 
 fn capability_errors(contracts: &str, jobs_store: &str) -> Vec<String> {
