@@ -456,7 +456,7 @@ async fn probe_seedvr2_source(
     probe_seedvr2_with_context(seedvr2_source_probe_args(source), Some(ctx)).await
 }
 
-#[cfg(native_lane)]
+#[cfg(any(test, native_lane))]
 pub(super) async fn probe_seedvr2_with_context(
     args: Vec<String>,
     context: Option<FfmpegContext<'_>>,
@@ -521,7 +521,7 @@ impl Seedvr2ProbeCollector {
     }
 }
 
-#[cfg(native_lane)]
+#[cfg(any(test, native_lane))]
 async fn read_seedvr2_stderr(
     pipe: tokio::process::ChildStderr,
 ) -> std::io::Result<sceneworks_core::media_process::ParsedStderr<Seedvr2ProbeCollector>> {
