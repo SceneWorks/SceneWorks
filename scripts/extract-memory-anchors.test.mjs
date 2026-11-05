@@ -1,3 +1,4 @@
+import { rustFacadeSource, rustFacadeFunction } from "./lib/rust-facade-source.mjs";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -1271,7 +1272,7 @@ test("every contract_estimate row is on a lane that implements the per-rung ladd
   };
   const implementing = [];
   for (const [backend, relative] of Object.entries(laneSources)) {
-    const source = await readFile(path.join(ROOT, relative), "utf8");
+    const source = await rustFacadeSource(path.join(ROOT, relative));
     if (/fn floor_pseudo_anchor\b/.test(source)) implementing.push(backend);
   }
   assert.deepEqual(
@@ -1300,8 +1301,8 @@ test("every contract_estimate row is on a lane that implements the per-rung ladd
 // ---------------------------------------------------------------------------------------------
 
 test("RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced, read from its source", async () => {
-  const source = await readFile(
-    path.join(ROOT, "crates/sceneworks-worker/src/candle_memory_strategy.rs"), "utf8",
+  const source = await rustFacadeSource(
+    path.join(ROOT, "crates/sceneworks-worker/src/candle_memory_strategy.rs"),
   );
   const body = source.match(
     /pub\(crate\) fn is_receipt_priced\(engine_id: &str\) -> bool \{([\s\S]*?)\n\}/,
@@ -1317,8 +1318,8 @@ test("RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced, read from it
   assert.ok(helpers.length > 0, "is_receipt_priced delegates to per-family helpers");
   assert.equal(body[1].replace(/\b(is_[a-z0-9_]+)\(engine_id\)|engine_id\s*==\s*"[^"]+"|\|\|/g, "").trim(), "",
     "every receipt-priced expression must be understood");
-  const registry = await readFile(
-    path.join(ROOT, "crates/sceneworks-worker/src/memory_route_registry.rs"), "utf8",
+  const { source: registry } = await rustFacadeFunction(
+    path.join(ROOT, "crates/sceneworks-worker/src/memory_route_registry.rs"), "gate_family",
   );
   const gateBody = registry.match(
     /pub\(crate\) fn gate_family\(engine_id: &str\) -> Option<MemoryGateFamily> \{\s*use MemoryGateFamily::\*;\s*Some\(match engine_id \{([\s\S]*?)\n\s*\}\)\s*\}/,
