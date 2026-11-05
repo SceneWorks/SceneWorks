@@ -498,7 +498,7 @@ fn should_warn_open_bind(access_token: &str, ip: std::net::IpAddr) -> bool {
 // bind (e.g. a trusted-network deployment that fronts its own auth) by setting
 // `SCENEWORKS_ALLOW_OPEN_BIND=1`. Pure + tested alongside `should_warn_open_bind`.
 fn open_bind_override_enabled(value: &str) -> bool {
-    matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES")
+    sceneworks_core::env_util::flag_value("SCENEWORKS_ALLOW_OPEN_BIND", Some(value), false)
 }
 
 /// Choose the builtin-manifest seed mode from the raw `SCENEWORKS_CONFIG_DIR` and
@@ -539,9 +539,8 @@ fn seed_mode_for_config_dir(
     if !explicit_config_dir {
         return SeedMode::Overwrite;
     }
-    let own_manifests = own_manifests_env
-        .map(str::trim)
-        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"));
+    let own_manifests =
+        sceneworks_core::env_util::flag_value("SCENEWORKS_OWN_MANIFESTS", own_manifests_env, false);
     if own_manifests {
         SeedMode::IfMissing
     } else {
@@ -658,7 +657,7 @@ async fn spawn_inprocess_utility_worker(
     port: u16,
     data_dir: PathBuf,
 ) -> Result<InProcessUtilityWorker, sceneworks_worker::WorkerError> {
-    let mut worker_settings = sceneworks_worker::Settings::from_env();
+    let mut worker_settings = sceneworks_worker::Settings::try_from_env()?;
     worker_settings.api_url = format!("http://127.0.0.1:{port}");
     worker_settings.data_dir = data_dir;
     worker_settings.gpu_id =
