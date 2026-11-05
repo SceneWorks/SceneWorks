@@ -68,7 +68,18 @@ const MODEL_IMPORT_DEFAULTS: &str = include_str!("../../lora_family.rs");
 const BASE_WEIGHT_IMPORTS: &str = include_str!("../../base_weights.rs");
 const API_VALIDATION: &str = include_str!("../../../../../apps/rust-api/src/jobs.rs");
 const API_GENERATION: &str = include_str!("../../../../../apps/rust-api/src/generation.rs");
-const API_MODEL_CATALOG: &str = include_str!("../../../../../apps/rust-api/src/models.rs");
+const API_MODEL_CATALOG: &str = concat!(
+    include_str!("../../../../../apps/rust-api/src/models/mod.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/license.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/download.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/convert.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/delete.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/import.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/catalog.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/install_state.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/hf_cache_health.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/size_estimate.rs"),
+);
 const API_CONTRACT_ENTRY: &str = concat!(
     include_str!("../../../../../apps/rust-api/src/lib.rs"),
     include_str!("../../../../../apps/rust-api/src/web_assets.rs"),

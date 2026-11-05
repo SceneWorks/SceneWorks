@@ -1,4 +1,6 @@
 //! Pure shared helper contracts: no network, model loading or learned execution.
+mod common;
+
 use sceneworks_core::{
     display_util::{format_bytes, quote_path},
     model_artifacts::artifact_selection::{
@@ -174,4 +176,48 @@ fn environment_policies_preserve_api_raw_worker_trimmed_and_path_defaults() {
             .unwrap()
             .success());
     }
+}
+
+// The shared fixtures interoperate with the production header reader; no tensor execution.
+
+#[test]
+fn shared_safetensors_fixture_preserves_metadata_fill_and_header_offsets() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("nested/metadata.safetensors");
+    common::write_safetensors(
+        &path,
+        &[("half", "BF16"), ("full", "F32"), ("byte", "U8")],
+        Some(json!({ "source": "fixture" })),
+        0x5a,
+    );
+    let before = common::tree_snapshot(root.path());
+    let header = common::safetensors_header(&path);
+    assert_eq!(header.value["__metadata__"], json!({ "source": "fixture" }));
+    assert_eq!(header.value["half"]["data_offsets"], json!([0, 2]));
+    assert_eq!(header.value["full"]["data_offsets"], json!([2, 6]));
+    assert_eq!(header.value["byte"]["data_offsets"], json!([6, 7]));
+    assert_eq!(header.file_len - header.data_start, 7);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[header.data_start as usize..], &[0x5a; 7]);
+    assert_eq!(
+        common::tree_snapshot(root.path()),
+        before,
+        "header read is immutable"
+    );
+}
+
+#[test]
+fn shared_krea_fixture_keeps_its_three_dense_bf16_markers() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("krea.safetensors");
+    common::write_krea_native_file(&path, 0x22);
+    let header = common::safetensors_header(&path);
+    assert_eq!(header.value.as_object().unwrap().len(), 3);
+    assert_eq!(
+        header.value["model.diffusion_model.txtfusion.projector.weight"]["dtype"],
+        "BF16"
+    );
+    assert_eq!(header.file_len - header.data_start, 6);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[header.data_start as usize..], &[0x22; 6]);
 }
