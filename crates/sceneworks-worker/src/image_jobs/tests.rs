@@ -19747,7 +19747,12 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
     let source = include_str!("candle.rs");
     let artifacts = include_str!("artifact_resolution.rs");
     let memory = include_str!("memory.rs");
-    let selector = crate::source_tests::facade_source("candle_memory_strategy.rs");
+    // This tripwire historically reads production wiring and the SANA refusal fixture.
+    let selector = format!(
+        "{}\n{}",
+        crate::source_tests::facade_source("candle_memory_strategy.rs"),
+        include_str!("../candle_memory_strategy/tests.rs"),
+    );
     let registry = concat!(
         include_str!("../memory_route_registry.rs"),
         include_str!("../memory_route_registry/tests.rs"),
