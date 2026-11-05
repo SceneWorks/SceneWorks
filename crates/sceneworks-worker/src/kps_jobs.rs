@@ -225,31 +225,33 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
         detector_blob(&image.pixels, image.height as usize, image.width as usize)
             .map_err(|error| WorkerError::Engine(format!("SCRFD blob: {error}")))?;
     let dets = SCRFD.with(|cell| -> WorkerResult<_> {
-        {
-            let cached = cell.borrow();
-            if cached.as_ref().map(|(path, _)| path.as_path()) != Some(scrfd_path) {
-                drop(cached);
-                // Parse the weights once, process-wide (poison-recovery), then build the detector for
-                // this thread.
+        let cached = crate::cache_thread::get_or_load_local(
+            cell,
+            |entry| cached_path_matches(Some(entry), scrfd_path),
+            || {
+                // Parsed weights remain process-wide; the !Send detector stays on this thread.
                 let weights_cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-                let mut guard = weights_cell.lock().unwrap_or_else(|poisoned| {
-                    let mut guard = poisoned.into_inner();
-                    *guard = None;
-                    guard
-                });
-                if !cached_path_matches(guard.as_ref(), scrfd_path) {
-                    let weights = crate::image_jobs::read_weights(scrfd_path).map_err(|error| {
-                        WorkerError::Engine(format!("SCRFD weights {scrfd_path:?}: {error}"))
-                    })?;
-                    *guard = Some((scrfd_path.to_path_buf(), weights));
-                }
-                let scrfd = Scrfd::from_weights(&guard.as_ref().expect("weights loaded").1)
+                let mut guard =
+                    crate::cache_thread::lock_resetting(weights_cell, |slot| *slot = None);
+                let (_, weights) = crate::cache_thread::get_or_load(
+                    &mut guard,
+                    |entry| cached_path_matches(Some(entry), scrfd_path),
+                    || {
+                        let weights =
+                            crate::image_jobs::read_weights(scrfd_path).map_err(|error| {
+                                WorkerError::Engine(format!(
+                                    "SCRFD weights {scrfd_path:?}: {error}"
+                                ))
+                            })?;
+                        Ok((scrfd_path.to_path_buf(), weights))
+                    },
+                )?;
+                let scrfd = Scrfd::from_weights(weights)
                     .map_err(|error| WorkerError::Engine(format!("SCRFD load: {error}")))?;
-                *cell.borrow_mut() = Some((scrfd_path.to_path_buf(), scrfd));
-            }
-        }
-        let cached = cell.borrow();
-        let (_, scrfd) = cached.as_ref().expect("detector cached");
+                Ok((scrfd_path.to_path_buf(), scrfd))
+            },
+        )?;
+        let (_, scrfd) = &*cached;
         scrfd
             .detect(&blob, det_scale, DET_THRESH, NMS_THRESH)
             .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))
@@ -275,18 +277,17 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn detect_largest_kps_candle(face_dir: &Path, image: &Image) -> WorkerResult<KpsExtraction> {
     let dets = CANDLE_FACE.with(|cell| -> WorkerResult<_> {
-        {
-            let cached = cell.borrow();
-            if cached.as_ref().map(|(dir, _)| dir.as_path()) != Some(face_dir) {
-                drop(cached);
+        let cached = crate::cache_thread::get_or_load_local(
+            cell,
+            |(dir, _)| dir.as_path() == face_dir,
+            || {
                 let analysis = runtime_cuda::providers::face::load(face_dir).map_err(|error| {
                     WorkerError::Engine(format!("face stack {face_dir:?}: {error}"))
                 })?;
-                *cell.borrow_mut() = Some((face_dir.to_path_buf(), analysis));
-            }
-        }
-        let cached = cell.borrow();
-        let (_, analysis) = cached.as_ref().expect("face analysis cached");
+                Ok((face_dir.to_path_buf(), analysis))
+            },
+        )?;
+        let (_, analysis) = &*cached;
         analysis
             .detect(image)
             .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))

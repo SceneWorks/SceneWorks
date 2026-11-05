@@ -251,19 +251,17 @@ pub(crate) fn propagate_track_blocking(
     // prior propagation that panicked mid-run leaves the lock poisoned, so take the
     // inner guard and drop the possibly-corrupt cached predictor to force a clean
     // reload below (sc-4277 / F-MLXW-13).
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = crate::image_jobs::read_weights(&weights_path)
-            .map_err(|e| WorkerError::Engine(format!("sam2 weights load: {e}")))?;
-        let predictor = Sam2VideoPredictor::from_weights_for_size(&weights, Sam2ModelSize::Large)
-            .map_err(|e| WorkerError::Engine(format!("sam2 predictor build: {e}")))?;
-        *guard = Some(predictor);
-    }
-    let predictor = guard.as_ref().expect("predictor loaded");
+    let mut guard = crate::cache_thread::lock_resetting(cell, |slot| *slot = None);
+    let predictor = crate::cache_thread::get_or_load(
+        &mut guard,
+        |_| true,
+        || {
+            let weights = crate::image_jobs::read_weights(&weights_path)
+                .map_err(|e| WorkerError::Engine(format!("sam2 weights load: {e}")))?;
+            Sam2VideoPredictor::from_weights_for_size(&weights, Sam2ModelSize::Large)
+                .map_err(|e| WorkerError::Engine(format!("sam2 predictor build: {e}")))
+        },
+    )?;
 
     let mut run = |seeds: &[(usize, BoxNorm)]| -> WorkerResult<Vec<Vec<u8>>> {
         let mut state = predictor
@@ -384,11 +382,7 @@ mod tests {
 
         // The recovery idiom used at the call sites: take the inner guard and reset
         // the cached model so the reload path runs.
-        let mut guard = cache.lock().unwrap_or_else(|poisoned| {
-            let mut guard = poisoned.into_inner();
-            *guard = None;
-            guard
-        });
+        let mut guard = crate::cache_thread::lock_resetting(&cache, |slot| *slot = None);
         assert_eq!(*guard, None, "cached model is dropped on poison recovery");
         *guard = Some(42); // reload
         assert_eq!(*guard, Some(42));
