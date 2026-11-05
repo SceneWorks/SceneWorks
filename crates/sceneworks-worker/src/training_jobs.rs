@@ -954,25 +954,13 @@ impl PreparedTrainingRun {
 }
 
 /// Fully owned, weights-free result. The no-backend build only validates and closes inputs.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 type TrainingPreflight = PreparedTrainingRun;
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 type TrainingPreflight = ();
 
 /// Synchronous entry point for rank processes and metadata-only contract tests.
-#[cfg(any(
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ),
-    test
-))]
+#[cfg(any(native_lane, test))]
 pub(crate) fn preflight_training_run(
     settings: &Settings,
     plan: &TrainingPlan,
@@ -992,10 +980,7 @@ fn preflight_training_run_with_inputs(
     masks_pending: bool,
     mut prepared_inputs: PreparedTrainingInputs,
 ) -> WorkerResult<TrainingPreflight> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         validate_training_plan(settings, plan)?;
         let engine_id = validate_training_target_config(plan)?;
@@ -1014,10 +999,7 @@ fn preflight_training_run_with_inputs(
             prepared_inputs,
         })
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         validate_training_plan(settings, plan)?;
         validate_training_target_config(plan)?;
@@ -1042,17 +1024,11 @@ fn finish_training_preflight<T>(
     prepared: TrainingPreflight,
     operation: WorkerResult<T>,
 ) -> WorkerResult<T> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         prepared.finish(operation)
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         let () = prepared;
         operation
@@ -1127,10 +1103,7 @@ async fn preflight_training_run_async_using(
             if let Err(error) = check_prepared_input_cancel(Some(&task_cancel)) {
                 return finish_training_preflight(prepared, Err(error));
             }
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
+            #[cfg(native_lane)]
             let prepared = {
                 let mut prepared = prepared;
                 prepared.request.cancel = task_cancel;
@@ -2454,17 +2427,11 @@ async fn run_training_dry_run(
         ),
     )
     .await?;
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     preflight_training_run_async(api, settings, &job.id, plan, masks_pending)
         .await?
         .close()?;
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     preflight_training_run_async(api, settings, &job.id, plan, masks_pending).await?;
     let item_count = plan.dataset.items.len();
     update_job(
@@ -4710,10 +4677,7 @@ mod tests {
             .filter(|t| t.kernel == "moss_image_lora")
             .collect();
         assert_eq!(targets.len(), 2, "both MOSS checkpoints must be covered");
-        let native_runtime = cfg!(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ));
+        let native_runtime = cfg!(native_lane);
         for target in targets {
             let engine_id = engine_trainer_id_for(&target.kernel, &target.base_model).unwrap();
             assert_eq!(
