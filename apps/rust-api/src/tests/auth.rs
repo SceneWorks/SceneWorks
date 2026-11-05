@@ -49,7 +49,7 @@ fn loopback_trusted_only_when_enabled_and_peer_is_local() {
 fn open_bind_override_only_for_explicit_optin() {
     // sc-5720 (API-001): the override that lets an unauthenticated open bind start
     // must require an explicit affirmative value; anything else keeps the refusal.
-    for value in ["1", "true", "TRUE", "yes", "YES", " 1 "] {
+    for value in ["1", "true", "TRUE", "yes", "YES", " 1 ", "On", "YeS"] {
         assert!(open_bind_override_enabled(value), "{value:?} should opt in");
     }
     for value in ["", "0", "false", "no", "off", "2", "enable"] {

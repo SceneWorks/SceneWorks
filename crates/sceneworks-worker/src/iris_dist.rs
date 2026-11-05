@@ -409,8 +409,21 @@ pub fn iris_rank_entry() -> Option<i32> {
             .name("iris-rank".to_owned())
             .stack_size(crate::WORKER_ENTRY_STACK_BYTES)
             .spawn(move || {
-                let settings = crate::settings::Settings::from_env();
                 let mut out = std::io::stdout();
+                let settings = match crate::settings::Settings::try_from_env() {
+                    Ok(settings) => settings,
+                    Err(error) => {
+                        write_message(
+                            &mut out,
+                            &RankMessage::Failed {
+                                message: error.to_string(),
+                                dist: None,
+                                canceled: false,
+                            },
+                        );
+                        return 1;
+                    }
+                };
                 match (read_spec(&spec_path), RankWorld::from_env()) {
                     (Ok(spec), Ok(world)) => run_rank_process_with(
                         &spec,

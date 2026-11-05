@@ -1240,7 +1240,7 @@ fn collect_video_model_mappings(_backend: &str) -> Result<Vec<VideoModelMapping>
 
 /// Build the same GPU capability list production registers on this matching-platform lane.
 fn matching_platform_worker_capabilities() -> Result<Vec<String>, String> {
-    let mut settings = crate::Settings::from_env();
+    let mut settings = crate::Settings::try_from_env().map_err(|error| error.to_string())?;
     settings.backend_mlx_enabled = cfg!(target_os = "macos");
     settings.backend_candle_enabled =
         cfg!(all(not(target_os = "macos"), feature = "backend-candle"));
