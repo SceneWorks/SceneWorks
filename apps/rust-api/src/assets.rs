@@ -209,7 +209,7 @@ pub(crate) async fn import_asset(
     .await;
     if let Err(error) = collect_result {
         if let Some((_, _, temp_path)) = file.as_ref() {
-            let _ = tokio::fs::remove_file(temp_path).await;
+            crate::uploads::cleanup_staged_upload(temp_path).await;
         }
         return Err(error);
     }
