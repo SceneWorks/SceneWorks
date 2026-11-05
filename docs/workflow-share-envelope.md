@@ -798,6 +798,7 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 
 <!-- END PINNED: builders -->
 
+The test-only builder registries live in `crates/sceneworks-core/tests/common/workflow_registry.rs`.
 Adding an entry to `ADVANCED_BUILDERS` is what turns the lint on for that builder — at which point
 every key it emits needs an `allow`/`deny` decision, and a row in the table above, which
 `the_doc_lists_exactly_the_registered_builders` pins in both directions.
@@ -864,7 +865,7 @@ discovery scan rather than a list:
 
 ## The write seams, and what each one embeds for
 
-`WORKFLOW_WRITE_SEAMS` in `crates/sceneworks-core/src/workflow_share.rs` is what closes that. It
+`WORKFLOW_WRITE_SEAMS` in `crates/sceneworks-core/tests/common/workflow_registry.rs` is what closes that. It
 pairs every place in `sceneworks-worker` an envelope can reach a written file with the **web
 builders that feed it** — the same `(file, function)` key the two builder registries are joined on —
 and `every_worker_write_seam_declares_the_lane_it_embeds_for` refuses a seam whose builder is
