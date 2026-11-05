@@ -563,6 +563,20 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
     expect(metaText(container)).toEqual(["needs 37 GB"]);
   });
 
+  it("uses each model's native provider capabilities for the displayed tier floor", async () => {
+    const model = { id: "flux3_klein", name: "FLUX.3", type: "image", installState: "installed",
+      hasVariantMatrix: true, variants: [variant("nvfp4", "installed", null, null)],
+      candle: { minMemoryGb: 16, measured: true, vramGbByTier: { nvfp4: 24 } } };
+    const show = (capabilities, status = "online") => render(root, { models: [model],
+      macCapabilities: { macGatingActive: false }, visibleWorkers: [{ status, capabilities }] });
+    await show(["nvfp4"]);
+    expect(metaText(container)).toEqual(["needs 16 GB"]);
+    await show(["flux3_nvfp4"], "offline");
+    expect(metaText(container)).toEqual(["needs 16 GB"]);
+    await show(["flux3_nvfp4"]);
+    expect(metaText(container)).toEqual(["needs 26 GB"]);
+  });
+
   it("says NOTHING on a CUDA host with no candle evidence, rather than borrowing the MLX floor", async () => {
     // z_image declares mlx 48 + a measured MLX q4 footprint, and NO candle block. Pre-sc-15400 the row
     // showed "needs 48 GB" on Windows — an MLX unified-memory figure presented as a VRAM requirement.
