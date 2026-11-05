@@ -16,13 +16,17 @@ use sceneworks_core::contracts::{Asset, JsonObject};
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::workflow_share::{
     advanced_key_rule, build_workflow_share, build_workflow_share_from, is_path_shaped,
-    parse_workflow_share, AdvancedBuilder, AdvancedBuilderShape, AdvancedDisposition,
-    AdvancedKeySource, SeamDisposition, WebBuilderRef, WorkflowAssetFacts, WorkflowShare,
-    ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION,
-    PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_MAX_BYTES, WORKFLOW_SHARE_SCHEMA_VERSION,
-    WORKFLOW_WRITE_SEAMS,
+    parse_workflow_share, AdvancedDisposition, AdvancedKeySource, WorkflowAssetFacts,
+    WorkflowShare, ADVANCED_KEY_RULES, PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_MAX_BYTES,
+    WORKFLOW_SHARE_SCHEMA_VERSION,
 };
+#[path = "common/workflow_registry.rs"]
+mod workflow_registry;
 use serde_json::{json, Value};
+use workflow_registry::{
+    AdvancedBuilder, AdvancedBuilderShape, SeamDisposition, WebBuilderRef, ADVANCED_BUILDERS,
+    DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION, WORKFLOW_WRITE_SEAMS,
+};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
