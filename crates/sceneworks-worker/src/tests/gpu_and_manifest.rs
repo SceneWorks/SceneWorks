@@ -2061,7 +2061,7 @@ fn declared_candle_vram_rows_are_well_formed() {
         );
     }
 
-    let zimage_edit_arm = include_str!("../image_jobs.rs")
+    let zimage_edit_arm = include_str!("../image_jobs/dispatch.rs")
         .split_once("CandleImageRoute::ZimageEdit => {")
         .expect("Z-Image Edit route must remain explicit")
         .1
