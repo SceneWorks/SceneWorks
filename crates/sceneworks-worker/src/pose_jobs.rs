@@ -272,25 +272,24 @@ pub(crate) fn detect_catalog_poses_blocking(
         .to_rgb8();
     let (width, height) = (image.width(), image.height());
     let cell = DETECTOR.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    let cache_matches = guard.as_ref().is_some_and(|(cached_det, cached_pose, _)| {
-        resolved_cache_paths_match(
-            [cached_det.as_path(), cached_pose.as_path()],
-            [det_path, pose_path],
-        )
-    });
-    if !cache_matches {
-        *guard = Some((
-            det_path.to_path_buf(),
-            pose_path.to_path_buf(),
-            Detector::load(det_path, pose_path, &mut crate::cv::ModelIoLoader)?,
-        ));
-    }
-    let detector = &mut guard.as_mut().expect("detector loaded").2;
+    let mut guard = crate::cache_thread::lock_resetting(cell, |slot| *slot = None);
+    let detector = &mut crate::cache_thread::get_or_load(
+        &mut guard,
+        |(cached_det, cached_pose, _)| {
+            resolved_cache_paths_match(
+                [cached_det.as_path(), cached_pose.as_path()],
+                [det_path, pose_path],
+            )
+        },
+        || {
+            Ok((
+                det_path.to_path_buf(),
+                pose_path.to_path_buf(),
+                Detector::load(det_path, pose_path, &mut crate::cv::ModelIoLoader)?,
+            ))
+        },
+    )?
+    .2;
     let people = detector
         .detect(&image)?
         .iter()
@@ -317,25 +316,24 @@ fn detect_batch(
     // A cancel that lands before the (long) cold detector load starts skips the load entirely.
     bail_if_canceled(cancel)?;
     let cell = DETECTOR.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    let cache_matches = guard.as_ref().is_some_and(|(cached_det, cached_pose, _)| {
-        resolved_cache_paths_match(
-            [cached_det.as_path(), cached_pose.as_path()],
-            [det_path.as_path(), pose_path.as_path()],
-        )
-    });
-    if !cache_matches {
-        *guard = Some((
-            det_path.clone(),
-            pose_path.clone(),
-            Detector::load(&det_path, &pose_path, &mut crate::cv::ModelIoLoader)?,
-        ));
-    }
-    let detector = &mut guard.as_mut().expect("detector loaded").2;
+    let mut guard = crate::cache_thread::lock_resetting(cell, |slot| *slot = None);
+    let detector = &mut crate::cache_thread::get_or_load(
+        &mut guard,
+        |(cached_det, cached_pose, _)| {
+            resolved_cache_paths_match(
+                [cached_det.as_path(), cached_pose.as_path()],
+                [det_path.as_path(), pose_path.as_path()],
+            )
+        },
+        || {
+            Ok((
+                det_path.clone(),
+                pose_path.clone(),
+                Detector::load(&det_path, &pose_path, &mut crate::cv::ModelIoLoader)?,
+            ))
+        },
+    )?
+    .2;
     let device = detector.device;
     let mut out = Vec::with_capacity(images.len());
     for path in images {
@@ -395,25 +393,24 @@ pub(crate) fn detect_and_render_skeleton(
     // Process-wide cached detector — the same `DETECTOR` static + EP-with-CPU-fallback load the
     // batch path uses, so the studio and the pose_detect job share one loaded model.
     let cell = DETECTOR.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    let cache_matches = guard.as_ref().is_some_and(|(cached_det, cached_pose, _)| {
-        resolved_cache_paths_match(
-            [cached_det.as_path(), cached_pose.as_path()],
-            [det_path, pose_path],
-        )
-    });
-    if !cache_matches {
-        *guard = Some((
-            det_path.to_path_buf(),
-            pose_path.to_path_buf(),
-            Detector::load(det_path, pose_path, &mut crate::cv::ModelIoLoader)?,
-        ));
-    }
-    let detector = &mut guard.as_mut().expect("detector loaded").2;
+    let mut guard = crate::cache_thread::lock_resetting(cell, |slot| *slot = None);
+    let detector = &mut crate::cache_thread::get_or_load(
+        &mut guard,
+        |(cached_det, cached_pose, _)| {
+            resolved_cache_paths_match(
+                [cached_det.as_path(), cached_pose.as_path()],
+                [det_path, pose_path],
+            )
+        },
+        || {
+            Ok((
+                det_path.to_path_buf(),
+                pose_path.to_path_buf(),
+                Detector::load(det_path, pose_path, &mut crate::cv::ModelIoLoader)?,
+            ))
+        },
+    )?
+    .2;
     let people = detector.detect(image)?;
 
     // Convert + squareify each person, keep the largest-area one (same ordering rule as the

@@ -89,17 +89,16 @@ fn with_sam3_weights<R>(
     f: impl FnOnce(&Weights) -> WorkerResult<R>,
 ) -> WorkerResult<R> {
     let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = Weights::from_file(model_path, device)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    f(guard.as_ref().expect("weights loaded"))
+    let mut guard = crate::cache_thread::lock_resetting(cell, |slot| *slot = None);
+    let weights = crate::cache_thread::get_or_load(
+        &mut guard,
+        |_| true,
+        || {
+            Weights::from_file(model_path, device)
+                .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))
+        },
+    )?;
+    f(weights)
 }
 
 /// A built (optionally quantized) `Sam3VideoModel` with the `"person"` concept already tokenized.
