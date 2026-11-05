@@ -959,8 +959,8 @@ type TrainingPreflight = PreparedTrainingRun;
 #[cfg(not(native_lane))]
 type TrainingPreflight = ();
 
-/// Synchronous entry point for rank processes and metadata-only contract tests.
-#[cfg(any(native_lane, test))]
+/// Synchronous entry point for native rank processes and metadata-only contract tests.
+#[cfg(native_lane)]
 pub(crate) fn preflight_training_run(
     settings: &Settings,
     plan: &TrainingPlan,
