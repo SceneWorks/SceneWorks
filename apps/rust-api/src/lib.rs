@@ -39,6 +39,7 @@ use sceneworks_core::jobs_store::{
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
     MAX_LISTED_JOBS,
 };
+use sceneworks_core::limits::{requested_steps, steps_limit_error};
 use sceneworks_core::lora_family::{
     accepted_lora_families, apply_adapter_metadata_to_manifest_entry,
     apply_model_manifest_defaults, canonical_lora_family, detect_lora_family, detect_model_family,
@@ -67,9 +68,8 @@ use sceneworks_core::training_store::{
 };
 use sceneworks_core::video_request::{
     classify_reference_set, default_resolution, duration_limit_error, fps_limit_error,
-    reference_limit_error, requested_auto_duration, requested_ltx25_vae_decoder, requested_steps,
-    requested_temporal_upsample_rounds, resolve_duration, resolve_fps, steps_limit_error,
-    ReferenceSetVerdict,
+    reference_limit_error, requested_auto_duration, requested_ltx25_vae_decoder,
+    requested_temporal_upsample_rounds, resolve_duration, resolve_fps, ReferenceSetVerdict,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
