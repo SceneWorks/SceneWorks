@@ -6,12 +6,8 @@ use super::*;
 /// ceiling client-side — this is the authoritative server-side guard.
 pub(crate) const MAX_MOOD_BOARD_IMAGES: usize = 6;
 
-/// The `task` discriminator for Qwen-Image 2.1's official prompt rewriting (sc-24113, epic 24107).
-///
-/// Spelled here as well as in `crates/sceneworks-worker/src/qwen_prompt_rewrite.rs` because the two
-/// crates share no dependency in this direction; `the_rewrite_task_name_matches_the_worker` pins
-/// them together.
-pub(crate) const QWEN_IMAGE_REWRITE_TASK: &str = "qwen_image_rewrite";
+// The API and worker classify the same core-owned discriminator.
+pub(crate) use sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK;
 
 /// Maximum reference images on a Qwen-Image 2.1 rewrite request.
 ///
@@ -288,23 +284,6 @@ async fn resolve_image_caption_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The rewrite task name is spelled in THREE places — here, in the worker's
-    /// `qwen_prompt_rewrite::REWRITE_TASK`, and in the web client's `qwenRewritePrompt` body — and
-    /// the three crates share no dependency that would make a rename propagate.
-    ///
-    /// A mismatch is silent and total: `RefineTask::from_payload` falls through to the generic
-    /// `Rewrite` for any unknown discriminator, so the job would quietly run the Anubis refiner
-    /// under the generic rewrite rules instead of Qwen's frozen template, return prose where the
-    /// client expects a suggestion object, and surface only as a parse failure with no clue why.
-    ///
-    /// This pins the API's half against the literal the worker classifies on. The web half is
-    /// pinned by the end-to-end route tests in `crate::tests::jobs`, which POST the same string the
-    /// client does.
-    #[test]
-    fn the_rewrite_task_name_matches_the_worker() {
-        assert_eq!(QWEN_IMAGE_REWRITE_TASK, "qwen_image_rewrite");
-    }
 
     /// The rewrite's reference ceiling is the RENDER's ceiling, and deliberately not the mood
     /// board's. Asserting both together is what stops a future "unify the caps" cleanup from

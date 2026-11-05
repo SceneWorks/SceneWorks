@@ -65,6 +65,9 @@ runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "67f525f
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "67f525f7c5d6abd07b49d3fa3f3d8d73513b805f" }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [features]
 default = []
 mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-instantid", "dep:mlx-gen-krea", "dep:mlx-gen-krea-realtime", "dep:mlx-gen-ltx", "dep:mlx-gen-mage", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-scail2", "dep:mlx-gen-sdxl", "dep:mlx-gen-wan", "dep:mlx-rs", "dep:runtime-macos"]

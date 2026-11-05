@@ -158,10 +158,12 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     // The primitives themselves (`ensure_cached_file`, `ensure_cached_file_verified`,
     // `ensure_hf_cached_file`, `download_snapshot_into_cache`) and their shared plumbing.
     ("downloads.rs", DownloadRole::Installer),
-    // Dispatches `run_model_download_job` / `run_lora_download_job` from the job loop.
-    ("lib.rs", DownloadRole::Installer),
+    // Dispatches the same installer/render orchestration formerly in lib.rs; no new fetch edge.
+    ("utility_dispatch.rs", DownloadRole::Installer),
     // The Model Manager executor: model + LoRA installs, tier fetches, conversions.
-    ("model_jobs.rs", DownloadRole::Installer),
+    ("model_jobs/download.rs", DownloadRole::Installer),
+    ("model_jobs/convert.rs", DownloadRole::Installer),
+    ("model_jobs/import.rs", DownloadRole::Installer),
     // -- Job-time: the population epic 17625 is migrating. Only ever shrinks. --------------------
     // Video/image tier fetches via `model_jobs::ensure_hf_files_cached` at generation time.
     ("image_jobs/base.rs", DownloadRole::JobTime),
@@ -293,13 +295,6 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "minimax_h3_import_fixture.rs",
         "synthetic-component-staging",
         CacheRole::Scratch,
-    ),
-    // Explicit per-fixture HF-layout library for pinned-vs-mutable-source regression cases.
-    (
-        "worker",
-        "video_jobs/minimax_h3_import_tests.rs",
-        "source-library",
-        CacheRole::HfCache,
     ),
     // Prepared control-training datasets, regenerated from the source images.
     (
@@ -511,10 +506,15 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "keypoint-uploads",
         CacheRole::Upload,
     ),
-    ("worker", "model_jobs.rs", "lora-uploads", CacheRole::Upload),
     (
         "worker",
-        "model_jobs.rs",
+        "model_jobs/import.rs",
+        "lora-uploads",
+        CacheRole::Upload,
+    ),
+    (
+        "worker",
+        "model_jobs/import.rs",
         "model-uploads",
         CacheRole::Upload,
     ),
@@ -526,7 +526,7 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     // Cross-process model-conversion locks.
     (
         "worker",
-        "model_jobs.rs",
+        "model_jobs/conversion_publication.rs",
         "worker-locks",
         CacheRole::Runtime,
     ),
@@ -1490,7 +1490,7 @@ fn test_only_files(tree: &BTreeMap<String, String>, root_module: &str) -> BTreeS
         let declared = module_declarations(code);
         let production = module_declarations(&strip_cfg_test_items(code));
         for name in &declared {
-            if let Some(target) = resolve_module(rel, name, tree, root_module) {
+            if let Some(target) = resolve_module(rel, name, code, tree, root_module) {
                 children
                     .entry(rel.as_str())
                     .or_default()
@@ -1581,9 +1581,49 @@ fn include_paths(code: &str) -> Vec<String> {
 fn resolve_module(
     rel: &str,
     name: &str,
+    code: &str,
     tree: &BTreeMap<String, String>,
     root_module: &str,
 ) -> Option<String> {
+    fn explicit_path(items: &[syn::Item], name: &str) -> Option<String> {
+        for item in items {
+            if let syn::Item::Mod(module) = item {
+                if module.ident == name && module.content.is_none() {
+                    for attribute in &module.attrs {
+                        if attribute.path().is_ident("path") {
+                            if let syn::Meta::NameValue(value) = &attribute.meta {
+                                if let syn::Expr::Lit(syn::ExprLit {
+                                    lit: syn::Lit::Str(path),
+                                    ..
+                                }) = &value.value
+                                {
+                                    return Some(path.value());
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((_, children)) = &module.content {
+                    if let Some(path) = explicit_path(children, name) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+        None
+    }
+    if let Some(path) = syn::parse_file(code)
+        .ok()
+        .and_then(|file| explicit_path(&file.items, name))
+    {
+        let parent = rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        let target = if parent.is_empty() {
+            path
+        } else {
+            format!("{parent}/{path}")
+        };
+        return tree.contains_key(&target).then_some(target);
+    }
     let dir = if rel == root_module || rel.ends_with("/mod.rs") {
         rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
     } else {
@@ -1600,6 +1640,29 @@ fn resolve_module(
     ]
     .into_iter()
     .find(|candidate| tree.contains_key(candidate))
+}
+
+#[test]
+fn path_attributes_preserve_test_only_and_production_module_edges() {
+    let root = r#"
+        #[cfg(test)]
+        #[path = "renamed_fixture.rs"]
+        mod fixture;
+        #[path = "renamed_runtime.rs"]
+        mod runtime;
+    "#;
+    let tree = BTreeMap::from([
+        ("bin/lane.rs".to_owned(), root.to_owned()),
+        ("bin/renamed_fixture.rs".to_owned(), String::new()),
+        ("bin/renamed_runtime.rs".to_owned(), String::new()),
+    ]);
+    let test_only = test_only_files(&tree, "lib.rs");
+    assert!(test_only.contains("bin/renamed_fixture.rs"));
+    assert!(!test_only.contains("bin/renamed_runtime.rs"));
+    assert_eq!(
+        resolve_module("bin/lane.rs", "runtime", root, &tree, "lib.rs"),
+        Some("bin/renamed_runtime.rs".to_owned())
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2763,11 +2826,6 @@ fn synthetic_fixture_cache_roles_do_not_authorize_new_destinations() {
             "synthetic-component-staging",
             CacheRole::Scratch,
         ),
-        (
-            "video_jobs/minimax_h3_import_tests.rs",
-            "source-library",
-            CacheRole::HfCache,
-        ),
     ] {
         assert_eq!(
             allowed.get(&("worker".into(), file.into(), subdir.into())),
@@ -3075,7 +3133,8 @@ fn the_guard_module_is_excluded_from_its_own_scan() {
     assert!(
         test_only.contains("tests.rs")
             && test_only.contains("tests/lora_and_downloads.rs")
-            && test_only.contains("tests/test_api_stub.rs"),
+            && test_only.contains("tests/test_api_stub.rs")
+            && test_only.contains("video_jobs/minimax_h3_import_tests.rs"),
         "the module walk must follow `include!` edges into src/tests/, or the crate's own download \
          tests read as production job-time downloads"
     );
