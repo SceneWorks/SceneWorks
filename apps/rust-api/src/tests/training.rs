@@ -4209,7 +4209,7 @@ async fn racing_terminal_training_report_loses_before_lora_side_effects() {
     claim_training_job(&app, &job_id).await;
 
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    *state.progress_before_accept_once.lock() = Some(barrier.clone());
+    *state.test_hooks.progress_before_accept_once.lock() = Some(barrier.clone());
     let completing_app = app.clone();
     let completing_job_id = job_id.clone();
     let completing_adapter_path = adapter_path.display().to_string();
@@ -4321,7 +4321,7 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
         "result": { "outputPath": adapter_path.display().to_string() }
     });
     let mut failure_events = state.events.subscribe();
-    *state.progress_side_effects_fail_once.lock() = true;
+    *state.test_hooks.progress_side_effects_fail_once.lock() = true;
     let (first_status, _) = request(
         app.clone(),
         "POST",
@@ -4358,7 +4358,7 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
     // Keep the handoff pending for startup recovery and prove the retry emits
     // neither a duplicate terminal snapshot nor a duplicate queue refresh.
     let mut retry_events = state.events.subscribe();
-    *state.progress_side_effects_fail_once.lock() = true;
+    *state.test_hooks.progress_side_effects_fail_once.lock() = true;
     let (retry_status, _) = request(
         app.clone(),
         "POST",
@@ -4638,6 +4638,7 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
         "fixture must poison one complete production batch"
     );
     state
+        .test_hooks
         .progress_side_effects_fail_job_ids
         .lock()
         .extend(poison_ids.iter().cloned());
@@ -4658,7 +4659,11 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
             .expect("poison batch recovery returns"),
         0
     );
-    let first_attempts = state.progress_side_effects_attempts.lock().clone();
+    let first_attempts = state
+        .test_hooks
+        .progress_side_effects_attempts
+        .lock()
+        .clone();
     assert!(
         poison_ids
             .iter()
@@ -4674,6 +4679,7 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
     let (_, restarted_state) =
         create_app_with_state(settings).expect("restarted app and state create");
     restarted_state
+        .test_hooks
         .progress_side_effects_fail_job_ids
         .lock()
         .extend(poison_ids.iter().cloned());
@@ -4697,7 +4703,10 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
         0
     );
     assert_eq!(
-        *restarted_state.progress_side_effects_attempts.lock(),
+        *restarted_state
+            .test_hooks
+            .progress_side_effects_attempts
+            .lock(),
         std::collections::HashMap::new(),
         "poison rows must stay out of the due set across restart until durable backoff expires"
     );
@@ -4727,6 +4736,7 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
         "the poison rows still fail, so none of them recovers"
     );
     let expired_attempts = restarted_state
+        .test_hooks
         .progress_side_effects_attempts
         .lock()
         .clone();
@@ -8464,4 +8474,136 @@ async fn raw_jobs_route_refuses_qwen_image_2_1_turbo_as_a_training_base() {
         sceneworks_core::training::untrainable_base_model_reason("qwen_image_2_1").is_none(),
         "base 2.1 trains"
     );
+}
+
+struct ParquetFinalizeFixture {
+    _temporary: tempfile::TempDir,
+    app: axum::Router,
+    state: crate::AppState,
+    dataset_route: String,
+    finalize_route: String,
+    payload: Value,
+    staged_path: std::path::PathBuf,
+}
+
+async fn parquet_finalize_fixture() -> ParquetFinalizeFixture {
+    let temporary = tempfile::tempdir().unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temporary)).unwrap();
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Finalize ownership"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let project_id = project["id"].as_str().unwrap();
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({"name":"Empty import","items":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().unwrap();
+    let relative =
+        format!("training/datasets/{dataset_id}/parquet-imports/job_finalize_test/pq_item.png");
+    let staged_path = std::path::Path::new(project["path"].as_str().unwrap()).join(&relative);
+    std::fs::create_dir_all(staged_path.parent().unwrap()).unwrap();
+    std::fs::write(&staged_path, b"png-bytes").unwrap();
+    let dataset_route = format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}");
+    ParquetFinalizeFixture {
+        _temporary: temporary,
+        app,
+        state,
+        finalize_route: format!("{dataset_route}/parquet-import-finalize"),
+        dataset_route,
+        payload: json!({"jobId":"job_finalize_test","datasetVersion":dataset["version"],"items":[{"id":"pq_item","path":relative,"displayName":"pq_item.png","width":32,"height":16}]}),
+        staged_path,
+    }
+}
+
+#[tokio::test]
+async fn parquet_finalize_keeps_requests_live_and_rechecks_the_commit_revision() {
+    let fixture = parquet_finalize_fixture().await;
+    let gate = std::sync::Arc::new(crate::test_hooks::BlockingIoTestHook::default());
+    *fixture
+        .state
+        .test_hooks
+        .parquet_finalize_before_validation_once
+        .lock() = Some(gate.clone());
+    let app = fixture.app.clone();
+    let route = fixture.finalize_route.clone();
+    let payload = fixture.payload.clone();
+    let pending = tokio::spawn(async move {
+        request_with_peer(app, "POST", &route, payload, "127.0.0.1:50000").await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_reached())
+        .await
+        .unwrap();
+    let (status, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        request(fixture.app.clone(), "GET", "/api/v1/projects", Value::Null),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::OK);
+    let (status, edited) = request(
+        fixture.app.clone(),
+        "PATCH",
+        &fixture.dataset_route,
+        json!({"name":"Changed meanwhile","items":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_ne!(
+        edited["version"], fixture.payload["datasetVersion"],
+        "the competing write must change the content revision"
+    );
+    gate.release();
+    let (status, refusal) = pending.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert!(refusal["detail"]
+        .as_str()
+        .unwrap()
+        .contains("Dataset changed"));
+    let (_, current) = request(fixture.app, "GET", &fixture.dataset_route, Value::Null).await;
+    assert_eq!(current["name"], "Changed meanwhile");
+    assert_eq!(current["version"], edited["version"]);
+    assert_eq!(current["items"], json!([]));
+    assert!(
+        fixture.staged_path.is_file(),
+        "a stale import must not consume its staged input"
+    );
+}
+
+#[tokio::test]
+async fn canceling_parquet_validation_cannot_commit_a_dataset() {
+    let fixture = parquet_finalize_fixture().await;
+    let gate = std::sync::Arc::new(crate::test_hooks::BlockingIoTestHook::default());
+    *fixture
+        .state
+        .test_hooks
+        .parquet_finalize_before_validation_once
+        .lock() = Some(gate.clone());
+    let app = fixture.app.clone();
+    let route = fixture.finalize_route.clone();
+    let payload = fixture.payload.clone();
+    let pending = tokio::spawn(async move {
+        request_with_peer(app, "POST", &route, payload, "127.0.0.1:50000").await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_reached())
+        .await
+        .unwrap();
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_finished())
+        .await
+        .unwrap();
+    let (_, current) = request(fixture.app, "GET", &fixture.dataset_route, Value::Null).await;
+    assert_eq!(current["version"], fixture.payload["datasetVersion"]);
+    assert_eq!(current["items"], json!([]));
+    assert!(fixture.staged_path.is_file());
 }

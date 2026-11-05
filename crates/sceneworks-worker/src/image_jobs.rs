@@ -15,9 +15,9 @@
 //! the [`crate::engines::MODEL_TABLE`] dispatch table + links its provider crate.
 
 use super::*;
-// Used only by the generation harness in base.rs (the metrics builders), which is
-// itself `include!`d only on macOS / the backend-candle lane — so gate the import to
-// match, or the Linux-no-candle "neither" build sees it as unused (`-D warnings`).
+// The metrics owner uses this contract type only in the native image lanes.
+// Keep the parent binding behind that same gate so the Linux default build
+// retains its strict unused-import check.
 #[cfg(native_lane)]
 use sceneworks_core::contracts::GenerationMetrics;
 use sceneworks_core::image_request::ImageRequest;
@@ -3675,8 +3675,7 @@ fn stub_rgb8(width: u32, height: u32, seed: i64) -> Vec<u8> {
 // resolvers) carry their own `#[cfg(target_os = "macos")]`. So these two includes compile on macOS
 // AND on the Windows candle build.
 #[cfg(native_lane)]
-// MLX/candle generator stream helpers.
-include!("image_jobs/stream.rs");
+mod stream;
 
 // Iris-3B generation-task wiring (sc-25679 MLX / sc-25680 Candle / sc-25681 controls): its tests
 // drive the MLX `generate_stream` arm and the Candle `generate_candle_stream` arm end to end.
@@ -3719,14 +3718,43 @@ use tier_resolver::{
 };
 
 #[cfg(native_lane)]
-// base image routing (MLX) + neutral txt2img generation harness + the candle execution path.
-include!("image_jobs/base.rs");
+mod adapters;
+#[cfg(native_lane)]
+mod artifact_resolution;
+#[cfg(native_lane)]
+mod candle;
+#[cfg(native_lane)]
+mod conditioning;
+#[cfg(native_lane)]
+mod events;
+#[cfg(native_lane)]
+mod geometry;
+#[cfg(native_lane)]
+mod load_policy;
+#[cfg(native_lane)]
+mod load_spec;
+#[cfg(native_lane)]
+mod memory;
+#[cfg(native_lane)]
+mod metrics;
+#[cfg(native_lane)]
+mod mlx;
+#[cfg(native_lane)]
+mod moss;
+#[cfg(native_lane)]
+mod quantization;
+#[cfg(native_lane)]
+mod render;
+#[cfg(native_lane)]
+mod routing;
+#[cfg(native_lane)]
+mod sampling;
 // Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849). The
 // weight-resolution helper (`resolve_pid_weights`) is backend-neutral, so it compiles on BOTH face
 // backends: the generic MLX lanes (base.rs/qwen.rs `generate*`, macOS-only) AND the candle InstantID
 // Angles/Poses lane (instantid.rs, sc-8373), which now decodes through the `sdxl` PiD student off-Mac.
 #[cfg(native_lane)]
-include!("image_jobs/pid.rs");
+mod pid;
 // Shared strict-control driver (epic 8236, sc-8243): the `(engine_id, control_repo, supported_kinds)`
 // single source of truth + the preprocess (pose/canny/depth/user-passthrough) → `Conditioning::Control`
 // core the three MLX registry strict-control paths (zimage/flux2/qwen below) route through. Off-Mac the
@@ -3734,26 +3762,21 @@ include!("image_jobs/pid.rs");
 // `preprocess_control_entry` (pose/canny/depth), so this is gated to either platform (the candle build
 // off-Mac, MLX on macOS) rather than macOS-only.
 #[cfg(native_lane)]
-include!("image_jobs/strict_control.rs");
+mod strict_control;
 // Generic SDXL OpenPose ControlNet. One backend-neutral route drives the registered `sdxl`
 // provider on both MLX and Candle; platform bundles select the implementation behind the registry.
+#[cfg(target_os = "macos")]
+mod flux1_control;
+#[cfg(target_os = "macos")]
+mod flux2;
+#[cfg(target_os = "macos")]
+mod krea_edit;
+#[cfg(target_os = "macos")]
+mod qwen;
 #[cfg(native_lane)]
-include!("image_jobs/sdxl_control.rs");
+mod sdxl_control;
 #[cfg(target_os = "macos")]
-// Z-Image strict-pose and prompt augmentation helpers.
-include!("image_jobs/zimage.rs");
-#[cfg(target_os = "macos")]
-// FLUX.2 edit routing and conditioning.
-include!("image_jobs/flux2.rs");
-#[cfg(target_os = "macos")]
-// FLUX.1-dev strict-control (Shakker Union-Pro-2.0) routing.
-include!("image_jobs/flux1_control.rs");
-#[cfg(target_os = "macos")]
-// Qwen control/edit routing.
-include!("image_jobs/qwen.rs");
-#[cfg(target_os = "macos")]
-// Krea 2 Kontext-style image-edit routing (epic 10871).
-include!("image_jobs/krea_edit.rs");
+mod zimage;
 // Krea 2 single-phase turbo-on-Raw routing (epic 13879 S3, sc-13883): the accelerator LoRA on a
 // `krea_2_raw` t2i job → the distilled Turbo sampling regime (fixed mu 1.15 / ~8 steps / CFG-off).
 // Shared by the MLX path (macOS) AND the candle lane (Windows/Linux CUDA, sc-13887): the whole file
@@ -3762,7 +3785,7 @@ include!("image_jobs/krea_edit.rs");
 // engine (inference PR #204) keys the turbo regime on the `krea_2_turbo` descriptor id exactly like
 // MLX.
 #[cfg(native_lane)]
-include!("image_jobs/krea_turbo_raw.rs");
+mod krea_turbo_raw;
 // Krea 2 multi-phase denoise routing (epic 13879 S4, sc-13884): a `krea_2_raw` t2i job carrying an
 // explicit `advanced.phases` list → the multi-phase driver (one Raw trajectory / global schedule,
 // per-phase guidance + per-phase toggling of the job's load-time LoRA stack by index). Shared by the
@@ -3770,53 +3793,35 @@ include!("image_jobs/krea_turbo_raw.rs");
 // `GenerationRequest::phases` contract, which the candle Krea engine also honors (inference PR #204),
 // so the shape-detection + `advanced.phases` parse/validate + engine invocation are all backend-neutral.
 #[cfg(native_lane)]
-include!("image_jobs/krea_multiphase.rs");
+mod checkpoint_plan;
 #[cfg(target_os = "macos")]
-// Krea 2 pose-ControlNet (MLX) strict-pose routing (sc-8465, epic 8459 S5).
-include!("image_jobs/krea_control.rs");
+mod krea_control;
 #[cfg(native_lane)]
-// Imported single-file Krea 2 checkpoint routing (epic 14015 S0c, sc-14018/sc-14023): a user-imported
-// `krea_2`-family DiT single file → paired with a resident base tier (shared TE/VAE/tokenizer) and
-// loaded through the selected runtime's native single-file entrypoint, bypassing the registry
-// snapshot-dir path. Shared by MLX and Candle so global import acceptance always has a real route.
-include!("image_jobs/krea_imported.rs");
+mod krea_imported;
 #[cfg(native_lane)]
-// Plan-driven checkpoint routing (epic 20398, sc-20634): a user model bound to a persisted
-// `ImportPlanV1` (`importPlan.checkpointId` on its manifest entry) is resolved and re-verified
-// through the checkpoint plan store, its provider selected by family + source shape + operation
-// through the registry's imported-model authority, and rendered through the shared cached-generator
-// seam. Backend-neutral: the same file serves MLX and Candle.
-include!("image_jobs/checkpoint_plan.rs");
+mod krea_multiphase;
 #[cfg(native_lane)]
-include!("image_jobs/sdxl_imported.rs");
+mod mage_finetuned;
 #[cfg(native_lane)]
-// Fine-tuned Mage-Flow base checkpoint routing (sc-15036, epic 14034 F6): the `transformer/`-shaped
-// artifact a FULL base fine-tune writes, paired at load with the installed base's shared text
-// encoder + VAE and rendered through the `load_finetuned` entrypoint that skips the pinned-
-// checkpoint identity guard a fine-tune necessarily fails. The shared request path uses native MLX
-// on macOS and the native Candle Mage engine on CUDA hosts.
-include!("image_jobs/mage_finetuned.rs");
+mod sdxl_imported;
 #[cfg(target_os = "macos")]
-// SenseNova edit routing.
-include!("image_jobs/sensenova.rs");
+mod sensenova;
 // Bernini still-image (t2i/i2i) routing. Included on macOS (the MLX `generate_bernini_image_stream`)
 // AND the candle lane (sc-10996: `generate_candle_bernini_image_stream` + the shared task/raw-settings/
 // generate-one helpers); each item inside is cfg-gated to its backend, so the neither build pulls in
 // nothing. (Unlike the other macOS-only routing files above, whose candle siblings live in dedicated
 // `*_candle.rs` files, Bernini keeps both lanes in one file to share the neutral still-image helpers.)
 #[cfg(native_lane)]
-include!("image_jobs/bernini.rs");
+mod bernini;
 #[cfg(target_os = "macos")]
-// SDXL advanced routing.
-include!("image_jobs/sdxl.rs");
+mod kolors;
 #[cfg(target_os = "macos")]
-// Kolors advanced conditioning (img2img + IP-Adapter-Plus reference).
-include!("image_jobs/kolors.rs");
+mod sdxl;
 // InstantID native routing — macOS (MLX) + the Windows/CUDA candle lane (sc-5491). The two engines'
 // `InstantId` APIs differ only at the load boundary (with_face dir-vs-Weights, quantize, largest_face
 // signature), cfg-split inside; the per-item generate/restore loop is backend-neutral over `gen_core`.
 #[cfg(native_lane)]
-include!("image_jobs/instantid.rs");
+mod instantid;
 // SDXL IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS keeps
 // the MLX SDXL IP path (sdxl.rs `SdxlSubMode::Ip`); there is no MLX `IpAdapterSdxl`, so this is
 // candle-exclusive.
@@ -3980,12 +3985,10 @@ use zimage_identity_candle::{zimage_identity_candle_available, zimage_identity_c
 mod pulid_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use pulid_candle::{generate_candle_pulid_stream, pulid_candle_available};
-#[cfg(target_os = "macos")]
-// PuLID-FLUX native routing.
-include!("image_jobs/pulid.rs");
 #[cfg(native_lane)]
-// image detail tile-ControlNet routing.
-include!("image_jobs/detail.rs");
+mod detail;
+#[cfg(target_os = "macos")]
+mod pulid;
 
 #[cfg(not(native_lane))]
 pub(crate) async fn run_image_detail_job(
@@ -4008,3 +4011,240 @@ use tier_resolver::qwen_control_tier_subdir;
 use crate::adapter_resolution::resolve_prepared_adapter_file;
 #[cfg(any(test, native_lane))]
 use crate::adapter_resolution::{lora_weight, resolve_adapter_file};
+
+// Preserve the named existing image interface and the current orchestration seams.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use adapters::candle_adapter_resident_bytes;
+#[cfg(all(
+    native_lane,
+    any(native_lane, test),
+    all(feature = "test-support", native_lane)
+))]
+use adapters::resolve_prepared_adapters;
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use adapters::{classify_adapter, classify_prepared_adapter};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use artifact_resolution::candle_weights_gap;
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use artifact_resolution::{
+    resolve_model_path_dir, resolve_weights_dir, tier_key_for_resolved_dir,
+    ZIMAGE_MLX_TURNKEY_REPO, ZIMAGE_MLX_TURNKEY_REVISION,
+};
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use artifact_resolution::{
+    resolved_mlx_artifact_provenance, resolved_mlx_artifact_tier,
+    resolved_mlx_artifact_tier_for_model,
+};
+#[cfg(target_os = "macos")]
+use bernini::generate_bernini_image_stream;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use bernini::generate_candle_bernini_image_stream;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use bernini::{
+    bernini_adapter_resident_bytes, resolve_candle_bernini_model_dir,
+    resolve_candle_bernini_tier_dir_and_quant,
+};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle::generate_candle_stream;
+#[cfg(native_lane)]
+use checkpoint_plan::generate_checkpoint_plan_stream;
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use checkpoint_plan::{
+    checkpoint_plan_bespoke_primary_dir, checkpoint_plan_bespoke_primary_pin,
+    checkpoint_plan_checkpoint_id, request_is_checkpoint_plan_backed, CheckpointPlanBespokeDir,
+    CheckpointPlanSelection,
+};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use checkpoint_plan::{
+    checkpoint_plan_bespoke_roles, checkpoint_plan_bespoke_tree, CheckpointPlanBespokeRoles,
+    CheckpointPlanBespokeTree,
+};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use conditioning::candle_conditioned_edit_work;
+#[cfg(native_lane)]
+use conditioning::qwen_image_2_1_reference_ids;
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use conditioning::{
+    load_reference_alpha, load_reference_image, load_reference_image_with,
+    resolve_character_image_likeness_source, resolve_control_identity_source, FlattenPolicy,
+    QwenImage21Reference,
+};
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use detail::{begin_detail_cancel, run_image_detail_job};
+#[cfg(target_os = "macos")]
+use flux1_control::generate_flux1_dev_control_stream;
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use flux2::{flux2_edit_engine_id, flux2_edit_uses_provider_memory_safety};
+#[cfg(target_os = "macos")]
+use flux2::{generate_flux2_dev_control_stream, generate_flux2_edit_stream};
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use geometry::fit_engine_image;
+#[cfg(native_lane)]
+use instantid::generate_instantid_stream;
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use instantid::{
+    ensure_face_stack_dir, ensure_scrfd_weights, INSTANTID_ARCFACE_FILE, INSTANTID_MLX_REVISION,
+    INSTANTID_SCRFD_FILE,
+};
+#[cfg(target_os = "macos")]
+use kolors::generate_kolors_control_stream;
+#[cfg(target_os = "macos")]
+use krea_control::generate_krea_control_stream;
+#[cfg(target_os = "macos")]
+use krea_edit::generate_krea_edit_stream;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use krea_imported::generate_krea_imported_control_stream;
+#[cfg(target_os = "macos")]
+use krea_imported::generate_krea_imported_control_stream;
+#[cfg(native_lane)]
+use krea_imported::generate_krea_imported_stream;
+#[cfg(native_lane)]
+use krea_multiphase::generate_krea_multiphase_stream;
+#[cfg(native_lane)]
+use krea_turbo_raw::generate_krea_turbo_on_raw_stream;
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use load_policy::{
+    apply_measured_mlx_load_shape, declared_sequential_resident_alternative,
+    prepare_mlx_load_policy, release_declared_sequential_for_request,
+};
+#[cfg(native_lane)]
+use load_spec::validate_selected_decoder_request;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use load_spec::{
+    apply_declared_candle_image_load_shape, candle_artifact_path_matches,
+    candle_certified_hf_artifact_path, candle_certified_load_spec, candle_pinned_hf_artifact_path,
+    candle_shared_memory_tier,
+};
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use load_spec::{
+    attach_manifest_text_encoder, has_authored_text_encoder,
+    prepare_manifest_text_encoder_with_file_pins, ManifestTextEncoderAttachedSpec,
+};
+#[cfg(native_lane)]
+use mage_finetuned::generate_mage_finetuned_stream;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use memory::{
+    admit_sdxl_bespoke_memory, candle_resolved_tier_key, validate_candle_tier_memory_evidence,
+};
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use mlx::ensure_mlx_candidate_provenance;
+#[cfg(target_os = "macos")]
+use mlx::generate_stream;
+#[cfg(all(native_lane, any(target_os = "macos", test)))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use mlx::{choose_mlx_request_tier, MlxTierFit};
+#[cfg(all(native_lane, feature = "test-support"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use moss::{
+    moss_generation_preload_for_test, moss_generation_preload_for_test_with_check,
+};
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use pid::{pid_effective_dims, pid_output_tier, PidOutputTier};
+#[cfg(target_os = "macos")]
+use pulid::generate_pulid_flux_stream;
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use pulid::is_pulid_flux_model;
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use quantization::resolve_quant;
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use quantization::{fixed_mlx_artifact_quant, mlx_load_quant_for_resolved_artifact};
+#[cfg(target_os = "macos")]
+use qwen::{generate_qwen_control_stream, generate_qwen_edit_stream};
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use render::LaneRgbaSurface;
+#[cfg(all(
+    native_lane,
+    any(all(not(target_os = "macos"), feature = "backend-candle"), test)
+))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use routing::imported_base_snapshot_companions;
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use routing::mlx_flux_strict_control_engine_id;
+#[cfg(native_lane)]
+use routing::PreparedFileDispatch;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use routing::{
+    candle_adapter_label, is_candle_engine, prepare_candle_image_route, CandleImageRoute,
+    PreparedCandleImageRoute, WIRED_CANDLE_POSE_FAMILIES,
+};
+#[cfg(target_os = "macos")]
+use routing::{prepare_image_route, ImageRoute, PreparedImageRoute, WIRED_MLX_POSE_FAMILIES};
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use sampling::{
+    curated_image_menu, emit_load_event, emit_sampling_knob_unsupported, normalize_sampling_knob,
+    read_advanced_guidance_method, read_advanced_sampling_knobs,
+};
+#[cfg(target_os = "macos")]
+use sdxl::generate_sdxl_advanced_stream;
+#[cfg(native_lane)]
+use sdxl_control::generate_sdxl_control_stream;
+#[cfg(native_lane)]
+use sdxl_imported::generate_sdxl_imported_stream;
+#[cfg(target_os = "macos")]
+use sensenova::generate_sensenova_edit_stream;
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use stream::mlx_weights_gap;
+#[cfg(native_lane)]
+use stream::prepare_image_route_with_progress;
+#[cfg(target_os = "macos")]
+use zimage::{generate_zimage_base_control_stream, generate_zimage_control_stream};
+
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use artifact_resolution::resolved_artifact_provenance_tests;

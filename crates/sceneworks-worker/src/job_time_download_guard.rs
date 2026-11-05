@@ -166,7 +166,12 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     ("model_jobs/import.rs", DownloadRole::Installer),
     // -- Job-time: the population epic 17625 is migrating. Only ever shrinks. --------------------
     // Video/image tier fetches via `model_jobs::ensure_hf_files_cached` at generation time.
-    ("image_jobs/base.rs", DownloadRole::JobTime),
+    // F17/F93 partitions the former image base into these four actual callers/definitions.
+    // Existing function bodies and fetch call edges are unchanged; each real file stays explicit.
+    ("image_jobs/artifact_resolution.rs", DownloadRole::JobTime),
+    ("image_jobs/conditioning.rs", DownloadRole::JobTime),
+    ("image_jobs/mlx.rs", DownloadRole::JobTime),
+    ("image_jobs/candle.rs", DownloadRole::JobTime),
     ("video_jobs/bernini.rs", DownloadRole::JobTime),
     ("video_jobs/krea_realtime.rs", DownloadRole::JobTime),
     ("video_jobs/ltx.rs", DownloadRole::JobTime),
@@ -194,7 +199,7 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     // Identity stacks. `pulid.rs` builds a `DownloadContext` literal of its own, so it is caught
     // without any wrapper resolution; `image_jobs/kolors.rs`, `sdxl.rs` and `sensenova.rs` are the
     // files that genuinely need it — they name no primitive and no context, reaching Hugging Face
-    // only through `image_jobs/base.rs`'s `stage_likeness`.
+    // only through `image_jobs/conditioning.rs`'s `stage_likeness`.
     ("image_jobs/instantid.rs", DownloadRole::JobTime),
     ("image_jobs/pulid.rs", DownloadRole::JobTime),
     ("image_jobs/pulid_candle.rs", DownloadRole::JobTime),
@@ -223,7 +228,7 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     ("face_analysis_jobs.rs", DownloadRole::JobTime),
     ("face_likeness_compare_jobs.rs", DownloadRole::JobTime),
     ("kps_jobs.rs", DownloadRole::JobTime),
-    // Identity likeness staging shared by the SDXL-family lanes (`image_jobs/base.rs`).
+    // Identity likeness staging shared through `image_jobs/conditioning.rs`.
     ("image_jobs/kolors.rs", DownloadRole::JobTime),
     ("image_jobs/sdxl.rs", DownloadRole::JobTime),
     ("image_jobs/sensenova.rs", DownloadRole::JobTime),
@@ -242,8 +247,10 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
 /// population looking flat.
 ///
 /// **Only ever goes down.** Each migration slice deletes its entry and lowers this in the same
-/// commit.
-const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 41;
+/// commit. F17/F93's structural partition changes physical files41→44 without adding a fetch:
+/// the former image base's existing calls now reside in artifact_resolution/conditioning/mlx/candle.
+/// The exact current file set and role ratchet remain enforced; there is no logical-owner alias.
+const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 44;
 
 /// What a `<data_dir>/cache/<subdir>` destination holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -583,13 +590,13 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     ("core", "hf_home.rs", "huggingface", CacheRole::HfCache),
     (
         "core",
-        "project_store.rs",
+        "project_store/keypoints.rs",
         "keypoint-uploads",
         CacheRole::Upload,
     ),
     (
         "core",
-        "project_store.rs",
+        "project_store/poses.rs",
         "pose_detect",
         CacheRole::Scratch,
     ),
@@ -882,7 +889,10 @@ fn collect_rs(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
 /// code, with inline `#[cfg(test)]` items removed from what remains.
 fn production_sources(src_dir: &Path, root_module: &str) -> Vec<SourceFile> {
     let tree = read_tree(src_dir);
-    let test_only = test_only_files(&tree, root_module);
+    let roots = cargo_source_roots(src_dir);
+    assert!(roots.iter().any(|root| root == root_module));
+    let roots: Vec<_> = roots.iter().map(String::as_str).collect();
+    let test_only = test_only_files_from_roots(&tree, &roots);
     tree.iter()
         .filter(|(rel, _)| !test_only.contains(rel.as_str()))
         .map(|(rel, code)| SourceFile {
@@ -890,6 +900,57 @@ fn production_sources(src_dir: &Path, root_module: &str) -> Vec<SourceFile> {
             code: strip_cfg_test_items(code),
         })
         .collect()
+}
+
+/// Cargo owns binary roots: helper files beside a binary are not additional roots, especially
+/// when its manifest disables autobins. Follow every declared library/binary on every platform.
+fn cargo_source_roots(src_dir: &Path) -> Vec<String> {
+    static METADATA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    let metadata = METADATA.get_or_init(|| {
+        let output = std::process::Command::new(env!("CARGO"))
+            .current_dir(repo_root())
+            .args([
+                "metadata",
+                "--format-version=1",
+                "--no-deps",
+                "--offline",
+                "--locked",
+            ])
+            .output()
+            .expect("read local Cargo target metadata");
+        assert!(
+            output.status.success(),
+            "Cargo metadata: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("valid Cargo target metadata")
+    });
+    let src_dir = src_dir.canonicalize().expect("scanned source directory");
+    let mut roots = BTreeSet::new();
+    for package in metadata["packages"].as_array().expect("Cargo packages") {
+        for target in package["targets"].as_array().expect("Cargo targets") {
+            if !target["kind"]
+                .as_array()
+                .expect("Cargo target kind")
+                .iter()
+                .any(|kind| matches!(kind.as_str(), Some("lib" | "bin")))
+            {
+                continue;
+            }
+            let target = Path::new(target["src_path"].as_str().expect("Cargo source path"))
+                .canonicalize()
+                .expect("declared Cargo source exists");
+            if let Ok(relative) = target.strip_prefix(&src_dir) {
+                roots.insert(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    assert!(
+        !roots.is_empty(),
+        "Cargo declares no roots under {}",
+        src_dir.display()
+    );
+    roots.into_iter().collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1473,61 +1534,185 @@ fn strip_cfg_test_items(code: &str) -> String {
 
 /// Every file in `tree` reachable only as test code.
 ///
-/// Seeded from `#[cfg(test)] mod NAME;` declarations (detected by diffing the module declarations
-/// before and after [`strip_cfg_test_items`]) and propagated through both `mod NAME;` and
-/// `include!("…")` edges — `src/tests.rs` reaches its four submodules through `include!`, so a
+/// Follows actual AST `mod`/`#[path]`/`include!` edges from the crate root, carrying test-only
+/// ancestry and retaining any file also reachable in production. There is no test-directory
+/// exemption. Literal text that merely names a module is not an edge. Includes remain necessary — `src/tests.rs` reaches its four submodules through `include!`, so a
 /// `mod`-only walk would leave them classified as production.
 ///
 /// This is what keeps THIS module out of its own scan: it is declared `#[cfg(test)] mod
 /// job_time_download_guard;`, and its synthetic fixtures contain both `ensure_hf_cached_file(` and
 /// `.join("cache")`.
 fn test_only_files(tree: &BTreeMap<String, String>, root_module: &str) -> BTreeSet<String> {
-    let mut children: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    let mut includes: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    let mut seeds: BTreeSet<String> = BTreeSet::new();
+    test_only_files_from_roots(tree, &[root_module])
+}
 
-    for (rel, code) in tree {
-        let declared = module_declarations(code);
-        let production = module_declarations(&strip_cfg_test_items(code));
-        for name in &declared {
-            if let Some(target) = resolve_module(rel, name, code, tree, root_module) {
-                children
-                    .entry(rel.as_str())
-                    .or_default()
-                    .push(target.clone());
-                if !production.contains(name) {
-                    seeds.insert(target);
+fn test_only_files_from_roots(tree: &BTreeMap<String, String>, roots: &[&str]) -> BTreeSet<String> {
+    use syn::parse::Parser;
+
+    fn requires_test(meta: &syn::Meta) -> bool {
+        match meta {
+            syn::Meta::Path(path) => path.is_ident("test"),
+            syn::Meta::List(list) if list.path.is_ident("all") => {
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+                    .parse2(list.tokens.clone())
+                    .expect("valid cfg predicate")
+                    .iter()
+                    .any(requires_test)
+            }
+            _ => false,
+        }
+    }
+    fn test_attribute(attributes: &[syn::Attribute]) -> bool {
+        attributes.iter().any(|attribute| {
+            attribute.path().is_ident("cfg")
+                && requires_test(&attribute.parse_args::<syn::Meta>().expect("valid cfg"))
+        })
+    }
+    fn relative(base: &Path, path: &str) -> Option<String> {
+        let mut result = PathBuf::new();
+        for part in base.join(path).components() {
+            match part {
+                std::path::Component::Normal(part) => result.push(part),
+                std::path::Component::ParentDir => {
+                    if !result.pop() {
+                        return None;
+                    }
                 }
+                std::path::Component::CurDir => {}
+                _ => return None,
             }
         }
-        for path in include_paths(code) {
-            let base = rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-            let target = if base.is_empty() {
-                path
-            } else {
-                format!("{base}/{path}")
-            };
-            if tree.contains_key(&target) {
-                includes.entry(rel.as_str()).or_default().push(target);
+        Some(result.to_string_lossy().replace('\\', "/"))
+    }
+    fn edges(
+        items: &[syn::Item],
+        module_dir: &Path,
+        attribute_dir: &Path,
+        source_dir: &Path,
+        inherited_test: bool,
+        tree: &BTreeMap<String, String>,
+        out: &mut Vec<(String, bool)>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Mod(module) => {
+                    let test_only = inherited_test || test_attribute(&module.attrs);
+                    let explicit = module.attrs.iter().find_map(|attribute| {
+                        if !attribute.path().is_ident("path") {
+                            return None;
+                        }
+                        match &attribute.meta {
+                            syn::Meta::NameValue(value) => match &value.value {
+                                syn::Expr::Lit(value) => match &value.lit {
+                                    syn::Lit::Str(path) => Some(path.value()),
+                                    _ => None,
+                                },
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    });
+                    if let Some((_, body)) = &module.content {
+                        let nested = explicit.as_deref().map_or_else(
+                            || module_dir.join(module.ident.to_string()),
+                            |path| attribute_dir.join(path),
+                        );
+                        edges(body, &nested, &nested, source_dir, test_only, tree, out);
+                    } else {
+                        let targets = if let Some(path) = explicit {
+                            vec![relative(attribute_dir, &path)]
+                        } else {
+                            vec![
+                                relative(module_dir, &format!("{}.rs", module.ident)),
+                                relative(module_dir, &format!("{}/mod.rs", module.ident)),
+                            ]
+                        };
+                        if let Some(target) = targets
+                            .into_iter()
+                            .flatten()
+                            .find(|target| tree.contains_key(target))
+                        {
+                            out.push((target, test_only));
+                        }
+                    }
+                }
+                syn::Item::Macro(item) if item.mac.path.is_ident("include") => {
+                    if let Ok(path) = syn::parse2::<syn::LitStr>(item.mac.tokens.clone()) {
+                        if let Some(target) = relative(source_dir, &path.value())
+                            .filter(|target| tree.contains_key(target))
+                        {
+                            out.push((target, inherited_test || test_attribute(&item.attrs)));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
-
-    let mut out = seeds.clone();
-    let mut frontier: Vec<String> = seeds.into_iter().collect();
-    while let Some(current) = frontier.pop() {
-        let downstream = children
-            .get(current.as_str())
-            .into_iter()
-            .chain(includes.get(current.as_str()))
-            .flatten();
-        for target in downstream {
-            if out.insert(target.clone()) {
-                frontier.push(target.clone());
+    let mut graph = BTreeMap::new();
+    for (rel, code) in tree {
+        let source_dir = Path::new(rel).parent().unwrap_or_else(|| Path::new(""));
+        let module_dir = if roots.contains(&rel.as_str()) || rel.ends_with("/mod.rs") {
+            source_dir.to_path_buf()
+        } else {
+            Path::new(rel).with_extension("")
+        };
+        let mut children = Vec::new();
+        match syn::parse_file(code) {
+            Ok(syntax) => edges(
+                &syntax.items,
+                &module_dir,
+                source_dir,
+                source_dir,
+                false,
+                tree,
+                &mut children,
+            ),
+            // An included fragment need not parse as a complete file. Preserve its legacy edges,
+            // but never infer a new test-only seed from unparsed text or its string fixtures.
+            Err(_) => {
+                children.extend(
+                    module_declarations(code)
+                        .iter()
+                        .filter_map(|name| resolve_module(rel, name, code, tree, roots[0]))
+                        .map(|path| (path, false)),
+                );
+                children.extend(
+                    include_paths(code)
+                        .iter()
+                        .filter_map(|path| relative(source_dir, path))
+                        .filter(|path| tree.contains_key(path))
+                        .map(|path| (path, false)),
+                );
             }
         }
+        graph.insert(rel.as_str(), children);
     }
-    out
+    let mut production = BTreeSet::new();
+    let mut tests = BTreeSet::new();
+    let mut frontier: Vec<_> = roots
+        .iter()
+        .map(|root| ((*root).to_owned(), false))
+        .collect();
+    while let Some((current, test_only)) = frontier.pop() {
+        let visited = if test_only {
+            &mut tests
+        } else {
+            &mut production
+        };
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        if let Some(children) = graph.get(current.as_str()) {
+            frontier.extend(
+                children
+                    .iter()
+                    .map(|(path, child_test)| (path.clone(), test_only || *child_test)),
+            );
+        }
+    }
+    // A file reused by a production edge, or not reachable from the actual root, remains scanned.
+    tests.difference(&production).cloned().collect()
 }
 
 /// `mod NAME;` declarations in `code` (not `mod NAME { … }`, which needs no file).
@@ -1656,7 +1841,7 @@ fn path_attributes_preserve_test_only_and_production_module_edges() {
         ("bin/renamed_fixture.rs".to_owned(), String::new()),
         ("bin/renamed_runtime.rs".to_owned(), String::new()),
     ]);
-    let test_only = test_only_files(&tree, "lib.rs");
+    let test_only = test_only_files_from_roots(&tree, &["bin/lane.rs"]);
     assert!(test_only.contains("bin/renamed_fixture.rs"));
     assert!(!test_only.contains("bin/renamed_runtime.rs"));
     assert_eq!(
@@ -2819,20 +3004,30 @@ fn synthetic_fixture_cache_roles_do_not_authorize_new_destinations() {
         (
             "minimax_h3_import_fixture.rs",
             "fixture-hub",
-            CacheRole::HfCache,
+            Some(CacheRole::HfCache),
         ),
         (
             "minimax_h3_import_fixture.rs",
             "synthetic-component-staging",
-            CacheRole::Scratch,
+            Some(CacheRole::Scratch),
+        ),
+        (
+            "video_jobs/minimax_h3_import_tests.rs",
+            "source-library",
+            None,
         ),
     ] {
         assert_eq!(
-            allowed.get(&("worker".into(), file.into(), subdir.into())),
-            Some(&role),
-            "fixture role is exact, not permission for arbitrary generated weight caches"
+            allowed.get(&("worker".into(), file.into(), subdir.into())).copied(),
+            role,
+            "fixture role or test-only absence is exact, not permission for arbitrary generated weight caches"
         );
     }
+    let tree = read_tree(&repo_root().join("crates/sceneworks-worker/src"));
+    assert!(
+        test_only_files(&tree, "lib.rs").contains("video_jobs/minimax_h3_import_tests.rs"),
+        "the #[path] import regression fixture must remain compiler-derived test-only source"
+    );
     let discovered = cache_destinations(
         "let p = data_dir.join(\"cache\").join(\"fixture-hub-new-unregistered\");",
         &BTreeMap::new(),
@@ -3133,8 +3328,7 @@ fn the_guard_module_is_excluded_from_its_own_scan() {
     assert!(
         test_only.contains("tests.rs")
             && test_only.contains("tests/lora_and_downloads.rs")
-            && test_only.contains("tests/test_api_stub.rs")
-            && test_only.contains("video_jobs/minimax_h3_import_tests.rs"),
+            && test_only.contains("tests/test_api_stub.rs"),
         "the module walk must follow `include!` edges into src/tests/, or the crate's own download \
          tests read as production job-time downloads"
     );
@@ -3142,6 +3336,84 @@ fn the_guard_module_is_excluded_from_its_own_scan() {
         !test_only.contains("downloads.rs") && !test_only.contains("model_jobs.rs"),
         "production modules must NOT be classified test-only — that would blind both gates"
     );
+    for path in [
+        "image_jobs/tests/moss_consumer_tests.rs",
+        "image_jobs/tests/moss_dispatch_tests.rs",
+        "tests/test_api_stub.rs",
+        "video_jobs/minimax_h3_import_tests.rs",
+    ] {
+        assert!(
+            test_only.contains(path),
+            "actual #[path] test ancestry must exclude {path}"
+        );
+    }
+    let fixture = BTreeMap::from([
+        (
+            "lib.rs".into(),
+            r##"#[cfg(test)] #[path = "checks/unit.rs"] mod unit;
+            #[path = "shared.rs"] mod shared;
+            #[cfg(test)] #[path = "shared.rs"] mod also_test;
+            #[path = "tests/production.rs"] mod production;
+            const TEXT: &str = "#[cfg(test)] mod hidden;";"##
+                .into(),
+        ),
+        ("checks/unit.rs".into(), "include!(\"helpers.rs\");".into()),
+        (
+            "checks/helpers.rs".into(),
+            "#[path = \"nested/fixture.rs\"] mod fixture;".into(),
+        ),
+        ("checks/nested/fixture.rs".into(), "fn fixture() {}".into()),
+        ("shared.rs".into(), "fn shared() {}".into()),
+        ("tests/production.rs".into(), "fn production() {}".into()),
+        ("hidden.rs".into(), "fn unbound() {}".into()),
+        ("orphan.rs".into(), "fn orphan() {}".into()),
+    ]);
+    assert_eq!(test_only_files(&fixture, "lib.rs"), BTreeSet::from([
+        "checks/unit.rs".into(), "checks/helpers.rs".into(), "checks/nested/fixture.rs".into(),
+    ]), "only actual test-only edges may remove files; production reuse, directory names and string literals cannot");
+}
+
+#[test]
+fn binary_test_ancestry_preserves_production_reuse_and_unbound_files() {
+    let tree = BTreeMap::from([
+        ("lib.rs".into(), "#[path = \"shared.rs\"] mod shared;".into()),
+        ("shared.rs".into(), "fn shipping() {}".into()),
+        ("bin/main.rs".into(), "#[cfg(test)] mod unit; #[cfg(test)] #[path = \"../shared.rs\"] mod alias; const TEXT: &str = \"#[cfg(test)] mod orphan;\";".into()),
+        ("bin/unit.rs".into(), "include!(\"fixture.rs\");".into()),
+        ("bin/fixture.rs".into(), "fn fixture() {}".into()),
+        ("bin/orphan.rs".into(), "fn still_scanned() {}".into()),
+    ]);
+    assert_eq!(
+        test_only_files_from_roots(&tree, &["lib.rs", "bin/main.rs"]),
+        BTreeSet::from(["bin/unit.rs".into(), "bin/fixture.rs".into()])
+    );
+}
+
+#[test]
+fn cargo_binary_roots_exclude_adapter_tests_without_hiding_helpers() {
+    let src = repo_root().join("crates/sceneworks-memory-adapter/src");
+    let roots = cargo_source_roots(&src);
+    for root in ["lib.rs", "bin/mlx.rs", "bin/candle.rs"] {
+        assert!(roots.iter().any(|actual| actual == root), "{root}");
+    }
+    assert!(!roots.iter().any(|root| root.ends_with("_tests.rs")));
+    let files = production_sources(&src, "lib.rs");
+    let names: BTreeSet<_> = files.iter().map(|file| file.rel.as_str()).collect();
+    for test in [
+        "bin/mlx_sensenova_tests.rs",
+        "bin/candle_sensenova_candle_tests.rs",
+    ] {
+        assert!(
+            !names.contains(test),
+            "binary test ancestry must exclude {test}"
+        );
+    }
+    for shipping in ["lib.rs", "bin/mlx.rs", "bin/candle.rs"] {
+        assert!(
+            names.contains(shipping),
+            "shipping root must remain scanned: {shipping}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4136,5 +4408,44 @@ fn scanner_parsers_recognise_the_shapes_they_must_judge() {
     assert_eq!(
         include_paths("include!(\"tests/hf_and_family.rs\");"),
         vec!["tests/hf_and_family.rs".to_owned()]
+    );
+}
+
+#[test]
+fn scanner_follows_test_path_modules_without_hiding_production_aliases() {
+    let tree = [
+        (
+            "lib.rs",
+            r##"
+            #[cfg(test)]
+            #[path = "fixtures.rs"]
+            mod tests;
+            #[path = "shared.rs"]
+            pub mod shipping;
+            #[cfg(test)]
+            #[path = "shared.rs"]
+            mod test_alias;
+            const DECOY: &str = "#[path = \"shipping.rs\"] mod unrelated;";
+            mod live;
+        "##,
+        ),
+        (
+            "fixtures.rs",
+            "#[path = \"nested/stub.rs\"] pub(crate) mod stub;",
+        ),
+        ("nested/stub.rs", "fn mocked_http() {}"),
+        ("shared.rs", "fn production() {}"),
+        ("live.rs", "fn production() {}"),
+        ("shipping.rs", "fn unreferenced_but_scanned() {}"),
+    ]
+    .into_iter()
+    .map(|(path, code)| (path.to_owned(), code.to_owned()))
+    .collect();
+    assert_eq!(
+        test_only_files(&tree, "lib.rs"),
+        ["fixtures.rs", "nested/stub.rs"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     );
 }

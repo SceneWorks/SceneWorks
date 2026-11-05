@@ -18,12 +18,12 @@
 //! never the bits-ladder `q8` default the generic resolvers fall back to. Nothing here downtiers,
 //! dequantizes or substitutes another package; every shape it cannot honor is a typed refusal.
 
+use crate::WorkerError;
+use crate::WorkerResult;
 use sceneworks_core::contracts::JsonObject;
 use sceneworks_core::image_request::{
     flux3_requested_tier, image_quant_tier_refusal, Flux3Tier, FLUX3_TIERED_MODEL_IDS,
 };
-
-use super::{WorkerError, WorkerResult};
 
 /// The native image lane a request is about to run on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -982,7 +982,7 @@ mod tests {
     #[test]
     fn the_candle_lane_consumes_every_flux3_plan_seam_in_order() {
         let body = function_body(
-            include_str!("base.rs"),
+            include_str!("candle.rs"),
             "async fn generate_candle_registry_stream_using(",
         );
         let lane = "generate_candle_registry_stream_using";
@@ -1031,7 +1031,7 @@ mod tests {
     /// tier identity of every prepared candidate, and the root components.
     #[test]
     fn the_mlx_lane_consumes_every_flux3_plan_seam() {
-        let body = function_body(include_str!("base.rs"), "async fn generate_stream_using(");
+        let body = function_body(include_str!("mlx.rs"), "async fn generate_stream_using(");
         let lane = "generate_stream_using";
         let plan = position(
             body,

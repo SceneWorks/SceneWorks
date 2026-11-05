@@ -1,4 +1,28 @@
-enum GenEvent {
+#[cfg(target_os = "macos")]
+use super::artifact_resolution::model_repo;
+#[cfg(target_os = "macos")]
+use super::artifact_resolution::resolve_weights_dir;
+#[cfg(target_os = "macos")]
+use super::mlx_model;
+#[cfg(target_os = "macos")]
+use super::resolved_tier_is_complete;
+use super::sampling::emit_load_event;
+use super::CancelFlag;
+use super::Generator;
+#[cfg(target_os = "macos")]
+use super::ImageRequest;
+use super::LoadPhase;
+use super::LoadSpec;
+use super::Progress;
+use crate::heartbeat_while_blocking;
+use crate::ApiClient;
+use crate::JsonObject;
+use crate::Settings;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+pub(super) enum GenEvent {
     /// An output already encoded by its producing lane, persisted through shared assetWrites.
     AssetWritten {
         index: usize,
@@ -74,7 +98,7 @@ enum GenEvent {
     },
 }
 
-type GeneratedImage = (i64, u32, u32, Vec<u8>);
+pub(super) type GeneratedImage = (i64, u32, u32, Vec<u8>);
 
 /// A generated image plus its optional pre-built `faceLikeness` sidecar block (sc-4409). Returned by
 /// the per-item closure of [`drive_gen_items_scored`] so the identity-likeness post-pass (used by all
@@ -89,7 +113,7 @@ type ScoredGeneratedImage = (i64, u32, u32, Vec<u8>, Option<JsonObject>);
 /// latest frame per job (single-slot, latest-wins), so a dropped intermediate frame is invisible.
 /// Contrast with [`send_gen_progress`]'s `blocking_send`, which is correct for `Progress` events
 /// (they are load-bearing for cancel polling) but would stall the GPU here.
-fn preview_sink_for(
+pub(super) fn preview_sink_for(
     tx: &tokio::sync::mpsc::Sender<GenEvent>,
     index: usize,
 ) -> gen_core::PreviewSink {
@@ -100,13 +124,13 @@ fn preview_sink_for(
 }
 
 #[derive(Clone)]
-struct PromptEnhancementEventSink {
+pub(super) struct PromptEnhancementEventSink {
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     index: usize,
 }
 
 impl PromptEnhancementEventSink {
-    fn for_prompt(&self, prompt: &str) -> gen_core::PromptEnhancementSink {
+    pub(super) fn for_prompt(&self, prompt: &str) -> gen_core::PromptEnhancementSink {
         let tx = self.tx.clone();
         let index = self.index;
         let expected_prompt = prompt.to_owned();
@@ -128,7 +152,7 @@ impl PromptEnhancementEventSink {
     /// prompt-enhancement report rides. Load-bearing like that report, so it blocks rather than
     /// dropping under channel pressure; it is sent before the image itself, so the consumer holds
     /// it when the image is written.
-    fn send_image_facts(&self, facts: JsonObject) {
+    pub(super) fn send_image_facts(&self, facts: JsonObject) {
         let _ = self.tx.blocking_send(GenEvent::ImageFacts {
             index: self.index,
             facts,
@@ -148,7 +172,7 @@ fn prompt_enhancement_event_sink_for(
 
 /// Source checks can hash multi-GB files. The job-wide observer follows the blocking task;
 /// the shared poster reports the latest I/O state while this helper keeps heartbeats alive.
-async fn prepare_image_route_with_progress<T: Send + 'static>(
+pub(super) async fn prepare_image_route_with_progress<T: Send + 'static>(
     api: &ApiClient,
     settings: &Settings,
     job_id: &str,
@@ -158,12 +182,18 @@ async fn prepare_image_route_with_progress<T: Send + 'static>(
     heartbeat_while_blocking(api, settings, job_id, "image source preparation", task).await
 }
 
-fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
+pub(super) fn send_gen_progress(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+    progress: Progress,
+) {
     crate::load_progress::generator_progress(&progress);
     // Internal resource boundary: never extend the worker wire protocol or synthesize Step 0.
     if matches!(
         progress,
-        Progress::ConditioningComplete | Progress::PromptEncodingComplete | Progress::PostProcessing
+        Progress::ConditioningComplete
+            | Progress::PromptEncodingComplete
+            | Progress::PostProcessing
     ) {
         return;
     }
@@ -196,7 +226,7 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
     let _ = tx.blocking_send(event);
 }
 
-fn send_generated_image(
+pub(super) fn send_generated_image(
     tx: &tokio::sync::mpsc::Sender<GenEvent>,
     index: usize,
     image: GeneratedImage,
@@ -231,7 +261,7 @@ fn send_scored_generated_image(
     .is_ok()
 }
 
-fn drive_gen_items<I, Item, F>(
+pub(super) fn drive_gen_items<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
     mut generate: F,
@@ -269,7 +299,7 @@ where
 /// contract changes only the FLUX.2-dev-capable generic lanes; every other producer remains source-
 /// and behavior-identical.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn drive_gen_items_reported<I, Item, F>(
+pub(super) fn drive_gen_items_reported<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
     mut generate: F,
@@ -314,7 +344,7 @@ where
 // The scored producers are all face-backend paths; off-Mac they compile only with the candle backend
 // (the angle-set scorer's backend legs are cfg-gated the same way). The native include owns
 // that boundary; no inverse dead-code suppression is needed here.
-fn drive_gen_items_scored<I, Item, F>(
+pub(super) fn drive_gen_items_scored<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
     mut generate: F,
@@ -345,7 +375,7 @@ where
 /// [`drive_gen_items_scored`] plus the request-local prompt-report sink used by shared native lanes.
 /// Face likeness and prompt provenance remain independent per-image facts. Both the MLX and
 /// Candle registry callers use this helper; the native stream include owns its availability.
-fn drive_gen_items_scored_reported<I, Item, F>(
+pub(super) fn drive_gen_items_scored_reported<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
     mut generate: F,
@@ -385,7 +415,7 @@ where
 /// image `k` on seed `seed + k`, the seed the engine drew its noise from, after its provenance
 /// `facts`. A cancel or an engine failure inside the call returns before any image is sent, so a
 /// partial batch is never published; a count that is not `expected` is a typed engine failure.
-fn drive_native_prompt_batch<F>(
+pub(super) fn drive_native_prompt_batch<F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     seed: i64,
     expected: usize,
@@ -418,102 +448,6 @@ where
     Ok(())
 }
 
-#[cfg(test)]
-#[test]
-fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    send_gen_progress(&tx, 2, Progress::ConditioningComplete);
-    assert!(matches!(
-        rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
-    send_gen_progress(
-        &tx,
-        2,
-        Progress::Step {
-            current: 1,
-            total: 4,
-        },
-    );
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(GenEvent::Step {
-            index: 2,
-            current: 1,
-            total: 4
-        })
-    ));
-    assert!(matches!(
-        rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
-}
-
-#[cfg(test)]
-#[test]
-fn prompt_encoding_complete_stays_internal_and_preserves_first_positive_step() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    send_gen_progress(&tx, 2, Progress::PromptEncodingComplete);
-    send_gen_progress(&tx, 2, Progress::PostProcessing);
-    assert!(matches!(
-        rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
-    send_gen_progress(
-        &tx,
-        2,
-        Progress::Step {
-            current: 1,
-            total: 4,
-        },
-    );
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(GenEvent::Step {
-            index: 2,
-            current: 1,
-            total: 4
-        })
-    ));
-    assert!(matches!(
-        rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
-}
-
-/// Incremental prompt-upsampling token counts DO reach the FLUX 3 surface; only the completion
-/// boundary stays internal (no event, no synthesized step).
-#[cfg(test)]
-#[test]
-fn prompt_upsampling_tokens_are_emitted_but_completion_stays_internal() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    send_gen_progress(
-        &tx,
-        0,
-        Progress::Upsampling {
-            tokens: 3,
-            max_tokens: 8,
-        },
-    );
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(GenEvent::Upsampling {
-            index: 0,
-            tokens: 3,
-            max_tokens: 8
-        })
-    ));
-    send_gen_progress(&tx, 0, Progress::PromptUpsamplingComplete);
-    send_gen_progress(&tx, 0, Progress::PromptEncodingComplete);
-    send_gen_progress(&tx, 0, Progress::ConditioningComplete);
-    assert!(matches!(
-        rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
-    send_gen_progress(&tx, 0, Progress::Loading(LoadPhase::EncodingPrompt));
-    assert!(matches!(rx.try_recv(), Ok(GenEvent::Loading { index: 0, phase: LoadPhase::EncodingPrompt })));
-}
-
 /// Release MLX's freed-buffer cache between batch images so peak memory doesn't carry
 /// forward across a `drive_gen_items` loop (sc-5567). `clear_cache()` returns only the
 /// retained-for-reuse buffers to the OS — live arrays (the cached model weights) are not
@@ -521,7 +455,7 @@ fn prompt_upsampling_tokens_are_emitted_but_completion_stays_internal() {
 /// tens-of-seconds generation, and far cheaper than an OOM kill. No-op off macOS: the
 /// Windows/CUDA candle lane shares this loop but has no `mlx_rs` dependency.
 #[cfg(target_os = "macos")]
-fn release_gen_cache_between_items() {
+pub(super) fn release_gen_cache_between_items() {
     #[cfg(test)]
     if SUPPRESS_TEST_MLX_CACHE_RELEASE.with(std::cell::Cell::get) {
         return;
@@ -539,7 +473,7 @@ std::thread_local! {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-fn without_mlx_cache_release_for_headless_test<T>(run: impl FnOnce() -> T) -> T {
+pub(super) fn without_mlx_cache_release_for_headless_test<T>(run: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -553,7 +487,7 @@ fn without_mlx_cache_release_for_headless_test<T>(run: impl FnOnce() -> T) -> T 
 }
 
 #[cfg(not(target_os = "macos"))]
-fn release_gen_cache_between_items() {}
+pub(super) fn release_gen_cache_between_items() {}
 
 /// Always release allocator-cache buffers at the end of an item, including cancellation and error
 /// exits. Provider scopes synchronize/release active graphs and windows first; this guard then
@@ -571,7 +505,7 @@ impl Drop for RequestCacheRelease {
 // (MLX `Box<dyn Generator>` or candle `InstantId`) — created and consumed inside the one
 // `spawn_blocking`, so it never needs to be `Send`.
 #[cfg(native_lane)]
-fn start_gen_stream<G, L, D>(
+pub(super) fn start_gen_stream<G, L, D>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -610,7 +544,7 @@ where
     (cancel, rx, blocking)
 }
 
-fn start_cached_gen_stream<D>(
+pub(super) fn start_cached_gen_stream<D>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -651,7 +585,7 @@ where
 
 /// The reclaimable-byte estimate and the gate that consumes resident-entry credit for one cold load.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-struct ColdLoadAdmission<A> {
+pub(super) struct ColdLoadAdmission<A> {
     incoming_reclaimable_weight_bytes: u64,
     admit: A,
 }
@@ -670,7 +604,7 @@ impl<A> ColdLoadAdmission<A> {
 /// The admission closure is invoked by the cache loader only for a cold/different-key load; an exact
 /// warm hit goes straight to `drive` without re-gating or evicting itself.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn start_cached_gen_stream_after_cold_admission<A, D>(
+pub(super) fn start_cached_gen_stream_after_cold_admission<A, D>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -741,7 +675,7 @@ where
 /// own policy intent after vetting, and the callback owes it exactly one settlement — thread it into
 /// `mlx_fit_gate::evaluate_request` (which floors the memory ladder with it and reports what the
 /// selection did) or `decline` it. It is `#[must_use]`, so forgetting is a compiler warning.
-fn start_cached_gen_stream_with_request_state<D>(
+pub(super) fn start_cached_gen_stream_with_request_state<D>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -782,7 +716,7 @@ where
 /// lifted to the image stream, so a test can drive a whole image job arm (`generate_stream_using`)
 /// against a stub `Generator` with no tensor backend or weights. Production passes
 /// `crate::inference_runtime::load` through the plain name.
-fn start_cached_gen_stream_with_request_state_using<D>(
+pub(super) fn start_cached_gen_stream_with_request_state_using<D>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -827,12 +761,12 @@ where
 }
 
 /// The cache owner and loader form one private dependency for the existing stream transaction.
-struct CachedGeneratorFactory<L> {
-    cache: crate::generator_cache::GeneratorCacheHandle,
-    load: L,
+pub(super) struct CachedGeneratorFactory<L> {
+    pub(super) cache: crate::generator_cache::GeneratorCacheHandle,
+    pub(super) load: L,
 }
 
-fn start_cached_gen_stream_with_request_state_using_owned<D, L>(
+pub(super) fn start_cached_gen_stream_with_request_state_using_owned<D, L>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -949,3 +883,7 @@ pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Op
         model_repo(request, &model),
     ))
 }
+
+#[cfg(test)]
+#[path = "tests/stream_tests.rs"]
+mod tests;

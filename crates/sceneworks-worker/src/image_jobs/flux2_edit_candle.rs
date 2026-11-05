@@ -1,13 +1,41 @@
-use super::{
-    admit_candle_base, apply_candle_image_load_shape, attach_manifest_text_encoder,
-    candle_certified_artifact_path, candle_conditioned_edit_work, candle_quant_for_resolved_tier,
-    candle_resolved_tier_key, consume_gen_events, drive_gen_items_reported, fit_engine_image,
-    load_reference_image, mlx_model, model_repo, pid_effective_dims, pid_output_tier,
-    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
-    resolve_pid_weights, resolve_weights_dir, start_gen_stream, ApiClient, CandleBaseEvidence,
-    Flux2Edit, Flux2EditPaths, Flux2EditRequest, Image, ImagePlan, ImageRequest, JobSnapshot,
-    JsonObject, Path, PathBuf, PromptEnhance, Settings, Value, WorkerError, WorkerResult,
-};
+use super::adapters::resolve_adapters;
+use super::admit_candle_base;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::conditioning::candle_conditioned_edit_work;
+use super::conditioning::load_reference_image;
+use super::events::consume_gen_events;
+use super::geometry::fit_engine_image;
+use super::load_policy::apply_candle_image_load_shape;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::candle_certified_artifact_path;
+use super::memory::candle_quant_for_resolved_tier;
+use super::memory::candle_resolved_tier_key;
+use super::mlx_model;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::resolve_pid_weights;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::stream::drive_gen_items_reported;
+use super::stream::start_gen_stream;
+use super::CandleBaseEvidence;
+use super::Flux2Edit;
+use super::Flux2EditPaths;
+use super::Flux2EditRequest;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::PromptEnhance;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 pub(super) fn flux2_edit_adapter_source_bytes(
