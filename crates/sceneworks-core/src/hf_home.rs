@@ -131,28 +131,23 @@ pub fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
 
 /// The same HF override precedence with a caller-owned fallback (CLI smoke caches use HOME/.cache).
 pub fn huggingface_hub_cache_dir_or_else(default: impl FnOnce() -> PathBuf) -> PathBuf {
-    if let Some(path) = std::env::var("HF_HUB_CACHE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(path) = env_nonempty("HF_HUB_CACHE") {
         return PathBuf::from(path);
     }
-    if let Some(path) = std::env::var("HUGGINGFACE_HUB_CACHE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(path) = env_nonempty("HUGGINGFACE_HUB_CACHE") {
         return PathBuf::from(path);
     }
-    if let Some(path) = std::env::var("HF_HOME")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(path) = env_nonempty("HF_HOME") {
         return PathBuf::from(path).join("hub");
     }
     default()
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 /// Typed authoritative model source library. Runtime and catalog compatibility helpers delegate
@@ -200,6 +195,28 @@ pub fn huggingface_repo_cache_path(data_dir: &Path, repo: &str) -> Option<PathBu
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn cache_env_uses_trimmed_nonempty_values_in_priority_order() {
+        use crate::test_env::EnvVars;
+        let fallback = || PathBuf::from("fallback");
+        for (values, expected) in [
+            ([" /first ", " /second ", " /home "], "/first"),
+            (["   ", " /second ", " /home "], "/second"),
+            (["", "  ", " /home "], "/home/hub"),
+            (["", "", ""], "fallback"),
+        ] {
+            let _env = EnvVars::set(&[
+                ("HF_HUB_CACHE", values[0]),
+                ("HUGGINGFACE_HUB_CACHE", values[1]),
+                ("HF_HOME", values[2]),
+            ]);
+            assert_eq!(
+                huggingface_hub_cache_dir_or_else(fallback),
+                PathBuf::from(expected)
+            );
+        }
+    }
 
     /// sc-4279 / F-MLXW-15: canonical home for the `repo_slugs.json`
     /// cross-language contract now that `safe_repo_dir_name` lives in core (it was
