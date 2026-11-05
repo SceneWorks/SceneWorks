@@ -421,10 +421,17 @@ impl PreparedH3Load {
 
     /// Prepared file closure, not `physicalReadHashes`: content identity is not proof of tensor use.
     pub fn prepared_sources_json(&self) -> Value {
-        Value::Array(self.files.iter().map(|pin| json!({
-            "path": pin.loader_path(),
-            "sha256": pin.content_sha256().iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        })).collect())
+        Value::Array(
+            self.files
+                .iter()
+                .map(|pin| {
+                    json!({
+                        "path": pin.loader_path(),
+                        "sha256": crate::hashing::hex(pin.content_sha256()),
+                    })
+                })
+                .collect(),
+        )
     }
 }
 

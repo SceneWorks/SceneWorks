@@ -37,13 +37,14 @@
 #![cfg(target_os = "windows")]
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use futures_util::StreamExt;
-use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
+use crate::cuda_provision_check::{
+    all_markers_current, build_client, download_verified, extract_libraries, invalidate_markers,
+    top_marker_current, write_marker, LibraryFilter,
+};
 use crate::cuda_provision_check::{component_provisioned, dir_has_dll, write_component_marker};
 use crate::setup::{emit, gpu_runtime_dir};
 
@@ -277,29 +278,15 @@ pub(crate) fn onnxruntime_dll_if_present() -> Option<PathBuf> {
     dll.exists().then_some(dll)
 }
 
-/// True when `root`'s top-level `.redist-marker` names this exact `REDIST_VERSION`.
-/// A missing, unreadable, or older-version marker is not evidence.
-fn top_marker_current(root: &Path) -> bool {
-    fs::read_to_string(root.join(".redist-marker"))
-        .map(|marker| marker.trim() == REDIST_VERSION)
-        .unwrap_or(false)
-}
-
 /// True when EVERY component under `root` carries a current-version completion marker
 /// alongside its sentinel DLL(s). This is the recovery path for a run that provisioned
 /// every component but died before writing the top-level marker.
 fn all_component_markers_current(root: &Path) -> bool {
-    let cuda = cuda_subdir(root);
-    let ort = ort_subdir(root);
-    COMPONENTS.iter().all(|component| {
-        component_provisioned(
-            root,
-            dest_dir(component, &cuda, &ort),
-            component.slug,
-            REDIST_VERSION,
-            component.sentinels,
-        )
-    })
+    all_markers_current(
+        root,
+        REDIST_VERSION,
+        COMPONENTS.iter().map(|component| component.slug),
+    ) && is_staged_complete(&cuda_subdir(root), &ort_subdir(root))
 }
 
 /// True when `root` proves it was provisioned at this exact `REDIST_VERSION` — either by
@@ -311,7 +298,7 @@ fn all_component_markers_current(root: &Path) -> bool {
 /// presence alone cannot distinguish a tree staged at the pinned version from one left by
 /// an older install. Only a marker can.
 fn has_current_marker_evidence(root: &Path) -> bool {
-    top_marker_current(root) || all_component_markers_current(root)
+    top_marker_current(root, REDIST_VERSION) || all_component_markers_current(root)
 }
 
 /// True when a prior run already provisioned this exact `REDIST_VERSION` into `root` AND
@@ -319,7 +306,8 @@ fn has_current_marker_evidence(root: &Path) -> bool {
 /// sentinel sweep catches a tree whose DLLs were deleted/pruned after the marker landed
 /// (which would otherwise short-circuit provisioning and leave the worker unable to load).
 fn already_provisioned(root: &Path) -> bool {
-    top_marker_current(root) && is_staged_complete(&cuda_subdir(root), &ort_subdir(root))
+    top_marker_current(root, REDIST_VERSION)
+        && is_staged_complete(&cuda_subdir(root), &ort_subdir(root))
 }
 
 /// True when `root` holds a runtime that may be adopted as-is without downloading: the
@@ -372,16 +360,6 @@ fn remove_runtime_dir(dir: &Path) -> Result<(), String> {
     }
 }
 
-/// Drop every completion witness under `root`. Called before the first destructive step of a
-/// replacement so an interrupted purge can't leave markers vouching for a half-deleted tree
-/// (the same ordering `linux_cuda_provision::install_from_staged` relies on).
-fn invalidate_markers(root: &Path) {
-    let _ = fs::remove_file(root.join(".redist-marker"));
-    for component in COMPONENTS {
-        let _ = fs::remove_file(root.join(format!(".component-{}.ok", component.slug)));
-    }
-}
-
 /// Replace a runtime provisioned at a different pin: markers first, then both DLL dirs, then
 /// recreate them empty for the caller to repopulate.
 ///
@@ -398,7 +376,7 @@ fn invalidate_markers(root: &Path) {
 /// it are gone after the first pass, so a failure mid-download resumes via the per-component
 /// retry-skip instead of wiping the components that already landed (sc-13614).
 fn replace_foreign_runtime(root: &Path, cuda: &Path, ort: &Path) -> Result<(), String> {
-    invalidate_markers(root);
+    invalidate_markers(root, COMPONENTS.iter().map(|component| component.slug));
     for dir in [cuda, ort] {
         remove_runtime_dir(dir)?;
         fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
@@ -538,18 +516,6 @@ fn install_from_staged(source: &Path, root: &Path, cuda: &Path, ort: &Path) -> R
     Ok(())
 }
 
-/// Write the success marker so a fully provisioned root short-circuits `already_provisioned`
-/// on later launches.
-fn write_marker(root: &Path) -> Result<(), String> {
-    fs::write(root.join(".redist-marker"), REDIST_VERSION)
-        .map_err(|error| format!("write marker: {error}"))
-}
-
-/// Hex-encode a sha256 digest for comparison against the pinned value.
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// Download one wheel into `tmp`, verify its sha256, and extract its DLLs into the
 /// destination dir. The wheel is STREAMED chunk-by-chunk to disk while the sha256 is fed
 /// incrementally (F-129, sc-8931), so a ~660 MB wheel never sits whole in RAM — the peak
@@ -564,42 +530,18 @@ async fn fetch_component(
     cuda: &Path,
     ort: &Path,
 ) -> Result<usize, String> {
-    let response = client
-        .get(component.url)
-        .send()
-        .await
-        .map_err(|error| format!("download {}: {error}", component.label))?
-        .error_for_status()
-        .map_err(|error| format!("download {}: {error}", component.label))?;
-
     let wheel_path = tmp_dir.join(format!(
         "{}.whl",
         component.label.replace(['/', ' ', '(', ')'], "_")
     ));
-
-    // Stream the body to the temp file, hashing each chunk as it lands. Peak RAM is one
-    // chunk instead of the whole wheel.
-    let mut file =
-        fs::File::create(&wheel_path).map_err(|error| format!("create wheel: {error}"))?;
-    let mut hasher = Sha256::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("download {}: {error}", component.label))?;
-        hasher.update(&chunk);
-        file.write_all(&chunk)
-            .map_err(|error| format!("write {}: {error}", component.label))?;
-    }
-    file.flush()
-        .map_err(|error| format!("write {}: {error}", component.label))?;
-    drop(file);
-
-    let digest = hex(&hasher.finalize());
-    if digest != component.sha256 {
-        return Err(format!(
-            "{}: sha256 mismatch (expected {}, got {digest})",
-            component.label, component.sha256
-        ));
-    }
+    download_verified(
+        client,
+        component.url,
+        component.label,
+        component.sha256,
+        &wheel_path,
+    )
+    .await?;
 
     let dest = match component.dest {
         Dest::Cuda => cuda.to_path_buf(),
@@ -623,39 +565,8 @@ async fn fetch_component(
 /// Extract DLLs from a wheel (zip) into `dest` by basename. `names = None` extracts
 /// every `*.dll`; otherwise only the listed basenames. Returns how many were written.
 fn extract_dlls(wheel: &Path, names: Option<&[String]>, dest: &Path) -> Result<usize, String> {
-    fs::create_dir_all(dest).map_err(|error| format!("create {}: {error}", dest.display()))?;
-    let file = fs::File::open(wheel).map_err(|error| format!("open wheel: {error}"))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|error| format!("open zip: {error}"))?;
-    let mut written = 0usize;
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|error| format!("read zip entry: {error}"))?;
-        // Use the sanitized name so a malicious entry can't traverse out of dest.
-        let Some(entry_path) = entry.enclosed_name() else {
-            continue;
-        };
-        let Some(base) = entry_path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !base.to_ascii_lowercase().ends_with(".dll") {
-            continue;
-        }
-        if let Some(names) = names {
-            if !names.iter().any(|name| name == base) {
-                continue;
-            }
-        }
-        let out_path = dest.join(base);
-        // Stream the entry straight to disk (F-129, sc-8931) instead of reading the whole
-        // DLL into a Vec first — a cuDNN DLL can be hundreds of MB, and io::copy uses a
-        // fixed-size buffer.
-        let mut out =
-            fs::File::create(&out_path).map_err(|error| format!("write {base}: {error}"))?;
-        std::io::copy(&mut entry, &mut out).map_err(|error| format!("extract {base}: {error}"))?;
-        written += 1;
-    }
-    Ok(written)
+    let names = names.map(|names| names.iter().map(String::as_str).collect::<Vec<_>>());
+    extract_libraries(wheel, dest, LibraryFilter::Dlls(names.as_deref()))
 }
 
 /// Provision the CUDA / onnxruntime redist on first run (idempotent). Emits
@@ -702,7 +613,7 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
                 false,
             );
             install_from_staged(&source, &root, &cuda, &ort)?;
-            write_marker(&root)?;
+            write_marker(&root, REDIST_VERSION)?;
             emit(app, "provision", "GPU runtime ready (pre-staged).", false);
             return Ok(());
         }
@@ -716,7 +627,7 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
     //    NEW marker over the OLD DLLs and skip the download loop entirely — the loop being
     //    the only thing that re-fetches at the new pin.
     if adoptable(&root) {
-        write_marker(&root)?;
+        write_marker(&root, REDIST_VERSION)?;
         emit(
             app,
             "provision",
@@ -756,11 +667,7 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
     // accepts the connection but stalls (pre- or mid-stream) can't freeze the first-run
     // setup screen forever. No total `timeout` — that would cap the legitimate ~2.7 GB
     // transfer (sc-11149).
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .read_timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|error| format!("http client: {error}"))?;
+    let client = build_client()?;
 
     let mut outcome: Result<(), String> = Ok(());
     for (index, component) in COMPONENTS.iter().enumerate() {
@@ -844,7 +751,7 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
     outcome?;
 
     // Mark success last so a partial/aborted run re-provisions next launch.
-    write_marker(&root)?;
+    write_marker(&root, REDIST_VERSION)?;
     emit(app, "provision", "GPU runtime ready.", false);
     Ok(())
 }
@@ -1035,7 +942,7 @@ mod tests {
         let src_guard = scratch("stage-src");
         let src = src_guard.path();
         stage_tree(src, STAGED_CUDA_DLLS);
-        write_marker(src).expect("pin the source bundle");
+        write_marker(src, REDIST_VERSION).expect("pin the source bundle");
 
         let dest_guard = scratch("stage-dest");
         let dest = dest_guard.path();
@@ -1059,7 +966,7 @@ mod tests {
         let flat_guard = scratch("stage-flat");
         let flat = flat_guard.path();
         touch(flat, STAGED_CUDA_DLLS);
-        write_marker(flat).expect("pin the flat source");
+        write_marker(flat, REDIST_VERSION).expect("pin the flat source");
         let dest_guard = scratch("stage-flat-dest");
         let dest = dest_guard.path();
         let error = install_from_staged(flat, dest, &cuda_subdir(dest), &ort_subdir(dest))
@@ -1078,7 +985,7 @@ mod tests {
             .filter(|dll| *dll != "cudnn64_9.dll")
             .collect();
         stage_tree(partial, &incomplete);
-        write_marker(partial).expect("pin the partial source");
+        write_marker(partial, REDIST_VERSION).expect("pin the partial source");
         let dest2_guard = scratch("stage-partial-dest");
         let dest2 = dest2_guard.path();
         let error = install_from_staged(partial, dest2, &cuda_subdir(dest2), &ort_subdir(dest2))
@@ -1176,7 +1083,7 @@ mod tests {
         assert!(!already_provisioned(root));
 
         // A complete tree with a current top marker is adopted and short-circuits.
-        write_marker(root).expect("write current marker");
+        write_marker(root, REDIST_VERSION).expect("write current marker");
         assert!(adoptable(root));
         assert!(already_provisioned(root));
 
@@ -1194,7 +1101,7 @@ mod tests {
         let root_guard = scratch("self-stage");
         let root = root_guard.path();
         stage_tree(root, STAGED_CUDA_DLLS);
-        write_marker(root).expect("pin the runtime root");
+        write_marker(root, REDIST_VERSION).expect("pin the runtime root");
         install_from_staged(root, root, &cuda_subdir(root), &ort_subdir(root))
             .expect("a complete, pinned root installs from itself");
         assert!(is_staged_complete(&cuda_subdir(root), &ort_subdir(root)));
@@ -1216,7 +1123,7 @@ mod tests {
 
         // Fully marked at this pin.
         mark_components(root, REDIST_VERSION);
-        write_marker(root).expect("current top marker");
+        write_marker(root, REDIST_VERSION).expect("current top marker");
         assert!(!holds_foreign_runtime(root));
 
         // A partial run at this pin: half the components marked, no top marker.
@@ -1282,7 +1189,7 @@ mod tests {
         let src_guard = scratch("replace-src");
         let src = src_guard.path();
         stage_tree(src, STAGED_CUDA_DLLS);
-        write_marker(src).expect("pin the bundle");
+        write_marker(src, REDIST_VERSION).expect("pin the bundle");
 
         let dest_guard = scratch("replace-dest");
         let dest = dest_guard.path();
@@ -1408,32 +1315,20 @@ mod tests {
         let dest = tmp.join("cuda");
         fs::create_dir_all(&dest).expect("create dest");
 
-        // Download (async reqwest) + verify sha256 + unzip — exercising the same code
-        // the real provisioner uses (extract_dlls / hex), minus the AppHandle emit.
-        let bytes = tauri::async_runtime::block_on(async {
-            let client = reqwest::Client::builder().build().expect("client");
-            client
-                .get(component.url)
-                .send()
-                .await
-                .expect("send")
-                .error_for_status()
-                .expect("status")
-                .bytes()
-                .await
-                .expect("bytes")
-        });
-
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let digest = hex(&hasher.finalize());
-        assert_eq!(
-            digest, component.sha256,
-            "sha256 must match the pinned value"
-        );
-
+        // Exercise the production streamed verifier and extractor without AppHandle.
         let wheel = tmp.join("runtime.whl");
-        fs::write(&wheel, &bytes).expect("write wheel");
+        tauri::async_runtime::block_on(async {
+            let client = build_client().expect("client");
+            download_verified(
+                &client,
+                component.url,
+                component.label,
+                component.sha256,
+                &wheel,
+            )
+            .await
+            .expect("download and verify pinned wheel");
+        });
         let written = extract_dlls(&wheel, None, &dest).expect("extract");
         assert!(written >= 1, "at least one DLL extracted");
         assert!(

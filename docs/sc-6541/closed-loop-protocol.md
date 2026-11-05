@@ -320,3 +320,5 @@ the result) — out of the time box unless the pilot finishes with compute to sp
 | **Variant construction drift** — X confounded with count/caption | Manifest shape (count/captions/trigger/resolution) fixed; only pixels/selection change; any forced change called out. |
 | **Over-investment** — full 5-variant matrix before the instrument is proven | Pilot-first; full matrix gated on demonstrated Y separability. |
 | **False precision** — "learned thresholds" at N≈5 | Pilot-calibration register; recommend only large/monotone/mechanism-matched effects. |
+
+The development-only instrument source now lives in `crates/sceneworks-worker/tests/studies/`; existing manual Cargo selectors and recorded study artifacts are unchanged.

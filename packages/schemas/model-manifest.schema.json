@@ -1226,6 +1226,9 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+              "generation": { "type": "string", "minLength": 1, "description": "Adapter architecture generation. Different LTX generations cannot exchange adapters." },
+              "sizeClass": { "type": "string", "minLength": 1, "description": "Backbone size class for base-model compatibility; not a memory estimate." },
+              "imageConditionedBackbone": { "type": "boolean", "description": "Image-conditioned adapter-backbone class (I2V or TI2V). Admission still gates size class and adapter lineage; this does not promise optional tensor targets or advertise user-visible input capabilities." },
               "families": { "type": "array", "items": { "type": "string" } },
               "types": { "type": "array", "items": { "type": "string" } },
               "baseModel": { "type": "string", "minLength": 1, "description": "Exact training-base identity required by this model's adapter contract; FLUX3 uses the canonical upstream repository, not a SceneWorks model-id alias." },
@@ -1306,21 +1309,21 @@
                 "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1,
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-allow-undeclared": true,
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn allowed_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "steps_limit_error(&request.model, steps" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/limits.rs", "anchor": "pub fn allowed_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "steps_limit_error(&request.model, steps" }],
                 "description": "The EXACT set of denoise step counts this model can render; API and worker reject an off-menu request rather than snapping to the nearest legal count. The membership-tested sibling of hardMinSteps, and it exists because a distilled model's step count is not a knob at all: LTX-2.3 bakes its sigma waypoints into training and runs a fixed 8-step stage-1 schedule, so `hardMinSteps: 8` would say 'at least 8' and wrongly admit steps: 30, which the engine refuses (sc-19502). Enforced through the same steps_limit_error gate as hardMinSteps, which since sc-24108 runs on the image enqueue path as well as the video one; the readers named here are shared with that key. No image model declares a step MENU today — a distilled image model would be the first. Lane-agnostic on purpose: both backends derive the count from a byte-identical STAGE1_SIGMAS table and share gen-core's Capabilities::supported_steps floor, so one declaration binds both. ABSENT MEANS NO MENU, so every model that declares nothing is byte-for-byte unchanged. A declared menu must contain the model's own defaults.steps."
               },
               "hardMinSteps": {
                 "type": "integer", "minimum": 1,
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-allow-undeclared": true,
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_min_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "steps_limit_error(&request.model, steps" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/limits.rs", "anchor": "pub fn hard_min_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "steps_limit_error(&request.model, steps" }],
                 "description": "Hard FLOOR on `advanced.steps` (denoise / sampling steps); API and worker reject rather than raise the count. The sampling-axis sibling of hardMinDuration. THE UNIT IS MODEL EVALUATIONS (NFE) — the same unit `defaults.steps`, `advanced.steps` and a turbo adapter's `sampling.steps` carry: MiniMax-H3's engine builds its sigma grid as linspace(1, 0, steps + 1), appending the terminal 0 ITSELF (`JointSchedule::with_shifts(evaluations + 1, ..)`), so nothing in SceneWorks adds or subtracts one and `steps: 1` is a legal 2-point grid that RENDERS — as noise, because one evaluation is a single Euler jump from pure randomness. H3's floor of 2, the smallest schedule with an intermediate sigma, is therefore a PRODUCT judgement rather than an engine limit (sc-19426, corrected sc-18726); the retracted \"N steps drive N-1 model evaluations, so 1 is unrenderable\" reading described diffusers' `num_inference_steps` grid-point convention, which is NOT what this key counts. Enforced at enqueue on BOTH the video and image paths, plus the worker's video lane — the gates named in x-sceneworks-readers are the only per-model rejection seams in the app. The image enqueue reader was added by sc-24108 for Qwen-Image 2.1, the first image model with a real sampling floor (its engine refuses steps < 2); before that this key was video-only and an image declaration would have been inert. The `apps/rust-api` anchor matches both call sites. ABSENT MEANS NO FLOOR, so every model that declares nothing is byte-for-byte unchanged, the same never-block-without-evidence posture hardMinDuration takes. A declared floor must not exceed the model's own defaults.steps."
               },
               "hardMaxSteps": {
                 "type": "integer", "minimum": 1,
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-allow-undeclared": true,
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_max_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/image_jobs/base.rs", "anchor": "sceneworks_core::video_request::hard_max_steps(&request.model_manifest_entry)" }, { "path": "crates/sceneworks-core/src/supra2.rs", "anchor": "crate::video_request::hard_max_steps(entry)" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/limits.rs", "anchor": "pub fn hard_max_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/image_jobs/sampling.rs", "anchor": "sceneworks_core::video_request::hard_max_steps(&request.model_manifest_entry)" }, { "path": "crates/sceneworks-core/src/supra2.rs", "anchor": "crate::limits::hard_max_steps(entry)" }],
                 "description": "Hard CEILING on `advanced.steps` (sc-24215), the sibling of hardMinSteps in the same unit (model evaluations). API enqueue (steps_limit_error) and the model's own worker boundary REJECT a request above it rather than clamping it; the generic image lane's historical clamp (80, or defaults.steps when higher) is replaced by this value for a model that declares it. Supra2-IMG declares gen-core's shared sanity cap (100000) because upstream has no steps limit. ABSENT MEANS NO DECLARED CEILING: every other model keeps exactly its previous behaviour. A declared ceiling must not be below the model's own defaults.steps."
               },
               "maxPixels": {
@@ -1339,21 +1342,21 @@
                 "type": "integer", "minimum": 1,
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-allow-undeclared": true,
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn image_dimension_envelope" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "image_dimension_error(" }, { "path": "apps/web/src/resolutionOverride.js", "anchor": "minDimension" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/image_limits.rs", "anchor": "pub fn image_dimension_envelope" }, { "path": "crates/sceneworks-core/src/image_request.rs", "anchor": "crate::image_limits::image_dimension_error(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "sceneworks_core::image_request::validate_image_request_payload(" }, { "path": "apps/web/src/resolutionOverride.js", "anchor": "minDimension" }],
                 "description": "Smallest legal side for the free Width/Height override, in pixels (sc-24113). The lower half of a model's own size envelope, as distinct from `resolutions`, which is the curated preset ladder. ABSENT MEANS the API's blanket floor (HISTORICAL_MIN_IMAGE_DIMENSION, 256) still applies, so every model that declares nothing is byte-for-byte unchanged. Declaring it is what lets a model legitimately go BELOW that blanket: Qwen-Image 2.1's engine accepts 32 px per side, which the global floor refused outright with no model getting a say. Deriving this from the extremes of `resolutions` (what the web did before this key existed) gives the smallest PRESET side, not the smallest legal one — 1536 rather than 32 for 2.1."
               },
               "maxDimension": {
                 "type": "integer", "minimum": 1,
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-allow-undeclared": true,
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn image_dimension_envelope" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "image_dimension_error(" }, { "path": "apps/web/src/resolutionOverride.js", "anchor": "maxDimension" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/image_limits.rs", "anchor": "pub fn image_dimension_envelope" }, { "path": "crates/sceneworks-core/src/image_request.rs", "anchor": "crate::image_limits::image_dimension_error(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "sceneworks_core::image_request::validate_image_request_payload(" }, { "path": "apps/web/src/resolutionOverride.js", "anchor": "maxDimension" }],
                 "description": "Largest legal side for the free Width/Height override, in pixels (sc-24113). The upper half of `minDimension`'s envelope. ABSENT MEANS the blanket MAX_IMAGE_DIMENSION (4096) still applies. Declaring it tightens a model whose real ceiling is lower than the blanket — Qwen-Image 2.1 stops at 2752 — so an over-cap request is a 400 at enqueue rather than an engine refusal the user sees as a failed render."
               },
               "maxReferenceAssets": {
                 "type": "integer", "minimum": 0,
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-allow-undeclared": true,
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn image_max_reference_assets" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "image_reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/image_jobs/base.rs", "anchor": "sceneworks_core::video_request::image_max_reference_assets(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/image_limits.rs", "anchor": "pub fn image_max_reference_assets" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "image_reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/image_jobs/conditioning.rs", "anchor": "sceneworks_core::video_request::image_max_reference_assets(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
                 "description": "Ceiling on the model's ordered reference list. Long-standing on VIDEO models (sc-17160, where it counts `referenceAssetIds` and defaults to 8 via reference_caps); sc-24113 adds an IMAGE reader with NO default, because most image models take no references at all and an absent key there must mean 'this gate has no opinion'. On the IMAGE lane it counts the FLATTENED ordered conditioning list (sc-24110) - `sourceAssetId`, `maskAssetId` and every `referenceAssetIds` entry together - because the engine receives ONE list and a per-carrier count would admit `source + mask + 9` as nine references. Enforced at enqueue by rejecting, never truncating, and re-read by the worker resolver so both ends share one ceiling: for Qwen-Image 2.1 (1-10 ordered references) a dropped entry is not a smaller render but a different one, since the template numbers the images (<image1> ...) and block-causal attention makes each visible only to what follows, so shortening the list renumbers every reference after the cut."
               },
               "recommendedMaxDuration": {
@@ -1510,7 +1513,7 @@
               "quantize": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Default MLX transformer tier, in bits. `resolve_quant` (crates/sceneworks-worker/src/image_jobs/base.rs) reads this as: <=0 -> dense bf16 with no packed tier, <=4 -> q4, anything else -> q8. 0 is therefore the ONLY way to declare a dense-only artifact: OMITTING the key means q8, not dense. The former `minimum: 1` forbade a value the runtime has always honored, which made FLUX.2 [klein] 9B True V2 — a converted, fixed dense-BF16 transformer — unrepresentable."
+                "description": "Default MLX transformer tier, in bits. `resolve_quant` (crates/sceneworks-worker/src/image_jobs/quantization.rs) reads this as: <=0 -> dense bf16 with no packed tier, <=4 -> q4, anything else -> q8. 0 is therefore the ONLY way to declare a dense-only artifact: OMITTING the key means q8, not dense. The former `minimum: 1` forbade a value the runtime has always honored, which made FLUX.2 [klein] 9B True V2 — a converted, fixed dense-BF16 transformer — unrepresentable."
               },
               "minQualityTier": { "type": "string" },
               "converter": { "type": "string" },
@@ -1532,7 +1535,7 @@
                 "type": "integer",
                 "minimum": 1,
                 "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" }],
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
               "minMemoryGbByTier": {
@@ -1542,7 +1545,7 @@
                 "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
                 "x-sceneworks-contract": "advisory",
                 "x-sceneworks-readers": [
-                  { "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" },
+                  { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" },
                   { "path": "apps/web/src/tierSuggestion.js", "anchor": "tierFloorRowGb(options.model, options.backend, variant?.variant)" },
                   { "path": "apps/web/src/tierSuggestion.js", "anchor": "blanketFloorGb(model, backend, tier)" }
                 ],
@@ -1860,7 +1863,7 @@
                 "type": "integer",
                 "minimum": 1,
                 "x-sceneworks-contract": "binding",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "candle.get(\"minMemoryGb\").and_then(json_f64)" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate/budget.rs", "anchor": "candle.get(\"minMemoryGb\").and_then(json_f64)" }],
                 "description": "Minimum GPU VRAM (GB) to run this model on the candle/CUDA lane — the measured overall-peak of the DEFAULT (lightest, typically q4) hosted tier, plus headroom. This gates the default tier only, matching the established MLX default-tier-gating convention; heavier hosted tiers (q8 / bf16) can exceed this value, and their per-tier measured ceilings live in vramGbByTier. Retires the epic 7982 SD3.5 'minMemoryGb under measured peak' follow-up: this is a real measured CUDA number, not the inherited unified-memory mlx value."
               },
               "minMemoryGbByTier": {
@@ -1869,7 +1872,7 @@
                 "additionalProperties": { "type": "integer", "minimum": 1 },
                 "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
                 "x-sceneworks-contract": "binding",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "tier_floor_gb(candle, tier_key)" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate/budget.rs", "anchor": "tier_floor_gb(candle, tier_key)" }],
                 "description": "Per-tier form of candle.minMemoryGb, for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar — an ALREADY-PADDED floor that predicted_peak_gb returns as-is, with NO HEADROOM_GB added. That is the whole reason this key is not vramGbByTier: that ladder is a raw measured/estimated PEAK, the gate pads it, and a row there is an evidence claim the sibling `measured` flag classifies. This key makes no evidence claim, so a DERIVED floor can live here honestly while vramGbByTier stays empty. Resolution order in predicted_peak_gb: vramGbByTier[tier] + headroom, else minMemoryGbByTier[tier], else minMemoryGb. A tier with no row therefore lands on the scalar, which must stay conservative for every unlisted key (including nvfp4)."
               },
               "vramGbByTier": {
@@ -1923,7 +1926,7 @@
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-readers": [
                   {
-                    "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+                    "path": "crates/sceneworks-worker/src/candle_memory_strategy/selection.rs",
                     "anchor": "verified_candidates"
                   }
                 ],
@@ -1947,7 +1950,7 @@
               "turboFit": {
                 "$ref": "#/$defs/kreaTurboFit",
                 "x-sceneworks-contract": "binding",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "get(\"turboFit\")?" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate/krea.rs", "anchor": "get(\"turboFit\")?" }],
                 "description": "Resolution-aware, per-phase constrained-card fit evidence for ordinary Krea 2 Turbo. The worker selects the least-cost sufficient rung and fails closed to the established resident/sequential gate when a tier has no complete measured curves."
               },
               "measured": {
@@ -2045,7 +2048,7 @@
           "image": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Image-generation capability metadata (sc-15299) — the image-lane sibling of the `video` sub-block (sc-8445), declaring which generation AXES an image engine actually has so Image Studio can hide a control the worker would discard rather than offering a knob that silently does nothing. Mirrors the engine descriptor's own `Capabilities { supports_guidance, supports_negative_prompt }`, which `resolve_guidance` / `resolve_negative_prompt` in the worker's image_jobs/base.rs already gate on. Every property is OPTIONAL and, exactly like `video` but UNLIKE `audio`, an ABSENT property means TRUE: the image population is overwhelmingly guidance-taking, so absent-means-supported is the correct default and leaves an undeclared entry behaving exactly as it did before this block existed. Only a guidance-distilled engine that genuinely lacks an axis declares it false.",
+            "description": "Image-generation capability metadata (sc-15299) — the image-lane sibling of the `video` sub-block (sc-8445), declaring which generation AXES an image engine actually has so Image Studio can hide a control the worker would discard rather than offering a knob that silently does nothing. Mirrors the engine descriptor's own `Capabilities { supports_guidance, supports_negative_prompt }`, which `resolve_guidance` / `resolve_negative_prompt` in the worker's image_jobs/sampling.rs already gate on. Every property is OPTIONAL and, exactly like `video` but UNLIKE `audio`, an ABSENT property means TRUE: the image population is overwhelmingly guidance-taking, so absent-means-supported is the correct default and leaves an undeclared entry behaving exactly as it did before this block existed. Only a guidance-distilled engine that genuinely lacks an axis declares it false.",
             "properties": {
               "supportsGuidance": {
                 "type": "boolean",

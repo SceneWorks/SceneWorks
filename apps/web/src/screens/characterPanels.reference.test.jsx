@@ -59,7 +59,7 @@ function refs(...assetIds) {
 // contract where a mutation triggers a refetch and hands the panel a new array. The
 // ref exposes setters so a test can drive a refetch / character switch declaratively
 // without a nested root.render (which pollutes React act state across tests).
-function Host({ initialRefs, initialCharacter, importAsset, onAddCharacterReference, apiRef }) {
+function Host({ initialRefs, initialCharacter, importAsset, onAddCharacterReference, failAttach, apiRef }) {
   const [approvedReferences, setApprovedReferences] = React.useState(initialRefs);
   const [selectedCharacter, setSelectedCharacter] = React.useState(initialCharacter);
 
@@ -71,11 +71,12 @@ function Host({ initialRefs, initialCharacter, importAsset, onAddCharacterRefere
   const addCharacterReference = React.useCallback(
     async (characterId, payload) => {
       onAddCharacterReference?.(characterId, payload);
+      if (failAttach) return null;
       // The refetch: fold the newly approved reference in under a fresh array identity.
       setApprovedReferences((current) => refs(...current.map((r) => r.assetId), payload.assetId));
       return {};
     },
-    [onAddCharacterReference],
+    [onAddCharacterReference, failAttach],
   );
 
   return (
@@ -188,6 +189,24 @@ describe("CharacterGenerationPanel reference selection (sc-8851)", () => {
     // The upload-then-select flow survives the refetch: the panel ends up on the reference
     // the user just uploaded, not snapped back to reference #1.
     expect(pickedId()).toBe("ref_new");
+  });
+
+  it("reports a failed reference attachment and leaves the existing selection usable", async () => {
+    await mount({ initialRefs: refs("ref_a"), initialCharacter: character, importAsset: vi.fn(async () => ({ id: "new" })), failAttach: true });
+    const input = container.querySelector('input[type="file"]');
+    Object.defineProperty(input, "files", { configurable: true, value: [new File(["x"], "ref.png", { type: "image/png" })] });
+    await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.textContent).toContain("Could not attach the reference. Try again.");
+    expect(pickedId()).toBe("ref_a");
+  });
+
+  it("reports a thrown reference upload error", async () => {
+    await mount({ initialRefs: refs("ref_a"), initialCharacter: character, importAsset: vi.fn(async () => { throw new Error("network failure"); }) });
+    const input = container.querySelector('input[type="file"]');
+    Object.defineProperty(input, "files", { configurable: true, value: [new File(["x"], "ref.png", { type: "image/png" })] });
+    await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.textContent).toContain("network failure");
+    expect(pickedId()).toBe("ref_a");
   });
 
   it("falls back to [0] when the picked id disappears from approvedReferences", async () => {

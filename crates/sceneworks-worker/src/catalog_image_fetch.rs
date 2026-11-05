@@ -8,7 +8,7 @@ use crate::downloads::{fetch_public_source_url_bytes_with_options, PublicSourceU
 use crate::{WorkerError, WorkerResult};
 use futures_util::future::join_all;
 use image::codecs::jpeg::JpegEncoder;
-use image::{DynamicImage, ImageFormat, ImageReader};
+use image::{DynamicImage, ImageFormat};
 use rusqlite::{params, Connection, OptionalExtension};
 use sceneworks_core::catalog_store::{
     Catalog, CatalogError, CatalogProcessingLease, CatalogRecord, CatalogRegistry, NewCatalogRecord,
@@ -19,10 +19,13 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::fs::{File, OpenOptions};
+use std::collections::HashSet;
+use std::fs::File;
+#[cfg(test)]
+use std::fs::OpenOptions;
 use std::future::Future;
-use std::io::{Cursor, Read, Write};
+#[cfg(test)]
+use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,11 +53,13 @@ pub enum CatalogImageFetchError {
     Sqlite(rusqlite::Error),
     InvalidOptions(String),
     Busy(String),
+    Canceled,
 }
 
 impl std::fmt::Display for CatalogImageFetchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Canceled => formatter.write_str("Catalog image fetch canceled."),
             Self::Catalog(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Json(error) => write!(formatter, "{error}"),
@@ -144,20 +149,19 @@ pub fn verify_catalog_image_bytes(
             ))
         }
     };
-    let decoded = image::load_from_memory_with_format(&bytes, format).map_err(|_| {
-        WorkerError::InvalidPayload("catalog image could not be decoded".to_owned())
+    let (decoded, _) = sceneworks_core::image_decode::decode_image_bounded(
+        &bytes,
+        catalog_decode_limits(
+            max_bytes,
+            MAX_IMAGE_EDGE,
+            MAX_IMAGE_EDGE,
+            MAX_DECODED_PIXELS,
+        ),
+    )
+    .map_err(|error| {
+        WorkerError::InvalidPayload(format!("catalog image could not be decoded: {error}"))
     })?;
     let (width, height) = (decoded.width(), decoded.height());
-    if width == 0
-        || height == 0
-        || width > MAX_IMAGE_EDGE
-        || height > MAX_IMAGE_EDGE
-        || u64::from(width).saturating_mul(u64::from(height)) > MAX_DECODED_PIXELS
-    {
-        return Err(WorkerError::InvalidPayload(
-            "catalog image dimensions exceed the materialization limit".to_owned(),
-        ));
-    }
     drop(decoded);
     Ok(VerifiedCatalogImage {
         content_hash: hex_digest(&bytes),
@@ -434,7 +438,13 @@ impl CacheReferenceIndex {
                  record_json text not null
              );
              create index cache_references_by_path
-                 on cache_references(cache_path, availability, accepted, status);",
+                 on cache_references(cache_path, availability, accepted, status);
+             create table thumbnail_references (
+                 record_id text not null,
+                 path text not null,
+                 primary key (record_id, path)
+             );
+             create index thumbnail_references_by_path on thumbnail_references(path);",
         )?;
         {
             let transaction = connection.transaction()?;
@@ -465,6 +475,22 @@ impl CacheReferenceIndex {
 
     fn upsert_on(connection: &Connection, record: &CatalogRecord) -> CatalogImageFetchResult<()> {
         let state = acquisition_state(record);
+        connection.execute(
+            "delete from thumbnail_references where record_id = ?1",
+            [&record.id],
+        )?;
+        for path in [
+            record.thumbnail_path.as_deref(),
+            state.thumbnail_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            connection.execute(
+                "insert or ignore into thumbnail_references(record_id, path) values (?1, ?2)",
+                params![record.id, path],
+            )?;
+        }
         let Some(cache_path) = state.cache_path.as_deref() else {
             connection.execute(
                 "delete from cache_references where record_id = ?1",
@@ -494,6 +520,14 @@ impl CacheReferenceIndex {
             ],
         )?;
         Ok(())
+    }
+
+    fn thumbnail_is_referenced(&self, path: &str) -> CatalogImageFetchResult<bool> {
+        Ok(self.connection.query_row(
+            "select exists(select 1 from thumbnail_references where path = ?1)",
+            [path],
+            |row| row.get(0),
+        )?)
     }
 
     fn summary(
@@ -607,7 +641,6 @@ impl CatalogFetchLease {
         Self::acquire_with_processing(catalog, Some(processing))
     }
 
-    #[allow(dead_code)]
     fn acquire_under_processing_lease(
         catalog: &Catalog,
         _processing: &CatalogProcessingLease,
@@ -620,27 +653,22 @@ impl CatalogFetchLease {
         processing: Option<CatalogProcessingLease>,
     ) -> CatalogImageFetchResult<Self> {
         let path = catalog.root().join(FETCH_LOCK_FILE);
-        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(CatalogImageFetchError::InvalidOptions(format!(
+        let file = sceneworks_core::file_lock::open_regular_lock_file(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidInput {
+                CatalogImageFetchError::InvalidOptions(format!(
                     "Catalog fetch lock must be a regular file: {}",
                     path.display()
-                )));
+                ))
+            } else {
+                CatalogImageFetchError::Io(error)
             }
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)?;
-        let contended = fs2::lock_contended_error().raw_os_error();
+        })?;
         match FileLock::try_exclusive(file) {
             Ok(lock) => Ok(Self {
                 _processing: processing,
                 _file: lock,
             }),
-            Err(error) if error.raw_os_error() == contended => {
+            Err(error) if sceneworks_core::file_lock::is_contended(&error) => {
                 Err(CatalogImageFetchError::Busy(format!(
                     "Catalog {} already has an active image fetch.",
                     catalog.descriptor().id
@@ -676,18 +704,20 @@ pub async fn fetch_attached_catalog_images(
 /// Pipeline-only sibling that proves the caller already owns the shared
 /// catalog-processing lease. The fetch-specific compatibility lock remains
 /// held for the complete pass, while the shared lease can span later stages.
-#[allow(dead_code)]
+#[cfg(native_lane)]
 pub(crate) async fn fetch_attached_catalog_images_under_processing_lease(
     registry: &CatalogRegistry,
     catalog_id: &str,
     options: &CatalogImageFetchOptions,
     processing: &CatalogProcessingLease,
+    cancel: &gen_core::CancelFlag,
 ) -> CatalogImageFetchResult<CatalogImageFetchReport> {
     fetch_attached_catalog_images_with_lease(
         registry,
         catalog_id,
         options,
         Some(processing),
+        Some(cancel),
         |url, fetch_options| async move {
             fetch_public_source_url_bytes_with_options(&url, &fetch_options).await
         },
@@ -705,7 +735,8 @@ where
     F: Fn(String, PublicSourceUrlFetchOptions) -> Fut + Clone,
     Fut: Future<Output = WorkerResult<Vec<u8>>>,
 {
-    fetch_attached_catalog_images_with_lease(registry, catalog_id, options, None, fetcher).await
+    fetch_attached_catalog_images_with_lease(registry, catalog_id, options, None, None, fetcher)
+        .await
 }
 
 async fn fetch_attached_catalog_images_with_lease<F, Fut>(
@@ -713,12 +744,14 @@ async fn fetch_attached_catalog_images_with_lease<F, Fut>(
     catalog_id: &str,
     options: &CatalogImageFetchOptions,
     processing: Option<&CatalogProcessingLease>,
+    cancel: Option<&gen_core::CancelFlag>,
     fetcher: F,
 ) -> CatalogImageFetchResult<CatalogImageFetchReport>
 where
     F: Fn(String, PublicSourceUrlFetchOptions) -> Fut + Clone,
     Fut: Future<Output = WorkerResult<Vec<u8>>>,
 {
+    fetch_cancel_checkpoint(cancel)?;
     validate_options(options)?;
     let mut catalog = registry.open_attached(catalog_id)?;
     let _lease = match processing {
@@ -732,6 +765,7 @@ where
     let mut artifact_budget = ArtifactBudget::initialize(&catalog, options.max_cache_bytes)?;
     let reference_index = CacheReferenceIndex::build(&catalog)?;
     reconcile_discard_intents(&catalog, &reference_index, &mut artifact_budget)?;
+    cleanup_abandoned_thumbnail_generations(&catalog, &reference_index, &mut artifact_budget)?;
 
     let mut checkpoint = CatalogImageFetchCheckpoint {
         requested_accepted_target: options.accepted_target,
@@ -753,6 +787,8 @@ where
     let mut target_reached = false;
 
     loop {
+        fetch_cancel_checkpoint(cancel)?;
+        tokio::task::yield_now().await;
         let page = catalog.page_records_after(cursor, options.page_size)?;
         if page.records.is_empty() {
             break;
@@ -760,9 +796,11 @@ where
         cursor = page.next_cursor;
         let mut candidate_index = 0;
         while candidate_index < page.records.len() {
+            fetch_cancel_checkpoint(cancel)?;
             let mut pending = Vec::new();
             while candidate_index < page.records.len() && pending.len() < permit_backed_concurrency
             {
+                fetch_cancel_checkpoint(cancel)?;
                 let mut record = page.records[candidate_index].clone();
                 candidate_index += 1;
                 checkpoint.counts.candidates = checkpoint.counts.candidates.saturating_add(1);
@@ -892,10 +930,12 @@ where
                     record,
                     options.clone(),
                     Arc::clone(&semaphore),
+                    cancel,
                     fetcher.clone(),
                 )
             });
             for outcome in join_all(futures).await {
+                fetch_cancel_checkpoint(cancel)?;
                 let mut record = outcome.record;
                 let prior = acquisition_state(&record);
                 checkpoint.counts.retries = checkpoint
@@ -968,6 +1008,13 @@ where
     Ok(CatalogImageFetchReport { checkpoint })
 }
 
+fn fetch_cancel_checkpoint(cancel: Option<&gen_core::CancelFlag>) -> CatalogImageFetchResult<()> {
+    if cancel.is_some_and(gen_core::CancelFlag::is_cancelled) {
+        return Err(CatalogImageFetchError::Canceled);
+    }
+    Ok(())
+}
+
 struct FetchOutcome {
     record: CatalogRecord,
     attempts: u32,
@@ -993,6 +1040,7 @@ async fn fetch_candidate<F, Fut>(
     record: CatalogRecord,
     options: CatalogImageFetchOptions,
     semaphore: Arc<Semaphore>,
+    cancel: Option<&gen_core::CancelFlag>,
     fetcher: F,
 ) -> FetchOutcome
 where
@@ -1035,6 +1083,15 @@ where
     };
     let mut attempts = 0;
     loop {
+        if cancel.is_some_and(gen_core::CancelFlag::is_cancelled) {
+            return FetchOutcome {
+                record,
+                attempts,
+                result: Err(WorkerError::Canceled(
+                    "Catalog image fetch canceled.".to_owned(),
+                )),
+            };
+        }
         attempts += 1;
         match fetcher(url.clone(), fetch_options).await {
             Ok(bytes) => {
@@ -1044,7 +1101,10 @@ where
                     result: Ok(FetchedDownload { bytes, permit }),
                 };
             }
-            Err(_error) if attempts <= options.max_retries => {
+            Err(_error)
+                if attempts <= options.max_retries
+                    && !cancel.is_some_and(gen_core::CancelFlag::is_cancelled) =>
+            {
                 let multiplier = 1_u64 << attempts.saturating_sub(1).min(8);
                 let delay = options
                     .retry_backoff_ms
@@ -1063,41 +1123,39 @@ where
     }
 }
 
+fn catalog_decode_limits(
+    max_bytes: usize,
+    max_width: u32,
+    max_height: u32,
+    max_pixels: u64,
+) -> sceneworks_core::image_decode::ImageDecodeLimits {
+    sceneworks_core::image_decode::ImageDecodeLimits {
+        max_bytes,
+        max_width,
+        max_height,
+        max_pixels,
+        // Preserve the native image decoder's existing 512 MiB allocation ceiling.
+        max_alloc: 512 * 1024 * 1024,
+        catalog_formats_only: true,
+    }
+}
+
 fn validate_image(
     bytes: Vec<u8>,
     options: &CatalogImageFetchOptions,
     permit: OwnedSemaphorePermit,
 ) -> WorkerResult<FetchedImage> {
-    let reader = ImageReader::new(Cursor::new(&bytes))
-        .with_guessed_format()
-        .map_err(|error| WorkerError::InvalidPayload(format!("image format failed: {error}")))?;
-    let format = reader
-        .format()
-        .ok_or_else(|| WorkerError::InvalidPayload("image format is unknown".to_owned()))?;
-    if !matches!(
-        format,
-        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP
-    ) {
-        return Err(WorkerError::InvalidPayload(
-            "image format must be PNG, JPEG, or WebP".to_owned(),
-        ));
-    }
-    let (width, height) = reader.into_dimensions().map_err(|error| {
-        WorkerError::InvalidPayload(format!("image dimensions failed: {error}"))
-    })?;
-    let pixels = u64::from(width).saturating_mul(u64::from(height));
-    if width == 0
-        || height == 0
-        || width > options.max_width
-        || height > options.max_height
-        || pixels > options.max_pixels
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "image dimensions {width}x{height} exceed configured limits"
-        )));
-    }
-    let image = image::load_from_memory_with_format(&bytes, format)
-        .map_err(|error| WorkerError::InvalidPayload(format!("image decode failed: {error}")))?;
+    let (image, format) = sceneworks_core::image_decode::decode_image_bounded(
+        &bytes,
+        catalog_decode_limits(
+            options.max_file_bytes,
+            options.max_width,
+            options.max_height,
+            options.max_pixels,
+        ),
+    )
+    .map_err(|error| WorkerError::InvalidPayload(format!("image decode failed: {error}")))?;
+    let (width, height) = (image.width(), image.height());
     Ok(FetchedImage {
         bytes,
         format,
@@ -1184,7 +1242,7 @@ where
         if staged.exists() {
             atomic_replace(&staged, &fetched.bytes)?;
         } else {
-            atomic_create(&staged, &fetched.bytes)?;
+            create_unpublished_file(&staged, &fetched.bytes)?;
         }
         artifact_budget.replaced(staged_existing, fetched.bytes.len() as u64);
         base_marker.staged_cache_path = Some(staged_relative);
@@ -1205,12 +1263,12 @@ where
     }
 
     let thumbnail_path = if let Some(max_edge) = options.thumbnail_max_edge {
-        let relative = format!("thumbnails/sha256/{}/{}.jpg", &hash[..2], hash);
-        let path = safe_catalog_file(catalog, &relative, true)?;
         let thumbnail = fetched.image.thumbnail(max_edge, max_edge).to_rgb8();
         let mut encoded = Vec::new();
         JpegEncoder::new_with_quality(&mut encoded, 82).encode_image(&thumbnail)?;
         let thumbnail_hash = hex_digest(&encoded);
+        let (relative, path, unpublished) =
+            select_thumbnail_target(catalog, &hash, &thumbnail_hash, encoded.len() as u64)?;
         if validate_cached_file(&path, &thumbnail_hash, encoded.len() as u64).is_err() {
             let mut existing_bytes = std::fs::metadata(&path)
                 .map(|metadata| metadata.len())
@@ -1267,10 +1325,15 @@ where
                 return Ok(base_marker);
             }
             persist_completion_marker(catalog, &base_marker, artifact_budget)?;
-            if path.exists() {
+            if unpublished {
+                // The pending journal above is durable, and no record names this
+                // fresh generation yet. Its owned FD may contain partial bytes
+                // until sync completes; recovery validates it before publishing.
+                sceneworks_core::fsutil::write_new_unpublished_with(&path, &encoded, || Ok(()))?;
+            } else if path.exists() {
                 atomic_replace(&path, &encoded)?;
             } else {
-                atomic_create(&path, &encoded)?;
+                atomic_write_with_hook(&path, &encoded, false, || Ok(()))?;
             }
             artifact_budget.replaced(existing_bytes, encoded.len() as u64);
             fault_hook(PersistFaultPoint::ThumbnailPublished)?;
@@ -1714,7 +1777,10 @@ fn cleanup_stale_temps(catalog: &Catalog) -> CatalogImageFetchResult<()> {
         let directory = safe_catalog_directory(catalog, relative, false)?;
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
-            let metadata = entry.metadata()?;
+            let Some(metadata) = sceneworks_core::fsutil::payload_entry_metadata(&entry.path())?
+            else {
+                continue;
+            };
             if metadata.is_file() && entry.file_name().to_string_lossy().ends_with(".tmp") {
                 std::fs::remove_file(entry.path())?;
             }
@@ -1723,7 +1789,9 @@ fn cleanup_stale_temps(catalog: &Catalog) -> CatalogImageFetchResult<()> {
     let staged_directory = safe_catalog_directory(catalog, "images/.fetch-tmp", false)?;
     for entry in std::fs::read_dir(staged_directory)? {
         let entry = entry?;
-        let metadata = entry.metadata()?;
+        let Some(metadata) = sceneworks_core::fsutil::payload_entry_metadata(&entry.path())? else {
+            continue;
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
         if !metadata.is_file() || !name.ends_with(".staged") {
             continue;
@@ -1746,7 +1814,12 @@ fn safe_catalog_directory(
     relative: &str,
     create: bool,
 ) -> CatalogImageFetchResult<PathBuf> {
-    let path = safe_relative_join(catalog.root(), relative)?;
+    // An empty parent denotes the trusted catalog root, never a file path.
+    let path = if relative.is_empty() {
+        catalog.root().to_path_buf()
+    } else {
+        safe_relative_join(catalog.root(), relative)?
+    };
     let mut current = catalog.root().to_path_buf();
     for component in Path::new(relative).components() {
         let Component::Normal(component) = component else {
@@ -1798,22 +1871,45 @@ fn safe_catalog_file(
 }
 
 fn safe_relative_join(root: &Path, relative: &str) -> CatalogImageFetchResult<PathBuf> {
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            !matches!(component, Component::Normal(_))
-                || component.as_os_str().to_string_lossy().contains('\0')
-        })
-    {
-        return Err(CatalogImageFetchError::InvalidOptions(
+    sceneworks_core::safe_path::confine_under(
+        root,
+        relative,
+        sceneworks_core::safe_path::Confinement::Lexical,
+    )
+    .map_err(|_| {
+        CatalogImageFetchError::InvalidOptions(
             "catalog cache path must contain only normal relative components".to_owned(),
-        ));
-    }
-    Ok(root.join(path))
+        )
+    })
 }
 
+/// Initial staged bytes and journals have no product reader until their existing
+/// lease/journal/record gate. Only these recoverable private paths may use direct
+/// exclusive creation on filesystems with neither exclusive rename nor hard links.
+fn create_unpublished_file(path: &Path, bytes: &[u8]) -> CatalogImageFetchResult<()> {
+    create_unpublished_file_with_hook(path, bytes, || Ok(()))
+}
+
+fn create_unpublished_file_with_hook(
+    path: &Path,
+    bytes: &[u8],
+    before_gate: impl FnOnce() -> std::io::Result<()>,
+) -> CatalogImageFetchResult<()> {
+    let temporary = catalog_temporary_directory(path)?;
+    // Select the strategy BEFORE consuming a FnOnce authority check. Unsupported
+    // atomic publication is never retried after the check and additional I/O.
+    if sceneworks_core::fsutil::atomic_create_supported(&temporary)? {
+        atomic_write_with_hook(path, bytes, false, before_gate)
+    } else {
+        sceneworks_core::fsutil::write_new_unpublished_with(path, bytes, before_gate)
+            .map_err(CatalogImageFetchError::Io)
+    }
+}
+
+// Test fixture files are unreferenced until their record/journal is explicitly installed.
+#[cfg(test)]
 fn atomic_create(path: &Path, bytes: &[u8]) -> CatalogImageFetchResult<()> {
-    atomic_write_with_hook(path, bytes, false, || Ok(()))
+    create_unpublished_file(path, bytes)
 }
 
 fn atomic_replace(path: &Path, bytes: &[u8]) -> CatalogImageFetchResult<()> {
@@ -1829,6 +1925,21 @@ fn atomic_write_with_hook<F>(
 where
     F: FnOnce() -> std::io::Result<()>,
 {
+    let temp_directory = catalog_temporary_directory(path)?;
+    sceneworks_core::fsutil::write_atomic_with(
+        path,
+        bytes,
+        sceneworks_core::fsutil::AtomicWriteOptions {
+            replace,
+            temp_directory: Some(&temp_directory),
+            ..Default::default()
+        },
+        before_rename,
+    )
+    .map_err(CatalogImageFetchError::Io)
+}
+
+fn catalog_temporary_directory(path: &Path) -> CatalogImageFetchResult<PathBuf> {
     let parent = path.parent().ok_or_else(|| {
         CatalogImageFetchError::InvalidOptions("cache path has no parent".to_owned())
     })?;
@@ -1842,7 +1953,6 @@ where
         .map(|artifact_root| artifact_root.join(TEMP_DIRECTORY))
         .unwrap_or_else(|| parent.join(TEMP_DIRECTORY));
     std::fs::create_dir_all(&temp_directory)?;
-    let temp = temp_directory.join(format!("{}.tmp", uuid::Uuid::new_v4()));
     let temp_metadata = std::fs::symlink_metadata(&temp_directory)?;
     if temp_metadata.file_type().is_symlink() || !temp_metadata.is_dir() {
         return Err(CatalogImageFetchError::InvalidOptions(format!(
@@ -1850,60 +1960,197 @@ where
             temp_directory.display()
         )));
     }
-    let result = (|| -> CatalogImageFetchResult<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        sync_parent_directory(&temp);
-        before_rename()?;
-        if !replace && path.exists() {
-            return Err(CatalogImageFetchError::Io(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("cache destination already exists: {}", path.display()),
-            )));
-        }
-        match std::fs::rename(&temp, path) {
-            Ok(()) => {
-                sync_parent_directory(path);
-                Ok(())
-            }
-            Err(error) if path.exists() => {
-                if replace {
-                    Err(CatalogImageFetchError::Io(std::io::Error::new(
-                        error.kind(),
-                        format!(
-                            "atomic cache replacement failed while preserving {}: {error}",
-                            path.display()
-                        ),
-                    )))
-                } else {
-                    Err(CatalogImageFetchError::Io(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        format!(
-                            "cache destination appeared during atomic write: {} ({error})",
-                            path.display()
-                        ),
-                    )))
-                }
-            }
-            Err(error) => Err(error.into()),
-        }
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(temp);
-    }
-    result
+    Ok(temp_directory)
 }
 
+// Other cache state transitions retain their existing best-effort sync policy.
 fn sync_parent_directory(path: &Path) {
-    if let Some(parent) = path.parent() {
-        if let Ok(directory) = File::open(parent) {
-            let _ = directory.sync_all();
+    let _ = sceneworks_core::fsutil::sync_parent_directory(path);
+}
+
+/// A generation is private until the completion journal and record transaction
+/// publish its path. Existing/shared thumbnail paths are never filled in place.
+fn select_thumbnail_target(
+    catalog: &Catalog,
+    image_hash: &str,
+    thumbnail_hash: &str,
+    bytes: u64,
+) -> CatalogImageFetchResult<(String, PathBuf, bool)> {
+    select_thumbnail_target_with_probe(
+        catalog,
+        image_hash,
+        thumbnail_hash,
+        bytes,
+        sceneworks_core::fsutil::atomic_create_supported,
+    )
+}
+
+fn select_thumbnail_target_with_probe(
+    catalog: &Catalog,
+    image_hash: &str,
+    thumbnail_hash: &str,
+    bytes: u64,
+    probe: impl FnOnce(&Path) -> std::io::Result<bool>,
+) -> CatalogImageFetchResult<(String, PathBuf, bool)> {
+    let relative = format!("thumbnails/sha256/{}/{}.jpg", &image_hash[..2], image_hash);
+    let path = safe_catalog_file(catalog, &relative, true)?;
+    if validate_cached_file(&path, thumbnail_hash, bytes).is_ok() {
+        return Ok((relative, path, false));
+    }
+    let temporary = safe_catalog_directory(catalog, "thumbnails/.fetch-tmp", true)?;
+    let atomic_create_supported = probe(&temporary)?;
+    if atomic_create_supported && !path.exists() {
+        return Ok((relative, path, false));
+    }
+    // A different encoding is not proof the canonical thumbnail is corrupt.
+    // Keep existing paths immutable until reference/journal-aware cleanup can
+    // reclaim them; only the current record will name this new generation.
+    let generation_directory = format!("thumbnails/sha256/{}/{}", &image_hash[..2], image_hash);
+    let directory = safe_catalog_directory(catalog, &generation_directory, true)?;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str().filter(|name| thumbnail_generation_name(name)) else {
+            continue;
+        };
+        let relative = format!("{generation_directory}/{name}");
+        let path = safe_catalog_file(catalog, &relative, false)?;
+        if validate_cached_file(&path, thumbnail_hash, bytes).is_ok() {
+            return Ok((relative, path, false));
         }
     }
+    let relative = format!(
+        "{generation_directory}/{}.jpg",
+        uuid::Uuid::new_v4().simple()
+    );
+    let path = safe_catalog_file(catalog, &relative, true)?;
+    Ok((relative, path, !atomic_create_supported))
+}
+
+fn thumbnail_generation_name(name: &str) -> bool {
+    name.strip_suffix(".jpg")
+        .is_some_and(|stem| stem.len() == 32 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn cleanup_abandoned_thumbnail_generations(
+    catalog: &Catalog,
+    references: &CacheReferenceIndex,
+    budget: &mut ArtifactBudget,
+) -> CatalogImageFetchResult<()> {
+    let mut journals = HashSet::new();
+    let markers =
+        safe_catalog_directory(catalog, &format!("artifacts/{COMPLETION_DIRECTORY}"), true)?;
+    for entry in std::fs::read_dir(markers)? {
+        let entry = entry?;
+        if sceneworks_core::fsutil::payload_entry_metadata(&entry.path())?.is_none() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let path = safe_catalog_file(
+            catalog,
+            &format!("artifacts/{COMPLETION_DIRECTORY}/{name}"),
+            false,
+        )?;
+        if let Ok(marker) = serde_json::from_reader::<_, CompletionMarker>(File::open(&path)?) {
+            if completion_marker_path(catalog, &marker.record_id)? != path {
+                continue;
+            }
+            let record = match catalog.record_by_id(&marker.record_id) {
+                Ok(record) => record,
+                Err(CatalogError::NotFound(_)) => {
+                    remove_accounted_file(&path, budget)?;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            // Recovery deliberately skips already-published/rejected rows. Their
+            // actual pointers are protected by the reference index; a stale
+            // journal must not pin an abandoned replacement generation forever.
+            if matches!(
+                acquisition_state(&record).status.as_str(),
+                "available" | "rejected"
+            ) {
+                continue;
+            }
+            if let Some(path) = marker.thumbnail_path {
+                journals.insert(path);
+            }
+            if let Some(pending) = marker.pending_thumbnail {
+                journals.insert(pending.path);
+            }
+        }
+    }
+    let base = safe_catalog_directory(catalog, "thumbnails/sha256", true)?;
+    for prefix in std::fs::read_dir(base)? {
+        let prefix = prefix?;
+        let Some(prefix) = prefix
+            .file_name()
+            .to_str()
+            .filter(|name| name.len() == 2 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let directory =
+            safe_catalog_directory(catalog, &format!("thumbnails/sha256/{prefix}"), false)?;
+        for hash in std::fs::read_dir(directory)? {
+            let hash = hash?;
+            if let Some(name) = hash.file_name().to_str().filter(|name| {
+                name.strip_suffix(".jpg").is_some_and(|hash| {
+                    hash.len() == 64
+                        && hash.starts_with(&prefix)
+                        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            }) {
+                let relative = format!("thumbnails/sha256/{prefix}/{name}");
+                if !journals.contains(&relative)
+                    && !references.thumbnail_is_referenced(&relative)?
+                {
+                    let path = safe_catalog_file(catalog, &relative, false)?;
+                    remove_accounted_file(&path, budget)?;
+                }
+                continue;
+            }
+            let Some(hash) = hash
+                .file_name()
+                .to_str()
+                .filter(|name| {
+                    name.len() == 64
+                        && name.starts_with(&prefix)
+                        && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let relative_directory = format!("thumbnails/sha256/{prefix}/{hash}");
+            let directory = safe_catalog_directory(catalog, &relative_directory, false)?;
+            for file in std::fs::read_dir(directory)? {
+                let file = file?;
+                let Some(name) = file
+                    .file_name()
+                    .to_str()
+                    .filter(|name| thumbnail_generation_name(name))
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let relative = format!("{relative_directory}/{name}");
+                let path = safe_catalog_file(catalog, &relative, false)?;
+                if !journals.contains(&relative)
+                    && !references.thumbnail_is_referenced(&relative)?
+                {
+                    remove_accounted_file(&path, budget)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn completion_marker_path(catalog: &Catalog, record_id: &str) -> CatalogImageFetchResult<PathBuf> {
@@ -1987,7 +2234,7 @@ fn persist_discard_intent(
     if path.exists() {
         atomic_replace(&path, &payload)?;
     } else {
-        atomic_create(&path, &payload)?;
+        create_unpublished_file(&path, &payload)?;
     }
     artifact_budget.replaced(existing_bytes, payload.len() as u64);
     Ok(())
@@ -2001,7 +2248,10 @@ fn reconcile_discard_intents(
     let directory = safe_catalog_directory(catalog, "artifacts/discard-intents", false)?;
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
-        if !entry.metadata()?.is_file() || !entry.file_name().to_string_lossy().ends_with(".json") {
+        let Some(metadata) = sceneworks_core::fsutil::payload_entry_metadata(&entry.path())? else {
+            continue;
+        };
+        if !metadata.is_file() || !entry.file_name().to_string_lossy().ends_with(".json") {
             continue;
         }
         let payload = std::fs::read(entry.path())?;
@@ -2087,7 +2337,7 @@ fn persist_completion_marker(
         }
         atomic_replace(&path, &payload)?;
     } else {
-        atomic_create(&path, &payload)?;
+        create_unpublished_file(&path, &payload)?;
     }
     artifact_budget.replaced(existing_bytes, payload.len() as u64);
     Ok(())
@@ -2206,17 +2456,8 @@ fn validate_cached_file(path: &Path, expected_hash: &str, bytes: u64) -> std::io
             "cached image metadata mismatch",
         ));
     }
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    if format!("{:x}", hasher.finalize()) != expected_hash {
+    let digest = sceneworks_core::hashing::sha256_file(path)?;
+    if digest != expected_hash {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "cached image hash mismatch",
@@ -2230,7 +2471,7 @@ fn bounded_failure_reason(error: &WorkerError) -> String {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 #[cfg(test)]
@@ -2252,6 +2493,385 @@ mod tests {
     }
 
     #[test]
+    fn no_replace_preserves_destination_that_appears_after_staging() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("image.bin");
+        let error =
+            atomic_write_with_hook(&path, b"loser", false, || std::fs::write(&path, b"winner"))
+                .expect_err("another publisher wins");
+        assert!(
+            matches!(error, CatalogImageFetchError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"winner");
+        assert_eq!(
+            std::fs::read_dir(root.path().join(TEMP_DIRECTORY))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_initial_private_journal_and_staged_copy_recover_without_publishing_garbage() {
+        let (_root, registry, id) = catalog_with_urls(&["https://example.com/partial-private"]);
+        let catalog = registry.open_attached(&id).unwrap();
+        prepare_cache_directories(&catalog).unwrap();
+        let record = catalog.page_records(0, 1).unwrap().remove(0);
+        let staged = safe_catalog_file(&catalog, &staged_cache_path(&record), true).unwrap();
+        let marker = completion_marker_path(&catalog, &record.id).unwrap();
+        // Process-exit fixture: these files survived while their owned-FD writer
+        // was incomplete, before any record/checkpoint publication gate.
+        std::fs::write(&staged, b"partial image").unwrap();
+        std::fs::write(&marker, b"{partial journal").unwrap();
+        drop(catalog);
+        let bytes = png(12, 10);
+        let expected = hex_digest(&bytes);
+        let report = fetch_attached_catalog_images_with(
+            &registry,
+            &id,
+            &CatalogImageFetchOptions {
+                accepted_target: 1,
+                ..Default::default()
+            },
+            move |_, _| {
+                let bytes = bytes.clone();
+                async move { Ok(bytes) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.checkpoint.counts.accepted, 1);
+        let catalog = registry.open_attached(&id).unwrap();
+        let record = catalog.page_records(0, 1).unwrap().remove(0);
+        assert_eq!(
+            acquisition_state(&record).content_hash.as_deref(),
+            Some(expected.as_str())
+        );
+        assert!(!staged.exists());
+        assert!(!marker.exists());
+        assert!(image::load_from_memory(
+            &std::fs::read(catalog.root().join(record.image_path)).unwrap()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn private_thumbnail_generations_preserve_shared_readers_and_recover_quota() {
+        assert_thumbnail_references_and_recovery(false, false);
+    }
+
+    #[test]
+    fn canonical_thumbnail_survives_different_encoding_until_all_references_are_gone() {
+        for atomic_create_supported in [false, true] {
+            assert_thumbnail_references_and_recovery(true, atomic_create_supported);
+        }
+    }
+
+    fn assert_thumbnail_references_and_recovery(canonical: bool, atomic_create_supported: bool) {
+        use std::io::Write as _;
+        let (_root, registry, id) =
+            catalog_with_urls(&["https://example.com/old", "https://example.com/new"]);
+        let mut catalog = registry.open_attached(&id).unwrap();
+        prepare_cache_directories(&catalog).unwrap();
+        let mut records = catalog.page_records(0, 2).unwrap();
+        let bytes = png(10, 10);
+        let hash = hex_digest(&bytes);
+        let cache_relative = format!("images/sha256/{}/{}.png", &hash[..2], hash);
+        let cache = safe_catalog_file(&catalog, &cache_relative, true).unwrap();
+        atomic_create(&cache, &bytes).unwrap();
+        let generation_dir = format!("thumbnails/sha256/{}/{}", &hash[..2], hash);
+        let old_relative = if canonical {
+            format!("thumbnails/sha256/{}/{}.jpg", &hash[..2], hash)
+        } else {
+            format!("{generation_dir}/{}.jpg", uuid::Uuid::new_v4().simple())
+        };
+        let old = safe_catalog_file(&catalog, &old_relative, true).unwrap();
+        let image = image::load_from_memory(&bytes).unwrap();
+        let encode = |edge| {
+            let mut encoded = Vec::new();
+            JpegEncoder::new_with_quality(&mut encoded, 82)
+                .encode_image(&image.thumbnail(edge, edge).to_rgb8())
+                .unwrap();
+            encoded
+        };
+        let old_encoded = encode(8);
+        let old_bytes = old_encoded.as_slice();
+        atomic_create(&old, old_bytes).unwrap();
+        records[0].thumbnail_path = Some(old_relative.clone());
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: records[0].id.clone(),
+                image_path: records[0].image_path.clone(),
+                thumbnail_path: Some(old_relative.clone()),
+                embedding_path: None,
+                artifact_path: None,
+                metadata: records[0].metadata.clone(),
+            }])
+            .unwrap();
+        let mut budget = ArtifactBudget::initialize(&catalog, u64::MAX).unwrap();
+        let new_encoded = encode(4);
+        let new_bytes = new_encoded.as_slice();
+        assert_ne!(hex_digest(old_bytes), hex_digest(new_bytes));
+        let (new_relative, new, unpublished) = select_thumbnail_target_with_probe(
+            &catalog,
+            &hash,
+            &hex_digest(new_bytes),
+            new_bytes.len() as u64,
+            |_| Ok(atomic_create_supported),
+        )
+        .unwrap();
+        assert_eq!(unpublished, !atomic_create_supported);
+        assert_ne!(new, old);
+        assert_eq!(
+            std::fs::read(&old).expect("referenced thumbnail survives different encoding"),
+            old_bytes
+        );
+        assert_eq!(
+            budget.bytes,
+            catalog.storage_accounting().unwrap().artifact_bytes
+        );
+        let options = CatalogImageFetchOptions {
+            thumbnail_max_edge: Some(4),
+            ..Default::default()
+        };
+        let permit = Arc::new(Semaphore::new(bytes.len()))
+            .try_acquire_many_owned(bytes.len() as u32)
+            .unwrap();
+        let fetched = validate_image(bytes.clone(), &options, permit).unwrap();
+        let mut counts = CatalogImageFetchCounts::default();
+        persist_fetched(
+            &catalog,
+            &records[1],
+            &fetched,
+            &CatalogImageFetchOptions {
+                thumbnail_max_edge: None,
+                ..options.clone()
+            },
+            &mut counts,
+            &mut budget,
+        )
+        .unwrap();
+        for (max_thumbnail_bytes, max_artifact_bytes) in
+            [(1, u64::MAX), (options.max_thumbnail_bytes, budget.bytes)]
+        {
+            budget.max_bytes = max_artifact_bytes;
+            let before = budget.bytes;
+            let omitted = persist_fetched(
+                &catalog,
+                &records[1],
+                &fetched,
+                &CatalogImageFetchOptions {
+                    max_thumbnail_bytes,
+                    ..options.clone()
+                },
+                &mut counts,
+                &mut budget,
+            )
+            .unwrap();
+            assert!(omitted.thumbnail_path.is_none());
+            assert!(omitted.pending_thumbnail.is_none());
+            assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+            assert_eq!(budget.bytes, before);
+            assert_eq!(
+                budget.bytes,
+                catalog.storage_accounting().unwrap().artifact_bytes
+            );
+        }
+        budget.max_bytes = u64::MAX;
+        let marker = CompletionMarker {
+            record_id: records[1].id.clone(),
+            content_hash: hash.clone(),
+            cache_path: cache_relative,
+            staged_cache_path: None,
+            thumbnail_path: None,
+            pending_thumbnail: Some(PendingThumbnail {
+                path: new_relative.clone(),
+                content_hash: hex_digest(new_bytes),
+                bytes: new_bytes.len() as u64,
+            }),
+            bytes: bytes.len() as u64,
+            width: 10,
+            height: 10,
+        };
+        persist_completion_marker(&catalog, &marker, &mut budget).unwrap();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                for _ in 0..128 {
+                    assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+                    std::thread::yield_now();
+                }
+            });
+            let mut partial = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&new)
+                .unwrap();
+            partial.write_all(&new_bytes[..8]).unwrap();
+            partial.sync_all().unwrap();
+            reader.join().unwrap();
+        });
+        // Simulate process exit: leave the partial generation behind its valid
+        // pending journal, and another unreferenced abandoned generation beside it.
+        let abandoned_relative = format!("{generation_dir}/{}.jpg", uuid::Uuid::new_v4().simple());
+        let abandoned = safe_catalog_file(&catalog, &abandoned_relative, true).unwrap();
+        std::fs::write(&abandoned, b"abandoned partial bytes").unwrap();
+        let mut budget = ArtifactBudget::initialize(&catalog, u64::MAX).unwrap();
+        let before = budget.bytes;
+        let references = CacheReferenceIndex::build(&catalog).unwrap();
+        cleanup_abandoned_thumbnail_generations(&catalog, &references, &mut budget).unwrap();
+        assert!(!abandoned.exists());
+        assert!(new.exists(), "pending journal protects recovery bytes");
+        assert_eq!(
+            budget.bytes,
+            before - b"abandoned partial bytes".len() as u64
+        );
+        let recovered = recover_completion_marker(&catalog, &records[1], &mut budget)
+            .unwrap()
+            .unwrap();
+        assert!(recovered.pending_thumbnail.is_none());
+        assert!(recovered.thumbnail_path.is_none());
+        assert!(!new.exists());
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+        assert_eq!(
+            catalog
+                .record_by_id(&records[0].id)
+                .unwrap()
+                .thumbnail_path
+                .as_deref(),
+            Some(old_relative.as_str())
+        );
+        assert!(catalog
+            .record_by_id(&records[1].id)
+            .unwrap()
+            .thumbnail_path
+            .is_none());
+        // A complete already referenced thumbnail is reused rather than
+        // allocating a duplicate generation.
+        let (reused, _, unpublished) = select_thumbnail_target_with_probe(
+            &catalog,
+            &hash,
+            &hex_digest(old_bytes),
+            old_bytes.len() as u64,
+            |_| Ok(atomic_create_supported),
+        )
+        .unwrap();
+        assert_eq!(reused, old_relative);
+        assert!(!unpublished);
+        // Completed rows and deleted owners cannot leave stale journals pinning
+        // otherwise unreferenced generations or consuming their quota forever.
+        let mut published = catalog.record_by_id(&records[0].id).unwrap();
+        let state = AcquisitionState {
+            status: "available".to_owned(),
+            availability: "available".to_owned(),
+            cache_path: Some(marker.cache_path.clone()),
+            thumbnail_path: Some(old_relative.clone()),
+            ..Default::default()
+        };
+        set_acquisition_state(&mut published, &state).unwrap();
+        published.image_path = marker.cache_path.clone();
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: published.id.clone(),
+                image_path: published.image_path.clone(),
+                thumbnail_path: published.thumbnail_path.clone(),
+                embedding_path: None,
+                artifact_path: None,
+                metadata: published.metadata.clone(),
+            }])
+            .unwrap();
+        let stale_relative = format!("{generation_dir}/{}.jpg", uuid::Uuid::new_v4().simple());
+        let stale_file = safe_catalog_file(&catalog, &stale_relative, true).unwrap();
+        atomic_create(&stale_file, b"stale completed generation").unwrap();
+        let mut stale = marker.clone();
+        stale.record_id = published.id;
+        stale.thumbnail_path = Some(stale_relative);
+        stale.pending_thumbnail = None;
+        let mut budget = ArtifactBudget::initialize(&catalog, u64::MAX).unwrap();
+        persist_completion_marker(&catalog, &stale, &mut budget).unwrap();
+        let missing_relative = format!("{generation_dir}/{}.jpg", uuid::Uuid::new_v4().simple());
+        let missing_file = safe_catalog_file(&catalog, &missing_relative, true).unwrap();
+        atomic_create(&missing_file, b"deleted owner's generation").unwrap();
+        let mut missing = stale;
+        missing.record_id = "deleted-owner".to_owned();
+        missing.thumbnail_path = Some(missing_relative);
+        persist_completion_marker(&catalog, &missing, &mut budget).unwrap();
+        let mut budget = ArtifactBudget::initialize(&catalog, u64::MAX).unwrap();
+        let references = CacheReferenceIndex::build(&catalog).unwrap();
+        cleanup_abandoned_thumbnail_generations(&catalog, &references, &mut budget).unwrap();
+        assert!(!stale_file.exists());
+        assert!(!missing_file.exists());
+        assert!(!completion_marker_path(&catalog, &missing.record_id)
+            .unwrap()
+            .exists());
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+        assert_eq!(
+            budget.bytes,
+            catalog.storage_accounting().unwrap().artifact_bytes
+        );
+        // An acquisition pointer alone is a live reference even after the row
+        // pointer is cleared. Neither representation may lose its thumbnail.
+        let mut owner = catalog.record_by_id(&records[0].id).unwrap();
+        owner.thumbnail_path = None;
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: owner.id.clone(),
+                image_path: owner.image_path.clone(),
+                thumbnail_path: owner.thumbnail_path.clone(),
+                embedding_path: owner.embedding_path.clone(),
+                artifact_path: owner.artifact_path.clone(),
+                metadata: owner.metadata.clone(),
+            }])
+            .unwrap();
+        let references = CacheReferenceIndex::build(&catalog).unwrap();
+        cleanup_abandoned_thumbnail_generations(&catalog, &references, &mut budget).unwrap();
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+
+        let mut state = acquisition_state(&owner);
+        state.thumbnail_path = None;
+        set_acquisition_state(&mut owner, &state).unwrap();
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: owner.id.clone(),
+                image_path: owner.image_path.clone(),
+                thumbnail_path: owner.thumbnail_path.clone(),
+                embedding_path: owner.embedding_path.clone(),
+                artifact_path: owner.artifact_path.clone(),
+                metadata: owner.metadata.clone(),
+            }])
+            .unwrap();
+        let references = CacheReferenceIndex::build(&catalog).unwrap();
+        assert!(!references.thumbnail_is_referenced(&old_relative).unwrap());
+        // A valid pending journal still owns the bytes until recovery or discard.
+        let mut journal = recovered;
+        journal.pending_thumbnail = Some(PendingThumbnail {
+            path: old_relative.clone(),
+            content_hash: hex_digest(old_bytes),
+            bytes: old_bytes.len() as u64,
+        });
+        persist_completion_marker(&catalog, &journal, &mut budget).unwrap();
+        cleanup_abandoned_thumbnail_generations(&catalog, &references, &mut budget).unwrap();
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+        let recovered = recover_completion_marker(&catalog, &records[1], &mut budget)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered.thumbnail_path.as_deref(),
+            Some(old_relative.as_str())
+        );
+        cleanup_abandoned_thumbnail_generations(&catalog, &references, &mut budget).unwrap();
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+        remove_completion_marker(&catalog, &records[1].id, &mut budget).unwrap();
+        let before = budget.bytes;
+        cleanup_abandoned_thumbnail_generations(&catalog, &references, &mut budget).unwrap();
+        assert!(!old.exists(), "unreferenced thumbnails must release quota");
+        assert_eq!(budget.bytes, before - old_bytes.len() as u64);
+        assert_eq!(
+            budget.bytes,
+            catalog.storage_accounting().unwrap().artifact_bytes
+        );
+    }
+
+    #[test]
     fn shared_materialization_verifier_rejects_invalid_and_oversized_cached_bytes() {
         assert!(verify_catalog_image_bytes(b"not an image".to_vec(), 1024).is_err());
         assert!(verify_catalog_image_bytes(vec![0; 1025], 1024).is_err());
@@ -2261,8 +2881,95 @@ mod tests {
         assert_eq!(verified.content_hash.len(), 64);
     }
 
+    #[tokio::test]
+    async fn canceled_fetch_drains_in_flight_batch_before_releasing_lease() {
+        let (_root, registry, id) = catalog_fixture();
+        let cancel = gen_core::CancelFlag::new();
+        let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let options = CatalogImageFetchOptions::default();
+        let result = fetch_attached_catalog_images_with_lease(
+            &registry,
+            &id,
+            &options,
+            None,
+            Some(&cancel),
+            {
+                let cancel = cancel.clone();
+                let drained = drained.clone();
+                let registry = registry.clone();
+                let id = id.clone();
+                move |_url, _options| {
+                    let cancel = cancel.clone();
+                    let drained = drained.clone();
+                    let registry = registry.clone();
+                    let id = id.clone();
+                    async move {
+                        cancel.cancel();
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        let catalog = registry.open_attached(&id).expect("catalog");
+                        assert!(
+                            CatalogFetchLease::acquire(&catalog).is_err(),
+                            "lease stays held while download winds down"
+                        );
+                        drained.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(png(8, 8))
+                    }
+                }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(CatalogImageFetchError::Canceled)));
+        assert!(drained.load(std::sync::atomic::Ordering::SeqCst));
+        let catalog = registry.open_attached(&id).expect("catalog");
+        assert!(
+            CatalogFetchLease::acquire(&catalog).is_ok(),
+            "lease releases after the active batch stopped"
+        );
+        assert_eq!(
+            catalog.page_records(0, 1).expect("record")[0].image_path,
+            "images/pq_test"
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_fetch_does_not_retry_failed_in_flight_downloads() {
+        let (_root, registry, id) = catalog_fixture();
+        let cancel = gen_core::CancelFlag::new();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = fetch_attached_catalog_images_with_lease(
+            &registry,
+            &id,
+            &CatalogImageFetchOptions::default(),
+            None,
+            Some(&cancel),
+            {
+                let cancel = cancel.clone();
+                let calls = calls.clone();
+                move |_url, _options| {
+                    let cancel = cancel.clone();
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        cancel.cancel();
+                        Err(WorkerError::Engine("mock download failed".to_owned()))
+                    }
+                }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(CatalogImageFetchError::Canceled)));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    fn catalog_test_directory() -> TempDir {
+        match std::env::var_os("SCENEWORKS_CATALOG_TEST_ROOT") {
+            Some(root) => TempDir::new_in(root).expect("mounted catalog fixture"),
+            None => TempDir::new().expect("temp root"),
+        }
+    }
+
     fn catalog_fixture() -> (TempDir, CatalogRegistry, String) {
-        let root = TempDir::new().expect("temp root");
+        let root = catalog_test_directory();
         let registry = CatalogRegistry::new(root.path().join("registry.json"));
         let mut catalog = registry
             .create_catalog(root.path().join("catalog"), "fetch-test")
@@ -2282,7 +2989,7 @@ mod tests {
     }
 
     fn catalog_with_urls(urls: &[&str]) -> (TempDir, CatalogRegistry, String) {
-        let root = TempDir::new().expect("temp root");
+        let root = catalog_test_directory();
         let registry = CatalogRegistry::new(root.path().join("registry.json"));
         let mut catalog = registry
             .create_catalog(root.path().join("catalog"), "fetch-test")
@@ -2625,11 +3332,13 @@ mod tests {
         JpegEncoder::new_with_quality(&mut encoded, 82)
             .encode_image(&fetched.image.thumbnail(16, 16).to_rgb8())
             .expect("thumbnail");
-        let relative = format!(
-            "thumbnails/sha256/{}/{}.jpg",
-            &base.content_hash[..2],
-            base.content_hash
-        );
+        let (relative, _, _) = select_thumbnail_target(
+            &catalog,
+            &base.content_hash,
+            &hex_digest(&encoded),
+            encoded.len() as u64,
+        )
+        .expect("filesystem-specific thumbnail target");
         let mut pending_marker = base.clone();
         pending_marker.pending_thumbnail = Some(PendingThumbnail {
             path: relative.clone(),
@@ -3004,6 +3713,11 @@ mod tests {
     fn cache_paths_reject_parent_and_symlink_escape() {
         let (_root, registry, id) = catalog_fixture();
         let catalog = registry.open_attached(&id).expect("open");
+        std::fs::write(catalog.root().join("root.png"), b"fixture").unwrap();
+        assert_eq!(
+            safe_catalog_file(&catalog, "root.png", false).unwrap(),
+            catalog.root().join("root.png")
+        );
         assert!(safe_catalog_file(&catalog, "../outside", true).is_err());
         #[cfg(unix)]
         {
@@ -4251,7 +4965,11 @@ mod tests {
         while let Some(directory) = pending.pop() {
             for entry in std::fs::read_dir(directory).expect("read cache tree") {
                 let entry = entry.expect("entry");
-                let metadata = entry.metadata().expect("metadata");
+                let Some(metadata) = sceneworks_core::fsutil::payload_entry_metadata(&entry.path())
+                    .expect("metadata")
+                else {
+                    continue;
+                };
                 if metadata.is_dir() {
                     pending.push(entry.path());
                 } else if metadata.is_file() {

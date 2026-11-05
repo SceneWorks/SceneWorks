@@ -453,7 +453,7 @@ pub(crate) async fn update_reference_pack(
         project_call(state, move |store| {
             let mut draft = store.get_film_draft(&project_id, &draft_id)?;
             if draft.revision != payload.draft_revision {
-                return Err(ProjectStoreError::BadRequest(format!(
+                return Err(ProjectStoreError::Conflict(format!(
                     "Film draft revision conflict: expected {}, got {}",
                     draft.revision, payload.draft_revision
                 )));

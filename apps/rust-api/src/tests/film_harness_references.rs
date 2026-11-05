@@ -481,13 +481,7 @@ async fn every_mid_run_failure_is_refused_by_name_and_publishes_nothing() {
 
 /// An empty project for a run to generate into, so its dispatches can be counted.
 async fn new_project(harness: &Harness, name: &str) -> String {
-    let (_, project) = crate::tests::support::request(
-        harness.app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": name }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(harness.app.clone(), &(name)).await;
     project["id"].as_str().expect("project id").to_owned()
 }
 

@@ -1,3 +1,4 @@
+import { fetchPromptGuide } from "../promptGuides.js";
 import React, { useEffect, useState } from "react";
 import { Modal } from "./Modal.jsx";
 import { Markdown } from "./Markdown.jsx";
@@ -12,12 +13,9 @@ export function PromptGuideModal({ guide, modelName, onClose }) {
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     setState({ status: "loading", content: "" });
-    fetch(guide.path)
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.text();
-      })
+    fetchPromptGuide(guide.path, controller.signal)
       .then((text) => {
         if (active) setState({ status: "ready", content: text });
       })
@@ -26,6 +24,7 @@ export function PromptGuideModal({ guide, modelName, onClose }) {
       });
     return () => {
       active = false;
+      controller.abort();
     };
   }, [guide.path]);
 

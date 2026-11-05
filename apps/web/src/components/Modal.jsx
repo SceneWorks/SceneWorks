@@ -13,8 +13,62 @@ const FOCUSABLE_SELECTOR = [
 
 function focusableChildren(dialog) {
   return [...dialog.querySelectorAll(FOCUSABLE_SELECTOR)].filter(
-    (element) => !element.hidden && element.getAttribute("aria-hidden") !== "true",
+    (element) =>
+      !element.hidden && element.getAttribute("aria-hidden") !== "true",
   );
+}
+
+export function useDialogFocus(dialogRef, onClose) {
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    dialogRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (
+        previousFocus?.isConnected &&
+        typeof previousFocus.focus === "function"
+      ) {
+        previousFocus.focus();
+      }
+    };
+  }, [dialogRef]);
+
+  return (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key === "Tab") {
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = focusableChildren(dialog);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const focusIsOnContainer = document.activeElement === dialog;
+      if (
+        event.shiftKey &&
+        (document.activeElement === first ||
+          focusIsOnContainer ||
+          !dialog.contains(document.activeElement))
+      ) {
+        event.preventDefault();
+        last.focus();
+      } else if (
+        !event.shiftKey &&
+        (document.activeElement === last ||
+          focusIsOnContainer ||
+          !dialog.contains(document.activeElement))
+      ) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  };
 }
 
 // Shared modal primitive: a backdrop that closes on outside mousedown, a
@@ -34,15 +88,7 @@ function focusableChildren(dialog) {
 export function Modal({ children, onClose, className, describedBy, labelledBy, label }) {
   const dialogRef = useRef(null);
 
-  useEffect(() => {
-    const previousFocus = document.activeElement;
-    dialogRef.current?.focus();
-    return () => {
-      if (previousFocus?.isConnected && typeof previousFocus.focus === "function") {
-        previousFocus.focus();
-      }
-    };
-  }, []);
+  const onKeyDown = useDialogFocus(dialogRef, onClose);
 
   const overlay = (
     <div
@@ -55,43 +101,7 @@ export function Modal({ children, onClose, className, describedBy, labelledBy, l
         aria-labelledby={labelledBy}
         aria-modal="true"
         className={className}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onClose();
-            return;
-          }
-          if (event.key === "Tab") {
-            const dialog = dialogRef.current;
-            if (!dialog) return;
-            const focusable = focusableChildren(dialog);
-            if (focusable.length === 0) {
-              event.preventDefault();
-              dialog.focus();
-              return;
-            }
-            const first = focusable[0];
-            const last = focusable[focusable.length - 1];
-            const focusIsOnContainer = document.activeElement === dialog;
-            if (
-              event.shiftKey &&
-              (document.activeElement === first ||
-                focusIsOnContainer ||
-                !dialog.contains(document.activeElement))
-            ) {
-              event.preventDefault();
-              last.focus();
-            } else if (
-              !event.shiftKey &&
-              (document.activeElement === last ||
-                focusIsOnContainer ||
-                !dialog.contains(document.activeElement))
-            ) {
-              event.preventDefault();
-              first.focus();
-            }
-          }
-        }}
+        onKeyDown={onKeyDown}
         onMouseDown={(event) => event.stopPropagation()}
         ref={dialogRef}
         role="dialog"

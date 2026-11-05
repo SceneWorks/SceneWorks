@@ -1,25 +1,15 @@
+import { formatDecimalGb } from "../formatting.js";
+import { fetchPromptGuide } from "../promptGuides.js";
+import { isModelMissing } from "../modelMissing.js";
 import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icons.jsx";
 
-// Humanize a byte count to a "16.1 GB" label; null when the size is unknown.
-function formatGb(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return null;
-  }
-  return `${(bytes / 1e9).toFixed(1)} GB`;
-}
 
 // Detect the "refinement model isn't provisioned" failure (sc-5605) so we can offer a
 // one-click download instead of a raw worker error. The native worker resolves an
 // already-cached snapshot and fast-fails with "…snapshot is not cached…" when the model
 // is absent (the retired Python path auto-downloaded). Prefer the catalog install state
 // when the entry is supplied; fall back to the worker message otherwise.
-function isModelMissing(refineModel, errorMessage) {
-  if (refineModel?.installState) {
-    return refineModel.installState === "missing";
-  }
-  return /not cached|not installed|snapshot is not/i.test(errorMessage ?? "");
-}
 
 // "Refine my prompt" affordance shared by Image and Video Studio (sc-2041).
 // Sends the current prompt + the selected model's guide to the refinement worker
@@ -101,8 +91,7 @@ export function RefinePromptControl({
       let guide = "";
       if (guidePath) {
         try {
-          const response = await fetch(guidePath, { signal });
-          if (response.ok) guide = await response.text();
+          guide = await fetchPromptGuide(guidePath, signal);
         } catch (err) {
           if (err?.name === "AbortError") {
             return;
@@ -144,7 +133,7 @@ export function RefinePromptControl({
     }
   }
 
-  const sizeLabel = formatGb(refineModel?.downloadSizeBytes);
+  const sizeLabel = formatDecimalGb(refineModel?.downloadSizeBytes);
   const modelName = refineModel?.name || "Prompt Refiner";
 
   return (

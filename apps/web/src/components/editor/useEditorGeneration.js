@@ -1,12 +1,7 @@
+import { useSamplerControls } from "../../hooks/useSamplerControls.js";
 import { useEffect, useMemo, useState } from "react";
 import { qualityChoices } from "../../jobTypes.js";
-import {
-  samplerOptionsFromModel,
-  schedulerOptionsFromModel,
-  samplerDefaultFromModel,
-  schedulerDefaultFromModel,
-  schedulerShiftDefaultFromModel,
-} from "../../samplerOptions.js";
+
 import {
   allPossibleTiers,
   installedTiers,
@@ -19,7 +14,6 @@ import { useGenerationStudio } from "../generationStudio.jsx";
 import { loadStudioSettings, useStudioSettingsWriter } from "../../hooks/useStudioSettings.js";
 import { MOTIONS, DEFAULT_MOTION } from "./editorUtils.js";
 
-const LTX_VIDEO_MODEL_ID = "ltx_2_3";
 const EDITOR_DEFAULT_TIER = "q4";
 // Preset filtering is by workflow/mode; the editor drives multiple video modes, so it
 // borrows the most common video preset workflow for the availability filter.
@@ -38,7 +32,6 @@ export function useEditorGeneration({ context }) {
   const {
     activeProject,
     videoModels = [],
-    models = [],
     loras = [],
     presets = [],
     assets = [],
@@ -59,7 +52,7 @@ export function useEditorGeneration({ context }) {
     return { ...studio, ...own };
   }, [projectId]);
 
-  const fallbackModelId = videoModels[0]?.id ?? LTX_VIDEO_MODEL_ID;
+  const fallbackModelId = videoModels[0]?.id ?? "";
   const [model, setModel] = useState(saved.model ?? fallbackModelId);
   const [quality, setQuality] = useState(saved.quality ?? "balanced");
   const [resolution, setResolution] = useState(saved.resolution ?? "1280x720");
@@ -82,6 +75,7 @@ export function useEditorGeneration({ context }) {
     () => videoModels.find((item) => item.id === model) ?? videoModels[0] ?? null,
     [videoModels, model],
   );
+  const hasSelectedModel = selectedModel?.id === model;
   // Video generation axes are opt-out: existing catalog entries predate these
   // flags and keep both controls unless they explicitly declare an axis absent.
   const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
@@ -92,7 +86,7 @@ export function useEditorGeneration({ context }) {
     presets,
     selectedModel,
     loras,
-    models: videoModels.length ? videoModels : models,
+    models: videoModels,
     model,
     setModel,
     fallbackModelId,
@@ -115,8 +109,8 @@ export function useEditorGeneration({ context }) {
   const resolutionOptions = selectedModel?.limits?.resolutions ?? RESOLUTION_FALLBACK;
   const fpsOptions = selectedModel?.limits?.fps ?? FPS_FALLBACK;
   const durationOptions = selectedModel?.limits?.durations ?? DURATION_FALLBACK;
-  const samplerOptions = useMemo(() => samplerOptionsFromModel(selectedModel, null), [selectedModel]);
-  const schedulerOptions = useMemo(() => schedulerOptionsFromModel(selectedModel, null), [selectedModel]);
+  const { samplerOptions, schedulerOptions, showSamplerPicker, showSchedulerPicker } = useSamplerControls(selectedModel, null, { sampler, scheduler, setSampler, setScheduler, setSchedulerShift, reconcile: "model-invalid" });
+
   const tierPickerOpts = useMemo(
     () => ({
       convRotEligible: false,
@@ -138,8 +132,6 @@ export function useEditorGeneration({ context }) {
     }
   };
 
-  const showSamplerPicker = samplerOptions.length > 1;
-  const showSchedulerPicker = schedulerOptions.length > 1;
   const showTierPicker = possibleTiers.length > 1 && availableTiers.length > 0;
   // The tier the request actually carries. State when it is installed, else the same
   // EDITOR_DEFAULT_TIER-first rule the reconciler below applies. This is a belt at the payload
@@ -173,13 +165,6 @@ export function useEditorGeneration({ context }) {
     }
     if (!durationOptions.includes(Number(duration))) {
       setDuration(selectedModel.defaults?.duration ?? durationOptions[0]);
-    }
-    if (!samplerOptions.includes(sampler)) {
-      setSampler(samplerDefaultFromModel(selectedModel));
-    }
-    if (!schedulerOptions.includes(scheduler)) {
-      setScheduler(schedulerDefaultFromModel(selectedModel));
-      setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel?.id]);
@@ -290,6 +275,7 @@ export function useEditorGeneration({ context }) {
   // per-action mode + source asset + advanced.timelineAction/timelineContext. Blank /
   // default / non-finite values are omitted so the engine re-derives its own defaults.
   function buildBasePayload() {
+    if (!hasSelectedModel) return null;
     const mlxQuantize = tierQuantize(resolvedTier);
     const advanced = {
       resolution,
@@ -337,6 +323,7 @@ export function useEditorGeneration({ context }) {
   return {
     studio,
     selectedModel,
+    hasSelectedModel,
     supportsGuidance,
     supportsNegativePrompt,
     videoModels,

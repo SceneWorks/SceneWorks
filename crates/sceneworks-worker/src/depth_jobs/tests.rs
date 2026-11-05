@@ -10,8 +10,8 @@ use super::*;
 use crate::api_client::ApiClient;
 use axum::extract::{Path as AxumPath, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+
+use axum::Json;
 use gen_core::Progress;
 use gen_core_iris::depth::{DepthMap, DepthOutput};
 use image::GenericImageView;
@@ -132,30 +132,9 @@ fn stage_export(data_dir: &Path, files: &[&str], config: &str) {
     }
 }
 
-fn isolate_hf_cache() -> crate::test_env::EnvVars {
-    crate::test_env::EnvVars::set(&[
-        ("HF_HUB_CACHE", ""),
-        ("HUGGINGFACE_HUB_CACHE", ""),
-        ("HF_HOME", ""),
-    ])
-}
-
 /// The shipped `iris_3b_depth` catalog entry, so admission reads the real declaration.
 fn shipped_depth_entry() -> Value {
-    let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("builtin.models.jsonc embedded")
-        .1;
-    let manifest: Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text)).unwrap();
-    manifest["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|model| model["id"] == DEPTH_MODEL_ID)
-        .cloned()
-        .expect("iris_3b_depth is in the builtin catalog")
+    Value::Object(crate::test_env::shipped_catalog_entry(DEPTH_MODEL_ID))
 }
 
 // ---- EXIF orientation ---------------------------------------------------------------------------
@@ -321,7 +300,7 @@ fn a_rotated_jpeg_is_estimated_upright() {
 
 #[test]
 fn the_export_resolves_only_from_its_own_complete_depth_closure() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let data = tempfile::tempdir().unwrap();
     let settings = settings_at(data.path());
 
@@ -562,14 +541,12 @@ async fn spawn_job_api(cancel_requested: bool, reject_completion: bool) -> (Stri
         .into_response()
     }
     let posts: Posts = Arc::default();
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-        .route(
-            "/api/v1/workers/:worker_id/heartbeat",
-            post(heartbeat_route),
-        )
-        .with_state((posts.clone(), cancel_requested, reject_completion));
+    let app = crate::test_api_stub::job_progress_heartbeat_routes(
+        job_route,
+        progress_route,
+        heartbeat_route,
+    )
+    .with_state((posts.clone(), cancel_requested, reject_completion));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -1239,4 +1216,75 @@ fn a_depth_job_evicts_a_resident_generator_or_transform_before_loading() {
         .starts_with("[iris_depth_memory_admission]"));
     assert_eq!(refused.load_calls, 0);
     assert!(refused.depth_files().is_empty());
+}
+
+/// Metadata construction must be infallible before either output name is published.
+/// Literal geometry and metadata only: no estimator, device, image decode or job execution.
+#[test]
+fn depth_asset_fact_is_infallible_and_preserves_release_and_trained_lineage() {
+    let temp = tempfile::tempdir().unwrap();
+    let outputs = DepthOutputPaths::reserve(temp.path());
+    let source = SourceGeometry {
+        exif_orientation: 1,
+        stored_width: 32,
+        stored_height: 24,
+        width: 32,
+        height: 24,
+    };
+    let plan = plan_depth_input(32, 24, DepthResolution::Native, 4).unwrap();
+    let metadata = DepthMetadata::new(
+        "metadata-stub",
+        "c".repeat(64),
+        "bfloat16",
+        DepthResolution::Native,
+        &plan,
+    );
+    for trained in [None, Some("trained-depth")] {
+        let request = ImageDepthJobPayload {
+            project_id: "project".into(),
+            project_name: None,
+            source_asset_id: "source".into(),
+            resolution: DepthResolutionRequest::Native,
+            display_name: None,
+            iris_model: trained.map(str::to_owned),
+        };
+        // This type assertion rejects the latent post-publication `Result`/`?` interface.
+        let fact: Value = depth_asset_fact(DepthFactInputs {
+            outputs: &outputs,
+            request: &request,
+            source_name: "Source",
+            source: &source,
+            metadata: &metadata,
+            trained_export_path: trained.map(|_| "models/finetunes/trained-depth/depth".into()),
+        });
+        assert_eq!(fact["assetId"], outputs.asset_id);
+        assert_eq!(fact["mediaPath"], outputs.npy_rel);
+        assert_eq!(fact["preview"]["path"], outputs.preview_rel);
+        assert_eq!(fact["mimeType"], NPY_MIME_TYPE);
+        assert_eq!(fact["depth"]["shape"], json!([24, 32]));
+        assert_eq!(fact["depth"]["layout"], "row-major");
+        assert_eq!(fact["depth"]["source"]["assetId"], "source");
+        if let Some(model) = trained {
+            assert_eq!(fact["model"], model);
+            assert_eq!(fact["depth"]["model"]["trainedModelId"], model);
+            assert_eq!(fact["depth"]["model"]["weightsSource"], "training");
+            assert!(fact["depth"]["model"]["weightsRepo"].is_null());
+            assert!(fact["depth"]["model"]["weightsRevision"].is_null());
+            assert_eq!(
+                fact["depth"]["model"]["exportPath"],
+                "models/finetunes/trained-depth/depth"
+            );
+        } else {
+            assert_eq!(fact["model"], DEPTH_MODEL_ID);
+            assert_eq!(fact["depth"]["model"]["weightsRepo"], UPSTREAM_WEIGHTS_REPO);
+            assert_eq!(
+                fact["depth"]["model"]["weightsRevision"],
+                UPSTREAM_WEIGHTS_REVISION
+            );
+        }
+    }
+    assert!(!outputs.npy.exists());
+    assert!(!outputs.preview.exists());
+    assert!(!outputs.partial_npy.exists());
+    assert!(!outputs.partial_preview.exists());
 }

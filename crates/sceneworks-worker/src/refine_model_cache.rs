@@ -39,8 +39,8 @@ type RefineJob = CacheJob<RefineModelCacheKey, Box<dyn TextLlm>>;
 
 /// Reuse the generator cache's idle-eviction knob so both resident-model caches age out on the same
 /// window and one setting bounds memory across the image/video AND text lanes.
-const REFINE_CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
-const DEFAULT_REFINE_CACHE_IDLE_SECONDS: u64 = 300;
+#[cfg(test)]
+const DEFAULT_REFINE_CACHE_IDLE_SECONDS: u64 = cache_thread::DEFAULT_CACHE_IDLE_SECONDS;
 
 /// The refine cache DOES free the backend cache before a cold load (unlike the generator cache): the
 /// prior resident ~16 GB model's backend allocation is released BEFORE the new load allocates, so
@@ -83,7 +83,7 @@ impl RefineModelCacheKey {
 fn refine_worker() -> &'static mpsc::Sender<RefineJob> {
     REFINE_WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<RefineJob>();
-        let idle_timeout = refine_cache_idle_timeout_from_env();
+        let idle_timeout = cache_thread::idle_timeout_from_env();
         thread::Builder::new()
             .name("sceneworks-refine-model-cache".to_owned())
             .spawn(move || {
@@ -112,10 +112,7 @@ fn run_refine_cache_worker(rx: mpsc::Receiver<RefineJob>, idle_timeout: Option<D
     );
 }
 
-fn refine_cache_idle_timeout_from_env() -> Option<Duration> {
-    refine_cache_idle_timeout(std::env::var(REFINE_CACHE_IDLE_SECONDS_ENV).ok().as_deref())
-}
-
+#[cfg(test)]
 fn refine_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
     cache_thread::idle_timeout_from_secs(raw, DEFAULT_REFINE_CACHE_IDLE_SECONDS)
 }

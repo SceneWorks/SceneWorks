@@ -1,16 +1,44 @@
 use super::support::*;
 
 #[tokio::test]
+async fn film_planner_capabilities_use_core_sound_policy_without_inventing_installs() {
+    let temporary = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (status, availability) = request(
+        app,
+        "GET",
+        "/api/v1/projects/project/films/draft/planners",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{availability}");
+    assert_eq!(
+        availability["soundSynthesisModels"],
+        json!(sceneworks_core::film_plan::SOUND_SYNTHESIS_MODELS)
+    );
+    assert_eq!(
+        availability["defaultSoundSynthesisModel"],
+        json!(sceneworks_core::film_plan::DEFAULT_SOUND_SYNTHESIS_MODEL)
+    );
+    for provider in availability["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["provider"] != "openai_compatible")
+    {
+        assert_eq!(
+            provider["available"], false,
+            "empty fixture catalog cannot imply an installation: {provider}"
+        );
+        assert_eq!(provider["installState"], "missing");
+    }
+}
+
+#[tokio::test]
 async fn film_render_options_are_previewable_and_preserve_explicit_or_legacy_controls() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Render choices"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Render choices").await;
     let project_id = project["id"].as_str().unwrap();
     let (status, mut draft) = request(
         app.clone(),
@@ -133,13 +161,8 @@ async fn film_routes_create_edit_reopen_and_pin_a_reference_free_draft() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let settings = test_settings(&temporary);
     let app = create_app(settings.clone()).expect("app creates");
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Film route project"}),
-    )
-    .await;
+    let (status, project) =
+        crate::tests::support::create_project(app.clone(), &"Film route project").await;
     assert_eq!(status, StatusCode::CREATED);
     let project_id = project["id"].as_str().unwrap();
 
@@ -235,13 +258,8 @@ async fn film_routes_create_edit_reopen_and_pin_a_reference_free_draft() {
 async fn local_planning_persists_a_positive_timeout_and_rejects_zero_before_dispatch() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Bounded local planner"}),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Bounded local planner").await;
     let project_id = project["id"].as_str().unwrap();
     let (_, mut draft) = request(
         app.clone(),
@@ -294,13 +312,7 @@ async fn local_planning_persists_a_positive_timeout_and_rejects_zero_before_disp
 async fn invalid_manual_shot_is_reported_before_any_run_or_video_job_exists() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Invalid film"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Invalid film").await;
     let project_id = project["id"].as_str().unwrap();
     let (_, draft) = request(
         app.clone(),
@@ -328,13 +340,7 @@ async fn film_reference_routes_stage_assets_roundtrip_bindings_and_pin_run_input
     let temporary = tempfile::tempdir().expect("temp dir");
     let settings = test_settings(&temporary);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Film references"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Film references").await;
     let project_id = project["id"].as_str().unwrap();
     let (status, asset) = request_multipart_upload(
         app.clone(),
@@ -531,13 +537,7 @@ async fn film_reference_routes_stage_assets_roundtrip_bindings_and_pin_run_input
 async fn film_sound_route_stages_prerecorded_audio_and_pins_it_with_the_run() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Film sound"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Film sound").await;
     let project_id = project["id"].as_str().unwrap();
     let wav = crate::film_harness::fixture_sound_wav(1.0, 440, 4_000);
     let (status, asset) = request_multipart_upload(
@@ -611,13 +611,7 @@ async fn film_sound_route_stages_prerecorded_audio_and_pins_it_with_the_run() {
 async fn unapproved_reference_binding_is_a_named_finding() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Approval"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Approval").await;
     let project_id = project["id"].as_str().unwrap();
     let (_, asset) = request_multipart_upload(
         app.clone(),
@@ -671,13 +665,8 @@ async fn unapproved_reference_binding_is_a_named_finding() {
 async fn film_script_parse_and_unavailable_qwen_preserve_the_draft_and_manual_path() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Planning project"}),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Planning project").await;
     let project_id = project["id"].as_str().unwrap();
     let (_, mut draft) = request(
         app.clone(),
@@ -842,13 +831,8 @@ async fn saved_external_connection_keeps_credentials_out_of_projects_and_fails_c
     assert_eq!(status, StatusCode::OK, "{saved_connection}");
     assert!(!saved_connection.to_string().contains(secret));
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "External planning boundary"}),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"External planning boundary").await;
     let project_id = project["id"].as_str().unwrap();
     let (_, mut draft) = request(
         app.clone(),
@@ -931,13 +915,8 @@ async fn saved_external_connection_keeps_credentials_out_of_projects_and_fails_c
 async fn generated_plan_is_only_installed_by_explicit_revision_checked_apply() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Candidate apply project"}),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Candidate apply project").await;
     let project_id = project["id"].as_str().unwrap();
     let (_, mut draft) = request(
         app.clone(),
@@ -1091,13 +1070,7 @@ async fn film_render_refuses_an_authorized_revision_changed_by_another_session()
     let temporary = tempfile::tempdir().unwrap();
     let settings = test_settings(&temporary);
     let app = create_app(settings).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Revision"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Revision").await;
     let project_id = project["id"].as_str().unwrap();
     let (_, mut draft) = request(
         app.clone(),
@@ -1148,13 +1121,7 @@ async fn film_render_refuses_an_authorized_revision_changed_by_another_session()
 async fn film_render_store_pin_rechecks_revision_after_route_validation() {
     let temporary = tempfile::tempdir().unwrap();
     let app = create_app(test_settings(&temporary)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"Pin race"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Pin race").await;
     let project_id = project["id"].as_str().unwrap().to_owned();
     let (_, mut draft) = request(
         app.clone(),
@@ -1246,13 +1213,8 @@ async fn planning_repair_ceiling_is_rejected_before_creating_an_operation() {
 async fn film_reference_route_authors_described_only_roles_and_shared_image_locators() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Workspace authoring"}),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Workspace authoring").await;
     let project_id = project["id"].as_str().unwrap();
     let (_, draft) = request(
         app.clone(),
@@ -1484,13 +1446,7 @@ fn current_compiled_for(draft: &Value) -> Value {
 async fn editing_a_reference_pack_description_refuses_a_run_and_names_the_pack() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Pack edit"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Pack edit").await;
     let project_id = project["id"].as_str().unwrap().to_owned();
     let (_, mut draft) = request(
         app.clone(),
@@ -1588,13 +1544,7 @@ async fn editing_a_reference_pack_description_refuses_a_run_and_names_the_pack()
 async fn an_imported_plan_document_at_an_unsupported_schema_version_is_refused_by_version() {
     let temporary = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temporary)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Import"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Import").await;
     let project_id = project["id"].as_str().unwrap().to_owned();
     let (_, mut draft) = request(
         app.clone(),

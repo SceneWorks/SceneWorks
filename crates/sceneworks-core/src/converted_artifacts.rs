@@ -147,17 +147,27 @@ fn record_if_unchanged_with(
     if bundle_identity(dir).as_ref() != Some(verified) {
         return Ok(false);
     }
-    let temp = dir.join(format!(
-        "{VERIFICATION_FAILED_MARKER}.{}.tmp",
-        std::process::id()
-    ));
-    std::fs::write(&temp, problem)?;
-    after_temp_write();
-    if bundle_identity(dir).as_ref() != Some(verified) {
-        let _ = std::fs::remove_file(&temp);
+    let mut changed = false;
+    let result = crate::fsutil::write_atomic_with(
+        &dir.join(VERIFICATION_FAILED_MARKER),
+        problem.as_bytes(),
+        Default::default(),
+        || {
+            after_temp_write();
+            if bundle_identity(dir).as_ref() != Some(verified) {
+                changed = true;
+                Err(std::io::Error::other(
+                    "verified bundle changed before publication",
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    if changed {
         return Ok(false);
     }
-    std::fs::rename(&temp, dir.join(VERIFICATION_FAILED_MARKER))?;
+    result?;
     Ok(true)
 }
 

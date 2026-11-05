@@ -1,4 +1,3 @@
-
 fn write_safetensors_with_keys(path: &std::path::Path, keys: &[String]) {
     // Minimal valid safetensors: 8-byte little-endian header length + JSON header.
     // The family detector only reads the header, so empty tensor slices are fine.
@@ -91,12 +90,9 @@ fn hf_download_inputs_reject_option_injection() {
     .expect_err("malicious revision rejected");
     assert!(matches!(error, WorkerError::InvalidPayload(_)));
 
-    let error = validate_hf_download_inputs(
-        "owner/model",
-        "main",
-        &["--local-dir=/tmp/out".to_owned()],
-    )
-    .expect_err("malicious include pattern rejected");
+    let error =
+        validate_hf_download_inputs("owner/model", "main", &["--local-dir=/tmp/out".to_owned()])
+            .expect_err("malicious include pattern rejected");
     assert!(matches!(error, WorkerError::InvalidPayload(_)));
 }
 
@@ -123,7 +119,7 @@ fn hf_download_inputs_reject_traversal_and_absolute_patterns() {
 #[test]
 fn app_managed_cache_path_rejects_escape_and_symlink_escape() {
     let temp = tempdir().expect("temp dir");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = temp.path().join("data");
     let uploads = settings.data_dir.join("cache").join("pose-uploads");
     std::fs::create_dir_all(&uploads).expect("uploads dir");
@@ -693,11 +689,8 @@ async fn finalizer_rejects_an_internal_lock_root_alias_of_the_conversion_tree() 
     std::fs::create_dir_all(&lock_parent).expect("lock parent");
     std::fs::create_dir_all(&temp_dir).expect("converted temp");
     std::fs::write(temp_dir.join("weights.safetensors"), b"NEW").expect("new install");
-    std::os::unix::fs::symlink(
-        &conversion_root,
-        lock_parent.join("model-conversion"),
-    )
-    .expect("internal lock-root alias");
+    std::os::unix::fs::symlink(&conversion_root, lock_parent.join("model-conversion"))
+        .expect("internal lock-root alias");
 
     let error = finalize_converted_dir(&temp_dir, &final_dir, &data_dir)
         .await
@@ -914,15 +907,10 @@ async fn concurrent_finalizers_serialize_rollback_and_preserve_second_promotion(
     let first_final = final_dir.clone();
     let first_data = data_dir.clone();
     let first = tokio::spawn(async move {
-        finalize_converted_dir_with_test_hook(
-            &missing_temp,
-            &first_final,
-            &first_data,
-            move |_| {
-                let _ = aside_tx.send(());
-                let _ = release_rx.blocking_recv();
-            },
-        )
+        finalize_converted_dir_with_test_hook(&missing_temp, &first_final, &first_data, move |_| {
+            let _ = aside_tx.send(());
+            let _ = release_rx.blocking_recv();
+        })
         .await
     });
     aside_rx.await.expect("first finalizer moved OLD aside");
@@ -1109,7 +1097,11 @@ fn stale_receipt_resolves_exact_old_quant_tier_after_manifest_rename() {
     let snapshot = super::huggingface_repo_cache_path(root.path(), repo)
         .expect("cache path")
         .join("snapshots/old-revision");
-    for file in ["q4/transformer/old-1.safetensors", "q4/transformer/old-2.safetensors", "q4/config.json"] {
+    for file in [
+        "q4/transformer/old-1.safetensors",
+        "q4/transformer/old-2.safetensors",
+        "q4/config.json",
+    ] {
         let path = snapshot.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"old").unwrap();
@@ -1142,7 +1134,9 @@ fn stale_receipt_resolves_exact_old_quant_tier_after_manifest_rename() {
         1,
         "a targeted receipt hit must return before scanning unrelated install markers"
     );
-    assert!(!snapshot.join("q4/transformer/new-name.safetensors").exists());
+    assert!(!snapshot
+        .join("q4/transformer/new-name.safetensors")
+        .exists());
 }
 
 #[test]
@@ -1160,12 +1154,20 @@ fn stale_receipt_never_resolves_a_mixed_file_set() {
     std::fs::write(current.join("q8/b.safetensors"), b"b").unwrap();
     let marker = root.path().join("models").join(safe_download_dir(repo));
     std::fs::create_dir_all(&marker).unwrap();
-    std::fs::write(marker.join(INSTALL_MARKER), serde_json::to_vec(&json!({
-        "repo": repo, "modelId": "mixed", "variant": "q8",
-        "resolvedFiles": ["q8/a.safetensors", "q8/b.safetensors"]
-    })).unwrap()).unwrap();
+    std::fs::write(
+        marker.join(INSTALL_MARKER),
+        serde_json::to_vec(&json!({
+            "repo": repo, "modelId": "mixed", "variant": "q8",
+            "resolvedFiles": ["q8/a.safetensors", "q8/b.safetensors"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
-    assert_eq!(huggingface_receipt_weights_dir(root.path(), repo, Some("mixed"), Some("q8")), None);
+    assert_eq!(
+        huggingface_receipt_weights_dir(root.path(), repo, Some("mixed"), Some("q8")),
+        None
+    );
 }
 
 #[test]
@@ -1182,10 +1184,15 @@ fn stale_single_variant_receipt_resolves_snapshot_root() {
     std::fs::write(snapshot.join("config.json"), b"{}").unwrap();
     let marker = root.path().join("models").join(safe_download_dir(repo));
     std::fs::create_dir_all(&marker).unwrap();
-    std::fs::write(marker.join(INSTALL_MARKER), serde_json::to_vec(&json!({
-        "repo": repo, "modelId": "single", "variant": "default",
-        "resolvedFiles": ["transformer/old.safetensors", "config.json"]
-    })).unwrap()).unwrap();
+    std::fs::write(
+        marker.join(INSTALL_MARKER),
+        serde_json::to_vec(&json!({
+            "repo": repo, "modelId": "single", "variant": "default",
+            "resolvedFiles": ["transformer/old.safetensors", "config.json"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
     assert_eq!(
         huggingface_receipt_weights_dir(root.path(), repo, Some("single"), Some("default")),
@@ -1200,20 +1207,36 @@ fn receipt_revision_disambiguates_snapshots_with_identical_filenames() {
     let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
     let repo = "owner/revisions";
     let cache = super::huggingface_repo_cache_path(root.path(), repo).unwrap();
-    for (revision, bytes) in [("installed", b"old".as_slice()), ("newer", b"new".as_slice())] {
-        let file = cache.join("snapshots").join(revision).join("model.safetensors");
+    for (revision, bytes) in [
+        ("installed", b"old".as_slice()),
+        ("newer", b"new".as_slice()),
+    ] {
+        let file = cache
+            .join("snapshots")
+            .join(revision)
+            .join("model.safetensors");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, bytes).unwrap();
     }
     let marker = root.path().join("models").join(safe_download_dir(repo));
     std::fs::create_dir_all(&marker).unwrap();
-    std::fs::write(marker.join(INSTALL_MARKER), serde_json::to_vec(&json!({
-        "repo": repo, "modelId": "revisions", "variant": "default",
-        "snapshotRevision": "installed", "resolvedFiles": ["model.safetensors"]
-    })).unwrap()).unwrap();
+    std::fs::write(
+        marker.join(INSTALL_MARKER),
+        serde_json::to_vec(&json!({
+            "repo": repo, "modelId": "revisions", "variant": "default",
+            "snapshotRevision": "installed", "resolvedFiles": ["model.safetensors"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
-    let resolved = huggingface_receipt_weights_dir(root.path(), repo, Some("revisions"), Some("default")).unwrap();
-    assert_eq!(std::fs::read(resolved.join("model.safetensors")).unwrap(), b"old");
+    let resolved =
+        huggingface_receipt_weights_dir(root.path(), repo, Some("revisions"), Some("default"))
+            .unwrap();
+    assert_eq!(
+        std::fs::read(resolved.join("model.safetensors")).unwrap(),
+        b"old"
+    );
 }
 
 #[test]

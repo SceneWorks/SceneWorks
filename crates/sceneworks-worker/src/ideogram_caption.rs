@@ -59,14 +59,8 @@ pub(crate) fn ensure_caption_prompt(prompt: &str) -> String {
 /// caption (the web validator's full rules are not re-implemented here): the goal is only to avoid
 /// double-wrapping an already-structured prompt, not to re-validate it.
 fn is_caption_json(prompt: &str) -> bool {
-    if !prompt.trim_start().starts_with('{') {
-        return false;
-    }
-    matches!(
-        serde_json::from_str::<serde_json::Value>(prompt),
-        Ok(serde_json::Value::Object(map))
-            if map.get("compositional_deconstruction").is_some_and(serde_json::Value::is_object)
-    )
+    serde_json::from_str::<serde_json::Value>(prompt)
+        .is_ok_and(|caption| sceneworks_core::ideogram_caption::is_caption(&caption))
 }
 
 /// Wrap plain text into a minimal valid caption string. The same text seeds both
@@ -112,12 +106,7 @@ const DEFAULT_PLACEHOLDER_RETRIES: u32 = 3;
 
 /// Detection is on by default; `SCENEWORKS_IDEOGRAM_PLACEHOLDER_DETECT=0`/`false` disables it.
 fn detection_enabled() -> bool {
-    !matches!(
-        std::env::var("SCENEWORKS_IDEOGRAM_PLACEHOLDER_DETECT")
-            .ok()
-            .as_deref(),
-        Some("0") | Some("false")
-    )
+    sceneworks_core::env_util::env_flag("SCENEWORKS_IDEOGRAM_PLACEHOLDER_DETECT", true)
 }
 
 /// How many reseed-retries to attempt on a detected placeholder (`SCENEWORKS_IDEOGRAM_PLACEHOLDER_RETRIES`).

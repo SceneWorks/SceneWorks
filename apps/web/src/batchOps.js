@@ -1,3 +1,4 @@
+import { JOB_PATHS } from "./api/jobs.js";
 // Batch operations across multiple assets (sc-6112, Workstream F of epic 6087).
 // Pure orchestration: turn a multi-asset selection + one op (upscale / detail / edit)
 // + shared params into one job body PER asset, and summarize the fan-out's progress
@@ -13,9 +14,9 @@ import { buildDepthJobBody, DEPTH_ENDPOINT } from "./depthJobs.js";
 // upscale/detail are generic jobs, edit is the image-jobs route). `needsPrompt`
 // flags the op whose shared params include a text prompt.
 export const BATCH_OPS = [
-  { key: "upscale", label: "Upscale", endpoint: "/api/v1/jobs", needsPrompt: false },
-  { key: "detail", label: "Detail enhance", endpoint: "/api/v1/jobs", needsPrompt: false },
-  { key: "edit", label: "AI edit", endpoint: "/api/v1/image/jobs", needsPrompt: true },
+  { key: "upscale", label: "Upscale", endpoint: JOB_PATHS.generic, needsPrompt: false },
+  { key: "detail", label: "Detail enhance", endpoint: JOB_PATHS.generic, needsPrompt: false },
+  { key: "edit", label: "AI edit", endpoint: JOB_PATHS.image, needsPrompt: true },
   // Iris-3B monocular depth (sc-25682): one typed depth job per image; each result is a new depth
   // asset (raw .npy + preview) linked to its source — the source is never modified.
   { key: "depth", label: "Depth map", endpoint: DEPTH_ENDPOINT, needsPrompt: false },
@@ -43,7 +44,7 @@ export function buildBatchJob({ op, asset, params = {}, project, requestedGpu, d
   const displayName = asset.displayName ?? asset.id;
   if (op === "upscale") {
     return {
-      endpoint: "/api/v1/jobs",
+      endpoint: JOB_PATHS.generic,
       body: buildUpscaleJobBody({
         project,
         requestedGpu,
@@ -59,7 +60,7 @@ export function buildBatchJob({ op, asset, params = {}, project, requestedGpu, d
   }
   if (op === "detail") {
     return {
-      endpoint: "/api/v1/jobs",
+      endpoint: JOB_PATHS.generic,
       body: buildDetailJobBody({
         project,
         requestedGpu,
@@ -76,7 +77,7 @@ export function buildBatchJob({ op, asset, params = {}, project, requestedGpu, d
       throw new Error("Batch edit needs the source image dimensions.");
     }
     return {
-      endpoint: "/api/v1/image/jobs",
+      endpoint: JOB_PATHS.image,
       body: buildEditJobBody({
         project,
         requestedGpu,
@@ -205,4 +206,10 @@ export function summarizeBatchRun(run, jobs, observedJobs) {
   summary.active = summary.queued + summary.running;
   summary.allDone = summary.total > 0 && summary.done === summary.total;
   return summary;
+}
+
+// Keep error details bounded even when a large batch repeatedly fails admission.
+export function recordBatchEnqueueFailure(run, count, message) {
+  return { ...run, submitted: run.submitted + count, failed: run.failed + count,
+    firstError: run.firstError ?? message, lastError: message };
 }

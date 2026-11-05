@@ -20,13 +20,7 @@ const WEB_JOB_REQUESTS: &str = include_str!(
 );
 
 pub(super) async fn project(app: &axum::Router) -> String {
-    let (status, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "YuE2 songs" }),
-    )
-    .await;
+    let (status, created) = crate::tests::support::create_project(app.clone(), &"YuE2 songs").await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     created["id"].as_str().unwrap().to_owned()
 }

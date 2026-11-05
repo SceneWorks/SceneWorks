@@ -398,7 +398,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn real_generic_render_surface_transports_placement_document_to_generator() {
         struct Capture(gen_core::ModelDescriptor);
@@ -448,7 +448,7 @@ mod tests {
             flux3_layout: Some(&layout),
             ..Default::default()
         };
-        let images = super::super::render_on_surface(
+        let images = crate::image_jobs::render::render_on_surface(
             &generator,
             "scene",
             64,

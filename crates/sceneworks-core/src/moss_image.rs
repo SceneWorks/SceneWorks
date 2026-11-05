@@ -364,7 +364,7 @@ pub fn native_request(
     if expanded == 0 || expanded > 8 {
         return Err("MOSS-Image prompts × count must be in 1..=8".into());
     }
-    let envelope = crate::video_request::image_dimension_envelope(entry);
+    let envelope = crate::image_limits::image_dimension_envelope(entry);
     for (axis, value) in [("width", request.width), ("height", request.height)] {
         if value > 4096
             || envelope.min.is_some_and(|min| value < min)

@@ -10,14 +10,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
-
-/// Maximum allowed safetensors header size, in bytes. Matches the
-/// pre-existing 16 MiB cap enforced by the rust-api.
-const MAX_HEADER_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Errors returned when reading a safetensors header from disk.
 #[derive(Debug)]
@@ -55,39 +50,23 @@ impl std::error::Error for SafetensorsHeaderError {}
 /// layout is: 8-byte little-endian header length, then the JSON header,
 /// then tensor data — only the header is read.
 pub fn read_safetensors_header(path: &Path) -> Result<Value, SafetensorsHeaderError> {
-    let metadata = fs::metadata(path).map_err(SafetensorsHeaderError::Io)?;
-    if metadata.len() < 8 {
-        return Err(SafetensorsHeaderError::InvalidHeader);
-    }
-    let mut file = fs::File::open(path).map_err(SafetensorsHeaderError::Io)?;
-    let mut length_bytes = [0_u8; 8];
-    file.read_exact(&mut length_bytes)
-        .map_err(|_| SafetensorsHeaderError::InvalidHeader)?;
-    let header_len = u64::from_le_bytes(length_bytes);
-    if header_len == 0 || header_len > MAX_HEADER_BYTES || header_len + 8 > metadata.len() {
-        return Err(SafetensorsHeaderError::InvalidHeader);
-    }
-    let header_len_usize =
-        usize::try_from(header_len).map_err(|_| SafetensorsHeaderError::InvalidHeader)?;
-    let mut header = vec![0_u8; header_len_usize];
-    file.read_exact(&mut header)
-        .map_err(|_| SafetensorsHeaderError::InvalidHeader)?;
-    let header = serde_json::from_slice::<Value>(&header)
-        .map_err(|_| SafetensorsHeaderError::InvalidHeader)?;
-    // A valid header can still front a truncated/incomplete file (an interrupted
-    // download): the data section must be large enough to hold every tensor the
-    // header declares. The tensor `data_offsets` are relative to the byte buffer
-    // that begins right after the 8-byte length and the header JSON, so the file
-    // must be at least `8 + header_len + max(data_offsets end)` bytes. Without this
-    // the bad file is accepted at import and only fails cryptically at load time
-    // ("invalid data offsets exceeding the size of the file"). See sc-6072.
-    let declared = 8_u64
-        .saturating_add(header_len)
-        .saturating_add(max_tensor_data_end(&header));
-    if metadata.len() < declared {
+    use crate::safetensors::{
+        read_file_header, HeaderError, HeaderJsonPolicy, MAX_ADAPTER_HEADER_BYTES,
+    };
+    let descriptor = read_file_header(path, MAX_ADAPTER_HEADER_BYTES, HeaderJsonPolicy::Standard)
+        .map_err(|error| match error {
+        HeaderError::Io(error) => SafetensorsHeaderError::Io(error),
+        _ => SafetensorsHeaderError::InvalidHeader,
+    })?;
+    let header = descriptor.value;
+    let declared = descriptor
+        .data_start
+        .checked_add(max_tensor_data_end(&header))
+        .ok_or(SafetensorsHeaderError::InvalidHeader)?;
+    if descriptor.file_len < declared {
         return Err(SafetensorsHeaderError::IncompleteData {
             declared,
-            actual: metadata.len(),
+            actual: descriptor.file_len,
         });
     }
     Ok(header)
@@ -634,56 +613,7 @@ fn apply_krea_2_studio_surface_defaults(entry: &mut Map<String, Value>) {
 }
 
 pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
-    match normalize_model_family(family).as_str() {
-        "z-image" => Some("z_image_diffusers"),
-        "qwen-image" => Some("qwen_image"),
-        // Qwen-Image 2.1 (sc-24108) is its OWN family, not a spelling of `qwen-image`:
-        // `normalize_model_family` only lower-cases and `_`→`-`, so "qwen-image-2-1" never
-        // collapses onto "qwen-image" and the two never share an adapter stamp or a LoRA pool.
-        // Native MLX only at this pin; lineage label, never a Torch adapter.
-        "qwen-image-2-1" => Some("qwen_image_2_1"),
-        "lens" => Some("lens_turbo"),
-        "sensenova-u1" => Some("sensenova_u1"),
-        "flux" => Some("flux_diffusers"),
-        "flux3" => Some("mlx_flux3"),
-        "chroma" => Some("chroma_diffusers"),
-        "kolors" => Some("kolors_diffusers"),
-        "sdxl" => Some("sdxl_diffusers"),
-        // Mage-Flow uses native MLX on macOS and native Candle on Windows/Linux; there is no legacy
-        // Torch/diffusers adapter. This family label records recipe/lineage and selects the native
-        // routes; it is never instantiated through the generic Torch adapter.
-        "mage-flow" => Some("mlx_mage"),
-        // SD3 / SD3.5 is the native-MLX port (epic 7841); there is no Torch/diffusers
-        // adapter wired in SceneWorks. This label is recorded in recipe/lineage only —
-        // the job is MLX-routed by engine id, never instantiated through a Torch adapter
-        // (mirrors bernini / scail2). sc-7874 declares the LoRA family; engine wiring is
-        // a later slice.
-        "sd3" => Some("sd3"),
-        "ltx-video" => Some("ltx_video"),
-        "wan-video" => Some("wan_video"),
-        "svd" => Some("svd_video"),
-        // Bernini uses native MLX on macOS and native Candle on Windows/Linux; there is no legacy
-        // Torch/diffusers adapter. This label is recorded in recipe/lineage and selects native
-        // routes, never the generic Torch adapter.
-        "bernini" => Some("bernini"),
-        // SCAIL-2 (epic 5439) uses native MLX on macOS and native Candle off-Mac (engine id
-        // "scail2_14b"); no Torch/diffusers adapter. Lineage label only.
-        "scail2" => Some("scail2"),
-        // Anima (epic 10512) uses native MLX on Mac and Candle/CUDA off-Mac; there is no Python
-        // diffusers adapter. This lineage label names the MLX dispatch path while Candle routing owns
-        // the sibling native engine (mirrors sd3 / bernini / scail2).
-        "anima" => Some("anima"),
-        // Krea 2 (epic 14015): imported single-file Krea 2 checkpoints retain the historical
-        // `mlx_krea` lineage token used by the builtin catalog. Both native MLX and Candle dispatch
-        // this family through their imported Krea routes (sc-14108). The match scrutinee is the
-        // normalized family, so the arm keys
-        // on the hyphen form `krea-2` (`normalize_model_family("krea_2")`). Builtin krea_2 entries
-        // (`krea_2_turbo` / `krea_2_raw`) declare `adapter` explicitly, so
-        // `apply_model_manifest_defaults` (`or_insert_with`) never overrides them — this default only
-        // stamps user/imported krea_2 models that omit it.
-        "krea-2" => Some("mlx_krea"),
-        _ => None,
-    }
+    crate::model_facts::import_adapter_for_family(family)
 }
 
 pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) -> Vec<&'static str> {
@@ -814,32 +744,12 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
 }
 
 pub(crate) fn normalize_model_family(family: &str) -> String {
-    let normalized = family.trim().to_ascii_lowercase().replace('_', "-");
-    // Collapse spelling variants the `_`→`-` step alone can't unify. ostris
-    // ai-toolkit bakes Krea 2's base id into trained files as the separator-less
-    // `krea2` (`ss_base_model_version: "krea2"`), which is the same family as
-    // `krea-2` / `krea_2`. Kept an explicit alias, not a blind separator-strip —
-    // a blind strip could merge unrelated families.
-    match normalized.as_str() {
-        "krea2" => "krea-2".to_owned(),
-        _ => normalized,
-    }
+    crate::model_family::normalized(family)
 }
 
-/// The canonical *stored* LoRA-family token for any spelling of a family.
-///
-/// Detection, the catalog manifests, and the trainers agree on one token per
-/// family; only Krea 2 has variants in the wild — `krea2` (ai-toolkit's
-/// `ss_base_model_version`), `krea-2` (the UI's hyphen form), and `krea_2` (the
-/// catalog token) — all of which resolve to the catalog token `krea_2`. Every
-/// other family already stores its `normalize_model_family` form, so this returns
-/// that (lower-cased, `_`→`-`) unchanged for them.
+/// The shared canonical stored family identity; unknown/custom tokens remain supported.
 pub fn canonical_lora_family(family: &str) -> String {
-    let normalized = normalize_model_family(family);
-    match normalized.as_str() {
-        "krea-2" => "krea_2".to_owned(),
-        _ => normalized,
-    }
+    crate::model_family::canonical(family)
 }
 
 /// True when a *detected* base-architecture family legitimately satisfies a declared,
@@ -889,37 +799,7 @@ fn read_diffusers_model_index_family(dir: &Path) -> Option<String> {
 /// intentionally conservative — only return a family when the mapping is
 /// unambiguous, and otherwise let the caller treat the model as unassociated.
 pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
-    let normalized = class_name.trim();
-    let lower = normalized.to_ascii_lowercase();
-    match lower.as_str() {
-        "zimagepipeline"
-        | "zimageimg2imgpipeline"
-        | "zimageturbopipeline"
-        | "zimageturboimg2imgpipeline" => Some("z-image".to_owned()),
-        "qwenimagepipeline" | "qwenimageimg2imgpipeline" | "qwenimageeditpipeline" => {
-            Some("qwen-image".to_owned())
-        }
-        "lenspipeline" => Some("lens".to_owned()),
-        // Directory detection additionally validates transformer/config.json before accepting this
-        // family; this mapping is also used by callers that already hold a trusted class name.
-        "mageflowpipeline" => Some("mage-flow".to_owned()),
-        // Anima (epic 10512). Its diffusers modular pipeline (`AnimaModularPipeline`) is the
-        // `model_index.json` `_class_name` a diffusers-format Anima export would carry.
-        "animamodularpipeline" => Some("anima".to_owned()),
-        "fluxpipeline" | "fluximg2imgpipeline" | "fluxinpaintpipeline" => Some("flux".to_owned()),
-        "chromapipeline" | "chromaimg2imgpipeline" => Some("chroma".to_owned()),
-        "kolorspipeline" | "kolorsimg2imgpipeline" => Some("kolors".to_owned()),
-        "wanpipeline" | "wani2vpipeline" | "wantext2videopipeline" => Some("wan-video".to_owned()),
-        "ltxpipeline" | "ltxvideopipeline" | "ltximagetovideopipeline" => {
-            Some("ltx-video".to_owned())
-        }
-        "stablediffusion3pipeline"
-        | "stablediffusion3img2imgpipeline"
-        | "stablediffusion3inpaintpipeline" => Some("sd3".to_owned()),
-        "stablediffusionpipeline" | "stablediffusionimg2imgpipeline" => Some("sd1.5".to_owned()),
-        "stablediffusionxlpipeline" | "stablediffusionxlimg2imgpipeline" => Some("sdxl".to_owned()),
-        _ => None,
-    }
+    crate::model_family::diffusers_class_name_to_family(class_name)
 }
 
 /// Returns the detected LoRA architecture family or `None` if the header
@@ -940,15 +820,15 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
     }
     let bucket = detect_bucket(&keys)?;
     match bucket {
-        Bucket::WanVideo => Some("wan-video".to_owned()),
-        Bucket::Flux => Some("flux".to_owned()),
-        Bucket::Flux2 => Some("flux2".to_owned()),
-        Bucket::LtxVideo => Some("ltx-video".to_owned()),
-        Bucket::Sd3 => Some("sd3".to_owned()),
-        Bucket::Ideogram => Some("ideogram".to_owned()),
-        Bucket::Anima => Some("anima".to_owned()),
-        Bucket::Sdxl => Some("sdxl".to_owned()),
-        Bucket::Sd15 => Some("sd1.5".to_owned()),
+        Bucket::WanVideo => Some(crate::model_family::WAN_VIDEO.to_owned()),
+        Bucket::Flux => Some(crate::model_family::FLUX.to_owned()),
+        Bucket::Flux2 => Some(crate::model_family::FLUX2.to_owned()),
+        Bucket::LtxVideo => Some(crate::model_family::LTX_VIDEO.to_owned()),
+        Bucket::Sd3 => Some(crate::model_family::SD3.to_owned()),
+        Bucket::Ideogram => Some(crate::model_family::IDEOGRAM.to_owned()),
+        Bucket::Anima => Some(crate::model_family::ANIMA.to_owned()),
+        Bucket::Sdxl => Some(crate::model_family::SDXL.to_owned()),
+        Bucket::Sd15 => Some(crate::model_family::SD1_5.to_owned()),
         Bucket::MmDit => disambiguate_mm_dit(&keys),
     }
 }
@@ -1227,7 +1107,7 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
         .iter()
         .any(|key| key.contains("llm_adapter.") || key.contains("_llm_adapter_"))
     {
-        return Some("anima".to_owned());
+        return Some(crate::model_family::ANIMA.to_owned());
     }
     // Krea 2 (epic 7565). Its DiT carries a `text_fusion` Qwen3-VL-layer aggregator
     // and a gated single-stream attention whose projection is the leaf Linear
@@ -1257,7 +1137,7 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
             || key.contains("attn.to_gate.")
             || key.contains("_attn_to_gate.")
     }) {
-        return Some("krea_2".to_owned());
+        return Some(crate::model_family::KREA_2.to_owned());
     }
     // MiniMax-H3 (epic 17137, sc-18725). Its DiT prepends a two-layer token refiner whose blocks are
     // keyed `token_refiner.refiner_blocks.<n>.` — a doubled `refiner` no other family we detect uses
@@ -1281,10 +1161,10 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
         key.contains("token_refiner.refiner_blocks.")
             || key.contains("_token_refiner_refiner_blocks_")
     }) {
-        return Some("minimax-h3".to_owned());
+        return Some(crate::model_family::MINIMAX_H3.to_owned());
     }
     if keys.iter().any(|key| is_qwen_image_2_1_key(key)) {
-        return Some("qwen-image-2-1".to_owned());
+        return Some(crate::model_family::QWEN_IMAGE_2_1.to_owned());
     }
     None
 }
@@ -1318,7 +1198,7 @@ fn reconcile_qwen_metadata_with_keys(stamp: MetadataFamily, keys: &[String]) -> 
     } = stamp;
     match family.as_str() {
         "qwen-image" if keys.iter().any(|key| is_qwen_image_2_1_key(key)) => {
-            Some("qwen-image-2-1".to_owned())
+            Some(crate::model_family::QWEN_IMAGE_2_1.to_owned())
         }
         // sc-24163 (E10): the bare ai-toolkit `qwen_image` stamp names no version, and 2.1 and 2512
         // share every attention key, so an attention-only adapter carrying it is as likely 2.1 as
@@ -1327,7 +1207,9 @@ fn reconcile_qwen_metadata_with_keys(stamp: MetadataFamily, keys: &[String]) -> 
         // unresolved and the user declares the family, instead of a confident 2512 label that
         // hard-rejects a genuine 2.1 adapter from its own model.
         "qwen-image" if generic_qwen_label && !keys_evidence_qwen_image_2512(keys) => None,
-        "qwen-image-2-1" if keys_evidence_qwen_image_2512(keys) => Some("qwen-image".to_owned()),
+        "qwen-image-2-1" if keys_evidence_qwen_image_2512(keys) => {
+            Some(crate::model_family::QWEN_IMAGE.to_owned())
+        }
         _ => Some(family),
     }
 }
@@ -2213,10 +2095,10 @@ fn disambiguate_mm_dit(keys: &[String]) -> Option<String> {
     let blocks = transformer_block_indices(keys);
     let max_block = *blocks.iter().next_back()?;
     if max_block >= QWEN_MIN_BLOCK_INDEX {
-        return Some("qwen-image".to_owned());
+        return Some(crate::model_family::QWEN_IMAGE.to_owned());
     }
     if max_block == MAGE_FLOW_BLOCK_COUNT - 1 && blocks.len() == MAGE_FLOW_BLOCK_COUNT {
-        return Some("mage-flow".to_owned());
+        return Some(crate::model_family::MAGE_FLOW.to_owned());
     }
     None
 }
@@ -2316,13 +2198,15 @@ fn detect_metadata_family(header: &Value) -> Option<MetadataFamily> {
     {
         return Some(MetadataFamily::exact("moss-image".to_owned()));
     }
-    for key in [
+    let keys = [
         "baseModel",
         "base_model",
         "ss_base_model_version",
         "modelspec.architecture",
         "modelspec.implementation",
-    ] {
+    ];
+    // Keep the established field order; canonical aliases apply within each value.
+    for key in keys {
         let Some(value) = metadata.get(key).and_then(Value::as_str) else {
             continue;
         };
@@ -2434,6 +2318,9 @@ fn is_qwen_image_2_1_metadata(normalized: &str) -> bool {
 }
 
 fn metadata_value_to_family(value: &str) -> Option<String> {
+    if let Some(family) = crate::model_family::exact_identity(value) {
+        return Some(family.to_owned());
+    }
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         return None;
@@ -2443,20 +2330,20 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
         || normalized.contains("minimax_h3")
         || normalized.contains("minimaxh3")
     {
-        return Some("minimax-h3".to_owned());
+        return Some(crate::model_family::MINIMAX_H3.to_owned());
     }
     // Check chroma before flux: Chroma is FLUX.1-schnell-derived, so a Chroma
     // LoRA's metadata may name both. Only metadata can distinguish the two — by
     // tensor keys a Chroma LoRA is identical to a Flux LoRA (same double/single
     // transformer blocks), so the key-based detector classifies it as `flux`.
     if normalized.contains("chroma") {
-        return Some("chroma".to_owned());
+        return Some(crate::model_family::CHROMA.to_owned());
     }
     // Krea 2 (epic 7565): a distinct single-stream DiT family. No SD/Flux/Qwen
     // architecture string contains "krea", so this can sit ahead of them safely.
     // The label is `krea_2` (underscore) to match the catalog/trainer convention.
     if normalized.contains("krea") {
-        return Some("krea_2".to_owned());
+        return Some(crate::model_family::KREA_2.to_owned());
     }
     // Ideogram 4 (epic 4725): its own MMDiT (`diffusion_model.layers.<n>.attention.qkv`
     // + `adaln_modulation`), a distinct family from every SD/Flux/Qwen architecture. The
@@ -2464,7 +2351,7 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     // architecture string contains "ideogram", so match it here. The label is `ideogram`
     // to match the `ideogram_4` catalog `family` / `loraCompatibility.families`.
     if normalized.contains("ideogram") {
-        return Some("ideogram".to_owned());
+        return Some(crate::model_family::IDEOGRAM.to_owned());
     }
     // Anima (epic 10512): the Cosmos-Predict2 anime DiT. Its catalog/training-base ids are
     // `anima_base` / `anima_aesthetic` / `anima_turbo` and its weight files
@@ -2489,7 +2376,7 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
         || normalized.contains("cosmos_predict")
         || normalized.contains("cosmospredict")
     {
-        return Some("anima".to_owned());
+        return Some(crate::model_family::ANIMA.to_owned());
     }
     // Mage-Flow (epic 14034). Catalog/training-base ids are `mage_flow_base` / `mage_flow` /
     // `mage_flow_turbo` (+ the `_edit_*` trio), repos `microsoft|SceneWorks/Mage-Flow*`, and the MLX
@@ -2514,7 +2401,7 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
         || contains_token(&normalized, "mage_flow")
         || contains_token(&normalized, "mageflow")
     {
-        return Some("mage-flow".to_owned());
+        return Some(crate::model_family::MAGE_FLOW.to_owned());
     }
     // Exact FLUX3 training identities, before the broad FLUX.1 substring detector.
     if matches!(
@@ -2523,7 +2410,7 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
             | "black-forest-labs/flux-3-image-klein"
             | "black-forest-labs/flux-3-image-klein-base"
     ) {
-        return Some("flux3".to_owned());
+        return Some(crate::model_family::FLUX3.to_owned());
     }
     // Check flux2 before flux: FLUX.2 architecture strings ("flux2", "flux-2",
     // "flux.2", "flux_2") all contain the "flux" substring, so the generic flux
@@ -2534,13 +2421,13 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
         || normalized.contains("flux.2")
         || normalized.contains("flux_2")
     {
-        return Some("flux2".to_owned());
+        return Some(crate::model_family::FLUX2.to_owned());
     }
     if normalized.contains("flux") {
-        return Some("flux".to_owned());
+        return Some(crate::model_family::FLUX.to_owned());
     }
     if normalized.contains("zimage") || normalized.contains("z-image") {
-        return Some("z-image".to_owned());
+        return Some(crate::model_family::Z_IMAGE.to_owned());
     }
     // MOSS-Image (epic 27933): training-base ids `moss_image_base` / `moss_image_sft`, repos
     // `OpenMOSS-Team/MOSS-Image-*`, and the maltrainer module path all carry a `moss[-_]image`
@@ -2554,7 +2441,7 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
         || contains_token(&normalized, "moss_image")
         || contains_token(&normalized, "mossimage")
     {
-        return Some("moss-image".to_owned());
+        return Some(crate::model_family::MOSS_IMAGE.to_owned());
     }
     // Qwen-Image 2.1 (sc-24156, epic 24107) BEFORE the generic qwen+image arm below, which would
     // otherwise swallow `qwen_image_2_1` / `Qwen-Image-2.1` into the 2512 `qwen-image` family. The
@@ -2562,16 +2449,16 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     // adapter for one never loads on the other (E10): a mislabel here hard-routes a 2.1 LoRA onto
     // the 2512 model and hard-rejects it from its own.
     if is_qwen_image_2_1_metadata(&normalized) {
-        return Some("qwen-image-2-1".to_owned());
+        return Some(crate::model_family::QWEN_IMAGE_2_1.to_owned());
     }
     if normalized.contains("qwen") && normalized.contains("image") {
-        return Some("qwen-image".to_owned());
+        return Some(crate::model_family::QWEN_IMAGE.to_owned());
     }
     if normalized.contains("ltx") {
-        return Some("ltx-video".to_owned());
+        return Some(crate::model_family::LTX_VIDEO.to_owned());
     }
     if normalized.contains("wan") {
-        return Some("wan-video".to_owned());
+        return Some(crate::model_family::WAN_VIDEO.to_owned());
     }
     // Check SD3 before sdxl / sd1.5: SD3 / SD3.5 architecture strings
     // ("sd3", "sd-3", "sd3.5", "stable-diffusion-3", "stable-diffusion-3.5")
@@ -2585,13 +2472,13 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
         || normalized.contains("stable_diffusion_3")
         || normalized.contains("stablediffusion3")
     {
-        return Some("sd3".to_owned());
+        return Some(crate::model_family::SD3.to_owned());
     }
     if normalized.contains("sdxl") {
-        return Some("sdxl".to_owned());
+        return Some(crate::model_family::SDXL.to_owned());
     }
     if normalized == "sd1" || normalized == "sd1.5" || normalized.contains("stable-diffusion-v1") {
-        return Some("sd1.5".to_owned());
+        return Some(crate::model_family::SD1_5.to_owned());
     }
     None
 }
@@ -3401,11 +3288,16 @@ fn extra_compatible_lora_families(normalized_family: &str) -> &'static [&'static
     }
 }
 
+// Preserve the established compatibility spelling after resolving shared catalog aliases.
+fn normalize_lora_compatibility_family(family: &str) -> String {
+    normalize_model_family(&canonical_lora_family(family))
+}
+
 /// The set of LoRA families a model of `model_family` can load (normalized; the
 /// model's own family plus its extra-compatible families). Empty when the family
 /// is unknown — callers treat that as "skip validation".
 pub fn accepted_lora_families(model_family: &str) -> Vec<String> {
-    let normalized = normalize_model_family(model_family);
+    let normalized = normalize_lora_compatibility_family(model_family);
     if normalized.is_empty() {
         return Vec::new();
     }
@@ -3416,6 +3308,48 @@ pub fn accepted_lora_families(model_family: &str) -> Vec<String> {
             .map(|family| (*family).to_owned()),
     );
     families
+}
+
+/// Declared model families using the catalog's established precedence (including explicit empty
+/// lists), canonical spelling and stable order. Works on builtin, custom and imported rows alike.
+pub fn declared_model_lora_families(model: &Map<String, Value>) -> Vec<String> {
+    let values = ["families", "compatibleFamilies", "modelFamilies"]
+        .iter()
+        .find_map(|key| model.get(*key).filter(|value| !value.is_null()))
+        .or_else(|| {
+            model
+                .get("loraCompatibility")?
+                .get("families")
+                .filter(|value| !value.is_null())
+        })
+        .or_else(|| model.get("family").filter(|value| !value.is_null()));
+    let mut families: Vec<String> = match values {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(canonical_lora_family)
+            .collect(),
+        Some(Value::String(family)) => vec![canonical_lora_family(family)],
+        _ => Vec::new(),
+    };
+    families.sort();
+    families.dedup();
+    families
+}
+
+/// The same accepted-family gate for enqueue and film planning. Architecture extras are
+/// one-directional; an accepted base family never changes the model's own identity.
+pub fn accepted_model_lora_families(model: &Map<String, Value>) -> Vec<String> {
+    let mut accepted = Vec::new();
+    for declared in declared_model_lora_families(model) {
+        for family in accepted_lora_families(&declared) {
+            let family = canonical_lora_family(&family);
+            if !accepted.contains(&family) {
+                accepted.push(family);
+            }
+        }
+    }
+    accepted
 }
 
 /// The LoRA's declared compatible families (normalized, de-duplicated, sorted),
@@ -3441,7 +3375,7 @@ pub fn lora_declared_families(lora: &Value) -> Vec<String> {
     let mut families: Vec<String> = raw
         .iter()
         .filter_map(Value::as_str)
-        .map(normalize_model_family)
+        .map(normalize_lora_compatibility_family)
         .filter(|family| !family.is_empty())
         .collect();
     families.sort();
@@ -3492,37 +3426,44 @@ fn is_base_model_gated_family(family: &str) -> bool {
     matches!(family, "wan-video" | "ltx-video")
 }
 
-fn same_ltx_generation(model_id: &str, base: &str) -> bool {
-    let is_23 = |id: &str| matches!(id, "ltx_2_3" | "ltx_2_3_eros");
-    (is_23(model_id) && is_23(base)) || (model_id == "ltx_2_5" && base == "ltx_2_5")
+fn same_ltx_generation(
+    model_id: &str,
+    base: &str,
+    model: Option<&Map<String, Value>>,
+    base_model: Option<&Map<String, Value>>,
+) -> bool {
+    let generation = crate::model_facts::lora_generation(model_id, model);
+    generation.is_some() && generation == crate::model_facts::lora_generation(base, base_model)
 }
 
-/// Whether a model id names a **14B-class** Wan-family backbone, by the catalog's own id
-/// convention: the 14B entries carry a `_14b` suffix (`wan_2_2_t2v_14b`, `wan_2_2_i2v_14b`,
-/// `wan_2_2_vace_fun_14b`, `scail2_14b`, `krea_realtime_14b`) and the 5B TI2V entry — the other
-/// side of the split [`is_base_model_gated_family`] exists for — does not (`wan_2_2`).
-///
-/// A convention rather than an enumerated list on purpose: a new Wan 14B entry must not have to be
-/// added here to keep working, and a hard-coded list would silently exclude it.
-fn is_wan_14b_class_id(id: &str) -> bool {
-    normalize_model_family(id).ends_with("-14b")
+/// Whether the resolved backbone is 14B-class. Known models declare the class in their manifest;
+/// only unregistered legacy/custom IDs retain the prior suffix convention.
+fn is_wan_14b_class_id(id: &str, supplied: Option<&Map<String, Value>>) -> bool {
+    if let Some(value) = crate::model_facts::lora_fact(id, supplied, "sizeClass") {
+        return value.as_str() == Some("14b");
+    }
+    // A known builtin never infers missing class metadata from its ID. Unknown legacy/custom
+    // rows preserve the prior suffix convention when they carry no authoritative class fact.
+    crate::builtin_manifests::builtin_model_entry(id).is_none()
+        && normalize_model_family(id).ends_with("-14b")
 }
 
-/// Whether a model id names an **image-to-video** Wan entry (`wan_2_2_i2v_14b`), by the same id
-/// convention — an `i2v` path SEGMENT, not a substring, so a hypothetical `…si2vx…` id cannot match
-/// by accident.
-///
-/// This is a size-class peer of the 14B T2V entries, so [`is_wan_14b_class_id`] alone admits it.
-/// It must not ride the extra-compatible arm: an I2V LoRA targets `cross_attn.k_img`/`v_img`, which
-/// a text-to-video backbone does not have at any surface width, and the product ALREADY treats the
-/// two as non-interchangeable — `wan_2_2_i2v_14b` is refused on `wan_2_2_t2v_14b` by exact equality.
-/// Admitting it on Krea Realtime (also a T2V backbone) would be the one place that inconsistency
-/// existed, and it would surface as a hard engine error only AFTER a multi-GB tier fetch instead of
-/// a 400 at submit.
-fn is_wan_i2v_id(id: &str) -> bool {
-    normalize_model_family(id)
-        .split('-')
-        .any(|segment| segment == "i2v")
+/// Whether a recorded base uses the Wan I2V adapter layout. Host backbone conditioning and
+/// adapter lineage are separate: SCAIL-2 accepts Wan I2V adapters but is not itself a Wan adapter.
+fn is_wan_i2v_id(id: &str, supplied: Option<&Map<String, Value>>) -> bool {
+    if let Some(value) = crate::model_facts::lora_fact(id, supplied, "imageConditionedBackbone") {
+        // The base stamp's I2V split applies to Wan adapters. SCAIL-2's own adapter lineage
+        // remains distinct even though its host backbone accepts Wan-I2V adapters.
+        let base = crate::model_facts::entry(id, supplied);
+        let wan_adapter = base
+            .and_then(crate::model_facts::adapter)
+            .is_none_or(|adapter| adapter == "wan_video");
+        return value.as_bool() == Some(true) && wan_adapter;
+    }
+    crate::builtin_manifests::builtin_model_entry(id).is_none()
+        && normalize_model_family(id)
+            .split('-')
+            .any(|segment| segment == "i2v")
 }
 
 /// Whether a LoRA recording trained base model `base` may load on `model_id`, for a model whose own
@@ -3551,18 +3492,30 @@ fn is_wan_i2v_id(id: &str) -> bool {
 /// A LoRA that records NO base model is not this function's concern — the callers fall back to
 /// family gating for those, exactly as before.
 pub fn base_model_satisfies_gate(model_family: &str, model_id: &str, base: &str) -> bool {
+    base_model_satisfies_gate_with_manifest(model_family, model_id, base, None, None)
+}
+
+/// Resolve generation, size and conditioning from authoritative catalog rows when available.
+/// ID-only callers use builtin facts; unknown custom IDs retain the qualified legacy convention.
+pub fn base_model_satisfies_gate_with_manifest(
+    model_family: &str,
+    model_id: &str,
+    base: &str,
+    model: Option<&Map<String, Value>>,
+    base_model: Option<&Map<String, Value>>,
+) -> bool {
     if base == model_id {
         return true;
     }
     let normalized_family = normalize_model_family(model_family);
     if normalized_family == "ltx-video" {
-        return same_ltx_generation(model_id, base);
+        return same_ltx_generation(model_id, base, model, base_model);
     }
     extra_compatible_lora_families(&normalized_family).contains(&"wan-video")
-        && is_wan_14b_class_id(model_id)
-        && is_wan_14b_class_id(base)
-        && (extra_compatible_backbone_is_image_conditioned(&normalized_family)
-            || !is_wan_i2v_id(base))
+        && is_wan_14b_class_id(model_id, model)
+        && is_wan_14b_class_id(base, base_model)
+        && (extra_compatible_backbone_is_image_conditioned(model_id, &normalized_family, model)
+            || !is_wan_i2v_id(base, base_model))
 }
 
 /// Whether a model riding the `wan-video` extra-compatible arm has an **image-conditioned** (I2V)
@@ -3581,7 +3534,20 @@ pub fn base_model_satisfies_gate(model_family: &str, model_id: &str, base: &str)
 ///
 /// Both size classes still gate: `is_wan_14b_class_id` keeps the 5B TI2V base out either way, which
 /// is the split the base-model gate was written for.
-fn extra_compatible_backbone_is_image_conditioned(normalized_family: &str) -> bool {
+fn extra_compatible_backbone_is_image_conditioned(
+    model_id: &str,
+    normalized_family: &str,
+    supplied: Option<&Map<String, Value>>,
+) -> bool {
+    if let Some(value) =
+        crate::model_facts::lora_fact(model_id, supplied, "imageConditionedBackbone")
+    {
+        return value.as_bool() == Some(true);
+    }
+    if crate::builtin_manifests::builtin_model_entry(model_id).is_some() {
+        return false;
+    }
+    // Preserve the historical family policy for unregistered custom IDs.
     match normalized_family {
         // Wan2.1-I2V-14B-derived: 40 blocks × dim 5120 with the I2V cross-attention stack intact.
         "scail2" => true,
@@ -3613,7 +3579,22 @@ pub fn validate_lora_compatibility(
     adapter_id: &str,
     model_id: Option<&str>,
 ) -> Result<(), String> {
-    let normalized_model_family = model_family.map(normalize_model_family).unwrap_or_default();
+    validate_lora_compatibility_with_manifest(loras, model_family, adapter_id, model_id, None)
+}
+
+/// Manifest-aware variant for resolved API/worker requests. Explicit supplied facts take priority;
+/// older rows obtain missing adapter metadata from compatible known identities, never a guessed
+/// new capability. Callers without a model carrier can use the ID-only wrapper.
+pub fn validate_lora_compatibility_with_manifest(
+    loras: &[Value],
+    model_family: Option<&str>,
+    adapter_id: &str,
+    model_id: Option<&str>,
+    model: Option<&Map<String, Value>>,
+) -> Result<(), String> {
+    let normalized_model_family = model_family
+        .map(normalize_lora_compatibility_family)
+        .unwrap_or_default();
     let accepted = model_family.map(accepted_lora_families).unwrap_or_default();
     if loras.is_empty() {
         return Ok(());
@@ -3648,7 +3629,7 @@ pub fn validate_lora_compatibility(
             {
                 let base = lora_base_model(lora);
                 if families.iter().any(|family| family == "ltx-video")
-                    && model_id == "ltx_2_5"
+                    && crate::model_facts::lora_generation(model_id, model) == Some("2.5")
                     && base.is_none()
                     && declared_model_ids.is_empty()
                 {
@@ -3659,11 +3640,22 @@ pub fn validate_lora_compatibility(
                     ));
                 }
                 if let Some(base) = base {
+                    let base_manifest = lora
+                        .get("baseModelManifestEntry")
+                        .and_then(Value::as_object)
+                        .filter(|entry| {
+                            entry.get("id").and_then(Value::as_str) == Some(base.as_str())
+                        });
                     // `base_model_satisfies_gate` keeps the 5B-vs-14B split while letting a
                     // Wan-14B LoRA through on a model that accepts `wan-video` via the registry
                     // (sc-15017) — its base can never equal that model's own id.
-                    if !base_model_satisfies_gate(model_family.unwrap_or_default(), model_id, &base)
-                    {
+                    if !base_model_satisfies_gate_with_manifest(
+                        model_family.unwrap_or_default(),
+                        model_id,
+                        &base,
+                        model,
+                        base_manifest,
+                    ) {
                         let detail = if families.iter().any(|family| family == "ltx-video") {
                             "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable."
                         } else {
@@ -3684,6 +3676,102 @@ pub fn validate_lora_compatibility(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn worker_compatibility_canonicalizes_declared_and_model_aliases() {
+        for (alias, family, other) in [
+            ("qwenimage", "qwen-image", "qwen-image-2-1"),
+            ("qwen-image-2.1", "qwen-image-2-1", "qwen-image"),
+        ] {
+            for key in ["family", "modelFamilies"] {
+                let declared = if key == "family" {
+                    json!(alias)
+                } else {
+                    json!([alias])
+                };
+                let lora = json!({ "id": "installed-alias", key: declared });
+                for model in [alias, family] {
+                    assert!(
+                        validate_lora_compatibility_with_manifest(
+                            std::slice::from_ref(&lora),
+                            Some(model),
+                            "worker",
+                            None,
+                            None
+                        )
+                        .is_ok(),
+                        "{key}: {alias} must load on {model}"
+                    );
+                }
+                assert!(
+                    validate_lora_compatibility_with_manifest(
+                        &[lora],
+                        Some(other),
+                        "worker",
+                        None,
+                        None
+                    )
+                    .is_err(),
+                    "versioned Qwen families remain distinct"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recorded_base_metadata_precedes_later_family_aliases() {
+        for (base, alias, family) in [
+            ("black-forest-labs/FLUX.2-klein-9B", "flux", "flux2"),
+            ("lodestones/Chroma1-HD", "flux", "chroma"),
+            ("Qwen/Qwen-Image-2.1", "qwen_image", "qwen-image-2-1"),
+        ] {
+            for base_key in ["baseModel", "base_model"] {
+                for alias_key in [
+                    "ss_base_model_version",
+                    "modelspec.architecture",
+                    "modelspec.implementation",
+                ] {
+                    let mut header =
+                        header_from_keys(&["transformer_blocks.0.attn.to_q.lora_A.weight"]);
+                    header["__metadata__"] = json!({base_key: base, alias_key: alias});
+                    assert_eq!(
+                        detect_lora_family(&header).as_deref(),
+                        Some(family),
+                        "{base_key}={base} must precede {alias_key}={alias}"
+                    );
+                }
+            }
+        }
+        let native = json!({"__metadata__": {
+            "family": "flux", "baseModel": "black-forest-labs/FLUX.2-klein-9B"
+        }});
+        assert_eq!(detect_lora_family(&native).as_deref(), Some("flux"));
+        let fallback = json!({"__metadata__": {
+            "baseModel": "community/unclassified", "modelspec.architecture": "krea-realtime"
+        }});
+        assert_eq!(
+            detect_lora_family(&fallback).as_deref(),
+            Some("krea-realtime")
+        );
+    }
+
+    #[test]
+    fn versioned_qwen_repository_metadata_outweighs_generic_trainer_label() {
+        for version in ["Qwen/Qwen-Image-2.1", "qwen_image_2_1"] {
+            for key in ["baseModel", "base_model"] {
+                let mut header =
+                    header_from_keys(&["transformer_blocks.0.attn.to_q.lora_A.weight"]);
+                header["__metadata__"] = json!({
+                    key: version,
+                    "ss_base_model_version": "qwen_image"
+                });
+                assert_eq!(
+                    detect_lora_family(&header).as_deref(),
+                    Some("qwen-image-2-1")
+                );
+            }
+        }
+    }
 
     fn header_from_keys(keys: &[&str]) -> Value {
         let mut object = serde_json::Map::new();
@@ -7042,6 +7130,30 @@ mod tests {
         let path = temp.path().join("padded.safetensors");
         write_safetensors_with_data(&path, 32, 64);
         read_safetensors_header(&path).expect("over-long file is accepted");
+    }
+
+    #[test]
+    fn read_safetensors_header_preserves_adapter_cap_and_rejects_non_objects() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bounded.safetensors");
+        let length = crate::safetensors::MAX_ADAPTER_HEADER_BYTES + 1;
+        // Valid JSON apart from the intentional size violation: widening the import cap would
+        // accept this file, rather than merely failing later on malformed sparse-file padding.
+        let mut oversized = length.to_le_bytes().to_vec();
+        oversized.extend_from_slice(b"{}");
+        oversized.resize((length + 8) as usize, b' ');
+        std::fs::write(&path, oversized).unwrap();
+        assert!(matches!(
+            read_safetensors_header(&path),
+            Err(SafetensorsHeaderError::InvalidHeader)
+        ));
+        let mut raw = 2_u64.to_le_bytes().to_vec();
+        raw.extend_from_slice(b"[]");
+        std::fs::write(&path, raw).unwrap();
+        assert!(matches!(
+            read_safetensors_header(&path),
+            Err(SafetensorsHeaderError::InvalidHeader)
+        ));
     }
 
     #[test]

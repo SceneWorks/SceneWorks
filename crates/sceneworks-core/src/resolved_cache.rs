@@ -23,7 +23,7 @@ pub use retention::{
     RetentionHold, RetentionReport, SourceLifecycleSelector,
 };
 
-use crate::file_lock::FileLock;
+use crate::file_lock::{is_contended as is_lock_contended, FileLock};
 use crate::model_artifacts::{
     ActiveArtifactLease, ArtifactAvailability, ArtifactCompleteness, ArtifactIdentity,
     ArtifactLocation, ArtifactProvenance, ClosureFileStat, ModelArtifactResolver,
@@ -152,9 +152,9 @@ impl ResolvedCachePolicy {
         let defaults = Self::default();
         let enabled = match value(RESOLVED_CACHE_ENABLED_ENV) {
             None => defaults.enabled,
-            Some(raw) => parse_bool(&raw).ok_or_else(|| {
+            Some(raw) => crate::env_util::parse_bool(&raw).ok_or_else(|| {
                 ResolvedCacheError::new(format!(
-                    "{RESOLVED_CACHE_ENABLED_ENV} must be true/false or 1/0"
+                    "{RESOLVED_CACHE_ENABLED_ENV} must be 1/true/yes/on or 0/false/no/off"
                 ))
             })?,
         };
@@ -175,14 +175,6 @@ impl ResolvedCachePolicy {
         };
         policy.validate()?;
         Ok(policy)
-    }
-}
-
-fn parse_bool(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" => Some(true),
-        "0" | "false" => Some(false),
-        _ => None,
     }
 }
 
@@ -3197,19 +3189,7 @@ fn open_lock_file(path: &Path) -> Result<File, ResolvedCacheError> {
             )));
         }
     }
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(Into::into)
-}
-
-fn is_lock_contended(error: &std::io::Error) -> bool {
-    let fs2_contended = fs2::lock_contended_error().raw_os_error();
-    error.kind() == std::io::ErrorKind::WouldBlock
-        || fs2_contended.is_some() && error.raw_os_error() == fs2_contended
+    crate::file_lock::open_regular_lock_file(path).map_err(Into::into)
 }
 
 /// Everything [`ResolvedModelArtifact::validate`] proves except what needs the bundle to exist.
@@ -4202,16 +4182,7 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), Resolved
         .parent()
         .ok_or_else(|| ResolvedCacheError::new("cache record has no parent"))?;
     ensure_regular_directory(parent)?;
-    let temporary = parent.join(format!(".tmp-{}", random_id()?));
-    let result = (|| {
-        write_synced_file(&temporary, &body)?;
-        std::fs::rename(&temporary, path)?;
-        sync_dir(parent)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result.map_err(|error| {
+    crate::fsutil::write_atomic(path, &body).map_err(|error| {
         ResolvedCacheError::new(format!("write cache record {}: {error}", path.display()))
     })
 }
@@ -4355,10 +4326,8 @@ fn publish_rename_error(
 }
 
 fn random_id() -> Result<String, ResolvedCacheError> {
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| ResolvedCacheError::new(format!("generate cache id: {error}")))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    crate::hashing::random_hex(16)
+        .map_err(|error| ResolvedCacheError::new(format!("generate cache id: {error}")))
 }
 
 fn now_seconds() -> Result<u64, ResolvedCacheError> {

@@ -88,13 +88,7 @@ pub fn h3_fixture_config() -> Value {
 }
 
 /// A committed managed H3 import and the catalog entry the import job stamps for it.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub struct ManagedMiniMaxH3Import {
     pub entry: Map<String, Value>,
     pub install_dir: PathBuf,
@@ -107,13 +101,7 @@ pub struct ManagedMiniMaxH3Import {
 /// Commit a managed H3 DiT import into `data_dir` through the REAL transactional ingest and build
 /// its entry with the SAME stamp the model-import job applies (`run_model_import_job`; the job test
 /// `managed_h3_dit_import_stamps_a_selectable_video_entry` pins the job to this shape).
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub fn stage_managed_minimax_h3_import(data_dir: &Path, model_id: &str) -> ManagedMiniMaxH3Import {
     stage_managed_minimax_h3_import_layout(data_dir, model_id, "dense")
 }
@@ -630,7 +618,7 @@ pub fn install_fixture_snapshots(hub: &Path, tiers: &Path, base: &Path) {
 }
 
 /// Portable constructor metadata for import-only CPU tests; no native provider is linked here.
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub fn write_shared_configs(root: &Path, encoder: &Path) {
     let put = |path: PathBuf, value: Value| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -676,7 +664,7 @@ pub fn write_shared_configs(root: &Path, encoder: &Path) {
 }
 
 /// Constructor documents at fixture scale; no model weights, downloads, or tensor runtime.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub fn write_shared_configs(root: &Path, encoder: &Path) {
     let put = |path: PathBuf, value: Value| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1039,7 +1027,7 @@ fn pruned_managed_import_seals_source_precision_and_whole_basis_identity() {
         .output
         .join("diffusion_pytorch_model-00001-of-00001.safetensors");
     let headers = safetensors_path_tensor_headers(&shard).unwrap();
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     {
         use platform_runtime::providers::minimax_h3 as h3;
         let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(data.path().into()))
@@ -1200,7 +1188,7 @@ fn pruned_managed_import_seals_source_precision_and_whole_basis_identity() {
     );
 }
 
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 fn pruned_import_oracle() -> Value {
     serde_json::from_str(include_str!(
         "../tests/fixtures/minimax_h3_pruned_import.json"
@@ -1208,7 +1196,7 @@ fn pruned_import_oracle() -> Value {
     .unwrap()
 }
 
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 fn fixture_floats(value: &Value) -> Vec<f32> {
     value
         .as_array()
@@ -1218,7 +1206,7 @@ fn fixture_floats(value: &Value) -> Vec<f32> {
         .collect()
 }
 
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 fn assert_pruned_numeric(actual: &[f32], expected: &[f32], tolerance: f32, label: &str) {
     assert_eq!(actual.len(), expected.len(), "{label}");
     for (index, (&got, &want)) in actual.iter().zip(expected).enumerate() {
@@ -1233,7 +1221,7 @@ fn assert_pruned_numeric(actual: &[f32], expected: &[f32], tolerance: f32, label
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 fn assert_pruned_period(actual: &[f32], case: &Value, rows: usize, tolerance: f32, label: &str) {
     assert_eq!(actual.len(), rows, "{label}");
     let period = fixture_floats(&case["projection_period"]);

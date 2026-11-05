@@ -1,4 +1,5 @@
-import { apiFetch } from "./api.js";
+import { modelsApi } from "./api/modelsResources.js";
+
 
 // The client half of the universal checkpoint-import seam (epic 20398, sc-20650).
 //
@@ -73,11 +74,11 @@ export const LINKED_NEEDS_RESCAN = "needs_rescan";
 // ---------------------------------------------------------------------------------------------
 
 export function fetchLibraryRoots(token, options) {
-  return apiFetch("/api/v1/models/library-roots", token, options);
+  return modelsApi.libraryRoots(token, options);
 }
 
 export function approveLibraryRoot(token, { path, label } = {}) {
-  return apiFetch("/api/v1/models/library-roots", token, {
+  return modelsApi.libraryRoots(token, {
     method: "POST",
     body: JSON.stringify(label ? { path, label } : { path }),
   });
@@ -89,24 +90,24 @@ export function updateLibraryRoot(token, rootId, { label, path } = {}) {
   const body = {};
   if (label != null) body.label = label;
   if (path != null) body.path = path;
-  return apiFetch(`/api/v1/models/library-roots/${encodeURIComponent(rootId)}`, token, {
+  return modelsApi.libraryRoot(rootId, token, {
     method: "PATCH",
     body: JSON.stringify(body),
   });
 }
 
 export function removeLibraryRoot(token, rootId) {
-  return apiFetch(`/api/v1/models/library-roots/${encodeURIComponent(rootId)}`, token, {
+  return modelsApi.libraryRoot(rootId, token, {
     method: "DELETE",
   });
 }
 
 export function scanLibraryRoot(token, rootId, options) {
-  return apiFetch(`/api/v1/models/library-roots/${encodeURIComponent(rootId)}/scan`, token, options);
+  return modelsApi.scanLibraryRoot(rootId, token, options);
 }
 
 export function rescanLibraryCheckpoint(token, rootId, relativePath) {
-  return apiFetch(`/api/v1/models/library-roots/${encodeURIComponent(rootId)}/rescan`, token, {
+  return modelsApi.rescanLibraryRoot(rootId, token, {
     method: "POST",
     body: JSON.stringify({ relativePath }),
   });

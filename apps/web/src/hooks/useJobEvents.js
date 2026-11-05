@@ -1,5 +1,8 @@
-import { useEffect } from "react";
-import { apiFetch, eventUrl, isReauthenticating } from "../api.js";
+import { jobEventsSource } from "../api/jobs.js";
+import { jobsApi } from "../api/jobsResources.js";
+import { backoffDelay } from "../retry.js";
+import { useEffect, useInsertionEffect, useRef } from "react";
+import { isReauthenticating } from "../api.js";
 import {
   acceptsJobUpdate,
   jobRevision,
@@ -48,15 +51,20 @@ export function useJobEvents({
   pushNotice,
   dismissNoticeKind,
   generatedAssetRefreshesRef,
-  refreshAssetsRef,
-  refreshModelsRef,
-  refreshModelAndLorasRef,
-  refreshPersonTracksRef,
+  refreshAssets,
+  refreshModels,
+  refreshModelAndLoras,
+  refreshPersonTracks,
   activeProjectRef,
   enqueueTimelineGenerationApply,
   hasVisibleLocalFailure,
   refreshHealth,
 }) {
+  const refreshers = useRef({ refreshAssets, refreshModels, refreshModelAndLoras, refreshPersonTracks });
+  useInsertionEffect(() => {
+    refreshers.current = { refreshAssets, refreshModels, refreshModelAndLoras, refreshPersonTracks };
+  }, [refreshAssets, refreshModels, refreshModelAndLoras, refreshPersonTracks]);
+
   useEffect(() => {
     // Gated on `ready` (not just `authenticated`): SSE job updates carry assets whose
     // thumbnails render immediately, so the media-ticket mint must have settled first
@@ -69,6 +77,7 @@ export function useJobEvents({
     let reconnectTimer = null;
     let reconnectAttempt = 0;
     let closed = false;
+    const ticketController = new AbortController();
     let snapshotRevision = 0;
     let reconnectKnownJobIds = new Set();
     let maxRetainedClearTombstones = MAX_TERMINAL_JOBS;
@@ -174,17 +183,17 @@ export function useJobEvents({
           generationSetId: generationSetId || previousRefresh.generationSetId,
         });
         if (shouldRefreshGeneratedAssets) {
-          refreshAssetsRef.current?.(job.projectId);
+          refreshers.current.refreshAssets?.(job.projectId);
         }
       }
       if (job.status === "completed" && hasGeneratedAssets) {
         enqueueTimelineGenerationApply(job);
       }
       if (job.status === "completed" && job.projectId && job.type === "person_track") {
-        refreshPersonTracksRef.current?.(job.projectId);
+        refreshers.current.refreshPersonTracks?.(job.projectId);
       }
       if (job.status === "completed" && job.projectId && job.type === "person_detect") {
-        refreshAssetsRef.current?.(job.projectId);
+        refreshers.current.refreshAssets?.(job.projectId);
       }
       // A completed download flips the catalog's `installState`; a completed conversion writes the
       // MLX artifact that flips `mlxConversionState` to "converted"; a completed import upserts the
@@ -202,16 +211,16 @@ export function useJobEvents({
         job.status === "completed" &&
         (job.type === "model_download" || job.type === "model_convert" || job.type === "model_import")
       ) {
-        refreshModelsRef.current?.();
+        refreshers.current.refreshModels?.();
       }
       // A completed built-in LoRA download (sc-5944) flips the catalog entry to
       // installed; refresh models+loras so the Models row and any Studio gate update.
       if (job.status === "completed" && job.type === "lora_download") {
-        refreshModelAndLorasRef.current?.(job.projectId ?? activeProjectRef.current?.id);
+        refreshers.current.refreshModelAndLoras?.(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "completed" && job.type === "lora_import") {
         dismissNoticeKind("lora-import");
-        refreshModelAndLorasRef.current?.(job.projectId ?? activeProjectRef.current?.id);
+        refreshers.current.refreshModelAndLoras?.(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "completed" && job.type === "lora_train" && job.payload?.dryRun === false) {
         // sc-15036: a `lora_train` job now produces EITHER an adapter or a full base checkpoint,
@@ -221,7 +230,7 @@ export function useJobEvents({
           pushNotice("lora-train", `lora training: ${registrationError}`);
         } else {
           dismissNoticeKind("lora-train");
-          refreshModelAndLorasRef.current?.(job.projectId ?? activeProjectRef.current?.id);
+          refreshers.current.refreshModelAndLoras?.(job.projectId ?? activeProjectRef.current?.id);
         }
       }
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
@@ -415,13 +424,15 @@ export function useJobEvents({
       pruneClearedJobs();
       try {
         if (access.authRequired || activeJobIds.length > 0 || knownTerminalJobIds.length > 0) {
-          const response = await apiFetch("/api/v1/jobs/events/ticket", token, {
+          const response = await jobsApi.eventsTicket(token, {
             method: "POST",
+            signal: ticketController.signal,
             body: JSON.stringify({ activeJobIds, knownTerminalJobIds }),
           });
           ticket = response.ticket;
         }
       } catch (err) {
+        if (closed) return;
         if (isReauthenticating(err)) {
           // sc-15105: the token went stale mid-session and the access gate has claimed the
           // session. Don't push the raw "SceneWorks access token required" into the error
@@ -432,7 +443,7 @@ export function useJobEvents({
         }
         setError(err.message);
         if (!closed) {
-          const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
+          const delay = backoffDelay(reconnectAttempt, { baseMs: 1000, maxMs: 30000 });
           reconnectAttempt += 1;
           reconnectTimer = window.setTimeout(connect, delay);
         }
@@ -446,7 +457,7 @@ export function useJobEvents({
       // Event revisions are process-local. An API restart can reset the counter,
       // so each newly opened source establishes its own snapshot baseline.
       snapshotRevision = 0;
-      const source = new EventSource(eventUrl("/api/v1/jobs/events", ticket));
+      const source = jobEventsSource(ticket);
       events = source;
       source.addEventListener("jobs.snapshot", handleJobsSnapshot);
       source.addEventListener("jobs.cleared", handleJobsCleared);
@@ -463,7 +474,7 @@ export function useJobEvents({
           return;
         }
         refreshHealth();
-        const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
+        const delay = backoffDelay(reconnectAttempt, { baseMs: 1000, maxMs: 30000 });
         reconnectAttempt += 1;
         reconnectTimer = window.setTimeout(connect, delay);
       };
@@ -473,6 +484,7 @@ export function useJobEvents({
 
     return () => {
       closed = true;
+      ticketController.abort();
       if (reconnectTimer) {
         window.clearTimeout(reconnectTimer);
       }

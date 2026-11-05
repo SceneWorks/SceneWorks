@@ -9,16 +9,18 @@ publish = false
 default-run = "sceneworks-rust-api"
 
 [dependencies]
-axum = { version = "0.7", features = ["multipart"] }
-base64 = "0.22"
-fs2 = "0.4"
-futures-util = "0.3"
-glob = "0.3"
+axum = { workspace = true, features = ["multipart"] }
+base64 = { workspace = true }
+fs2 = { workspace = true }
+futures-util = { workspace = true, default-features = true }
+glob = { workspace = true }
 httpdate = "1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["service", "tokio"] }
 image = { workspace = true }
-parking_lot = "0.12"
-mime_guess = { version = "2", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+parking_lot = { workspace = true }
+mime_guess = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["json"] }
 rust-embed = { version = "8", features = ["debug-embed"], optional = true }
 sceneworks-core = { path = "../../crates/sceneworks-core" }
 # Tier-0 dataset-quality pixel extraction for the readiness endpoint (sc-6533). GPU-free
@@ -29,26 +31,22 @@ sceneworks-image-quality = { path = "../../crates/sceneworks-image-quality" }
 # as the /api/v1 routes.
 sceneworks-mcp = { path = "../../crates/sceneworks-mcp" }
 sceneworks-worker = { path = "../../crates/sceneworks-worker" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-subtle = "2.6"
-tempfile = "3.13"
-tokio = { version = "1.40", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+# Catalog result materialization owns a temporary staging directory until publication.
+# Tests reuse the same RAII directory dependency.
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"], default-features = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
 # Move deleted LoRA/model artifacts to the OS trash (recoverable) rather than unlinking them.
 trash = { workspace = true }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors"] }
-tower = { version = "0.5", features = ["util"] }
-uuid = { version = "1.11", features = ["v4"] }
-
-# Unix-only: parent-death watchdog liveness probe (safe kill(pid, None) wrapper).
-# Mirrors the desktop crate; the workspace forbids `unsafe`, so we use nix rather
-# than raw libc. Already in the workspace lock, so this pulls no new crate.
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", default-features = false, features = ["signal"] }
+tower = { workspace = true, features = ["limit"] }
+uuid = { workspace = true }
 
 # Embed the built apps/web/dist bundle into the binary and serve it with SPA
 # fallback. Off by default (server/test builds need no web build); the desktop
@@ -64,6 +62,8 @@ embed-web = ["dep:rust-embed", "dep:mime_guess"]
 # See crates/sceneworks-worker/Cargo.toml's `backend-candle` for the providers it
 # pulls. (sc-5559)
 backend-candle = ["sceneworks-worker/backend-candle"]
+# CPU aesthetic fixture only; no backend activation, and the test is also ignored.
+aesthetic-inference-proof = []
 # Manual bounded product acceptance only; never enabled by ordinary builds.
 model-inference-proof = ["backend-candle", "sceneworks-worker/model-inference-proof"]
 
@@ -72,13 +72,17 @@ model-inference-proof = ["backend-candle", "sceneworks-worker/model-inference-pr
 sceneworks-worker = { path = "../../crates/sceneworks-worker", features = ["test-support"] }
 sceneworks-core = { path = "../../crates/sceneworks-core", features = ["test-support"] }
 # Advance only a fixture runtime clock at verified job boundaries in cancellation tests.
-tokio = { version = "1.40", features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util"], default-features = true }
 # Construct SQLite BUSY errors directly in the API error-contract test without
 # adding rusqlite to the production API dependency surface.
-rusqlite = { version = "0.32", features = ["bundled"] }
-parquet = { version = "60.0", default-features = false, features = ["snap"] }
+rusqlite = { workspace = true }
+parquet = { workspace = true }
 # Real MCP streamable-HTTP client for the /mcp round-trip test (sc-10233); same
 # pinned version as crates/sceneworks-mcp — client features are additive.
-rmcp = { version = "=2.2.0", features = ["client", "transport-streamable-http-client-reqwest"] }
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 [lints]
 workspace = true
+
+# Existing Unix signal-delivery fixtures retain their direct safe signal wrapper.
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true }

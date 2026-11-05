@@ -11,9 +11,8 @@ mod cred_ipc;
 mod cuda_provision;
 #[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
 mod linux_cuda_provision;
-// Pure, cross-platform filesystem predicates for `cuda_provision` (marker + sentinel
-// checks). NOT `cfg`-gated so the retry-skip guard (sc-13614) is unit-tested on any
-// host, not only the Windows-only lane where `cuda_provision` compiles.
+// Shared Windows/Linux download, verification, markers and archive extraction.
+// Offline shared fixtures run on every host; shipping Mac startup does not use it.
 mod cuda_provision_check;
 // Likely-LAN-address discovery for the remote-access URL (epic 4484, story 5).
 mod net;
@@ -111,7 +110,10 @@ fn main() {
             // Save an asset to a user-chosen destination + resolve an asset's
             // project-relative path to its absolute on-disk path (sc-8726).
             settings::save_asset_as,
+            settings::begin_image_export,
             settings::save_image_export,
+            settings::finish_image_export,
+            settings::cancel_image_export,
             settings::resolve_asset_path,
             settings::list_credentials,
             settings::set_credential,

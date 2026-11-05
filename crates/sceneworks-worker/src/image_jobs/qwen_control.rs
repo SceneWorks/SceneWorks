@@ -1,17 +1,44 @@
-use super::advanced;
-use super::{
-    attach_manifest_text_encoder, pose_entries, resolve_adapters, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
-    ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot,
-    JsonObject, Path, PathBuf, Progress, QwenFunControl, QwenFunControlPaths,
-    QwenFunControlRequest, Settings, Value, WorkerError, WorkerResult,
-};
-use super::{
-    ensure_hf_cached_file, huggingface_snapshot_dir, resolve_app_managed_model_dir,
-    safe_weight_filename, standard_tier_subdir, DownloadContext,
-};
+use super::adapters::resolve_adapters;
+use super::conditioning::pose_entries;
+use super::load_spec::attach_manifest_text_encoder;
+#[cfg(target_os = "macos")]
+use super::qwen::qwen_control_raw_settings;
+#[cfg(target_os = "macos")]
+use super::qwen::QWEN_CONTROL_ENGINE_ID;
+#[cfg(target_os = "macos")]
+use super::qwen::QWEN_CONTROL_FILE;
+use super::run_candle_strict_control;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::standard_tier_subdir;
+use super::strict_control::trusted_control_weight_revision;
+use super::tier_resolver::qwen_control_tier_subdir;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::Progress;
+use super::QwenFunControl;
+use super::QwenFunControlPaths;
+use super::QwenFunControlRequest;
+use crate::advanced;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
-use serde_json::json;
 
 // Candle (Windows/CUDA) Qwen-Image 2512-Fun-Controlnet-Union (strict control) route (sc-5489 origin /
 // sc-8350 repoint, epic 8236) — `qwen_image` + `advanced.poses` off-Mac via
@@ -91,19 +118,12 @@ fn resolve_qwen_control_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Qwen control modelPath").map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model).unwrap_or(QWEN_CONTROL_DEFAULT_REPO)
         });
@@ -136,57 +156,6 @@ fn qwen_control_guidance(request: &ImageRequest) -> f32 {
     )
 }
 
-/// The packed control tier subdir the request's `advanced.mlxQuantize` selects (sc-9870): `bf16` (opt
-/// out of quantization, `<= 0` / "none"), `q8` (`> 4`), `q4` for an explicit Q4 pick (`1..=4`), else —
-/// with NO explicit `mlxQuantize` — the **`q8`** default (sc-10726) — the SAME mapping
-/// [`standard_tier_subdir`] uses for the base transformer tier, so the control overlay tier tracks the
-/// base tier for a coherent A/B (a q8-default base pairs with the q8 control overlay). The whole control
-/// matrix (q4/q8/bf16) installs as co-requisites alongside the base, so the q8 overlay is on disk
-/// whenever the base is.
-///
-/// The Q8 default is CLAMPED to what's installed (sc-10726): `snapshot` is the control repo's HF cache
-/// snapshot, and — with NO explicit pick — the resolver picks the highest CLEAN overlay tier whose
-/// `<tier>/model.safetensors` is actually on disk (q8 → bf16 → q4), so a legacy/partial install that
-/// carries only the q4 overlay resolves q4 rather than forcing a NEW q8 fetch (via
-/// [`ensure_qwen_control_weights`]) on the plain default path. An EXPLICIT pick is returned as-is (it
-/// may legitimately fetch its tier on demand), and an absent `snapshot` falls back to `q8`, the
-/// fresh-install co-requisite the base download brings. Mirrors the MLX `qwen_control_tier_subdir`.
-fn qwen_control_tier_subdir(request: &ImageRequest, snapshot: Option<&Path>) -> &'static str {
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
-    match bits {
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b > 4 => "q8",
-        Some(_) => "q4",
-        // Default: the app-wide Q8 default CLAMPED to the installed overlay — never a new fetch.
-        None => qwen_control_installed_default_tier(snapshot),
-    }
-}
-
-/// The highest CLEAN control overlay tier (q8 → bf16 → q4) whose `<tier>/model.safetensors` is present
-/// in the control repo `snapshot`, else `"q8"` (the fresh-install co-requisite default). Keeps a plain
-/// default job from forcing a NEW on-demand fetch on a legacy/partial install that carries only q4
-/// (sc-10726) — the default tier only wins when it is actually on disk. Mirrors the MLX
-/// `qwen_control_installed_default_tier`.
-fn qwen_control_installed_default_tier(snapshot: Option<&Path>) -> &'static str {
-    let present = |tier: &str| {
-        snapshot
-            .map(|root| root.join(tier).join(QWEN_CONTROL_FILE).is_file())
-            .unwrap_or(false)
-    };
-    if present("q8") {
-        "q8"
-    } else if present("bf16") {
-        "bf16"
-    } else if present("q4") {
-        "q4"
-    } else {
-        "q8"
-    }
-}
-
 /// The (repo, repo-relative file path) of the ControlNet weights.
 ///
 /// Default (sc-9870): the SceneWorks packed control tier — repo [`QWEN_CONTROL_REPO`], file
@@ -205,9 +174,7 @@ pub(super) fn qwen_control_repo_file(
         .and_then(Value::as_object);
     let pick = |key: &str| {
         cw.and_then(|m| m.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .map(str::to_owned)
     };
     let repo = pick("repo").unwrap_or_else(|| QWEN_CONTROL_REPO.to_owned());
@@ -309,18 +276,16 @@ pub(super) fn qwen_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
-    raw.insert("realModelInference".to_owned(), Value::Bool(true));
-    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    raw.insert("numInferenceSteps".to_owned(), json!(steps));
-    raw.insert("guidanceScale".to_owned(), json!(guidance));
-    raw.insert("controlScale".to_owned(), json!(control_scale));
-    raw.insert("poseCount".to_owned(), json!(pose_count));
-    raw.insert(
-        "controlEngine".to_owned(),
-        Value::String(QWEN_CONTROL_ENGINE.to_owned()),
-    );
-    raw
+    super::tier_resolver::control_raw_settings(
+        request,
+        repo,
+        steps,
+        control_scale,
+        pose_count,
+        super::tier_resolver::ControlBackend::Candle,
+        Some(guidance),
+        Some(QWEN_CONTROL_ENGINE),
+    )
 }
 
 /// The per-lane half of the candle Qwen 2512-Fun strict-control [`CandleStrictControl`] driver (sc-8304 /
@@ -426,7 +391,7 @@ impl CandleStrictControl for QwenStrictControl {
             let vae = self.qwen_base.join("vae");
             if transformer.is_dir() && vae.is_dir() {
                 let mut staged = vec![
-                    crate::conditioning_fit::weights_source_path(text_encoder),
+                    crate::weights_source::WeightsSourceExt::path(text_encoder),
                     vae.as_path(),
                 ];
                 staged.extend(overlays.iter().copied());
@@ -505,12 +470,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
         QWEN_CONTROL_DEFAULT_SCALE,
         0.0..=2.0,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model).unwrap_or(QWEN_CONTROL_DEFAULT_REPO)
         })

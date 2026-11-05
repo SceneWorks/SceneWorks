@@ -15,24 +15,15 @@
 
 use super::*;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{CancelFlag, Image};
 
 // The face-embedding space (glintr100 / ArcFace ResNet100, 512-d). Like the CLIP `EMBEDDING_SPACE`,
 // the readiness reader ignores it; it only guards the sidecar ingest merge, so the one requirement is
 // that it is stable across runs (a drifting value would replace instead of merge a partial re-run).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const FACE_EMBEDDING_SPACE: &str = "arcface-glintr100";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CANCEL_MESSAGE: &str = "Dataset face analysis canceled by user.";
 
 // MLX face stack (macOS): the same SCRFD + ArcFace the InstantID/kps paths use, loaded directly (not
@@ -47,20 +38,14 @@ use runtime_macos::providers::face::FaceAnalysis;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use gen_core::FaceEmbedder;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct FaceAnalysisItem {
     image_path: PathBuf,
     content_hash: String,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct FaceAnalysisRecord {
     content_hash: String,
@@ -73,20 +58,14 @@ struct FaceAnalysisRecord {
 /// One SCRFD detection in original-frame pixel coordinates. Catalog analysis
 /// intentionally uses detection-only entry points on both backends and never
 /// computes ArcFace embeddings for an objective face count.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CatalogFaceDetection {
     pub bbox: [f32; 4],
     pub confidence: f32,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 enum CatalogFaceBackend {
     #[cfg(target_os = "macos")]
     Mlx(FaceAnalysis),
@@ -95,18 +74,12 @@ enum CatalogFaceBackend {
 }
 
 /// Loaded SCRFD stack reused across every record in one catalog-analysis pass.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct CatalogFaceDetector {
     backend: CatalogFaceBackend,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl CatalogFaceDetector {
     pub(crate) fn load(weights_dir: &Path) -> WorkerResult<Self> {
         #[cfg(target_os = "macos")]
@@ -174,10 +147,7 @@ impl CatalogFaceDetector {
 /// The largest face's bounding-box area as a fraction of the frame (sc-6538). Pure. SCRFD can return
 /// boxes that extend past the image edge, so the fraction is clamped to `[0, 1]` rather than trusting
 /// `area ≤ frame`. A zero-area frame (degenerate metadata) yields `0.0`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn face_fraction(bbox: [f32; 4], width: u32, height: u32) -> f64 {
     let frame = f64::from(width) * f64::from(height);
     if frame <= 0.0 {
@@ -191,10 +161,7 @@ fn face_fraction(bbox: [f32; 4], width: u32, height: u32) -> f64 {
 /// The no-face funnel (sc-6538). Pure. Maps the largest detected face (its bbox + raw embedding) — or
 /// `None` when the image has no detectable face — to the `(embedding, face_fraction)` the sidecar
 /// stores. The `None` branch emits the empty/`0.0` "examined, no face" record both backends rely on.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn face_record_fields(
     largest: Option<([f32; 4], Vec<f32>)>,
     width: u32,
@@ -288,10 +255,7 @@ fn analyze_faces(
 
 /// The per-item loop shared by both backends: decode → largest face → record, with cancel checks +
 /// per-item progress. `largest` is the backend's largest-face extractor.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn embed_largest_faces(
     items: &[FaceAnalysisItem],
     largest: impl Fn(&Image) -> WorkerResult<Option<([f32; 4], Vec<f32>)>>,
@@ -321,10 +285,7 @@ fn embed_largest_faces(
     Ok(out)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_dataset_face_analysis_job(
     api: &ApiClient,
     settings: &Settings,
@@ -392,7 +353,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
         });
 
     // Hand the spawned blocking task to the shared scaffold (sc-8836, F-034): it owns the
-    // `CancelJoinGuard`, the per-item progress select loop (with the sc-8835 cancel/heartbeat
+    // `StreamSupervisor`, the per-item progress loop (with the sc-8835 cancel/heartbeat
     // handling), the saving update, and the sidecar POST. Only the endpoint/space/messages and the
     // record → payload fold differ here.
     let dataset_id = required_payload_string(&job.payload, "datasetId")?.to_owned();
@@ -437,10 +398,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
     Ok(())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn face_records_payload(records: &[FaceAnalysisRecord]) -> Vec<Value> {
     records
         .iter()
@@ -454,90 +412,28 @@ fn face_records_payload(records: &[FaceAnalysisRecord]) -> Vec<Value> {
         .collect()
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn face_analysis_items(
     settings: &Settings,
     payload: &JsonObject,
 ) -> WorkerResult<Vec<FaceAnalysisItem>> {
-    let dataset_root = payload
-        .get("datasetRoot")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Dataset face analysis payload.datasetRoot must be an app-managed dataset path."
-                    .to_owned(),
-            )
-        })?;
-    let items = payload
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Dataset face analysis payload.items must be an array.".to_owned(),
-            )
-        })?;
-    items
-        .iter()
-        .map(|item| {
-            let object = item.as_object().ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "Dataset face analysis item must be an object.".to_owned(),
-                )
-            })?;
-            let item_id = object
-                .get("itemId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "Dataset face analysis item is missing itemId.".to_owned(),
-                    )
-                })?;
-            let content_hash = object
-                .get("contentHash")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Dataset face analysis item {item_id} is missing contentHash."
-                    ))
-                })?
-                .to_owned();
-            let image_path = object
-                .get("imagePath")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Dataset face analysis item {item_id} is missing imagePath."
-                    ))
-                })?;
-            let image_path = resolve_dataset_item_path(
-                settings,
-                dataset_root,
-                image_path,
-                &format!("Dataset face analysis item {item_id} imagePath"),
-            )?;
+    parse_dataset_items(
+        settings,
+        payload,
+        "Dataset face analysis",
+        DatasetItemPolicy::Strict,
+        |item| {
+            let content_hash = item.required("contentHash")?.to_owned();
+            let image_path = item.image_path()?;
             Ok(FaceAnalysisItem {
                 image_path,
                 content_hash,
             })
-        })
-        .collect()
+        },
+    )
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn load_face_image(path: &Path) -> WorkerResult<Image> {
     let decoded = crate::image_decode::decode_image_any(path)
         .map_err(|error| {
@@ -551,10 +447,7 @@ fn load_face_image(path: &Path) -> WorkerResult<Image> {
     })
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn face_result(dataset_id: &str, analyzed: usize, with_face: usize, stored: Value) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("space".to_owned(), json!(FACE_EMBEDDING_SPACE));
@@ -568,7 +461,7 @@ fn face_result(dataset_id: &str, analyzed: usize, with_face: usize, stored: Valu
     result
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_dataset_face_analysis_job(
     _api: &ApiClient,
     _settings: &Settings,

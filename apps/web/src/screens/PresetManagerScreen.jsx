@@ -1,32 +1,27 @@
+import { useSamplerControls } from "../hooks/useSamplerControls.js";
+import { PresetCard } from "./presets/PresetCard.jsx";
+import { EditorHeadSection } from "./presets/EditorHeadSection.jsx";
+import { KindSection } from "./presets/KindSection.jsx";
+import { IdentitySection } from "./presets/IdentitySection.jsx";
+import { ModelSection } from "./presets/ModelSection.jsx";
+import { WorkflowSection } from "./presets/WorkflowSection.jsx";
+import { PromptTemplateSection } from "./presets/PromptTemplateSection.jsx";
+import { DefaultsSection } from "./presets/DefaultsSection.jsx";
+import { GeneralDefaultsSection } from "./presets/GeneralDefaultsSection.jsx";
+import { LorasSection } from "./presets/LorasSection.jsx";
+import { PresetAdvancedSection } from "./presets/PresetAdvancedSection.jsx";
+import { FooterSection } from "./presets/FooterSection.jsx";
+import { downloadSizeText } from "../formatting.js";
+import { slugifyPresetId } from "../presetUtils.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
+
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
-import {
-  LORA_WEIGHT_MAX,
-  LORA_WEIGHT_MIN,
-  LORA_WEIGHT_STEP,
-  MAX_PRESET_LORAS,
-  compactModeList,
-  loraMatchesModel,
-  loraWeight,
-  presetLoraId,
-  presetLoras,
-  presetSaveValidation,
-  presetValidation,
-  workflowModes,
-} from "../presetUtils.js";
-import {
-  SAMPLER_LABELS,
-  SCHEDULER_LABELS,
-  effectiveLimits,
-  samplerOptionsFromModel,
-  schedulerOptionsFromModel,
-  stepsMenuFromModel,
-} from "../samplerOptions.js";
+import { MAX_PRESET_LORAS, loraMatchesModel, loraWeight, presetLoraId, presetLoras, presetSaveValidation, presetValidation, workflowModes } from "../presetUtils.js";
+import { effectiveLimits } from "../samplerOptions.js";
 import { useValidation } from "../validation/useValidation.js";
-import { ValidationSummary } from "../validation/Validation.jsx";
+
 import { useAppStatic } from "../context/AppContext.js";
 import { qualityChoices } from "../jobTypes.js";
 import { appConfirm } from "../appConfirm.jsx";
@@ -196,22 +191,12 @@ function modelHelperLine(model) {
   }
   const caps = modelCapabilities(model);
   const flags = CAPABILITY_FLAGS.filter(([id]) => caps.includes(id)).map(([, label]) => label);
-  const size = model.downloadSizeLabel
-    ? `${model.downloadSizeEstimated ? "~" : ""}${model.downloadSizeLabel}`
-    : null;
+  const size = downloadSizeText(model);
   return [...flags, size].filter(Boolean).join(" · ");
 }
 
 function qualityLabel(value) {
   return qualityChoices.find(([id]) => id === value)?.[1] ?? null;
-}
-
-function slugify(value) {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "_")
-    .replace(/^_+|_+$/g, "");
 }
 
 function formLorasFromPreset(preset) {
@@ -364,8 +349,7 @@ export function PresetManagerScreen() {
   const addableLoras = availableLoras.filter((lora) => !selectedIds.includes(lora.id));
   const showLoraEmptyState = !availableLoras.length && !form.loras.length;
 
-  const samplerMenu = selectedModel ? samplerOptionsFromModel(selectedModel) : [];
-  const schedulerMenu = selectedModel ? schedulerOptionsFromModel(selectedModel) : [];
+  const { samplerOptions: samplerMenu, schedulerOptions: schedulerMenu, stepsMenu } = useSamplerControls(selectedModel, null, { reconcile: "none", emptyMenus: true });
 
   // Resolution/duration/fps menus come from the selected model's effective limits, the
   // same source the studios read — so the editor can't offer a default the studio would
@@ -375,7 +359,7 @@ export function PresetManagerScreen() {
   const fpsOptions = fpsOptionsForModel(selectedModel);
   // `steps` has NO fallback menu, unlike the three above: absent means "any count", which is every
   // model but the distilled ones (sc-19502).
-  const defaultsOptions = { resolutions: resolutionOptions, durations: durationOptions, fps: fpsOptions, steps: stepsMenuFromModel(selectedModel) };
+  const defaultsOptions = { resolutions: resolutionOptions, durations: durationOptions, fps: fpsOptions, steps: stepsMenu };
 
   const validation = presetValidation({ loras: form.loras }, loras, selectedModel);
   const valueErrors = defaultValueErrors(form, isVideo, defaultsOptions);
@@ -439,7 +423,7 @@ export function PresetManagerScreen() {
   function updateField(field, value) {
     setForm((current) => {
       if (field === "name" && !selectedPreset) {
-        return { ...current, name: value, id: slugify(value) };
+        return { ...current, name: value, id: slugifyPresetId(value) };
       }
       if (field === "model") {
         const nextModel = allModels.find((item) => item.id === value);
@@ -540,7 +524,7 @@ export function PresetManagerScreen() {
       prompt.suffix = form.promptSuffix.trim();
     }
     const payload = {
-      id: slugify(form.id || form.name),
+      id: slugifyPresetId(form.id || form.name),
       name: form.name.trim(),
       kind: "general",
       scope: form.scope,
@@ -594,7 +578,7 @@ export function PresetManagerScreen() {
       prompt.suffix = form.promptSuffix.trim();
     }
     const payload = {
-      id: slugify(form.id || form.name),
+      id: slugifyPresetId(form.id || form.name),
       name: form.name.trim(),
       scope: form.scope,
       workflow: segment.workflow,
@@ -927,153 +911,63 @@ export function PresetManagerScreen() {
   );
 
   function renderPresetCard(preset) {
-    const isGeneralPreset = preset.kind === "general";
-    const segment = segmentByKey(presetSegmentKey(preset));
-    const model = allModels.find((item) => item.id === preset.model);
-    // The studio snaps its model back into the installed catalog, so launching a model preset
-    // pinned to an uninstalled model would silently land on a different one. A general preset
-    // is model-agnostic, so it's always runnable.
-    const runnable = isGeneralPreset || models.some((item) => item.id === preset.model);
-    const scope = preset.scope ?? "global";
-    const builtin = scope === "builtin";
-    const defaults = preset.defaults ?? {};
-    const loraCount = presetLoras(preset).length;
-    const prefix = preset.prompt?.prefix ?? "";
-    const suffix = preset.prompt?.suffix ?? "";
-
-    const chips = [];
-    if (isGeneralPreset) {
-      chips.push(defaults.aspect ? `${defaults.aspect} aspect` : "Any aspect");
-      chips.push(defaults.count ? `${defaults.count} variations` : "Default count");
-    } else {
-      chips.push(defaults.resolution ? defaults.resolution.replace("x", " × ") : "Any size");
-      if (segment.type === "video") {
-        chips.push(defaults.duration ? `${defaults.duration}s` : "Default length");
-        chips.push(defaults.fps ? `${defaults.fps} fps` : "Default fps");
-      } else {
-        chips.push(defaults.count ? `${defaults.count} variations` : "Default count");
-      }
-      chips.push(qualityLabel(defaults.quality) ?? "Default quality");
-    }
 
     return (
-      <article className="preset-card" key={`${scope}-${preset.id}`}>
-        <div className="preset-card-head">
-          <div className="preset-card-title">
-            <strong>{preset.name ?? preset.id}</strong>
-            <div>
-              {isGeneralPreset ? (
-                <span className="preset-card-model">General · any model</span>
-              ) : (
-                <>
-                  {segment.label} · <span className="preset-card-model">{model?.name ?? preset.model}</span>
-                </>
-              )}
-            </div>
-          </div>
-          {isGeneralPreset ? <span className="preset-kind-chip">General</span> : null}
-          <span className={scope === "global" ? "preset-scope-chip global" : "preset-scope-chip"}>{scope}</span>
-        </div>
 
-        <div className="preset-card-preview">
-          {prefix ? <span className="faint">{prefix} </span> : null}
-          <span className="token">your prompt</span>
-          {suffix ? <span className="faint"> {suffix}</span> : null}
-        </div>
+      <PresetCard
 
-        <div className="preset-card-chips">
-          {chips.map((chip) => (
-            <span className="chip" key={chip}>
-              {chip}
-            </span>
-          ))}
-          {isGeneralPreset ? null : (
-            <span className={loraCount ? "chip accent" : "chip"}>
-              {loraCount ? `${loraCount} LoRA${loraCount === 1 ? "" : "s"}` : "No LoRAs"}
-            </span>
-          )}
-        </div>
+        key={`${preset.scope ?? "global"}-${preset.id}`}
 
-        <div className="preset-card-actions">
-          <button
-            className="primary-action preset-card-use"
-            disabled={busy || !runnable}
-            onClick={() => sendPresetToStudio(preset)}
-            title={runnable ? undefined : `Install ${model?.name ?? preset.model} to use this preset`}
-            type="button"
-          >
-            <Icon.Play size={13} /> Use in Studio
-          </button>
-          {builtin ? null : (
-            <button className="secondary-action" onClick={() => editPreset(preset)} type="button">
-              <Icon.Pencil size={13} /> Edit
-            </button>
-          )}
-          <span className="preset-card-spacer" />
-          <button
-            aria-label={`Duplicate ${preset.name ?? preset.id}`}
-            className="preset-icon-button"
-            disabled={busy}
-            onClick={() => duplicateOne(preset)}
-            title="Duplicate"
-            type="button"
-          >
-            <Icon.Duplicate size={14} />
-          </button>
-          {builtin ? null : (
-            <button
-              aria-label={`Archive ${preset.name ?? preset.id}`}
-              className="preset-icon-button danger"
-              disabled={busy}
-              onClick={() => archiveOne(preset)}
-              title="Archive"
-              type="button"
-            >
-              <Icon.Trash size={14} />
-            </button>
-          )}
-        </div>
-      </article>
+        preset={preset}
+
+        allModels={allModels}
+
+        archiveOne={archiveOne}
+
+        busy={busy}
+
+        duplicateOne={duplicateOne}
+
+        editPreset={editPreset}
+
+        models={models}
+
+        presetSegmentKey={presetSegmentKey}
+
+        qualityLabel={qualityLabel}
+
+        segmentByKey={segmentByKey}
+
+        sendPresetToStudio={sendPresetToStudio}
+
+      />
+
     );
+
   }
 
   function renderEditorHead() {
-    const statusPill = creating ? (
-      <span className="preset-status-pill">Draft</span>
-    ) : dirty ? (
-      <span className="preset-status-pill warn">
-        <span className="dot" aria-hidden="true" />
-        Unsaved changes
-      </span>
-    ) : (
-      <span className="preset-status-pill">Saved</span>
-    );
 
     return (
-      <div className="preset-editor-head">
-        <div className="preset-editor-context">
-          <button className="preset-back" onClick={backToList} type="button">
-            <Icon.ArrowLeft size={14} /> All presets
-          </button>
-          <p className="eyebrow preset-editor-eyebrow">{creating ? "New preset" : "Edit preset"}</p>
-        </div>
-        <div className="preset-editor-actions">
-          {statusPill}
-          {dirty ? (
-            <button className="secondary-action preset-discard" onClick={discardChanges} type="button">
-              Discard
-            </button>
-          ) : null}
-          <button className="secondary-action" onClick={backToList} type="button">
-            Cancel
-          </button>
-          <button className="primary-action" disabled={!canSave || busy} type="submit">
-            <Icon.Save size={15} />
-            <span>{busy ? "Saving…" : creating ? "Create preset" : "Save preset"}</span>
-          </button>
-        </div>
-      </div>
+
+      <EditorHeadSection
+
+        backToList={backToList}
+
+        busy={busy}
+
+        canSave={canSave}
+
+        creating={creating}
+
+        dirty={dirty}
+
+        discardChanges={discardChanges}
+
+      />
+
     );
+
   }
 
   function renderSectionHead(title, help, optional) {
@@ -1089,626 +983,278 @@ export function PresetManagerScreen() {
   }
 
   function renderKind() {
-    // Kind is locked after create (like the id): switching an existing preset between kinds
-    // would strand its model-specific fields or its stacked-fragment semantics. New presets
-    // choose; existing presets show it read-only.
-    const kinds = [
-      ["model", "Model preset", "Pinned to one model + workflow. Full controls and LoRAs."],
-      ["general", "General preset", "Model-agnostic. Prompt + aspect only; stacks onto any model."],
-    ];
+
     return (
-      <div className="preset-form-section">
-        {renderSectionHead(
-          "Type",
-          "General presets layer prompt fragments onto any model in any workflow; model presets are pinned to one model.",
-        )}
-        <div aria-label="Preset type" className="segmented-control preset-kind" role="radiogroup">
-          {kinds.map(([value, label, help]) => (
-            <button
-              aria-checked={form.kind === value}
-              className={form.kind === value ? "active" : ""}
-              disabled={!creating || !editable}
-              key={value}
-              onClick={() => updateField("kind", value)}
-              role="radio"
-              title={help}
-              type="button"
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
+
+      <KindSection
+
+        creating={creating}
+
+        editable={editable}
+
+        form={form}
+
+        renderSectionHead={renderSectionHead}
+
+        updateField={updateField}
+
+      />
+
     );
+
   }
 
   function renderIdentity() {
+
     return (
-      <div className="preset-form-section">
-        {renderSectionHead("Identity", "Name this preset and choose where it lives.")}
-        <div className="preset-identity-row">
-          <div className="preset-name-field">
-            {creating ? (
-              <label className="field field-name">
-                <span>Name</span>
-                <input
-                  onChange={(event) => updateField("name", event.target.value)}
-                  placeholder="Name this preset…"
-                  ref={nameInputRef}
-                  required
-                  value={form.name}
-                />
-              </label>
-            ) : (
-              <label className="field field-name preset-name-saved">
-                <span>Name</span>
-                <span className="preset-name-saved-row">
-                  <input
-                    disabled={!editable}
-                    onChange={(event) => updateField("name", event.target.value)}
-                    ref={nameInputRef}
-                    required
-                    value={form.name}
-                  />
-                  <button
-                    className="preset-icon-button"
-                    disabled={!editable}
-                    onClick={() => nameInputRef.current?.focus()}
-                    title="Rename preset"
-                    type="button"
-                  >
-                    <Icon.Pencil size={14} />
-                  </button>
-                </span>
-              </label>
-            )}
-          </div>
-          <label className="field preset-scope-field">
-            <span>Scope</span>
-            <div aria-label="Scope" className="scope-segment" role="radiogroup">
-              <button
-                aria-checked={form.scope === "project"}
-                className={form.scope === "project" ? "active" : ""}
-                disabled={!activeProject || !editable}
-                onClick={() => updateField("scope", "project")}
-                role="radio"
-                type="button"
-              >
-                <Icon.Folder size={14} /> This project
-              </button>
-              <button
-                aria-checked={form.scope === "global"}
-                className={form.scope === "global" ? "active" : ""}
-                disabled={!editable}
-                onClick={() => updateField("scope", "global")}
-                role="radio"
-                type="button"
-              >
-                <Icon.Stars size={14} /> Global
-              </button>
-            </div>
-          </label>
-        </div>
-        <div className="preset-identity-meta">
-          <label className="field">
-            <span>ID</span>
-            <input
-              disabled={!creating || !editable}
-              onChange={(event) => updateField("id", event.target.value)}
-              placeholder="auto-generated from name"
-              required
-              value={form.id}
-            />
-          </label>
-          <label className="field">
-            <span>Description</span>
-            <input
-              disabled={!editable}
-              onChange={(event) => updateField("description", event.target.value)}
-              placeholder="One line — what kind of shot this makes"
-              value={form.description}
-            />
-          </label>
-        </div>
-      </div>
+
+      <IdentitySection
+
+        activeProject={activeProject}
+
+        creating={creating}
+
+        editable={editable}
+
+        form={form}
+
+        nameInputRef={nameInputRef}
+
+        renderSectionHead={renderSectionHead}
+
+        updateField={updateField}
+
+      />
+
     );
+
   }
 
   function renderModel() {
+
     return (
-      <div className="preset-form-section">
-        {renderSectionHead("Base model", "Which checkpoint this preset renders with.")}
-        <div className="preset-model-grid">
-          <label className="field">
-            <span>Model</span>
-            <select
-              disabled={!editable}
-              onChange={(event) => updateField("model", event.target.value)}
-              value={form.model}
-            >
-              {form.model ? null : <option value="">{models.length ? "Select a model…" : "No models installed"}</option>}
-              {/* A preset can be pinned to a model this install hasn't downloaded. Say so,
-                  rather than rendering an empty select that silently rewrites it on save. */}
-              {form.model && !modelInstalled ? (
-                <option value={form.model}>{selectedModel?.name ?? form.model} — not installed</option>
-              ) : null}
-              <optgroup label="Image">
-                {imageModels.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name ?? model.id}
-                  </option>
-                ))}
-              </optgroup>
-              <optgroup label="Video">
-                {videoModels.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name ?? model.id}
-                  </option>
-                ))}
-              </optgroup>
-            </select>
-          </label>
-          <span className="preset-model-meta-line">{modelHelperLine(selectedModel)}</span>
-        </div>
-      </div>
+
+      <ModelSection
+
+        editable={editable}
+
+        form={form}
+
+        imageModels={imageModels}
+
+        modelHelperLine={modelHelperLine}
+
+        modelInstalled={modelInstalled}
+
+        models={models}
+
+        renderSectionHead={renderSectionHead}
+
+        selectedModel={selectedModel}
+
+        updateField={updateField}
+
+        videoModels={videoModels}
+
+      />
+
     );
+
   }
 
   function renderWorkflow() {
+
     return (
-      <div className="preset-form-section">
-        {renderSectionHead("Workflow", "Generation modes the selected model supports.")}
-        {segments.length ? (
-          <div aria-label="Workflow" className="segmented-control preset-workflow" role="radiogroup">
-            {segments.map((segment) => (
-              <button
-                aria-checked={form.segment === segment.key}
-                className={form.segment === segment.key ? "active" : ""}
-                disabled={!editable}
-                key={segment.key}
-                onClick={() => updateField("segment", segment.key)}
-                role="radio"
-                type="button"
-              >
-                {segment.label}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p className="inline-warning">
-            {selectedModel?.name ?? "This model"} declares no preset-capable workflow. Pick another model.
-          </p>
-        )}
-      </div>
+
+      <WorkflowSection
+
+        editable={editable}
+
+        form={form}
+
+        renderSectionHead={renderSectionHead}
+
+        segments={segments}
+
+        selectedModel={selectedModel}
+
+        updateField={updateField}
+
+      />
+
     );
+
   }
 
   function renderPromptTemplate() {
+
     return (
-      <div className="preset-form-section">
-        {renderSectionHead(
-          "Prompt template",
-          isGeneral
-            ? "Fragments added around your Studio prompt. Stack several general presets to combine them."
-            : "Text wrapped around whatever you type in the Studio. The preview updates as you edit.",
-        )}
-        <div className="preset-prompt-grid">
-          <label className="field">
-            <span>{isGeneral ? "Prepend to prompt" : "Prefix"}</span>
-            <textarea
-              disabled={!editable}
-              onChange={(event) => updateField("promptPrefix", event.target.value)}
-              placeholder="e.g. Cinematic 35mm, warm tungsten,"
-              rows={2}
-              value={form.promptPrefix}
-            />
-          </label>
-          <label className="field">
-            <span>{isGeneral ? "Append to prompt" : "Suffix"}</span>
-            <textarea
-              disabled={!editable}
-              onChange={(event) => updateField("promptSuffix", event.target.value)}
-              placeholder="e.g. shallow depth of field, neutral grade"
-              rows={2}
-              value={form.promptSuffix}
-            />
-          </label>
-        </div>
-        <div className="preset-live-preview">
-          <span className="eyebrow">Live preview</span>
-          <p>
-            {form.promptPrefix.trim() ? <span className="prefix">{form.promptPrefix.trim()} </span> : null}
-            <span className="token">your prompt</span>
-            {form.promptSuffix.trim() ? <span className="suffix"> {form.promptSuffix.trim()}</span> : null}
-          </p>
-        </div>
-      </div>
+
+      <PromptTemplateSection
+
+        editable={editable}
+
+        form={form}
+
+        isGeneral={isGeneral}
+
+        renderSectionHead={renderSectionHead}
+
+        updateField={updateField}
+
+      />
+
     );
+
   }
 
   function renderDefaults() {
+
     return (
-      <div className="preset-form-section">
-        {renderSectionHead("Defaults", "The settings the Studio starts on. All still editable per run.")}
-        <div className="preset-defaults-grid">
-          <label className="field">
-            <span>{isVideo ? "Resolution" : "Aspect"}</span>
-            <select disabled={!editable} onChange={(event) => updateField("resolution", event.target.value)} value={form.resolution}>
-              <option value="">No default</option>
-              {outOfMenuOption(form.resolution, resolutionOptions, (value) => value.replace("x", " × "))}
-              {resolutionOptions.map((value) => (
-                <option key={value} value={value}>
-                  {value.replace("x", " × ")}
-                </option>
-              ))}
-            </select>
-          </label>
-          {isVideo ? (
-            <>
-              <label className="field">
-                <span>Duration</span>
-                <select disabled={!editable} onChange={(event) => updateField("duration", event.target.value)} value={form.duration}>
-                  <option value="">No default</option>
-                  {outOfMenuOption(form.duration, durationOptions, (value) => `${value}s`)}
-                  {durationOptions.map((d) => (
-                    <option key={d} value={String(d)}>
-                      {d}s
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>Frames</span>
-                <select disabled={!editable} onChange={(event) => updateField("fps", event.target.value)} value={form.fps}>
-                  <option value="">No default</option>
-                  {outOfMenuOption(form.fps, fpsOptions, (value) => `${value} fps`)}
-                  {fpsOptions.map((f) => (
-                    <option key={f} value={String(f)}>
-                      {f} fps
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </>
-          ) : (
-            <label className="field">
-              <span>Variations</span>
-              <select disabled={!editable} onChange={(event) => updateField("count", event.target.value)} value={form.count}>
-                <option value="">No default</option>
-                {[1, 2, 3, 4, 6, 8].map((n) => (
-                  <option key={n} value={String(n)}>
-                    {n}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          <label className="field preset-quality-field">
-            <span>Quality</span>
-            <div aria-label="Quality" className="quality-pick" role="radiogroup">
-              {qualityChoices.map(([value, label]) => (
-                <button
-                  aria-checked={form.quality === value}
-                  className={form.quality === value ? "active" : ""}
-                  disabled={!editable}
-                  key={value}
-                  onClick={() => updateField("quality", form.quality === value ? "" : value)}
-                  role="radio"
-                  type="button"
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </label>
-        </div>
-      </div>
+
+      <DefaultsSection
+
+        durationOptions={durationOptions}
+
+        editable={editable}
+
+        form={form}
+
+        fpsOptions={fpsOptions}
+
+        isVideo={isVideo}
+
+        outOfMenuOption={outOfMenuOption}
+
+        renderSectionHead={renderSectionHead}
+
+        resolutionOptions={resolutionOptions}
+
+        updateField={updateField}
+
+      />
+
     );
+
   }
 
   function renderGeneralDefaults() {
+
     return (
-      <div className="preset-form-section">
-        {renderSectionHead("Defaults", "Applied on top of whatever model and mode the Studio is on.")}
-        <div className="preset-defaults-grid">
-          <label className="field">
-            <span>Aspect</span>
-            <select disabled={!editable} onChange={(event) => updateField("aspect", event.target.value)} value={form.aspect}>
-              <option value="">No default</option>
-              {GENERAL_ASPECT_RATIOS.map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>Variations</span>
-            <select disabled={!editable} onChange={(event) => updateField("count", event.target.value)} value={form.count}>
-              <option value="">No default</option>
-              {[1, 2, 3, 4, 6, 8].map((n) => (
-                <option key={n} value={String(n)}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>Sort order</span>
-            <input
-              disabled={!editable}
-              onChange={(event) => updateField("order", event.target.value)}
-              placeholder="0"
-              type="number"
-              value={form.order}
-            />
-          </label>
-        </div>
-        <label className="field prompt-field">
-          <span>Negative prompt</span>
-          <input
-            disabled={!editable}
-            onChange={(event) => updateField("negativePrompt", event.target.value)}
-            placeholder="oversaturated, hands, text, watermark"
-            value={form.negativePrompt}
-          />
-        </label>
-      </div>
+
+      <GeneralDefaultsSection
+
+        GENERAL_ASPECT_RATIOS={GENERAL_ASPECT_RATIOS}
+
+        editable={editable}
+
+        form={form}
+
+        renderSectionHead={renderSectionHead}
+
+        updateField={updateField}
+
+      />
+
     );
+
   }
 
   function renderLoras() {
+
     return (
-      <div className="preset-form-section">
-        {renderSectionHead(
-          "LoRAs",
-          `Up to ${MAX_PRESET_LORAS} fine-tunes layered with this preset, compatible with ${selectedModel?.name ?? "the chosen model"}.`,
-          true,
-        )}
-        <section aria-label="Preset LoRAs" className="lora-stack">
-          {form.loras.map((selected) => {
-            const lora = loras.find((item) => item.id === selected.id);
-            const missing = !lora || lora.installState === "missing";
-            const incompatible = lora && selectedModel && !loraMatchesModel(lora, selectedModel);
-            const name = lora?.name ?? selected.id;
-            const weight = Number(selected.weight);
-            return (
-              <div className={missing || incompatible ? "lora-slot warning" : "lora-slot"} key={selected.id}>
-                <div className="lora-slot-head">
-                  <span className="lora-slot-meta">
-                    <strong>{name}</strong>
-                    <small>
-                      {missing
-                        ? "Missing or still importing"
-                        : incompatible
-                          ? `${loraLabel(lora)} | incompatible with ${selectedModel?.name ?? selectedModel?.id}`
-                          : loraLabel(lora)}
-                    </small>
-                  </span>
-                  <button
-                    aria-label={`Remove ${name}`}
-                    className="lora-slot-remove"
-                    disabled={!editable}
-                    onClick={() => removeLora(selected.id)}
-                    title="Remove"
-                    type="button"
-                  >
-                    ×
-                  </button>
-                </div>
-                <LoraKeywordSummary lora={lora} />
-                <div className="lora-slot-weight">
-                  <label>
-                    <span>Weight</span>
-                    <span className="lora-slot-weight-value">{Number.isFinite(weight) ? weight.toFixed(2) : "—"}</span>
-                  </label>
-                  {/* Bidirectional -2..2 (LORA_WEIGHT_*), matching the studio pickers and
-                      the preset normalizer: slider LoRAs run negative for the inverse
-                      direction, and 0 is a valid neutral. */}
-                  <input
-                    aria-label={`${name} weight`}
-                    disabled={!editable || missing || incompatible}
-                    max={LORA_WEIGHT_MAX}
-                    min={LORA_WEIGHT_MIN}
-                    onChange={(event) => updateLoraWeight(selected.id, event.target.value)}
-                    step={LORA_WEIGHT_STEP}
-                    type="range"
-                    value={Number.isFinite(weight) ? weight : 0}
-                  />
-                </div>
-              </div>
-            );
-          })}
 
-          {showLoraEmptyState ? (
-            <div className="empty-panel compact-panel">
-              <span>{loraEmptyMessage}</span>
-              <button onClick={onOpenModels} type="button">
-                Open Models
-              </button>
-            </div>
-          ) : null}
+      <LorasSection
 
-          {form.loras.length < MAX_PRESET_LORAS ? (
-            showLoraPicker ? (
-              <div className="lora-picker-panel">
-                <strong>Pick a LoRA</strong>
-                {addableLoras.length ? (
-                  <div className="lora-picker-list">
-                    {addableLoras.map((lora) => (
-                      <button
-                        className="lora-pick-row"
-                        key={lora.id}
-                        onClick={() => {
-                          addLoraById(lora.id);
-                          setShowLoraPicker(false);
-                        }}
-                        type="button"
-                      >
-                        <span>
-                          <strong>{lora.name ?? lora.id}</strong> {lora.family ? <span className="chip">{lora.family}</span> : null}
-                        </span>
-                        <Icon.Plus size={14} />
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="lora-pick-empty">{loraEmptyMessage}</p>
-                )}
-                <div className="lora-picker-actions">
-                  <button onClick={() => setShowLoraPicker(false)} type="button">
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <button
-                className="lora-add"
-                data-count={`· ${addableLoras.length} available`}
-                disabled={!editable || !addableLoras.length}
-                onClick={() => setShowLoraPicker(true)}
-                type="button"
-              >
-                <Icon.Plus size={15} />
-                <span>Add LoRA</span>
-              </button>
-            )
-          ) : null}
-        </section>
-      </div>
+        addLoraById={addLoraById}
+
+        addableLoras={addableLoras}
+
+        editable={editable}
+
+        form={form}
+
+        loraEmptyMessage={loraEmptyMessage}
+
+        loraLabel={loraLabel}
+
+        loras={loras}
+
+        onOpenModels={onOpenModels}
+
+        removeLora={removeLora}
+
+        renderSectionHead={renderSectionHead}
+
+        selectedModel={selectedModel}
+
+        setShowLoraPicker={setShowLoraPicker}
+
+        showLoraEmptyState={showLoraEmptyState}
+
+        showLoraPicker={showLoraPicker}
+
+        updateLoraWeight={updateLoraWeight}
+
+      />
+
     );
+
   }
 
   function renderAdvanced() {
+
     return (
-      <div className="advanced-panel">
-        <label className="field prompt-field">
-          <span>Negative prompt</span>
-          <input
-            disabled={!editable}
-            onChange={(event) => updateField("negativePrompt", event.target.value)}
-            placeholder="oversaturated, hands, text, watermark"
-            value={form.negativePrompt}
-          />
-        </label>
-        <label className="field">
-          <span>Steps</span>
-          <input
-            disabled={!editable}
-            max="200"
-            min="1"
-            onChange={(event) => updateField("steps", event.target.value)}
-            placeholder="model default"
-            type="number"
-            value={form.steps}
-          />
-        </label>
-        <label className="field">
-          <span>Guidance</span>
-          <input
-            disabled={!editable}
-            max="60"
-            min="0"
-            onChange={(event) => updateField("guidanceScale", event.target.value)}
-            placeholder="model default"
-            step="0.1"
-            type="number"
-            value={form.guidanceScale}
-          />
-        </label>
-        {samplerMenu.length > 1 ? (
-          <label className="field">
-            <span>Sampler</span>
-            <select disabled={!editable} onChange={(event) => updateField("sampler", event.target.value)} value={form.sampler}>
-              <option value="">No default</option>
-              {samplerMenu.map((value) => (
-                <option key={value} value={value}>
-                  {SAMPLER_LABELS[value] ?? value}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        {schedulerMenu.length > 1 ? (
-          <label className="field">
-            <span>Scheduler</span>
-            <select disabled={!editable} onChange={(event) => updateField("scheduler", event.target.value)} value={form.scheduler}>
-              <option value="">No default</option>
-              {schedulerMenu.map((value) => (
-                <option key={value} value={value}>
-                  {SCHEDULER_LABELS[value] ?? value}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        <label className="field">
-          <span>Sort order</span>
-          <input
-            disabled={!editable}
-            onChange={(event) => updateField("order", event.target.value)}
-            placeholder="0"
-            type="number"
-            value={form.order}
-          />
-        </label>
-        <label className="field">
-          <span>Derived modes</span>
-          <input disabled readOnly value={compactModeList(activeSegment.workflow)} />
-        </label>
-      </div>
+
+      <PresetAdvancedSection
+
+        activeSegment={activeSegment}
+
+        editable={editable}
+
+        form={form}
+
+        samplerMenu={samplerMenu}
+
+        schedulerMenu={schedulerMenu}
+
+        updateField={updateField}
+
+      />
+
     );
+
   }
 
   function renderFooter() {
-    const loraCount = form.loras.length;
-    const chips = isGeneral
-      ? [
-          "General · any model",
-          form.aspect ? `${form.aspect} aspect` : "Any aspect",
-          form.count ? `${form.count} variations` : "Default count",
-        ]
-      : [
-          selectedModel?.name ?? form.model,
-          form.resolution ? form.resolution.replace("x", " × ") : "Any size",
-          isVideo
-            ? form.duration
-              ? `${form.duration}s`
-              : "Default length"
-            : form.count
-              ? `${form.count} variations`
-              : "Default count",
-          loraCount ? `${loraCount} LoRA${loraCount === 1 ? "" : "s"}` : "No LoRAs",
-        ].filter(Boolean);
 
     return (
-      <>
-        {/* Surfaced reasons only — read-only built-in, broken defaults, preset-LoRA
-            problems. Name/model are silent requirements. The message banner below is a
-            submission result, left as-is (epic 10644, sc-10651). */}
-        <ValidationSummary issues={saveValidity.surfaced} label="Save errors" />
-        {message.text ? (
-          <p className={message.tone === "success" ? "inline-success" : "inline-warning"}>{message.text}</p>
-        ) : null}
-        <div className="preset-recipe-footer">
-          <div className="preset-recipe-chips">
-            <span className="eyebrow">Recipe</span>
-            {chips.map((chip, index) => (
-              <span className={index === 0 ? "chip accent" : "chip"} key={chip}>
-                {chip}
-              </span>
-            ))}
-          </div>
-          <span className="preset-card-spacer" />
-          <button className="secondary-action" onClick={backToList} type="button">
-            Cancel
-          </button>
-          <button className="primary-action" disabled={!canSave || busy} type="submit">
-            <Icon.Save size={15} />
-            <span>{busy ? "Saving…" : creating ? "Create preset" : "Save preset"}</span>
-          </button>
-        </div>
-      </>
+
+      <FooterSection
+
+        backToList={backToList}
+
+        busy={busy}
+
+        canSave={canSave}
+
+        creating={creating}
+
+        form={form}
+
+        isGeneral={isGeneral}
+
+        isVideo={isVideo}
+
+        message={message}
+
+        saveValidity={saveValidity}
+
+        selectedModel={selectedModel}
+
+      />
+
     );
+
   }
 }

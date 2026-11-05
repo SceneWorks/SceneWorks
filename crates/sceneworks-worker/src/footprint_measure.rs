@@ -98,19 +98,7 @@ static FOOTPRINT_RAN: AtomicBool = AtomicBool::new(false);
 /// backbone file `sentinel` (e.g. `unet/diffusion_pytorch_model.safetensors`). Returns the `<tier>/`
 /// dir itself, ready to hand to `WeightsSource::Dir`. `None` if the tier hasn't been pulled.
 fn cached_tier_dir(repo: &str, tier: &str, sentinel: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let repo_cache = repo.replace('/', "--");
-    let snapshots = PathBuf::from(home)
-        .join(".cache/huggingface/hub")
-        .join(format!("models--{repo_cache}"))
-        .join("snapshots");
-    std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .find_map(|e| {
-            let tier_dir = e.path().join(tier);
-            tier_dir.join(sentinel).is_file().then_some(tier_dir)
-        })
+    super::smoke_support::cached_tier_dir(repo, tier, sentinel)
 }
 
 /// Resolve the tier dir from an explicit override env (a turnkey root OR the tier dir itself) or the

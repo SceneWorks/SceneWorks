@@ -1,3 +1,5 @@
+mod common;
+use common::write_safetensors;
 use std::fs;
 use std::path::Path;
 // Only the Windows junction fixture holds an owned path; gated so the macOS/Linux build does not
@@ -23,36 +25,6 @@ fn linked_request(root: &Path, relative_path: &str) -> CheckpointInspectionReque
         "comfy-primary",
     )
     .expect("valid request")
-}
-
-fn write_safetensors(path: &Path, entries: &[(&str, &str)], metadata: Option<Value>) {
-    let mut header = Map::new();
-    if let Some(metadata) = metadata {
-        header.insert("__metadata__".to_owned(), metadata);
-    }
-    let mut offset = 0_u64;
-    for (name, dtype) in entries {
-        let width = match *dtype {
-            "F16" | "BF16" => 2,
-            "F32" => 4,
-            _ => 1,
-        };
-        header.insert(
-            (*name).to_owned(),
-            json!({
-                "dtype": dtype,
-                "shape": [1],
-                "data_offsets": [offset, offset + width],
-            }),
-        );
-        offset += width;
-    }
-    let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
-    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
-    bytes.extend(encoded);
-    bytes.resize(bytes.len() + offset as usize, 0x5a);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, bytes).unwrap();
 }
 
 fn qwen_transformer_entries() -> Vec<(&'static str, &'static str)> {
@@ -358,11 +330,13 @@ fn safetensors_single_file_and_fused_checkpoint_share_the_inventory_contract() {
         &temp.path().join("qwen.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     write_safetensors(
         &temp.path().join("sdxl.safetensors"),
         &sdxl_fused_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
 
     let single = inspect_checkpoint(&linked_request(temp.path(), "qwen.safetensors"));
@@ -392,11 +366,13 @@ fn gguf_and_component_directory_produce_the_same_inventory_shape() {
         &directory.join("transformer/model.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     write_safetensors(
         &directory.join("vae/model.safetensors"),
         &vae_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     fs::write(
         directory.join("model_index.json"),
@@ -444,6 +420,7 @@ fn discovery_is_header_only_but_runnable_validation_checks_declared_ranges() {
         &path,
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let bytes = fs::read(&path).unwrap();
     fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
@@ -477,6 +454,7 @@ fn duplicate_keys_and_malformed_metadata_are_typed_and_actionable() {
         &temp.path().join("bad-metadata.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": 7})),
+        0x5a,
     );
 
     let duplicate = inspect_checkpoint(&linked_request(temp.path(), "duplicate.safetensors"));
@@ -507,6 +485,7 @@ fn missing_index_shards_and_ambiguous_component_roles_are_diagnostics() {
         &indexed.join("model-00001-of-00002.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     fs::write(
         indexed.join("model.safetensors.index.json"),
@@ -519,6 +498,7 @@ fn missing_index_shards_and_ambiguous_component_roles_are_diagnostics() {
         &conflicting.join("vae/not-a-vae.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
 
     let missing = inspect_checkpoint(&linked_request(temp.path(), "indexed"));
@@ -581,6 +561,7 @@ fn a_non_utf8_checkpoint_basename_refuses_rather_than_discovering_an_empty_inter
         &target,
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     std::os::unix::fs::symlink(&target, temp.path().join("checkpoint.safetensors")).unwrap();
 
@@ -616,6 +597,7 @@ fn unchanged_bytes_are_deterministic_and_changed_bytes_rotate_the_fingerprint() 
         &path,
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let request = linked_request(temp.path(), "model.safetensors");
 
@@ -652,6 +634,7 @@ fn descriptor_duplicate_keys_and_invalid_gguf_ranges_fail_closed() {
         &directory.join("transformer/model.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     fs::write(
         directory.join("transformer/config.json"),
@@ -711,6 +694,7 @@ fn managed_sources_compile_managed_locators_for_every_artifact() {
         &temp.path().join("model.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let request = CheckpointInspectionRequestV1::managed(
         "managed-community-model",
@@ -741,6 +725,7 @@ fn descriptor_byte_changes_rotate_directory_fingerprint_and_plan_identity() {
         &directory.join("transformer/model.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let config = directory.join("transformer/config.json");
     fs::write(
@@ -773,6 +758,7 @@ fn duplicate_gguf_metadata_and_unsafe_index_paths_fail_closed() {
         &indexed.join("model-00001-of-00001.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     fs::write(
         indexed.join("model.safetensors.index.json"),
@@ -804,6 +790,7 @@ fn safetensors_indices_are_bijections_over_the_actual_shard_tensor_tables() {
         &valid.join(shard_name),
         &qwen_entries,
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let valid_mappings = qwen_entries
         .iter()
@@ -825,7 +812,12 @@ fn safetensors_indices_are_bijections_over_the_actual_shard_tensor_tables() {
     assert_eq!(shard_evidence.tensor_names, expected_tensor_names);
 
     let bogus = temp.path().join("bogus/transformer");
-    write_safetensors(&bogus.join(shard_name), &[("actual.weight", "F16")], None);
+    write_safetensors(
+        &bogus.join(shard_name),
+        &[("actual.weight", "F16")],
+        None,
+        0x5a,
+    );
     write_safetensors_index(
         &bogus.join("model.safetensors.index.json"),
         &[("bogus.weight", shard_name)],
@@ -836,6 +828,7 @@ fn safetensors_indices_are_bijections_over_the_actual_shard_tensor_tables() {
         &incomplete.join(shard_name),
         &[("actual.one", "F16"), ("actual.two", "F16")],
         None,
+        0x5a,
     );
     write_safetensors_index(
         &incomplete.join("model.safetensors.index.json"),
@@ -849,11 +842,13 @@ fn safetensors_indices_are_bijections_over_the_actual_shard_tensor_tables() {
         &duplicate.join(shard_one),
         &[("shared.weight", "F16")],
         None,
+        0x5a,
     );
     write_safetensors(
         &duplicate.join(shard_two),
         &[("shared.weight", "F16"), ("other.weight", "F16")],
         None,
+        0x5a,
     );
     write_safetensors_index(
         &duplicate.join("model.safetensors.index.json"),
@@ -892,11 +887,13 @@ fn same_size_mutation_between_complete_passes_is_typed_and_uses_verified_bytes()
         &transformer,
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     write_safetensors(
         &directory.join("vae/model.safetensors"),
         &vae_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let original_size = fs::metadata(&transformer).unwrap().len();
     let request = linked_request(temp.path(), "mutable");
@@ -927,6 +924,7 @@ fn mutation_after_the_second_pass_is_caught_by_final_identity_revalidation() {
         &artifact,
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let original_size = fs::metadata(&artifact).unwrap().len();
     let changed = inspect_checkpoint_with_hook(
@@ -954,6 +952,7 @@ fn timestamp_restored_same_size_mutation_uses_authoritative_final_bytes() {
         &artifact,
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let original_size = fs::metadata(&artifact).unwrap().len();
     let original_modified = fs::metadata(&artifact).unwrap().modified().unwrap();
@@ -1026,8 +1025,18 @@ fn aggregate_tensor_name_evidence_budget_fails_closed_across_artifacts() {
         .iter()
         .map(|name| (name.as_str(), "U8"))
         .collect::<Vec<_>>();
-    write_safetensors(&directory.join("left.safetensors"), &left_entries, None);
-    write_safetensors(&directory.join("right.safetensors"), &right_entries, None);
+    write_safetensors(
+        &directory.join("left.safetensors"),
+        &left_entries,
+        None,
+        0x5a,
+    );
+    write_safetensors(
+        &directory.join("right.safetensors"),
+        &right_entries,
+        None,
+        0x5a,
+    );
 
     let inspected = inspect_checkpoint(&linked_request(temp.path(), "aggregate-evidence"));
     let budget_diagnostics = inspected
@@ -1356,6 +1365,7 @@ fn canonical_link_confinement_accepts_internal_and_rejects_escaping_reparse_targ
         &internal_target,
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let internal_dir = root.join("internal/transformer");
     fs::create_dir_all(&internal_dir).unwrap();
@@ -1366,6 +1376,7 @@ fn canonical_link_confinement_accepts_internal_and_rejects_escaping_reparse_targ
         &external_target,
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let escaping_dir = root.join("escaping/transformer");
     fs::create_dir_all(&escaping_dir).unwrap();
@@ -1391,6 +1402,7 @@ fn unix_directory_symlinks_are_confined_on_linux_and_wsl() {
         &internal_target.join("model.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     fs::create_dir_all(root.join("internal")).unwrap();
     std::os::unix::fs::symlink(&internal_target, root.join("internal/transformer")).unwrap();
@@ -1400,6 +1412,7 @@ fn unix_directory_symlinks_are_confined_on_linux_and_wsl() {
         &external_target.join("model.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     fs::create_dir_all(root.join("escaping")).unwrap();
     std::os::unix::fs::symlink(&external_target, root.join("escaping/transformer")).unwrap();
@@ -1424,6 +1437,7 @@ fn windows_directory_junctions_are_confined_as_reparse_points() {
         &internal_target.join("transformer/model.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     fs::create_dir_all(&root).unwrap();
     let _internal = WindowsDirectoryJunction::create(&root.join("internal"), &internal_target);
@@ -1433,6 +1447,7 @@ fn windows_directory_junctions_are_confined_as_reparse_points() {
         &external_target.join("transformer/model.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     let _escaping = WindowsDirectoryJunction::create(&root.join("escaping"), &external_target);
 
@@ -1466,6 +1481,7 @@ fn descriptor_family_fallback_and_indexed_hidden_shards_are_fail_closed() {
         &hidden.join(".model-00001-of-00001.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     fs::write(
         hidden.join("model.safetensors.index.json"),
@@ -1571,8 +1587,8 @@ fn a_comfyui_wan_tree_compiles_to_two_named_expert_layers() {
     for (label, high_file, low_file, high_mark, low_mark) in spellings {
         let temp = TempDir::new().unwrap();
         let tree = temp.path().join("wan22");
-        write_safetensors(&tree.join(high_file), &wan_expert_entries(), None);
-        write_safetensors(&tree.join(low_file), &wan_expert_entries(), None);
+        write_safetensors(&tree.join(high_file), &wan_expert_entries(), None, 0x5a);
+        write_safetensors(&tree.join(low_file), &wan_expert_entries(), None, 0x5a);
 
         let result = inspect_checkpoint(&linked_request(temp.path(), "wan22"));
         assert!(result.is_runnable(), "{label}: {:?}", result.diagnostics);
@@ -1632,6 +1648,7 @@ fn the_expert_role_vocabulary_cannot_reclassify_another_family_or_a_single_exper
             .join("qwen/unet/qwen_image_high_noise_fp8_e4m3fn.safetensors"),
         &qwen_transformer_entries(),
         None,
+        0x5a,
     );
     let qwen = inspect_checkpoint(&linked_request(temp.path(), "qwen"));
     assert!(qwen.is_runnable(), "{:?}", qwen.diagnostics);
@@ -1658,7 +1675,12 @@ fn the_expert_role_vocabulary_cannot_reclassify_another_family_or_a_single_exper
     ] {
         let dir = temp.path().join("wan-single");
         let _ = fs::remove_dir_all(&dir);
-        write_safetensors(&dir.join("unet").join(name), &wan_expert_entries(), None);
+        write_safetensors(
+            &dir.join("unet").join(name),
+            &wan_expert_entries(),
+            None,
+            0x5a,
+        );
         let result = inspect_checkpoint(&linked_request(temp.path(), "wan-single"));
         assert!(result.is_runnable(), "{name}: {:?}", result.diagnostics);
         assert_eq!(result.plans[0].family, "wan-video", "{name}");
@@ -1768,6 +1790,7 @@ fn an_index_diagnostic_names_shards_relative_to_the_checkpoint() {
         &checkpoint.join("model-00001-of-00001.safetensors"),
         &qwen_transformer_entries(),
         Some(json!({"format": "pt"})),
+        0x5a,
     );
     fs::write(
         checkpoint.join("model.safetensors.index.json"),
@@ -1810,11 +1833,13 @@ fn a_plans_layer_identity_does_not_move_with_the_checkpoint() {
             &root.join(prefix).join("transformer/model.safetensors"),
             &qwen_transformer_entries(),
             Some(json!({"format": "pt"})),
+            0x5a,
         );
         write_safetensors(
             &root.join(prefix).join("vae/model.safetensors"),
             &vae_entries(),
             Some(json!({"format": "pt"})),
+            0x5a,
         );
         fs::write(
             root.join(prefix).join("model_index.json"),

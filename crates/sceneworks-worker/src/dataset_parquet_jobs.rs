@@ -6,13 +6,12 @@
 
 use super::*;
 use crate::downloads::fetch_public_source_url_bytes;
+use crate::parquet_row::{row_string_alias, row_u32_with_policy, MetadataField};
 use futures_util::stream::{self, StreamExt};
 use image::GenericImageView;
 use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::Field;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::Cursor;
 
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGE_EDGE: u32 = 16_384;
@@ -53,8 +52,8 @@ pub(crate) async fn run_dataset_parquet_import_job(
     let project_root = PathBuf::from(required_payload_string(&job.payload, "projectRoot")?);
     let dataset_root = PathBuf::from(required_payload_string(&job.payload, "datasetRoot")?);
     let source_path = PathBuf::from(required_payload_string(&job.payload, "sourcePath")?);
-    let url_column = required_payload_string(&job.payload, "urlColumn")?.to_owned();
-    let caption_column = required_payload_string(&job.payload, "captionColumn")?.to_owned();
+    let url_column = required_payload_text(&job.payload, "urlColumn")?.to_owned();
+    let caption_column = required_payload_text(&job.payload, "captionColumn")?.to_owned();
     let dataset_version = payload_u32(&job.payload, "datasetVersion", 0);
     let max_items = payload_usize(&job.payload, "maxItems", 1_000).clamp(
         1,
@@ -116,6 +115,8 @@ pub(crate) async fn run_dataset_parquet_import_job(
     let scan_caption_includes = caption_includes.clone();
     let scan_caption_excludes = caption_excludes.clone();
     let scan_caption_fields = caption_field_columns.clone();
+    let cancel = gen_core::CancelFlag::new();
+    let scan_cancel = cancel.clone();
     let scan_task = crate::load_progress::spawn_blocking(move || {
         read_candidates(
             &scan_source,
@@ -126,11 +127,18 @@ pub(crate) async fn run_dataset_parquet_import_job(
             &scan_caption_includes,
             &scan_caption_excludes,
             &scan_caption_fields,
+            &scan_cancel,
         )
     });
-    let candidates =
-        heartbeat_while_blocking(api, settings, &job.id, "Parquet metadata scan", scan_task)
+    let (canceled, result) =
+        StreamSupervisor::new(cancel, scan_task, progress_report_interval(settings), None)
+            .wait(api, settings, &job.id)
             .await?;
+    if canceled {
+        mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    let candidates = result.map_err(|error| task_join_error("Parquet metadata scan", error))??;
     if candidates.is_empty() {
         return Err(WorkerError::InvalidPayload(format!(
             "No usable URL/caption rows were found in columns {url_column:?} and {caption_column:?}."
@@ -359,12 +367,19 @@ fn read_candidates(
     caption_includes: &[String],
     caption_excludes: &[String],
     caption_field_columns: &[String],
+    cancel: &gen_core::CancelFlag,
 ) -> WorkerResult<Vec<Candidate>> {
+    scan_checkpoint(cancel)?;
     let files = parquet_files(source)?;
     let mut candidates = Vec::with_capacity(limit.min(16_384));
     let mut seen_urls = HashSet::new();
     let mut observed_columns = Vec::new();
+    let mut scanned = 0;
     for path in files {
+        scan_checkpoint(cancel)?;
+        if scanned >= limit {
+            break;
+        }
         let reader = SerializedFileReader::new(File::open(&path)?).map_err(|error| {
             WorkerError::InvalidPayload(format!(
                 "Could not read Parquet shard {}: {error}",
@@ -377,7 +392,11 @@ fn read_candidates(
                 path.display()
             ))
         })?;
-        for row in rows {
+        // Bound rows examined, not only accepted candidates: rejected/missing/duplicate rows
+        // consume the same finite budget, across every shard. `take` avoids decoding row cap + 1.
+        for row in rows.take(limit.saturating_sub(scanned)) {
+            scan_checkpoint(cancel)?;
+            scanned += 1;
             let row = row.map_err(|error| {
                 WorkerError::InvalidPayload(format!(
                     "Could not decode a row in {}: {error}",
@@ -461,46 +480,26 @@ fn read_candidates(
     Ok(candidates)
 }
 
+fn scan_checkpoint(cancel: &gen_core::CancelFlag) -> WorkerResult<()> {
+    if cancel.is_cancelled() {
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    Ok(())
+}
+
 fn row_u32(row: &parquet::record::Row, requested: &str) -> Option<u32> {
-    row.get_column_iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(requested))
-        .and_then(|(_, field)| match field {
-            Field::Byte(value) => u32::try_from(*value).ok(),
-            Field::Short(value) => u32::try_from(*value).ok(),
-            Field::Int(value) => u32::try_from(*value).ok(),
-            Field::Long(value) => u32::try_from(*value).ok(),
-            Field::UByte(value) => Some((*value).into()),
-            Field::UShort(value) => Some((*value).into()),
-            Field::UInt(value) => Some(*value),
-            Field::ULong(value) => u32::try_from(*value).ok(),
-            _ => None,
-        })
+    match row_u32_with_policy(row, &[requested], false) {
+        MetadataField::Value(value) => Some(value),
+        MetadataField::Missing | MetadataField::Invalid => None,
+    }
 }
 
 fn row_string(row: &parquet::record::Row, requested: &str) -> Option<String> {
-    row.get_column_iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(requested))
-        .and_then(|(_, field)| match field {
-            Field::Str(value) => Some(value.clone()),
-            Field::Bytes(value) => std::str::from_utf8(value.data()).ok().map(str::to_owned),
-            _ => None,
-        })
+    row_string_alias(row, &[requested])
 }
 
 fn hex_prefix(bytes: &[u8], chars: usize) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(chars);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        if output.len() == chars {
-            break;
-        }
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-        if output.len() == chars {
-            break;
-        }
-    }
-    output
+    sceneworks_core::hashing::hex_prefix(bytes, chars)
 }
 
 async fn materialize_candidate(
@@ -519,19 +518,22 @@ async fn materialize_candidate(
     let bytes = fetch_public_source_url_bytes(&candidate.url, MAX_IMAGE_BYTES).await?;
     let target_for_write = target.clone();
     let dimensions = crate::load_progress::spawn_blocking(move || -> WorkerResult<(u32, u32)> {
-        let mut reader = image::ImageReader::new(Cursor::new(bytes))
-            .with_guessed_format()
-            .map_err(|error| {
-                WorkerError::InvalidPayload(format!("dataset image format failed: {error}"))
-            })?;
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(MAX_IMAGE_EDGE);
-        limits.max_image_height = Some(MAX_IMAGE_EDGE);
-        limits.max_alloc = Some(MAX_IMAGE_DECODE_ALLOC);
-        reader.limits(limits);
-        let image = reader.decode().map_err(|error| {
+        let (image, _) = sceneworks_core::image_decode::decode_image_bounded(
+            &bytes,
+            sceneworks_core::image_decode::ImageDecodeLimits {
+                max_bytes: MAX_IMAGE_BYTES,
+                max_width: MAX_IMAGE_EDGE,
+                max_height: MAX_IMAGE_EDGE,
+                max_pixels: u64::from(MAX_IMAGE_EDGE) * u64::from(MAX_IMAGE_EDGE),
+                max_alloc: MAX_IMAGE_DECODE_ALLOC,
+                catalog_formats_only: false,
+            },
+        )
+        .map_err(|error| {
             WorkerError::InvalidPayload(format!("dataset image decode failed: {error}"))
         })?;
+        // The previous owned reader freed the encoded input before PNG encoding too.
+        drop(bytes);
         let (width, height) = image.dimensions();
         if width < min_edge || height < min_edge {
             return Err(WorkerError::InvalidPayload(format!(
@@ -651,8 +653,44 @@ mod tests {
             &["portrait".to_owned()],
             &["logo".to_owned()],
             &["short_caption".to_owned(), "missing_column".to_owned()],
+            &gen_core::CancelFlag::new(),
         )
         .expect("rows read");
+
+        // Every first-row filter rejection still consumes the scan budget. A matching row exists
+        // at index 1; it must not be read when the scanned-row cap is one.
+        let rejected = read_candidates(
+            &path,
+            "url",
+            "text",
+            1,
+            0,
+            &["logo".to_owned()],
+            &[],
+            &[],
+            &gen_core::CancelFlag::new(),
+        );
+        assert!(rejected
+            .expect_err("cap stops before the matching second row")
+            .to_string()
+            .contains("no usable rows"));
+        // Cancellation precedes even source discovery/metadata reads.
+        let cancel = gen_core::CancelFlag::new();
+        cancel.cancel();
+        assert!(matches!(
+            read_candidates(
+                &temp.path().join("absent"),
+                "url",
+                "text",
+                10,
+                0,
+                &[],
+                &[],
+                &[],
+                &cancel
+            ),
+            Err(WorkerError::Canceled(_))
+        ));
 
         assert_eq!(candidates.len(), 1);
         // sc-25685: named caption columns become per-item captions; an absent column adds nothing.
@@ -678,8 +716,18 @@ mod tests {
         file.extend_from_slice(b"PAR1");
         std::fs::write(&path, file).expect("fixture writes");
 
-        let import_error = read_candidates(&path, "url", "text", 1, 0, &[], &[], &[])
-            .expect_err("truncated metadata cannot be imported");
+        let import_error = read_candidates(
+            &path,
+            "url",
+            "text",
+            1,
+            0,
+            &[],
+            &[],
+            &[],
+            &gen_core::CancelFlag::new(),
+        )
+        .expect_err("truncated metadata cannot be imported");
         assert!(
             import_error
                 .to_string()

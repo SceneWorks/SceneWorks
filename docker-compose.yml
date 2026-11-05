@@ -17,6 +17,9 @@ services:
       HOME: /sceneworks/data
       SCENEWORKS_API_HOST: ${SCENEWORKS_API_HOST:-0.0.0.0}
       SCENEWORKS_API_PORT: ${SCENEWORKS_API_PORT:-8010}
+      # Workers address this service as api; preserve that explicit authority
+      # alongside operator-declared LAN/proxy names. Wildcards never disable checks.
+      SCENEWORKS_MCP_ALLOWED_HOSTS: api,${SCENEWORKS_MCP_ALLOWED_HOSTS:-}
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_CONFIG_DIR: /sceneworks/config
       # Download-credential store (sc-16540). Deliberately NOT under /sceneworks/config:

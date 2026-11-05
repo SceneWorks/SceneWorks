@@ -210,6 +210,39 @@ mod tests {
     }
 
     #[test]
+    fn shared_backstop_keeps_exif_orientation_and_metadata_strip_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("rotated.jpg");
+        RgbImage::from_pixel(3, 2, image::Rgb([20, 80, 140]))
+            .save(&source)
+            .unwrap();
+        let mut bytes = std::fs::read(&source).unwrap();
+        // EXIF TIFF IFD0 orientation=6 (rotate 90 degrees clockwise).
+        let exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
+        let mut segment = vec![0xff, 0xe1];
+        segment.extend_from_slice(&u16::try_from(exif.len() + 2).unwrap().to_be_bytes());
+        segment.extend_from_slice(exif);
+        bytes.splice(2..2, segment);
+        std::fs::write(&source, &bytes).unwrap();
+        let native = sceneworks_core::image_decode::decode_image_any(&source).unwrap();
+        assert_eq!((native.width(), native.height()), (3, 2));
+        let oriented = load_oriented(&source).unwrap();
+        assert_eq!((oriented.width(), oriented.height()), (2, 3));
+        let copied =
+            sceneworks_core::media_convert::ingest_image(&source, &dir.path().join("copy"))
+                .unwrap();
+        assert_eq!(std::fs::read(copied.path).unwrap(), bytes);
+        let output = dir.path().join("stripped.png");
+        write_metadata_stripped(&source, &output).unwrap();
+        assert_eq!(dims(&output), (2, 3));
+        let mut decoder = ImageReader::open(&output).unwrap().into_decoder().unwrap();
+        assert_eq!(
+            decoder.orientation().unwrap(),
+            image::metadata::Orientation::NoTransforms
+        );
+    }
+
+    #[test]
     fn baking_a_90_degree_orientation_swaps_dims() {
         // The behavior load_oriented relies on for rotated sources: a 90°/270° tag swaps width and
         // height, which is exactly why the crop must be planned on the *oriented* dimensions.

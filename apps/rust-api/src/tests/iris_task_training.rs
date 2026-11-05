@@ -4,6 +4,7 @@
 //! trained export as a depth / restoration model with its task identity, its selection in the depth
 //! and restoration job paths, resume, and Model Manager delete.
 use super::support::*;
+use std::sync::Arc;
 
 const DEPTH_TARGET: &str = "iris_3b_depth";
 const RESTORE_TARGET: &str = "iris_3b_restore";
@@ -125,13 +126,8 @@ fn npy(height: u32, width: u32) -> Vec<u8> {
 }
 
 async fn project(app: &axum::Router) -> String {
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Iris Task Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Iris Task Project").await;
     project["id"].as_str().expect("project id").to_owned()
 }
 
@@ -932,4 +928,127 @@ async fn a_failed_task_export_registers_no_model_and_leaves_its_sources_untouche
             "{target_id}: the same export, completed, registers: {reported}"
         );
     }
+}
+
+fn upload_cache_files(
+    directory: &std::path::Path,
+) -> std::collections::BTreeSet<std::path::PathBuf> {
+    match std::fs::read_dir(directory) {
+        Ok(entries) => entries.map(|entry| entry.unwrap().path()).collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(error) => panic!("upload-cache fixture cannot be read: {error}"),
+    }
+}
+
+async fn wait_for_upload_cache(
+    directory: &std::path::Path,
+    expected: &std::collections::BTreeSet<std::path::PathBuf>,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while &upload_cache_files(directory) != expected {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("all canceled/completed staging owners clean up");
+}
+
+#[tokio::test]
+async fn canceling_a_sidecar_rename_cleans_both_staging_names() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temporary)).unwrap();
+    let project_id = project(&app).await;
+    let dataset = dataset(&app, &project_id, 1).await;
+    let dataset_id = dataset["id"].as_str().unwrap().to_owned();
+    let item_id = dataset["items"][0]["id"].as_str().unwrap().to_owned();
+    let cache = state.settings.data_dir.join("cache/uploads");
+    let original = upload_cache_files(&cache);
+    let gate = Arc::new(crate::test_hooks::BlockingIoTestHook::default());
+    *state.test_hooks.sidecar_before_rename_once.lock() = Some(gate.clone());
+    let pending = tokio::spawn(async move {
+        upload_sidecar(
+            &app,
+            &project_id,
+            &dataset_id,
+            &item_id,
+            "depth",
+            "depth.npy",
+            &npy(16, 32),
+            &[],
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_reached())
+        .await
+        .unwrap();
+    assert_eq!(upload_cache_files(&cache).len(), original.len() + 1);
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_finished())
+        .await
+        .unwrap();
+    wait_for_upload_cache(&cache, &original).await;
+}
+
+#[tokio::test]
+async fn a_detached_sidecar_store_keeps_its_input_until_the_accepted_copy_finishes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temporary)).unwrap();
+    let project_id = project(&app).await;
+    let dataset = dataset(&app, &project_id, 1).await;
+    let dataset_id = dataset["id"].as_str().unwrap().to_owned();
+    let item_id = dataset["items"][0]["id"].as_str().unwrap().to_owned();
+    let cache = state.settings.data_dir.join("cache/uploads");
+    let original = upload_cache_files(&cache);
+    let gate = Arc::new(crate::test_hooks::BlockingIoTestHook::default());
+    *state.test_hooks.sidecar_before_store_once.lock() = Some(gate.clone());
+    let upload_app = app.clone();
+    let upload_project = project_id.clone();
+    let upload_dataset = dataset_id.clone();
+    let upload_item = item_id.clone();
+    let pending = tokio::spawn(async move {
+        upload_sidecar(
+            &upload_app,
+            &upload_project,
+            &upload_dataset,
+            &upload_item,
+            "depth",
+            "depth.npy",
+            &npy(16, 32),
+            &[],
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_reached())
+        .await
+        .unwrap();
+    let staged = upload_cache_files(&cache)
+        .difference(&original)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(staged.len(), 1);
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    assert!(
+        staged[0].is_file(),
+        "the detached store operation still owns its input"
+    );
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_finished())
+        .await
+        .unwrap();
+    let (status, saved) = request(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        saved["items"][0]["irisDepth"]["path"],
+        format!("sidecars/{item_id}.depth.npy")
+    );
+    wait_for_upload_cache(&cache, &original).await;
 }

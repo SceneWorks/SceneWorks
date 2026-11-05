@@ -403,17 +403,27 @@ pub fn iris_rank_entry() -> Option<i32> {
     let spec_path = PathBuf::from(std::env::var_os(RANK_SPEC_ENV)?);
     // The rank's own diagnostics (stderr, inherited by the worker's log) use the worker's format.
     sceneworks_core::observability::init_logging();
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         let thread = std::thread::Builder::new()
             .name("iris-rank".to_owned())
             .stack_size(crate::WORKER_ENTRY_STACK_BYTES)
             .spawn(move || {
-                let settings = crate::settings::Settings::from_env();
                 let mut out = std::io::stdout();
+                let settings = match crate::settings::Settings::try_from_env() {
+                    Ok(settings) => settings,
+                    Err(error) => {
+                        write_message(
+                            &mut out,
+                            &RankMessage::Failed {
+                                message: error.to_string(),
+                                dist: None,
+                                canceled: false,
+                            },
+                        );
+                        return 1;
+                    }
+                };
                 match (read_spec(&spec_path), RankWorld::from_env()) {
                     (Ok(spec), Ok(world)) => run_rank_process_with(
                         &spec,
@@ -442,10 +452,7 @@ pub fn iris_rank_entry() -> Option<i32> {
             _ => 1,
         })
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         let _ = spec_path;
         write_message(
@@ -470,13 +477,7 @@ fn read_spec(path: &Path) -> Result<RankSpec, String> {
 /// Train one rank: the SAME weights-free preflight and trainer inputs as the single-process path,
 /// the rank's world stamped onto the request, progress and the outcome written as protocol lines on
 /// `out`, cancellation read from `input` (a `cancel` line, or EOF when the coordinator is gone).
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 pub(crate) fn run_rank_process_using(
     spec: &RankSpec,
     world: &RankWorld,
@@ -490,10 +491,7 @@ pub(crate) fn run_rank_process_using(
 
 /// [`run_rank_process_using`], optionally exiting the PROCESS when the coordinator disappears (the
 /// real rank entry does; an in-process test must not).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn run_rank_process_with(
     spec: &RankSpec,
     world: &RankWorld,
@@ -725,10 +723,7 @@ fn free_loopback_port() -> std::io::Result<u16> {
 
 /// Coordinate `world_size` rank processes of an Iris plan until they finish: rank 0's events go to
 /// `tx`, `cancel` fans out, and the outcome is rank 0's export or a typed failure. Blocking.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn drive_rank_fleet(
     settings: &crate::settings::Settings,
     job_id: &str,
@@ -748,10 +743,7 @@ pub(crate) fn drive_rank_fleet(
     )
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn drive_rank_fleet_with(
     settings: &crate::settings::Settings,
     job_id: &str,
@@ -1075,13 +1067,7 @@ fn fleet_failure_message(failures: &[RankFailure], world_size: usize) -> String 
 /// Fake rank processes for the fleet tests: the test binary itself, re-entered on the ignored
 /// [`tests::fake_iris_rank_process`] test, which plays one rank according to
 /// `SCENEWORKS_FAKE_RANK_BEHAVIOR` and records its environment under `SCENEWORKS_FAKE_RANK_RECORD`.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 pub(crate) mod test_support {
     use super::*;
 
@@ -1194,13 +1180,7 @@ pub(crate) mod test_support {
     }
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod tests {
     use super::*;
     #[test]

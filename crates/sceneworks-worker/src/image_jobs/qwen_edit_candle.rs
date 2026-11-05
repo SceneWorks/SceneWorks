@@ -1,19 +1,53 @@
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::requested_receipt_variant;
+use super::conditioning::candle_conditioned_edit_work;
+use super::conditioning::load_reference_image;
+use super::conditioning::parse_poses;
+use super::conditioning::PoseInput;
+use super::events::consume_gen_events;
+use super::load_policy::apply_candle_qwen_load_shape;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::candle_certified_hf_artifact_path;
+use super::load_spec::candle_certified_load_spec;
+use super::load_spec::candle_pinned_hf_artifact_path;
+use super::load_spec::load_spec;
+use super::memory::apply_request_scoped_candle_residency;
+use super::memory::gate_with_evict_reclaim;
+use super::memory::installed_tier_keys;
+use super::memory::vram_reject_tail_for_tier;
+use super::memory::ResolutionLever;
+use super::nvfp4_host_eligible;
+use super::nvfp4_selected;
+use super::quantization::gate_tier_key;
+use super::quantization::tier_key_from_resolved_dir;
+use super::resolve_seed;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32_with;
+use super::standard_tier_subdir;
 #[cfg(test)]
 use super::standard_tier_subdir_gated;
-use super::{
-    apply_candle_qwen_load_shape, apply_request_scoped_candle_residency,
-    attach_manifest_text_encoder, candle_certified_hf_artifact_path, candle_certified_load_spec,
-    candle_conditioned_edit_work, candle_pinned_hf_artifact_path, consume_gen_events,
-    drive_gen_items, gate_tier_key, gate_with_evict_reclaim, installed_tier_keys,
-    load_reference_image, load_spec, nvfp4_host_eligible, nvfp4_selected, parse_poses,
-    read_safetensors_header, requested_receipt_variant, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_seed,
-    standard_tier_subdir, start_gen_stream, tier_key_from_resolved_dir, vram_reject_tail_for_tier,
-    AdapterKind, AdapterSpec, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    Path, PathBuf, PoseInput, QwenEdit, QwenEditPaths, QwenEditRequest, ResolutionLever, Settings,
-    Value, WorkerError, WorkerResult,
-};
-use super::{huggingface_snapshot_dir, resolve_app_managed_model_dir};
+use super::stream::drive_gen_items;
+use super::stream::start_gen_stream;
+use super::AdapterKind;
+use super::AdapterSpec;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::QwenEdit;
+use super::QwenEditPaths;
+use super::QwenEditRequest;
+use crate::huggingface_snapshot_dir;
+use crate::read_safetensors_header;
+use crate::resolve_app_managed_model_dir;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 /// User-adapter residency for the pinned Qwen Edit provider. Packed tiers always use deferred
@@ -440,12 +474,7 @@ fn qwen_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
 /// Reading the row keeps this catalog-driven: `MODEL_TABLE` already points all four edit ids at the
 /// turnkey (the same repo the MLX lane loads), so the two lanes cannot drift apart again.
 fn qwen_edit_candle_repo(request: &ImageRequest) -> String {
-    request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .map(str::to_owned)
         .or_else(|| {
             crate::engines::MODEL_TABLE
@@ -480,9 +509,7 @@ pub(crate) fn resolve_qwen_edit_candle_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Qwen edit modelPath").map(Some);
@@ -894,10 +921,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             tier,
             user_adapter_bytes,
         );
-        let raw_budget = crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-            crate::vram_gate::cuda_vram_cap_gb(),
-        );
+        let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
         let quant = match tier {
             "q4" => Some(gen_core::Quant::Q4),
             "q8" => Some(gen_core::Quant::Q8),
@@ -1442,7 +1466,7 @@ mod qwen_edit_tier_reconcile_tests {
             ("HF_HOME", ""),
         ]);
         let data = tempfile::tempdir().expect("temp data dir");
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = data.path().to_path_buf();
         let base = sceneworks_core::hf_home::huggingface_repo_cache_path(
             data.path(),

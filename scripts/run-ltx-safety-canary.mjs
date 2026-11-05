@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { fileSha256 } from "./lib/file-sha256.mjs";
+import { legacyUtf16Json as stableCompactJson } from "./lib/canonical-json.mjs";
 
 import { withMacMetalExecutionLease, scopedMetalChildOptions } from "./lib/apple-metal-lease.mjs";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants, createReadStream } from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import {
   chmod, copyFile, link, lstat, mkdtemp, mkdir, open, readFile, readdir, realpath, rm,
   rename, stat, unlink, writeFile,
@@ -14,6 +16,7 @@ import { createInterface } from "node:readline";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
+import { inferenceRevision as currentInferenceRevision } from "./lib/inference-provenance.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 import {
   canonicalJson, capturePlannedCase, logicalCaseId, validateBundle,
@@ -1300,14 +1303,6 @@ function validProcessIdentities(value) {
       && typeof identity?.started === "string" && identity.started.length > 0);
 }
 
-function stableCompactJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableCompactJson).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) =>
-      `${JSON.stringify(key)}:${stableCompactJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
 
 export function validateWatchdogEventChain(events) {
   if (!Array.isArray(events) || events.length === 0) {
@@ -2723,16 +2718,9 @@ async function sampleHostPressure(memoryBytes, signal) {
   return { memoryFreePercent, memoryFreeBytes, swapFreeBytes };
 }
 
-async function sha256(file, signal) {
-  const digest = createHash("sha256");
-  signal?.throwIfAborted();
-  for await (const chunk of createReadStream(file, { signal })) {
-    digest.update(chunk);
-    signal?.throwIfAborted();
-  }
-  return digest.digest("hex");
+function sha256(file, signal) {
+  return fileSha256(file, { signal });
 }
-
 export async function repositoryToolchain() {
   const source = await readFile(path.join(ROOT, "rust-toolchain.toml"), "utf8");
   const channels = [...source.matchAll(/^channel\s*=\s*"([^"]+)"\s*$/gm)].map((match) => match[1]);
@@ -4841,8 +4829,7 @@ async function controller(argv) {
     git(inferenceRepo, ["rev-parse", "HEAD^{tree}"]),
     repositoryToolchain(),
   ]);
-  const adapterSource = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
-  const pin = adapterSource.match(/pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/)?.[1];
+  const pin = await currentInferenceRevision();
   if (!pin || inferenceRevision !== pin) fail(`inference checkout ${inferenceRevision} does not match adapter pin ${pin}`);
   if (process.env.SCENEWORKS_LTX_REPOSITORY !== ARTIFACT_REPOSITORY
       || process.env.SCENEWORKS_LTX_REVISION !== ARTIFACT_REVISION) {

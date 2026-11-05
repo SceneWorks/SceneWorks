@@ -1,3 +1,4 @@
+import { titleForAsset } from "../assetTitle.js";
 import React, { useMemo, useState } from "react";
 import { isLibraryAsset } from "../constants.js";
 import { assetMatchesCharacter } from "../characterMembership.js";
@@ -5,9 +6,6 @@ import { AssetThumbnail, assetCanRenderAsImage } from "./assetMedia.jsx";
 import { FileDropzone } from "./FileDropzone.jsx";
 import { Modal } from "./Modal.jsx";
 
-function assetTitle(asset) {
-  return asset?.displayName ?? asset?.title ?? asset?.name ?? asset?.id ?? "Untitled asset";
-}
 
 const TABS = [
   ["file", "File"],
@@ -21,21 +19,22 @@ function CandidateGrid({ assets, selectedIds, onToggle, emptyLabel }) {
   if (!assets.length) {
     return <div className="empty-panel compact-panel">{emptyLabel}</div>;
   }
+  const selectedSet = new Set(selectedIds);
   return (
     <div aria-multiselectable className="dataset-add-grid" role="listbox">
       {assets.map((asset) => {
-        const selected = selectedIds.includes(asset.id);
+        const selected = selectedSet.has(asset.id);
         return (
           <button
             aria-selected={selected}
-            className={selected ? "dataset-add-card selected" : "dataset-add-card"}
+            className={selected ? "dataset-add-card asset-tile-windowed selected" : "dataset-add-card asset-tile-windowed"}
             key={asset.id}
             onClick={() => onToggle(asset.id)}
             role="option"
             type="button"
           >
             <AssetThumbnail asset={asset} />
-            <span>{assetTitle(asset)}</span>
+            <span>{titleForAsset(asset)}</span>
           </button>
         );
       })}
@@ -52,6 +51,9 @@ export function DatasetAddDialog({
   memberIds = [],
   characters = [],
   importing = false,
+  importProgress = "",
+  importError = "",
+  onCancelImport,
   onImport,
   onAdd,
   onClose,
@@ -107,23 +109,22 @@ export function DatasetAddDialog({
     if (selectedIds.length) {
       // sc-2022: adding from the Character tab associates the dataset with that
       // character on the next save; other sources pass no character.
-      onAdd(selectedIds, tab === "character" ? characterId : null);
-      setSelectedIds([]);
+      const result = onAdd(selectedIds, tab === "character" ? characterId : null);
+      setSelectedIds(result?.rejectedIds ?? []);
+    }
+  }
+
+  async function importFiles(files) {
+    const result = await onImport(files);
+    if (result?.rejectedIds?.length) {
+      setSelectedIds(result.rejectedIds);
+      setTab("library");
     }
   }
 
   function switchTab(next) {
     setTab(next);
     setSelectedIds([]);
-  }
-
-  function handleDrop(event) {
-    event.preventDefault();
-    setDragActive(false);
-    const files = event.dataTransfer?.files;
-    if (files?.length) {
-      onImport(files);
-    }
   }
 
   return (
@@ -158,13 +159,17 @@ export function DatasetAddDialog({
           accept={fileAccept}
           active={dragActive}
           busy={importing}
+          busyLabel={importProgress || "Importing"}
           hint={fileHint}
           multiple={multiple}
           onActiveChange={setDragActive}
-          onDrop={handleDrop}
-          onFiles={onImport}
+          onFiles={importFiles}
         />
       ) : null}
+
+      {tab === "file" && importing ? <button type="button" onClick={onCancelImport}>Cancel import</button> : null}
+      {tab === "file" && importProgress && importing ? <p role="status">{importProgress}</p> : null}
+      {importError ? <p className="inline-warning" role="alert">{importError}</p> : null}
 
       {tab === "library" ? (
         <CandidateGrid

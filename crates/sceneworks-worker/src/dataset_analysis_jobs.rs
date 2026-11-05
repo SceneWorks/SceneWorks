@@ -8,41 +8,20 @@
 
 use super::*;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CLIP_TEXT_EMBEDDER_ID: &str = "clip_vit_l14_text";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CLIP_EMBEDDER_MODEL: &str = "openai/clip-vit-large-patch14";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const EMBEDDING_SPACE: &str = "clip-vit-l14";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CANCEL_MESSAGE: &str = "Dataset analysis canceled by user.";
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{CancelFlag, Image, LoadSpec, WeightsSource};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct AnalysisItem {
     image_path: PathBuf,
@@ -51,10 +30,7 @@ struct AnalysisItem {
     caption_hash: String,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct AnalysisEmbeddingRecord {
     content_hash: String,
@@ -63,10 +39,7 @@ struct AnalysisEmbeddingRecord {
     text_embedding: Option<Vec<f32>>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_dataset_analysis_job(
     api: &ApiClient,
     settings: &Settings,
@@ -78,12 +51,7 @@ pub(crate) async fn run_dataset_analysis_job(
             "Dataset analysis job has no items to embed.".to_owned(),
         ));
     }
-    let model_name_or_path = job
-        .payload
-        .get("modelNameOrPath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let model_name_or_path = crate::payload::trimmed_string(job.payload.get("modelNameOrPath"))
         .unwrap_or(CLIP_EMBEDDER_MODEL)
         .to_owned();
     let weights_dir =
@@ -207,7 +175,7 @@ pub(crate) async fn run_dataset_analysis_job(
     );
 
     // Hand the spawned blocking task to the shared scaffold (sc-8836, F-034): it owns the
-    // `CancelJoinGuard`, the per-item progress select loop (with the sc-8835 cancel/heartbeat
+    // `StreamSupervisor`, the per-item progress loop (with the sc-8835 cancel/heartbeat
     // handling), the saving update, and the sidecar POST. Only the endpoint/space/messages and the
     // record → payload fold differ here.
     let dataset_id = required_payload_string(&job.payload, "datasetId")?.to_owned();
@@ -248,10 +216,7 @@ pub(crate) async fn run_dataset_analysis_job(
     Ok(())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn analysis_embedding_records_payload(records: &[AnalysisEmbeddingRecord]) -> Vec<Value> {
     records
         .iter()
@@ -266,99 +231,36 @@ fn analysis_embedding_records_payload(records: &[AnalysisEmbeddingRecord]) -> Ve
         .collect()
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn analysis_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<AnalysisItem>> {
-    let dataset_root = payload
-        .get("datasetRoot")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Dataset analysis payload.datasetRoot must be an app-managed dataset path."
-                    .to_owned(),
-            )
-        })?;
-    let items = payload
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Dataset analysis payload.items must be an array.".to_owned(),
-            )
-        })?;
-    items
-        .iter()
-        .map(|item| {
-            let object = item.as_object().ok_or_else(|| {
-                WorkerError::InvalidPayload("Dataset analysis item must be an object.".to_owned())
-            })?;
-            let item_id = object
-                .get("itemId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "Dataset analysis item is missing itemId.".to_owned(),
-                    )
-                })?;
-            let content_hash = object
-                .get("contentHash")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Dataset analysis item {item_id} is missing contentHash."
-                    ))
-                })?
-                .to_owned();
-            let caption_text = object
+    parse_dataset_items(
+        settings,
+        payload,
+        "Dataset analysis",
+        DatasetItemPolicy::Strict,
+        |item| {
+            let content_hash = item.required("contentHash")?.to_owned();
+            let caption_text = item
+                .object
                 .get("captionText")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            let caption_hash = object
-                .get("captionHash")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
+            let caption_hash = crate::payload::trimmed_string(item.object.get("captionHash"))
                 .map(str::to_owned)
                 .unwrap_or_else(|| sceneworks_core::dataset_quality::caption_hash(&caption_text));
-            let image_path = object
-                .get("imagePath")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Dataset analysis item {item_id} is missing imagePath."
-                    ))
-                })?;
-            let image_path = resolve_dataset_item_path(
-                settings,
-                dataset_root,
-                image_path,
-                &format!("Dataset analysis item {item_id} imagePath"),
-            )?;
+            let image_path = item.image_path()?;
             Ok(AnalysisItem {
                 image_path,
                 content_hash,
                 caption_text,
                 caption_hash,
             })
-        })
-        .collect()
+        },
+    )
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn load_analysis_image(path: &Path) -> WorkerResult<Image> {
     let decoded = crate::image_decode::decode_image_any(path)
         .map_err(|error| {
@@ -372,10 +274,7 @@ fn load_analysis_image(path: &Path) -> WorkerResult<Image> {
     })
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn analysis_result(dataset_id: &str, embedded_count: usize, stored: Value) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("embedder".to_owned(), json!(CLIP_EMBEDDER_ID));
@@ -389,7 +288,7 @@ fn analysis_result(dataset_id: &str, embedded_count: usize, stored: Value) -> Js
     result
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_dataset_analysis_job(
     _api: &ApiClient,
     _settings: &Settings,
@@ -409,26 +308,14 @@ mod tests {
     fn test_settings(data_dir: &Path) -> Settings {
         Settings {
             api_url: "http://127.0.0.1".to_owned(),
-            access_token: None,
-            data_dir: data_dir.to_path_buf(),
             config_dir: data_dir.join("config"),
             worker_id: "test-worker".to_owned(),
             gpu_id: "gpu-0".to_owned(),
-            is_child_worker: false,
-            poll_seconds: 1,
-            heartbeat_seconds: 1,
-            shutdown_timeout_seconds: 1,
             huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
-            huggingface_token: None,
-            credentials: Vec::new(),
             max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
             max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
-            allow_private_lora_urls: false,
-            utility_workers: 1,
             backend_mlx_enabled: true,
-            backend_candle_enabled: false,
-            gpu_memory_limit_bytes: 0,
-            external_model_roots: Vec::new(),
+            ..crate::Settings::for_test(data_dir.to_path_buf())
         }
     }
 

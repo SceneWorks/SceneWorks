@@ -25,9 +25,10 @@
 //! ([`the_privacy_callout_counts_its_own_prose_fields`]) and the pose coordinate arrays it names
 //! twice ([`the_doc_names_exactly_the_pose_fields_that_travel`]).
 
+mod common;
+use common::repo_root;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
 
 use sceneworks_core::contracts::{Asset, JsonObject};
 use sceneworks_core::workflow_parameters::{
@@ -38,13 +39,17 @@ use sceneworks_core::workflow_png::{
 };
 use sceneworks_core::workflow_share::{
     build_workflow_share, is_path_shaped, parse_workflow_share, AdvancedDisposition, AdvancedShape,
-    SeamDisposition, WorkflowInput, WorkflowLora, WorkflowProducer, WorkflowShare, WorkflowUpscale,
-    ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, INPUT_KINDS,
-    INPUT_KIND_SOURCE, OMITTED_FIELDS, OMITTED_LORAS, POSE_FIELDS, PRODUCER_NAME, PRODUCER_URL,
-    WORKFLOW_KINDS, WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
-    WORKFLOW_SHARE_SCHEMA_VERSION, WORKFLOW_WRITE_SEAMS,
+    WorkflowInput, WorkflowLora, WorkflowProducer, WorkflowShare, WorkflowUpscale,
+    ADVANCED_KEY_RULES, INPUT_KINDS, INPUT_KIND_SOURCE, OMITTED_FIELDS, OMITTED_LORAS, POSE_FIELDS,
+    PRODUCER_NAME, PRODUCER_URL, WORKFLOW_KINDS, WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY,
+    WORKFLOW_SHARE_MAX_BYTES, WORKFLOW_SHARE_SCHEMA_VERSION,
 };
+#[path = "common/workflow_registry.rs"]
+mod workflow_registry;
 use serde_json::{json, Value};
+use workflow_registry::{
+    SeamDisposition, ADVANCED_BUILDERS, DEFERRED_ADVANCED_BUILDERS, WORKFLOW_WRITE_SEAMS,
+};
 
 /// Repo-relative path of the document under test. Named once so a move is one edit.
 const DOC_PATH: &str = "docs/workflow-share-envelope.md";
@@ -54,12 +59,7 @@ const LINT_TEST_PATH: &str = "crates/sceneworks-core/tests/workflow_share.rs";
 
 /// The module the contributor section sends people to edit.
 const SHARE_SOURCE_PATH: &str = "crates/sceneworks-core/src/workflow_share.rs";
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
+const REGISTRY_SOURCE_PATH: &str = "crates/sceneworks-core/tests/common/workflow_registry.rs";
 
 fn read_repo_file(relative_path: &str) -> String {
     let path = repo_root().join(relative_path);
@@ -1992,7 +1992,7 @@ fn the_doc_lists_exactly_the_builder_registry_fields() {
     assert_same_set(
         &pinned_set(&doc(), "builder-fields", 0),
         &struct_fields(
-            &read_repo_file(SHARE_SOURCE_PATH),
+            &read_repo_file(REGISTRY_SOURCE_PATH),
             "pub struct AdvancedBuilder {",
         ),
         "builder-fields",

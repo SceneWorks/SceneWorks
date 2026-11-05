@@ -291,18 +291,7 @@ fn unified_memory_admission_accounts_for_the_output_canvas() {
 }
 
 fn shipped_entry(id: &str) -> Value {
-    let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("builtin.models.jsonc embedded")
-        .1;
-    let manifest: Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text)).unwrap();
-    manifest["models"]
-        .as_array()
-        .and_then(|models| models.iter().find(|model| model["id"] == id))
-        .cloned()
-        .unwrap_or_else(|| panic!("{id} is in the builtin catalog"))
+    Value::Object(crate::test_env::shipped_catalog_entry(id))
 }
 
 /// The catalog's declared (unmeasured) floors are the worker's floor + reserve on each lane, so the
@@ -506,10 +495,7 @@ fn a_trained_model_previews_with_its_own_tile_geometry() {
 
 /// The linked engine's descriptor matches what the UI and admission assume, on both native lanes
 /// (MLX declares `mac_only`, Candle does not).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn the_linked_restore_transform_declares_the_planned_capabilities() {
     let descriptor = crate::inference_runtime::transform_descriptor(IRIS_RESTORE_MODEL_ID)
@@ -529,16 +515,10 @@ fn the_linked_restore_transform_declares_the_planned_capabilities() {
 
 // The job wiring (`upscale_jobs`) compiles only where an upscaler backend does (macOS / Candle), so
 // the job-level tests and their fixtures do too.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) use job_tests::*;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod job_tests {
     use super::*;
 

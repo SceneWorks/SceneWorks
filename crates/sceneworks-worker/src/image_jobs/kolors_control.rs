@@ -1,18 +1,45 @@
-use super::advanced;
-use super::{
-    candle_artifact_path_matches, candle_certified_hf_artifact_path, candle_resolved_tier_key,
-    curated_image_menu, normalize_sampling_knob, pid_effective_dims, pid_output_tier, pose_entries,
-    read_advanced_sampling_knobs, resolve_adapters, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_pid_weights, run_candle_strict_control,
-    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, KolorsControl, KolorsControlPaths, KolorsControlRequest,
-    Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult,
-};
-use super::{
-    ensure_hf_cached_file, resolve_app_managed_model_dir, safe_weight_filename,
-    standard_tier_subdir, DownloadContext,
-};
+use super::adapters::resolve_adapters;
+use super::conditioning::pose_entries;
+#[cfg(target_os = "macos")]
+use super::kolors::kolors_control_raw_settings;
+use super::load_spec::candle_artifact_path_matches;
+use super::load_spec::candle_certified_hf_artifact_path;
+use super::memory::candle_resolved_tier_key;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::resolve_pid_weights;
+use super::run_candle_strict_control;
+use super::sampling::curated_image_menu;
+use super::sampling::normalize_sampling_knob;
+use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::standard_tier_subdir;
+use super::strict_control::trusted_control_weight_revision;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::KolorsControl;
+use super::KolorsControlPaths;
+use super::KolorsControlRequest;
+use super::Progress;
+use crate::advanced;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
+use crate::ensure_hf_cached_file;
+use crate::resolve_app_managed_model_dir;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 // Candle (Windows/CUDA) Kolors ControlNet (strict pose) route (sc-5489, epic 5480; sc-8823 driver route)
@@ -78,9 +105,7 @@ fn resolve_kolors_control_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Kolors control modelPath")
@@ -129,9 +154,7 @@ pub(super) fn kolors_control_repo_file(request: &ImageRequest) -> WorkerResult<(
         .and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(default)
             .to_owned()
     };
@@ -438,12 +461,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
         &job.id,
         backend,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model).unwrap_or(KOLORS_CONTROL_DEFAULT_REPO)
         })
@@ -499,10 +517,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
     if let Some(pid) = pid_weights.as_ref() {
         strategy_spec = strategy_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let predicted_peak = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
     let (control_repo, control_file) = kolors_control_repo_file(request)?;
     let control_revision = trusted_control_weight_revision(

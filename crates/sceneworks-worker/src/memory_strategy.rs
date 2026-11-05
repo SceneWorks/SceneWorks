@@ -34,7 +34,7 @@ use crate::ladder_margin_policy::{admission_allowance, AdmissionSubject};
 
 /// Provider-owned reference demand, resolved BEFORE derive/fit and recomputed on warm cache hits.
 /// No-reference callers preserve the legacy zero surcharge without probing a provider or its files.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn reference_workspace_bytes(
     provider_id: &str,
     spec: &gen_core::LoadSpec,
@@ -52,6 +52,7 @@ pub(crate) fn reference_workspace_bytes(
 }
 
 // The pure MLX selector also compiles in the no-backend worker and CPU tests.
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn reference_workspace_bytes_using(
     registry: &gen_core::ProviderRegistry,
     provider_id: &str,
@@ -74,6 +75,7 @@ pub(crate) fn reference_workspace_bytes_using(
 /// Bridge a calibration receipt's persisted materialization shape to the gen-core contract type.
 /// The two enums are the same axis; `sceneworks-core` keeps its own spelling because it
 /// deliberately has no gen-core dependency.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn load_shape_from_receipt(
     key: sceneworks_core::memory_calibration::LoadShapeKey,
 ) -> gen_core::LoadShape {
@@ -498,7 +500,7 @@ impl Candidate<'_> {
     }
 }
 
-const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 /// Evidence stores an integer byte ceiling. Admission converts that canonical value (after any
 /// allowance widening, which happens in integer bytes) to GiB exactly once; callers cannot submit

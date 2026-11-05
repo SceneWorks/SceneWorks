@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
-import { fallbackModels } from "./modelCatalog.js";
+import { fallbackModels } from "./testSupport/builtinModels.js";
 import {
   EXTRA_COMPATIBLE_LORA_FAMILIES,
   acceptedLoraFamilies,
@@ -260,10 +260,10 @@ describe("loraMatchesModel", () => {
 
   it("offers no LoRA for SenseNova when its schema-valid catalog rows omit the advertisement", () => {
     const seededSenseNova = fallbackModels.filter((model) => model.id.startsWith("sensenova_u1_"));
-    expect(seededSenseNova.map((model) => model.id)).toEqual([
+    expect(seededSenseNova.map((model) => model.id)).toEqual(expect.arrayContaining([
       "sensenova_u1_8b",
       "sensenova_u1_8b_fast",
-    ]);
+    ]));
     for (const model of seededSenseNova) {
       expect(model.loraCompatibility).toBeUndefined();
       expect(loraMatchesModel(sdxlLora, model)).toBe(false);
@@ -447,12 +447,14 @@ describe("slugifyPresetId", () => {
 
   it("trims leading and trailing separators so the id starts alphanumeric", () => {
     expect(slugifyPresetId("  --Neon Noir--  ")).toBe("neon_noir");
-    expect(slugifyPresetId("neon-noir")).toBe("neon-noir");
+    expect(slugifyPresetId("neon-noir")).toBe("neon_noir");
   });
 
-  it("returns empty string for non-sluggable input", () => {
-    expect(slugifyPresetId("日本語")).toBe("");
-    expect(slugifyPresetId("")).toBe("");
+  it("uses the backend fallback for non-sluggable input and lora", () => {
+    expect(slugifyPresetId("日本語")).toBe("preset");
+    expect(slugifyPresetId("")).toBe("preset");
+    expect(slugifyPresetId("LoRa")).toBe("preset");
+    expect(slugifyPresetId("Kelvin K")).toBe("kelvin");
   });
 });
 

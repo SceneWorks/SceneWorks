@@ -1,3 +1,4 @@
+import { getAudioContextCtor } from "./audioContext.js";
 import { timelineAudioState } from "./timelineAudio.js";
 
 // One graph for the assembled cut, created/resumed synchronously by the transport
@@ -111,7 +112,7 @@ export function createTimelineAudioPlayback(onError) {
       const token = generation;
       try {
         if (layers.size && !context) {
-          const Constructor = globalThis.AudioContext ?? globalThis.webkitAudioContext;
+          const Constructor = getAudioContextCtor();
           if (!Constructor) throw new Error("This browser does not support timeline audio mixing.");
           context = new Constructor();
           // Preserve the sum and relative layer gains. A final peak guard avoids

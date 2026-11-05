@@ -1,3 +1,33 @@
+#[cfg(not(target_os = "macos"))]
+use super::admit_candle_load_spec_floor;
+use super::checkpoint_plan::checkpoint_plan_bespoke_primary_dir;
+use super::checkpoint_plan::request_is_checkpoint_plan_backed;
+use super::events::consume_gen_events;
+use super::krea_imported::imported_model_quant;
+use super::mlx_model;
+use super::resolve_seed;
+use super::routing::imported_generate_request_supported;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::stream::drive_gen_items;
+use super::stream::start_cached_gen_stream_with_request_state;
+use super::CancelFlag;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::WeightsSource;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // Fine-tuned Mage-Flow base checkpoint txt2img route (sc-15036, epic 14034 F6).
 //
 // Renders the artifact a FULL base fine-tune (sc-14056) produces: a diffusers **transformer
@@ -32,9 +62,9 @@
 /// The adapter/engine id recorded on assets rendered from a fine-tuned base (distinct from the
 /// builtin `mage_flow*` registry ids and their `mlx_mage` label).
 #[cfg(target_os = "macos")]
-const MAGE_FINETUNED_ENGINE: &str = "mlx_mage_finetuned";
+pub(super) const MAGE_FINETUNED_ENGINE: &str = "mlx_mage_finetuned";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const MAGE_FINETUNED_ENGINE: &str = "candle_mage_finetuned";
+pub(super) const MAGE_FINETUNED_ENGINE: &str = "candle_mage_finetuned";
 
 /// The builtin catalog id whose installed snapshot supplies the shared text encoder + VAE a
 /// fine-tuned transformer is paired with.
@@ -44,7 +74,7 @@ const MAGE_FINETUNED_ENGINE: &str = "candle_mage_finetuned";
 /// `coRequisite` rows are what name the shared-components mirror. The components are BIT-IDENTICAL
 /// across all six Mage variants (sc-14979), so this resolves the same bytes whichever variant a
 /// user happens to have installed.
-const MAGE_FINETUNED_BASE_MODEL: &str = "mage_flow_base";
+pub(super) const MAGE_FINETUNED_BASE_MODEL: &str = "mage_flow_base";
 
 /// The tier the shared components are staged from: **dense bf16**.
 ///
@@ -55,12 +85,12 @@ const MAGE_FINETUNED_BASE_MODEL: &str = "mage_flow_base";
 /// prompt). Pairing dense with dense is the coherent load, and it is the same `bf16` tier the
 /// training run itself resolved (`training_jobs::TRAINING_COMPONENT_TIER`), so a user who could
 /// train has the components installed by construction.
-const MAGE_FINETUNED_COMPONENT_TIER: &str = "bf16";
+pub(super) const MAGE_FINETUNED_COMPONENT_TIER: &str = "bf16";
 
 /// Stable request/evidence identity for the bespoke imported-transformer lane. The user model id
 /// remains asset provenance; it must not masquerade as one of the six pinned builtin providers.
 #[cfg(target_os = "macos")]
-const MAGE_FINETUNED_MEMORY_ROUTE: &str = "mage_finetuned";
+pub(super) const MAGE_FINETUNED_MEMORY_ROUTE: &str = "mage_finetuned";
 
 /// Denoise-steps / guidance fallbacks — the undistilled `mage_flow_base` regime a fine-tune
 /// inherits. The Studio normally supplies both from the catalog entry's `defaults`
@@ -77,13 +107,13 @@ const MAGE_FINETUNED_DEFAULT_GUIDANCE: f32 = 5.0;
 /// `inference_runtime::checkpoint_adapter` is keyed on the projection too. Passing the portable
 /// `mage_flow` instead would silently answer "no adapter for this family" for a family this backend
 /// really does bind — which is why the value is named rather than spelled inline at the call site.
-const MAGE_FLOW_PLAN_FAMILY: &str = "mage-flow";
+pub(super) const MAGE_FLOW_PLAN_FAMILY: &str = "mage-flow";
 
 #[derive(Debug, PartialEq, Eq)]
-struct PreparedMageFinetunedTransformer {
-    directory: PathBuf,
-    config: gen_core::PinnedWeightsFile,
-    weights: gen_core::PinnedWeightsFile,
+pub(super) struct PreparedMageFinetunedTransformer {
+    pub(super) directory: PathBuf,
+    pub(super) config: gen_core::PinnedWeightsFile,
+    pub(super) weights: gen_core::PinnedWeightsFile,
 }
 
 /// Resolve the fine-tuned Mage-Flow transformer directory for `request`, or `None` when this is not
@@ -100,7 +130,7 @@ struct PreparedMageFinetunedTransformer {
 /// The path is confined by `normalize_app_managed_model_path` (a payload can never point the
 /// checkpoint outside a declared root; LAN jobs API, epic 4484) — the same confinement
 /// `resolve_weights_dir` uses.
-fn resolve_mage_finetuned_transformer(
+pub(super) fn resolve_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
@@ -125,9 +155,7 @@ fn resolve_mage_finetuned_transformer(
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
         })
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
     else {
         return Ok(None);
     };
@@ -171,7 +199,7 @@ fn resolve_mage_finetuned_transformer(
 ///
 /// This is also the only way a LINKED Mage-Flow fine-tune is loadable at all: a linked checkpoint
 /// has no `paths.model` for the scan above to find.
-fn resolve_plan_backed_mage_finetuned_transformer(
+pub(super) fn resolve_plan_backed_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
@@ -216,7 +244,7 @@ fn resolve_plan_backed_mage_finetuned_transformer(
 ///
 /// All-or-nothing, before any compute: a missing component fails the job with the seam's actionable
 /// error naming the component id + repo, rather than a mid-load "No such file or directory".
-fn resolve_mage_finetuned_components(
+pub(super) fn resolve_mage_finetuned_components(
     settings: &Settings,
 ) -> WorkerResult<std::collections::BTreeMap<String, WeightsSource>> {
     let descriptor = crate::inference_runtime::imported_model_descriptor(
@@ -224,14 +252,16 @@ fn resolve_mage_finetuned_components(
         gen_core::ImportedModelSource::TransformerDirectory,
         gen_core::ImportedModelOperation::Generate,
     )
-        .ok_or_else(|| {
-            WorkerError::Engine(
-                "the Mage-Flow generator is not registered in this runtime build — cannot resolve \
+    .ok_or_else(|| {
+        WorkerError::Engine(
+            "the Mage-Flow generator is not registered in this runtime build — cannot resolve \
                  the shared components a fine-tuned checkpoint pairs with"
-                    .to_owned(),
-            )
-        })?;
-    let manifest_entry = crate::training_jobs::builtin_model_manifest_entry(MAGE_FINETUNED_BASE_MODEL)
+                .to_owned(),
+        )
+    })?;
+    let manifest_entry = crate::training_jobs::builtin_model_manifest_entry(
+        MAGE_FINETUNED_BASE_MODEL,
+    )
     .ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "'{MAGE_FINETUNED_BASE_MODEL}' has no builtin catalog entry to resolve the shared \
@@ -266,7 +296,7 @@ fn resolve_mage_finetuned_components(
 /// [`prepare_mage_finetuned_transformer`] so the payload-selected transformer dir stays pinned from
 /// route selection through provider load — the same split `sdxl_imported_available` uses.
 #[cfg(test)]
-fn mage_finetuned_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn mage_finetuned_available(request: &ImageRequest, settings: &Settings) -> bool {
     matches!(
         prepare_mage_finetuned_transformer(request, settings),
         Ok(Some(_))
@@ -276,7 +306,7 @@ fn mage_finetuned_available(request: &ImageRequest, settings: &Settings) -> bool
 /// Validate the exact registered Mage generate shape and retain its pinned transformer files for
 /// dispatch. Production moves this value through [`PreparedImageRoute`] so async admission work
 /// cannot retarget the payload-selected directory between route selection and provider load.
-fn prepare_mage_finetuned_transformer(
+pub(super) fn prepare_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
@@ -317,12 +347,12 @@ fn mage_finetuned_raw_settings(
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert("guidanceScale".to_owned(), json!(guidance));
-    raw.insert(
-        "mode".to_owned(),
-        Value::String("text_to_image".to_owned()),
-    );
+    raw.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
     // The provenance that makes an asset traceable back to the run that produced its base.
-    raw.insert("baseCheckpoint".to_owned(), Value::String(request.model.clone()));
+    raw.insert(
+        "baseCheckpoint".to_owned(),
+        Value::String(request.model.clone()),
+    );
     raw.insert(
         "engine".to_owned(),
         Value::String(MAGE_FINETUNED_ENGINE.to_owned()),
@@ -339,10 +369,7 @@ fn mage_finetuned_raw_settings(
 /// q4/q8 fine-tunes are load-time quantized and therefore retain Eager with Transformer Missing.
 /// Lower rungs remain provider-owned in both cases.
 #[cfg(target_os = "macos")]
-fn mage_finetuned_memory_load_shape(
-    provider: &str,
-    spec: LoadSpec,
-) -> LoadSpec {
+fn mage_finetuned_memory_load_shape(provider: &str, spec: LoadSpec) -> LoadSpec {
     mage_finetuned_memory_load_shape_with(spec, |candidate| {
         crate::inference_runtime::media()
             .memory_strategy_contract(provider, candidate)
@@ -359,7 +386,7 @@ fn mage_finetuned_memory_load_shape(
 }
 
 #[cfg(target_os = "macos")]
-fn mage_finetuned_memory_load_shape_with(
+pub(super) fn mage_finetuned_memory_load_shape_with(
     spec: LoadSpec,
     source_proves_transformer: impl FnOnce(&LoadSpec) -> bool,
 ) -> LoadSpec {
@@ -377,7 +404,7 @@ fn mage_finetuned_memory_load_shape_with(
 /// undistilled Base descriptor, including true-CFG negative prompts; keeping this pure makes the
 /// accepted request surface independently testable without loading model weights.
 #[allow(clippy::too_many_arguments)]
-fn mage_finetuned_generation_request(
+pub(super) fn mage_finetuned_generation_request(
     prompt: String,
     negative_prompt: Option<String>,
     width: u32,
@@ -409,7 +436,7 @@ fn mage_finetuned_generation_request(
 /// checkpoint lives at a user path under a novel id, so there is nothing to key a registry cache
 /// on, exactly like the Krea imported lane.
 #[allow(clippy::too_many_arguments)]
-async fn generate_mage_finetuned_stream(
+pub(super) async fn generate_mage_finetuned_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -433,8 +460,7 @@ async fn generate_mage_finetuned_stream(
             "this runtime has no registered fine-tuned Mage-Flow generate route".to_owned(),
         )
     })?;
-    let (quant, quant_bits) =
-        imported_model_quant(request, &descriptor, "Fine-tuned Mage-Flow")?;
+    let (quant, quant_bits) = imported_model_quant(request, &descriptor, "Fine-tuned Mage-Flow")?;
 
     let (width, height) = (request.width, request.height);
     let steps =
@@ -448,8 +474,8 @@ async fn generate_mage_finetuned_stream(
         1.0..=20.0,
     );
     let raw_settings = mage_finetuned_raw_settings(request, steps, guidance, quant_bits);
-    let negative_prompt = (!request.negative_prompt.trim().is_empty())
-        .then(|| request.negative_prompt.clone());
+    let negative_prompt =
+        (!request.negative_prompt.trim().is_empty()).then(|| request.negative_prompt.clone());
 
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
@@ -532,72 +558,80 @@ async fn generate_mage_finetuned_stream(
                     crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
                 );
             }
-            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                #[cfg(target_os = "macos")]
-                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
-                    model,
-                    &mlx_request_plan,
-                    &mlx_request_inputs,
-                    cache_state,
-                    loaded_policy.offload_policy,
-                    warm_policy.take(),
-                    external_committed_bytes,
-                )?;
-                #[cfg(target_os = "macos")]
-                let _request_memory_limit = memory_evaluation
-                    .process_limit_bytes
-                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                let mut request = mage_finetuned_generation_request(
-                    prompt,
-                    negative_prompt.clone(),
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    preview,
-                    &cancel,
-                );
-                #[cfg(target_os = "macos")]
-                {
-                    request.memory = Some(memory_evaluation.memory);
-                }
-                let output = match crate::memory_strategy::generate_with_scope(
-                    model,
-                    &mut request,
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
+                    }
+                    #[cfg(target_os = "macos")]
+                    let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                        model,
+                        &mlx_request_plan,
+                        &mlx_request_inputs,
+                        cache_state,
+                        loaded_policy.offload_policy,
+                        warm_policy.take(),
+                        external_committed_bytes,
+                    )?;
+                    #[cfg(target_os = "macos")]
+                    let _request_memory_limit = memory_evaluation
+                        .process_limit_bytes
+                        .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                    let mut request = mage_finetuned_generation_request(
+                        prompt,
+                        negative_prompt.clone(),
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        preview,
+                        &cancel,
+                    );
+                    #[cfg(target_os = "macos")]
                     {
-                        #[cfg(target_os = "macos")]
-                        { Some(&memory_evaluation.context) }
-                        #[cfg(not(target_os = "macos"))]
-                        { None }
-                    },
-                    &mut *on_progress,
-                ) {
-                    Ok(output) => output,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Fine-tuned Mage-Flow generation failed: {error}"
-                        )));
+                        request.memory = Some(memory_evaluation.memory);
                     }
-                };
-                match output {
-                    GenerationOutput::Images(mut images) => {
-                        let image = images.pop().ok_or_else(|| {
-                            WorkerError::Engine(
-                                "Fine-tuned Mage-Flow checkpoint produced no image".to_owned(),
-                            )
-                        })?;
-                        Ok(Some((seed, image.width, image.height, image.pixels)))
+                    let output = match crate::memory_strategy::generate_with_scope(
+                        model,
+                        &mut request,
+                        {
+                            #[cfg(target_os = "macos")]
+                            {
+                                Some(&memory_evaluation.context)
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                None
+                            }
+                        },
+                        &mut *on_progress,
+                    ) {
+                        Ok(output) => output,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "Fine-tuned Mage-Flow generation failed: {error}"
+                            )));
+                        }
+                    };
+                    match output {
+                        GenerationOutput::Images(mut images) => {
+                            let image = images.pop().ok_or_else(|| {
+                                WorkerError::Engine(
+                                    "Fine-tuned Mage-Flow checkpoint produced no image".to_owned(),
+                                )
+                            })?;
+                            Ok(Some((seed, image.width, image.height, image.pixels)))
+                        }
+                        _ => Err(WorkerError::Engine(
+                            "Fine-tuned Mage-Flow checkpoint returned non-image output".to_owned(),
+                        )),
                     }
-                    _ => Err(WorkerError::Engine(
-                        "Fine-tuned Mage-Flow checkpoint returned non-image output".to_owned(),
-                    )),
-                }
-            })
+                },
+            )
         },
     );
 

@@ -1,10 +1,6 @@
 //! The guard every `fs2` advisory lock holder in this workspace releases through, so no holder
 //! releases by `close(2)` alone.
 //!
-//! (`catalog_store::CatalogProcessingLease` keeps its own equivalent `Drop`, written first when
-//! sc-22738 was diagnosed there; it holds the same `LOCK_UN` invariant and its own regression
-//! test.)
-//!
 //! `flock(2)` locks belong to the OPEN FILE DESCRIPTION, not to the descriptor and not to the
 //! process. `fork(2)` hands a child a reference to that same description, so closing the owner's
 //! descriptor only drops ONE reference: while any concurrently forked child still holds the
@@ -26,6 +22,47 @@ use std::io;
 
 use fs2::FileExt;
 
+/// Classify advisory-lock contention without confusing an error lacking an OS code with it.
+pub fn is_contended(error: &io::Error) -> bool {
+    let code = fs2::lock_contended_error().raw_os_error();
+    error.kind() == io::ErrorKind::WouldBlock || code.is_some() && error.raw_os_error() == code
+}
+
+/// Open a lock file without following a final symlink/reparse point, including a link
+/// substituted between metadata inspection and open. Callers retain their lock contention policy.
+pub fn open_regular_lock_file(path: &std::path::Path) -> io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if crate::safe_path::is_link_or_reparse_point(&metadata) || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lock must be a regular file",
+            ));
+        }
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if crate::safe_path::is_link_or_reparse_point(&metadata) || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "lock must be a regular file",
+        ));
+    }
+    Ok(file)
+}
+
 /// An acquired `fs2` advisory lock. Dropping it releases the lock explicitly.
 #[derive(Debug)]
 pub struct FileLock {
@@ -33,6 +70,17 @@ pub struct FileLock {
 }
 
 impl FileLock {
+    /// Open a regular lock file without truncating it, then wait for exclusive ownership.
+    /// Parent creation, timeout/retry and cancellation policies remain with the caller.
+    pub fn open_exclusive(path: &std::path::Path) -> io::Result<Self> {
+        Self::exclusive(open_regular_lock_file(path)?)
+    }
+
+    /// Open a regular lock file and refuse immediately if another owner holds it.
+    pub fn try_open_exclusive(path: &std::path::Path) -> io::Result<Self> {
+        Self::try_exclusive(open_regular_lock_file(path)?)
+    }
+
     /// Block until the exclusive lock is held.
     pub fn exclusive(file: File) -> io::Result<Self> {
         FileExt::lock_exclusive(&file)?;
@@ -102,6 +150,72 @@ impl Drop for FileLock {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn open_exclusive_preserves_bytes_and_refuses_reentrant_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("guard.lock");
+        std::fs::write(&path, b"existing lock metadata").unwrap();
+        let owner = FileLock::open_exclusive(&path).unwrap();
+        let error = FileLock::try_open_exclusive(&path).unwrap_err();
+        assert!(is_contended(&error));
+        let mut reader = owner.file();
+        let mut metadata = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut metadata).unwrap();
+        assert_eq!(metadata, b"existing lock metadata");
+        let inherited = owner.inherited_descriptor().unwrap();
+        drop(owner);
+        let next = FileLock::try_open_exclusive(&path).unwrap();
+        drop(next);
+        drop(inherited);
+        assert!(FileLock::open_exclusive(&directory.path().join("absent/guard.lock")).is_err());
+    }
+
+    #[test]
+    fn contention_classifier_rejects_unrelated_and_codeless_errors() {
+        assert!(is_contended(&fs2::lock_contended_error()));
+        assert!(is_contended(&io::ErrorKind::WouldBlock.into()));
+        assert!(!is_contended(&io::ErrorKind::PermissionDenied.into()));
+        assert!(!is_contended(&io::Error::other("unrelated")));
+    }
+
+    #[test]
+    fn regular_lock_opener_accepts_files_and_rejects_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("valid.lock");
+        assert!(open_regular_lock_file(&path).is_ok());
+        assert!(open_regular_lock_file(&path).is_ok());
+        assert!(open_regular_lock_file(temp.path()).is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn regular_lock_opener_refuses_directory_junction() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let link = temp.path().join("lock");
+        assert!(std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .status()
+            .unwrap()
+            .success());
+        assert!(open_regular_lock_file(&link).is_err());
+        std::fs::remove_dir(link).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn regular_lock_opener_refuses_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, b"untouched").unwrap();
+        let link = temp.path().join("lock");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(open_regular_lock_file(&link).is_err());
+        assert_eq!(std::fs::read(outside).unwrap(), b"untouched");
+    }
+
     use super::*;
 
     fn lock_file(path: &std::path::Path) -> File {

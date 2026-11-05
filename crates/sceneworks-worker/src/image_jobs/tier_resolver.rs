@@ -1,7 +1,10 @@
 #[cfg(target_os = "macos")]
-use super::is_anima_model;
-use super::{ImageRequest, Path, PathBuf, Value, STANDARD_TIER_MODELS};
-
+use super::artifact_resolution::is_anima_model;
+use super::artifact_resolution::STANDARD_TIER_MODELS;
+use super::ImageRequest;
+use crate::Path;
+use crate::PathBuf;
+use crate::Value;
 // sc-15799 (tier integrity): the hardcoded `DENSE_TE_TIER_MODELS` registry is DELETED. Keeping a dense
 // bf16 text encoder resident on a q4/q8 tier is an above-tier residency exception, and an exception the
 // shared decision cannot see is exactly what that story exists to eliminate — the ids lived in this file
@@ -16,7 +19,7 @@ use super::{ImageRequest, Path, PathBuf, Value, STANDARD_TIER_MODELS};
 /// `mlx.standardTierLayout: true`. The manifest flag is the first-class, catalog-driven form of the
 /// hardcoded registry (epic 8506) — a new quant-matrix model can opt in from the manifest alone,
 /// while the registry keeps every already-wired model working with zero manifest change.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(super) fn uses_standard_tier_layout(request: &ImageRequest) -> bool {
     STANDARD_TIER_MODELS.contains(&request.model.as_str())
         || request
@@ -35,10 +38,7 @@ pub(super) fn uses_standard_tier_layout(request: &ImageRequest) -> bool {
 /// where the shared decision, the audit table, and the parity lane can all see it. The hardcoded id list
 /// this used to fall back to is gone (see the note at the top of this file); a model that needs the
 /// carve-out declares the flag and carries a measured exception row in `config/tier-integrity.jsonc`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn is_dense_te_tier(request: &ImageRequest) -> bool {
     request
         .model_manifest_entry
@@ -146,10 +146,7 @@ pub(super) fn nvfp4_requested(request: &ImageRequest) -> bool {
 ///
 /// Gated to the lanes that HAVE a quant resolver ([`resolve_quant`]'s cfg): the neither-MLX-nor-candle
 /// build resolves no load quant at all, so this would be dead code there (`-D warnings`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn tier_dir_is_nvfp4(tier_dir: Option<&Path>) -> bool {
     tier_dir
         .and_then(Path::file_name)
@@ -178,10 +175,7 @@ fn tier_dir_is_nvfp4(tier_dir: Option<&Path>) -> bool {
 /// Gated to [`resolve_quant`]'s cfg, like [`tier_dir_is_nvfp4`]: every caller (the quant resolver, the
 /// label, and the candle fit gate) lives on the MLX or candle lane, so compiling it on the
 /// neither-backend build would be dead code under `-D warnings`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn nvfp4_selected(
     request: &ImageRequest,
     nvfp4_host: bool,
@@ -250,15 +244,13 @@ pub(super) fn preferred_tier(bits: Option<i64>, floor: Option<&str>, nvfp4: bool
     if nvfp4 {
         return NVFP4_TIER;
     }
-    match bits {
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b > 4 => "q8",
-        Some(_) => "q4",
-        None => match floor {
+    crate::payload::tier_for_bits(
+        bits,
+        match floor {
             Some(f) if tier_quality_rank(f) > tier_quality_rank("q8") => tier_static_name(f),
             _ => "q8",
         },
-    }
+    )
 }
 
 /// The model's per-model quality FLOOR (`mlx.minQualityTier`, sc-10731): the MINIMUM-fidelity tier a
@@ -439,10 +431,7 @@ pub(super) fn standard_tier_subdir_gated(
     request: &ImageRequest,
     nvfp4_host: bool,
 ) -> PathBuf {
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let bits = request.quant_bits();
     // A component dir "has weights" when it holds a packed/dense safetensors or a shard index.
     // Hidden entries don't count: a dir holding only a `._model.safetensors` AppleDouble sidecar has
     // no weights, and reporting otherwise routes the loader at a tier it cannot load
@@ -551,5 +540,131 @@ mod tests {
             pick_loadable_tier(&["q8"], &present, &|_| false),
             Some(PathBuf::from("q8"))
         );
+    }
+}
+
+/// Explicit picks retain their tier; implicit Q8 defaults clamp to the clean installed overlay
+/// in Q8 → BF16 → Q4 order. No cached tier means Q8, the fresh-install co-requisite.
+#[cfg(native_lane)]
+pub(super) fn qwen_control_tier_subdir(
+    request: &ImageRequest,
+    snapshot: Option<&Path>,
+) -> &'static str {
+    request.quant_bits().map_or_else(
+        || qwen_control_installed_default_tier(snapshot),
+        |bits| crate::payload::tier_for_bits(Some(bits), "q8"),
+    )
+}
+
+#[cfg(native_lane)]
+fn qwen_control_installed_default_tier(snapshot: Option<&Path>) -> &'static str {
+    let present = |tier: &str| {
+        snapshot
+            .map(|root| root.join(tier).join("model.safetensors").is_file())
+            .unwrap_or(false)
+    };
+    if present("q8") {
+        "q8"
+    } else if present("bf16") {
+        "bf16"
+    } else if present("q4") {
+        "q4"
+    } else {
+        "q8"
+    }
+}
+
+/// Telemetry preserves backend contracts: MLX records quantization (including null), while
+/// Candle records its native control engine and leaves its advanced quant field untouched.
+#[derive(Clone, Copy)]
+#[cfg(native_lane)]
+pub(super) enum ControlBackend {
+    #[cfg(target_os = "macos")]
+    Mlx(Option<i64>),
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    Candle,
+}
+
+#[cfg(native_lane)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn control_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    scale: f32,
+    poses: usize,
+    backend: ControlBackend,
+    guidance: Option<f32>,
+    engine: Option<&str>,
+) -> sceneworks_core::contracts::JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".into(), Value::Bool(true));
+    raw.insert("repo".into(), Value::String(repo.into()));
+    raw.insert("numInferenceSteps".into(), serde_json::json!(steps));
+    raw.insert("controlScale".into(), serde_json::json!(scale));
+    raw.insert("poseCount".into(), serde_json::json!(poses));
+    match backend {
+        #[cfg(target_os = "macos")]
+        ControlBackend::Mlx(bits) => {
+            raw.insert("mlxQuantize".into(), serde_json::json!(bits));
+            raw.insert("guidanceScale".into(), serde_json::json!(guidance));
+        }
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        ControlBackend::Candle => {
+            if let Some(guidance) = guidance {
+                raw.insert("guidanceScale".into(), serde_json::json!(guidance));
+            }
+        }
+    }
+    if let Some(engine) = engine {
+        raw.insert("controlEngine".into(), Value::String(engine.into()));
+    }
+    raw
+}
+
+#[cfg(all(test, native_lane))]
+mod control_helper_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn shared_control_tier_clamp_and_explicit_picks_preserve_installed_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("q4")).unwrap();
+        std::fs::write(dir.path().join("q4/model.safetensors"), b"metadata fixture").unwrap();
+        let payload = json!({"advanced":{}});
+        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        assert_eq!(qwen_control_tier_subdir(&request, Some(dir.path())), "q4");
+        assert_eq!(qwen_control_tier_subdir(&request, None), "q8");
+        for (bits, expected) in [(0, "bf16"), (4, "q4"), (8, "q8")] {
+            let mut request = request.clone();
+            request.advanced.insert("mlxQuantize".into(), json!(bits));
+            assert_eq!(
+                qwen_control_tier_subdir(&request, Some(dir.path())),
+                expected
+            );
+        }
+    }
+    #[test]
+    fn shared_control_telemetry_preserves_backend_nulls_and_native_engine_spelling() {
+        let payload = json!({"advanced":{"guidanceScale":19,"mlxQuantize":4,"untouched":true}});
+        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        #[cfg(target_os = "macos")]
+        let backend = ControlBackend::Mlx(None);
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let backend = ControlBackend::Candle;
+        let raw = control_raw_settings(&request, "repo", 8, 0.9, 2, backend, None, None);
+        assert_eq!(raw["untouched"], json!(true));
+        assert_eq!(raw["poseCount"], json!(2));
+        #[cfg(target_os = "macos")]
+        {
+            assert!(raw["guidanceScale"].is_null());
+            assert!(raw["mlxQuantize"].is_null());
+        }
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            assert_eq!(raw["guidanceScale"], json!(19));
+            assert_eq!(raw["mlxQuantize"], json!(4));
+        }
+        assert!(!raw.contains_key("controlEngine"));
     }
 }

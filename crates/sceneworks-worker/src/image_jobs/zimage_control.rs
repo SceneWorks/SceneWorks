@@ -1,18 +1,44 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
-use super::{
-    attach_manifest_text_encoder, candle_certified_hf_artifact_path, candle_certified_load_spec,
-    candle_resolved_tier_key, pid_effective_dims, pid_output_tier, pose_entries, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_pid_weights,
-    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
-    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
-    Progress, Settings, Value, WorkerError, WorkerResult, ZImageControl, ZImageControlPaths,
-    ZImageControlRequest,
-};
-use super::{
-    resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
-};
+use super::adapters::resolve_adapters;
+use super::conditioning::pose_entries;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::candle_certified_hf_artifact_path;
+use super::load_spec::candle_certified_load_spec;
+use super::memory::candle_resolved_tier_key;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::resolve_pid_weights;
+use super::run_candle_strict_control;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32_with;
+use super::standard_tier_subdir;
+use super::strict_control::trusted_control_weight_revision;
+#[cfg(target_os = "macos")]
+use super::zimage::zimage_control_raw_settings;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::Progress;
+use super::ZImageControl;
+use super::ZImageControlPaths;
+use super::ZImageControlRequest;
+use crate::advanced;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
-use serde_json::json;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 
 // Candle (Windows/CUDA) Z-Image Fun-ControlNet (strict pose) route (sc-5489, epic 5480) —
 // `z_image_turbo` + `advanced.poses` off-Mac via `runtime_cuda::providers::z_image::ZImageControl`. The LAST family
@@ -112,20 +138,13 @@ pub(super) fn resolve_zimage_control_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Z-Image control modelPath")
             .map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| zimage_control_base_default_repo(&request.model));
     let snapshot = if is_zimage_base_model(&request.model) && repo == super::ZIMAGE_MLX_TURNKEY_REPO
     {
@@ -196,9 +215,7 @@ pub(super) fn zimage_control_repo_file(request: &ImageRequest) -> WorkerResult<(
         .and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(default)
             .to_owned()
     };
@@ -278,20 +295,16 @@ fn zimage_control_raw_settings(
     is_base: bool,
     guidance: f32,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
-    raw.insert("realModelInference".to_owned(), Value::Bool(true));
-    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    raw.insert("numInferenceSteps".to_owned(), json!(steps));
-    raw.insert("controlScale".to_owned(), json!(control_scale));
-    raw.insert("poseCount".to_owned(), json!(pose_count));
-    if is_base {
-        raw.insert("guidanceScale".to_owned(), json!(guidance));
-    }
-    raw.insert(
-        "controlEngine".to_owned(),
-        Value::String(ZIMAGE_CTRL_ENGINE.to_owned()),
-    );
-    raw
+    super::tier_resolver::control_raw_settings(
+        request,
+        repo,
+        steps,
+        control_scale,
+        pose_count,
+        super::tier_resolver::ControlBackend::Candle,
+        is_base.then_some(guidance),
+        Some(ZIMAGE_CTRL_ENGINE),
+    )
 }
 
 /// The per-lane half of the candle Z-Image strict-control [`CandleStrictControl`] driver (sc-8304): the
@@ -400,7 +413,7 @@ impl CandleStrictControl for ZImageStrictControl {
             let transformer = self.snapshot.join("transformer");
             let vae = self.snapshot.join("vae");
             if transformer.is_dir() && vae.is_dir() {
-                overlays.push(crate::conditioning_fit::weights_source_path(text_encoder));
+                overlays.push(crate::weights_source::WeightsSourceExt::path(text_encoder));
                 overlays.push(vae.as_path());
                 return ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
                     if self.is_base {
@@ -530,12 +543,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
         ZIMAGE_CTRL_DEFAULT_SCALE,
         0.0..=2.0,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| zimage_control_base_default_repo(&request.model))
         .to_owned();
     // Base-mode real-CFG surface (sc-8680): resolve the guidance scale + negative prompt for the
@@ -611,10 +619,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
             Path::new(&control_file),
             &controlnet,
         );
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,

@@ -93,7 +93,12 @@ macro_rules! string_enum {
         impl $crate::contracts::StringEnum for $name {}
 
         impl $name {
-            pub fn as_str(&self) -> &str {
+            /// Wire values declared by this enum, excluding forward-compatible unknown values.
+            pub const fn known_values() -> &'static [&'static str] {
+                &[$($value,)+]
+            }
+
+            pub const fn as_str(&self) -> &str {
                 match self {
                     $(Self::$variant => $value,)+
                     Self::Unknown(value) => value.as_str(),
@@ -373,6 +378,37 @@ string_enum! {
     }
 }
 
+impl JobStatus {
+    /// Worker-owned states. Queued and API-owned pre-steps remain pending.
+    pub const fn active_statuses() -> [&'static str; 5] {
+        [
+            Self::Preparing.as_str(),
+            Self::Downloading.as_str(),
+            Self::LoadingModel.as_str(),
+            Self::Running.as_str(),
+            Self::Saving.as_str(),
+        ]
+    }
+
+    pub const fn terminal_statuses() -> [&'static str; 4] {
+        [
+            Self::Completed.as_str(),
+            Self::Failed.as_str(),
+            Self::Canceled.as_str(),
+            Self::Interrupted.as_str(),
+        ]
+    }
+
+    /// States that can be canceled immediately without worker acknowledgement.
+    pub const fn pending_statuses() -> [&'static str; 3] {
+        [
+            Self::Queued.as_str(),
+            Self::PendingCaption.as_str(),
+            Self::PendingWorkflow.as_str(),
+        ]
+    }
+}
+
 string_enum! {
     pub enum ProgressStage {
         Queued => "queued",
@@ -592,6 +628,16 @@ string_enum! {
     }
 }
 
+/// A source image must have both the image asset identity and raster image media.
+/// Preview PNGs attached to vectors, depth maps, poses or documents are not source images.
+pub fn is_raster_image_asset(asset_type: &str, mime_type: &str) -> bool {
+    let mime_type = mime_type.split(';').next().unwrap_or_default().trim();
+    asset_type == AssetType::Image.as_str()
+        && mime_type.starts_with("image/")
+        && mime_type.len() > "image/".len()
+        && mime_type != "image/svg+xml"
+}
+
 string_enum! {
     pub enum CharacterType {
         Person => "person",
@@ -701,6 +747,9 @@ string_enum! {
     }
 }
 
+/// Selects Qwen-Image 2.1's official structured prompt rewrite in API and worker payloads.
+pub const QWEN_IMAGE_REWRITE_TASK: &str = "qwen_image_rewrite";
+
 /// Maximum number of images one Parquet materialization job may add.
 ///
 /// Shared by API validation and the worker clamp so a newer client cannot create
@@ -808,9 +857,47 @@ impl ImageUpscaleRequest {
             .collect()
     }
 
+    /// Shared API/worker upscale boundary. Disabled controls remain inert.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.engine.trim().is_empty() {
+            return Err("upscale.engine is required".into());
+        }
+        if self.is_iris() {
+            if self.factor != default_image_upscale_factor() {
+                return Err("upscale.factor is not a control of the Iris restoration engine; use upscale.scale".into());
+            }
+            if self.extra.contains_key("softness") {
+                return Err(
+                    "upscale.softness is not a control of the Iris restoration engine".into(),
+                );
+            }
+            self.iris_params()
+                .map_err(|error| format!("upscale.{error}"))?;
+        } else {
+            image_upscale_factor(u64::from(self.factor))
+                .map_err(|_| "upscale.factor must be 2 or 4".to_owned())?;
+            crate::image_restoration::reject_iris_only_keys(&self.iris_controls(), &self.engine)
+                .map_err(|error| format!("upscale.{error}"))?;
+        }
+        Ok(())
+    }
+
     /// The parsed Iris restoration controls (a typed refusal for a malformed one).
     pub fn iris_params(&self) -> Result<crate::image_restoration::IrisRestoreParams, String> {
         crate::image_restoration::parse_iris_restore_params(&self.iris_controls())
+    }
+}
+
+/// The discrete scales supported by the non-Iris image upscalers.
+pub fn image_upscale_factor(factor: u64) -> Result<u8, String> {
+    match factor {
+        2 | 4 => Ok(factor as u8),
+        other => Err(format!(
+            "Image upscale supports only factor 2 or 4 (got {other})."
+        )),
     }
 }
 
@@ -2043,6 +2130,26 @@ pub struct ModelInstallMarker {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn raster_asset_identity_requires_image_type_and_raster_media() {
+        for mime in ["image/png", "image/jpeg", "image/webp", "image/png; x=test"] {
+            assert!(is_raster_image_asset("image", mime), "{mime}");
+        }
+        for (kind, mime) in [
+            ("", "image/png"),
+            ("vector", "image/png"),
+            ("depth", "image/png"),
+            ("document", "image/png"),
+            ("image", ""),
+            ("image", "image/"),
+            ("image", "application/octet-stream"),
+            ("image", "image/svg+xml"),
+            ("image", "image/svg+xml; charset=utf-8"),
+        ] {
+            assert!(!is_raster_image_asset(kind, mime), "{kind}: {mime}");
+        }
+    }
 
     #[test]
     fn image_upscale_request_round_trips_when_present() {

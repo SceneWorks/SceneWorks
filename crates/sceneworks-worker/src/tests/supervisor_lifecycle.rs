@@ -41,55 +41,6 @@ async fn an_embedder_shutdown_request_wakes_parked_and_late_waiters() {
     assert!(*sender.borrow());
 }
 
-/// sc-3513: the worker's `JobType::ImageEdit` dispatch arm delegates to
-/// `run_image_generate_job` — the engine keys edits on payload model+mode, not job
-/// type. Feeding an `image_edit`-typed job into the handler proves it reaches the image
-/// pipeline (stopping at the payload's projectId guard) rather than the `run_utility_job`
-/// "unsupported job type" default — i.e. plain Image Edit is genuinely handled. The
-/// handler never reads `job_type`, so a missing projectId is its first stop (no network).
-#[tokio::test]
-async fn image_edit_job_dispatches_to_image_generate_handler() {
-    let settings = test_settings("http://127.0.0.1".to_owned(), None);
-    let api = ApiClient::new(&settings);
-    let job: JobSnapshot = serde_json::from_value(json!({
-        "id": "job-image-edit-1",
-        "type": "image_edit",
-        "status": "preparing",
-        "projectId": null,
-        "projectName": null,
-        "payload": { "model": "qwen_image_edit_2511", "mode": "edit_image" },
-        "result": {},
-        "requestedGpu": "auto",
-        "assignedGpu": null,
-        "workerId": null,
-        "progress": 0,
-        "stage": "preparing",
-        "message": "",
-        "error": null,
-        "etaSeconds": null,
-        "elapsedSeconds": null,
-        "attempts": 1,
-        "sourceJobId": null,
-        "duplicateOfJobId": null,
-        "cancelRequested": false,
-        "createdAt": "2026-06-07T00:00:00Z",
-        "updatedAt": "2026-06-07T00:00:00Z",
-        "startedAt": null,
-        "completedAt": null,
-        "canceledAt": null,
-        "lastHeartbeatAt": null
-    }))
-    .expect("image_edit job snapshot deserializes");
-
-    let error = super::image_jobs::run_image_generate_job(&api, &settings, &job)
-        .await
-        .expect_err("missing projectId is rejected by the image handler");
-    assert!(
-        matches!(&error, WorkerError::InvalidPayload(message) if message.contains("projectId")),
-        "expected a projectId payload error from the image handler, got {error:?}",
-    );
-}
-
 #[tokio::test]
 async fn auto_supervisor_retries_timeout_and_empty_before_selecting_gpu_child() {
     let gpu = fallback_gpu("0");

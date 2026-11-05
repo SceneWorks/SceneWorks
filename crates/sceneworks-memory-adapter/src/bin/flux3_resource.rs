@@ -682,26 +682,17 @@ pub(super) fn spawn_reservation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct Fixture(PathBuf);
+    struct Fixture {
+        root: PathBuf,
+        _temporary: tempfile::TempDir,
+    }
     impl Fixture {
         fn new() -> Self {
-            static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "flux3-resource-{}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos(),
-                SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            std::fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let temporary = tempfile::tempdir().unwrap();
+            Self {
+                root: temporary.path().to_path_buf(),
+                _temporary: temporary,
+            }
         }
     }
     fn case(provider: &str) -> Value {
@@ -718,7 +709,7 @@ mod tests {
             "candle",
             checkpoint(PROVIDER).unwrap(),
             "bf16",
-            &fixture.0,
+            &fixture.root,
         )
         .unwrap();
         assert_eq!(
@@ -726,12 +717,12 @@ mod tests {
             "shared Node/Rust canonical domain-separated digest"
         );
         std::fs::write(
-            fixture.0.join("adapter.safetensors"),
+            fixture.root.join("adapter.safetensors"),
             b"tiny fixture NOT model evidence",
         )
         .unwrap();
         let file =
-            gen_core_flux3::conversion::hash_source_file(&fixture.0.join("adapter.safetensors"))
+            gen_core_flux3::conversion::hash_source_file(&fixture.root.join("adapter.safetensors"))
                 .unwrap();
         for provider in [PROVIDER, BASE_PROVIDER] {
             let mut value = case(provider);
@@ -741,7 +732,7 @@ mod tests {
             value["adapters"] =
                 json!([{"path":"adapter.safetensors","sha256":file.sha256,"scale":0.625}]);
             let checkpoint = checkpoint(provider).unwrap();
-            let bound = bind(&value, "candle", checkpoint, "bf16", &fixture.0).unwrap();
+            let bound = bind(&value, "candle", checkpoint, "bf16", &fixture.root).unwrap();
             assert_eq!(bound.request.prompt, "specific non-default scene");
             assert_eq!((bound.request.width, bound.request.height), (1536, 768));
             assert_eq!(
@@ -754,7 +745,7 @@ mod tests {
             assert_eq!(bound.inputs[0]["sha256"], file.sha256);
             assert_eq!(
                 bound.digest,
-                bind(&value, "candle", checkpoint, "bf16", &fixture.0)
+                bind(&value, "candle", checkpoint, "bf16", &fixture.root)
                     .unwrap()
                     .digest
             );
@@ -762,17 +753,17 @@ mod tests {
             changed["generation"]["seed"] = json!(9183);
             assert_ne!(
                 bound.digest,
-                bind(&changed, "candle", checkpoint, "bf16", &fixture.0)
+                bind(&changed, "candle", checkpoint, "bf16", &fixture.root)
                     .unwrap()
                     .digest
             );
-            assert!(bind(&value, "mlx", checkpoint, "bf16", &fixture.0).is_err());
+            assert!(bind(&value, "mlx", checkpoint, "bf16", &fixture.root).is_err());
             changed = value.clone();
             changed["modelId"] = json!("another_checkpoint");
-            assert!(bind(&changed, "candle", checkpoint, "bf16", &fixture.0).is_err());
+            assert!(bind(&changed, "candle", checkpoint, "bf16", &fixture.root).is_err());
             changed = value;
             changed["adapters"][0]["sha256"] = json!("0".repeat(64));
-            assert!(bind(&changed, "candle", checkpoint, "bf16", &fixture.0).is_err());
+            assert!(bind(&changed, "candle", checkpoint, "bf16", &fixture.root).is_err());
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -780,7 +771,7 @@ mod tests {
     fn supplemental_decodes_ten_real_local_reference_files_preserving_duplicate_asset_instances() {
         let fixture = Fixture::new();
         image::save_buffer(
-            fixture.0.join("reference.png"),
+            fixture.root.join("reference.png"),
             &[255, 0, 0, 0, 255, 0].repeat(32 * 16 / 2),
             32,
             16,
@@ -788,7 +779,8 @@ mod tests {
         )
         .unwrap();
         let file =
-            gen_core_flux3::conversion::hash_source_file(&fixture.0.join("reference.png")).unwrap();
+            gen_core_flux3::conversion::hash_source_file(&fixture.root.join("reference.png"))
+                .unwrap();
         let mut value = case(PROVIDER);
         value["references"]=json!((0..10).map(|index| json!({"instanceId":format!("instance-{index}"),"assetId":"same-asset","index":index,"path":"reference.png","sha256":file.sha256})).collect::<Vec<_>>());
         let bound = bind(
@@ -796,7 +788,7 @@ mod tests {
             "candle",
             checkpoint(PROVIDER).unwrap(),
             "bf16",
-            &fixture.0,
+            &fixture.root,
         )
         .unwrap();
         assert_eq!(bound.request.image_reference_count(), 10);
@@ -812,7 +804,7 @@ mod tests {
             "candle",
             checkpoint(PROVIDER).unwrap(),
             "bf16",
-            &fixture.0,
+            &fixture.root,
         )
         .unwrap();
         assert_eq!(boxed.request.flux3_layout_bindings.len(), 10);
@@ -838,7 +830,7 @@ mod tests {
             "candle",
             checkpoint(PROVIDER).unwrap(),
             "bf16",
-            &fixture.0
+            &fixture.root
         )
         .is_err());
         invalid = value.clone();
@@ -848,16 +840,16 @@ mod tests {
             "candle",
             checkpoint(PROVIDER).unwrap(),
             "bf16",
-            &fixture.0
+            &fixture.root
         )
         .is_err());
-        std::fs::write(fixture.0.join("reference.png"), b"corrupt reference").unwrap();
+        std::fs::write(fixture.root.join("reference.png"), b"corrupt reference").unwrap();
         assert!(bind(
             &value,
             "candle",
             checkpoint(PROVIDER).unwrap(),
             "bf16",
-            &fixture.0
+            &fixture.root
         )
         .is_err());
     }

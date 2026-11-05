@@ -1,6 +1,7 @@
+import { downloadBlob } from "../saveExportFile.js";
 import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
-import { assetUrl } from "../components/assetMedia.jsx";
+import { AssetMedia } from "../components/assetMedia.jsx";
 import { AudioDownloadButton } from "../components/audioTakeParts.jsx";
 import { jobAudioResultAssets } from "../jobResultAssets.js";
 import { formatRelativeTime } from "../audioTakes.js";
@@ -33,15 +34,7 @@ import {
 // Every server failure is rendered where it happened — never replaced with an empty state.
 
 export function downloadText(text, filename, type = "application/json") {
-  const blob = new Blob([text], { type });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
+  downloadBlob(new Blob([text], { type }), filename);
 }
 
 export function ErrorNotice({ error, children = null, testId = "yue2-error" }) {
@@ -366,7 +359,7 @@ export function Yue2RunCard({
         <div className="yue2-run__takes">
           {takes.map((asset) => (
             <div className="yue2-take" key={asset.id}>
-              <audio controls preload="none" src={assetUrl(asset)} aria-label={`Play ${asset.displayName ?? "take"}`} />
+              <AssetMedia asset={asset} controls preload="none" aria-label={`Play ${asset.displayName ?? "take"}`} />
               <AudioDownloadButton asset={asset} className="secondary-action" iconSize={14} job={job} label="Audio" />
             </div>
           ))}
@@ -949,7 +942,7 @@ export function Yue2ScoreWorkbench({
                         </span>
                       );
                     })()}
-                    {asset ? <audio controls preload="none" src={assetUrl(asset)} /> : null}
+                    {asset ? <AssetMedia asset={asset} controls preload="none" /> : null}
                     {render.truncated == null ? (
                       // A failed render may not know whether it truncated: say so, never "not truncated".
                       <span className="status-badge" data-testid="yue2-render-truncation-unknown">
@@ -1026,7 +1019,7 @@ function ComparisonSide({ label, side, asset }) {
         {side?.editBrief ? ` — ${side.editBrief}` : ""}
       </span>
       {asset ? (
-        <audio controls preload="none" src={assetUrl(asset)} aria-label={`Listen to ${label}`} />
+        <AssetMedia asset={asset} controls preload="none" aria-label={`Listen to ${label}`} />
       ) : (
         <span className="yue2-muted">No render to listen to.</span>
       )}

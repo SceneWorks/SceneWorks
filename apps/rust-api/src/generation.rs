@@ -1,6 +1,84 @@
 use super::*;
 use crate::dto::{VectorSampling, MAX_VECTOR_WALL_TIME_MS};
 
+pub(super) async fn create_generation_job_with_binding(
+    state: AppState,
+    job_type: JobType,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    mut payload: JsonObject,
+    requested_gpu: String,
+    admission: (Option<JobStatus>, Option<Value>),
+) -> Result<JobSnapshot, ApiError> {
+    let (initial_status, mut download_binding) = admission;
+    model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
+    // sc-26687 / sc-26690: freeze the server-trusted provenance of the checkpoint this job
+    // admitted, in the SAME transaction that enqueues it, so a later re-import or rescan cannot
+    // change the identity the generated asset will report.
+    //
+    // Typed handlers mint the primary with their own canonical resolver. The source seam fills
+    // runtime companions and canonicalizes the utility roles; mere presence of a primary in an
+    // arbitrary incoming payload is not authority. Unbound/builtin entries honestly get None.
+    let model_provenance = match payload.get("modelManifestEntry").and_then(Value::as_object) {
+        Some(entry) => {
+            // Imported component terms are independent of the author's terms. Covered here are
+            // typed generation jobs with a server-resolved primary; queue_model_import_job owns
+            // the component-download gate. Raw POST /jobs admission is gated separately in
+            // jobs.rs::create_job on its actual canonical selection, before atomic enqueue.
+            crate::models::ensure_inherited_component_licenses_acknowledged(
+                &state,
+                entry,
+                payload
+                    .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .await?;
+            sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                &state.settings.data_dir,
+                entry,
+            )
+            .map_err(|error| ApiError::internal(format!("resolve model provenance: {error}")))?
+        }
+        None => None,
+    };
+    let empty = JsonObject::new();
+    let entry = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    validate_expected_imported_model_reference(&payload, entry, model_provenance.as_ref())?;
+    // Freeze the admitted selection for retry/duplicate too, including requests that were not
+    // themselves replays. A later same-id catalog rebind must not change their weights.
+    if let Some(reference) = imported_reference_from_provenance(entry, model_provenance.as_ref()) {
+        payload.insert("expectedImportedModelRef".to_owned(), reference);
+    }
+    if let Some(binding) = download_binding.as_mut().and_then(Value::as_object_mut) {
+        binding.insert("payload".to_owned(), json!(payload));
+    }
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job_with_download_binding(
+            CreateJob {
+                job_type,
+                project_id,
+                project_name,
+                payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status,
+            },
+            model_provenance.as_ref(),
+            download_binding.as_ref(),
+        )
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok(job)
+}
+
 /// The single backend this API instance can actually enqueue for — the one authority every
 /// enqueue-time capability gate must key off.
 ///
@@ -223,6 +301,8 @@ pub(crate) async fn create_image_job(
         false
     };
     if let Some(entry) = model_manifest_entry.as_object() {
+        sceneworks_core::image_request::validate_image_request_payload(&job_payload, entry)
+            .map_err(ApiError::bad_request)?;
         let (default_width, default_height) =
             image_default_resolution(entry).unwrap_or((1024, 1024));
         // Preserve omitted sides through storage/retry. The worker derives their actual canvas
@@ -288,9 +368,9 @@ pub(crate) async fn create_image_job(
         // The declared sampler / scheduler MENU (sc-24114): a name no lane advertises is one the
         // worker silently falls back from, so it is refused here, naming the menu.
         if let Some(advanced) = job_payload.get("advanced").and_then(Value::as_object) {
-            if let Some(message) = sceneworks_core::video_request::image_sampling_knob_error(
-                &model_id, advanced, entry,
-            ) {
+            if let Some(message) =
+                sceneworks_core::image_limits::image_sampling_knob_error(&model_id, advanced, entry)
+            {
                 return Err(ApiError::bad_request(message));
             }
         }
@@ -372,7 +452,7 @@ pub(crate) async fn create_image_job(
         // Read off `job_payload` rather than the DTO so the count reflects what is actually
         // enqueued after preset/style patching. ABSENT ⇒ no cap, so every other image model is
         // byte-for-byte unchanged.
-        if let Some(message) = sceneworks_core::video_request::image_reference_limit_error(
+        if let Some(message) = sceneworks_core::image_limits::image_reference_limit_error(
             &model_id,
             sceneworks_core::image_request::ordered_image_reference_ids_for_model(
                 &model_id,
@@ -400,20 +480,6 @@ pub(crate) async fn create_image_job(
             job_payload.get("height").and_then(Value::as_u64),
         ) {
             if let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) {
-                // FLUX.3 reference sides were validated independently by the family parser:
-                // positive 16px grid, not the descriptor's historical 64px T2I floor.
-                if !reference_derived_size {
-                    if let Some(message) = sceneworks_core::video_request::image_dimension_error(
-                        &model_id,
-                        width,
-                        height,
-                        entry,
-                        crate::HISTORICAL_MIN_IMAGE_DIMENSION,
-                        crate::MAX_IMAGE_DIMENSION,
-                    ) {
-                        return Err(ApiError::bad_request(message));
-                    }
-                }
                 // The declared request-geometry ENVELOPE (sc-24112, `admissionGeometry`): the
                 // largest-preset area, the reference count and the batch, jointly. Per-side bounds
                 // cannot express it — 2752x2752 passes every side check and is still 7.57 Mpx
@@ -457,7 +523,7 @@ pub(crate) async fn create_image_job(
         // The PER-ENTRY half: each ordered reference must actually BE a raster image this project
         // owns. Needs the asset store, so it cannot live in the pure core helper. Only runs for a
         // model that declares the cap — no other image model pays an asset read it never paid.
-        if sceneworks_core::video_request::image_max_reference_assets(entry).is_some() {
+        if sceneworks_core::image_limits::image_max_reference_assets(entry).is_some() {
             let ordered = sceneworks_core::image_request::ordered_image_reference_ids_for_model(
                 &model_id,
                 &job_payload,
@@ -769,10 +835,10 @@ async fn validate_vector_source_asset(
     project_id: String,
     source_asset_id: String,
 ) -> Result<(), ApiError> {
-    let (asset, media_path) = project_call(state, move |store| {
+    let (asset, media_exists) = project_call(state, move |store| {
         let asset = store.get_asset(&project_id, &source_asset_id)?;
         let media_path = store.resolve_asset_media_path(&project_id, &source_asset_id)?;
-        Ok((asset, media_path))
+        Ok((asset, media_path.is_file()))
     })
     .await?;
     let media_type = asset
@@ -783,12 +849,12 @@ async fn validate_vector_source_asset(
         .pointer("/file/mimeType")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if media_type != "image" || !mime.starts_with("image/") || mime == "image/svg+xml" {
+    if !sceneworks_core::contracts::is_raster_image_asset(media_type, mime) {
         return Err(ApiError::bad_request(
             "sourceAssetId must name a raster image owned by projectId",
         ));
     }
-    if !media_path.is_file() {
+    if !media_exists {
         return Err(ApiError::bad_request(
             "sourceAssetId media is missing from its project",
         ));
@@ -852,10 +918,10 @@ pub(crate) async fn validate_ordered_image_references(
         let ordinal = index + 1;
         let project = project_id.clone();
         let id = asset_id.clone();
-        let (asset, media_path) = project_call(state.clone(), move |store| {
+        let (asset, media_exists) = project_call(state.clone(), move |store| {
             let asset = store.get_asset(&project, &id)?;
             let media_path = store.resolve_asset_media_path(&project, &id)?;
-            Ok((asset, media_path))
+            Ok((asset, media_path.is_file()))
         })
         .await
         .map_err(|_| {
@@ -871,12 +937,12 @@ pub(crate) async fn validate_ordered_image_references(
             .pointer("/file/mimeType")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if media_type != "image" || !mime.starts_with("image/") || mime == "image/svg+xml" {
+        if !sceneworks_core::contracts::is_raster_image_asset(media_type, mime) {
             return Err(ApiError::bad_request(format!(
                 "reference {ordinal} ({asset_id}) must name a raster image owned by projectId"
             )));
         }
-        if !media_path.is_file() {
+        if !media_exists {
             return Err(ApiError::bad_request(format!(
                 "reference {ordinal} ({asset_id}) media is missing from its project"
             )));
@@ -916,10 +982,8 @@ pub(crate) async fn create_vector_job(
         validate_vector_source_asset(state.clone(), payload.project_id.clone(), source_asset_id)
             .await?;
     }
-    let model_manifest_entry = crate::models::model_catalog(&state)
+    let model_manifest_entry = crate::models::find_model_by_id(&state, payload.model.as_str())
         .await?
-        .into_iter()
-        .find(|model| model.get("id").and_then(Value::as_str) == Some(payload.model.as_str()))
         .unwrap_or_else(|| json!({}));
     validate_vector_model_manifest(&payload.model, payload.mode, &model_manifest_entry)?;
     validate_vector_provider_request(&payload, &model_manifest_entry)?;
@@ -1114,20 +1178,11 @@ async fn create_vector_prompt_workflow_internal(
     .map_err(|error| ApiError::bad_request(format!("Invalid raster stage: {error}")))?;
     validate_image_job(&raster_request)?;
 
-    let catalog = crate::models::model_catalog(&state).await?;
-    let raster_model = catalog
-        .iter()
-        .find(|model| {
-            model.get("id").and_then(Value::as_str) == Some(payload.raster_model.as_str())
-        })
-        .cloned()
+    let raster_model = crate::models::find_model_by_id(&state, &payload.raster_model)
+        .await?
         .unwrap_or_else(|| json!({}));
-    let vector_model = catalog
-        .iter()
-        .find(|model| {
-            model.get("id").and_then(Value::as_str) == Some(payload.vector_model.as_str())
-        })
-        .cloned()
+    let vector_model = crate::models::find_model_by_id(&state, &payload.vector_model)
+        .await?
         .unwrap_or_else(|| json!({}));
     let raster_revision =
         validate_raster_workflow_model(&state, &payload.raster_model, &raster_model)?;
@@ -1473,10 +1528,8 @@ async fn prepare_vector_parent_from_intermediate(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("vector workflow revision is missing"))?
         .to_owned();
-    let model = crate::models::model_catalog(state)
+    let model = crate::models::find_model_by_id(state, vector_model_id.as_str())
         .await?
-        .into_iter()
-        .find(|model| model.get("id").and_then(Value::as_str) == Some(vector_model_id.as_str()))
         .unwrap_or_else(|| json!({}));
     let actual_revision = authoritative_workflow_revision(&model)?;
     validate_workflow_revision("vector", &actual_revision, Some(&expected_revision))?;
@@ -2767,7 +2820,7 @@ pub(crate) async fn create_video_job(
 
 pub(crate) fn video_job_platform(_state: &AppState) -> &'static str {
     #[cfg(test)]
-    if let Some(platform) = *_state.video_platform_override.lock() {
+    if let Some(platform) = *_state.test_hooks.video_platform_override.lock() {
         return platform;
     }
     std::env::consts::OS
@@ -3177,13 +3230,8 @@ mod plan_backed_video_enqueue_tests {
     const IMPORT_PLAN: &str = r#","importPlan": { "checkpointId": "ckpt_wan_abc123" }"#;
 
     async fn create_project(app: &axum::Router) {
-        let (status, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({ "name": "Imported Wan" }),
-        )
-        .await;
+        let (status, project) =
+            crate::tests::support::create_project(app.clone(), &"Imported Wan").await;
         assert_eq!(status, StatusCode::CREATED, "project create: {project}");
     }
 
@@ -3356,13 +3404,8 @@ mod imported_minimax_h3_video_tests {
     }
 
     async fn create_project(app: &axum::Router) {
-        let (status, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({ "name": "Imported H3" }),
-        )
-        .await;
+        let (status, project) =
+            crate::tests::support::create_project(app.clone(), &"Imported H3").await;
         assert_eq!(status, StatusCode::CREATED, "project create: {project}");
     }
 

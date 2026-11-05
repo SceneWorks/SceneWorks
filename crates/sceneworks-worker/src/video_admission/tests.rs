@@ -5290,7 +5290,7 @@ fn a_stale_bound_still_refuses_a_host_no_larger_than_the_one_that_failed() {
 /// so a new revision that the adapter misses reds here.
 #[test]
 fn the_memory_adapter_lists_every_worker_evidence_identity() {
-    let admission = include_str!("../video_admission.rs");
+    let admission = crate::source_tests::facade_source("video_admission.rs");
     let adapter = include_str!("../../../sceneworks-memory-adapter/src/bin/mlx_wan_scail2.rs");
     let identities = admission
         .split('"')
@@ -7043,3 +7043,5 @@ fn native_quant_none_preserves_static_prediction_and_requires_no_request_geometr
         VideoAdmissionOutcome::default()
     );
 }
+
+mod carrier_contracts;

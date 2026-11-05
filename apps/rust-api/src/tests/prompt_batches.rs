@@ -104,13 +104,8 @@ async fn prompt_batch_crud_routes_persist_global_and_project_batches() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Project-scoped batch lives in the project's own manifest.
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Batch Project" }),
-    )
-    .await;
+    let (status, project) =
+        crate::tests::support::create_project(app.clone(), &"Batch Project").await;
     assert_eq!(status, StatusCode::CREATED);
     let project_id = project["id"].as_str().expect("project id").to_owned();
 

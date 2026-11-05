@@ -53,6 +53,14 @@ afterEach(async () => {
   container.remove();
 });
 
+it("downloads conditional components through the model domain API", async () => {
+  apiFetchMock.mockResolvedValueOnce({ jobs: [{ id: "component-job" }] });
+  await expect(hookApi.downloadConditionalComponents("model/id", "purpose name")).resolves.toEqual({ jobs: [{ id: "component-job" }] });
+  expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/models/model%2Fid/conditional-components/purpose%20name/download", "tok", {
+    method: "POST", body: JSON.stringify({}),
+  });
+});
+
 describe("createModelImportJob type-field contract (sc-14020)", () => {
   it.each(["json", "multipart"])("submits %s managed repair to the original selection, not ordinary create", async (kind) => {
     const metadata = { repairModelId: "original-selection", modelId: "original-selection", name: "Renamed replacement", type: "image" };
@@ -127,14 +135,21 @@ describe("createModelImportJob type-field contract (sc-14020)", () => {
       ? { ...metadata, file: new File(["h3"], "h3.safetensors") }
       : kind === "linked" ? { ...metadata, linkedRootId: "root", linkedRelativePath: "h3.safetensors" }
         : { ...metadata, source: { kind: "url", url: "https://example.com/h3.safetensors" } };
-    // Accepting the opposite task's card is not consent for the explicitly selected base.
+    let serverAcknowledged = false;
+    apiFetchMock.mockImplementation(async (path) => path.endsWith("/license-acknowledgment")
+      ? { modelId: "minimax_h3_ref", acknowledged: serverAcknowledged }
+      : { id: "model-import-job-1", type: "model_import", status: "running" });
+    // Opposite-card consent and the selected card's stale paint cache authorize nothing.
     window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
     await expect(hookApi.createModelImportJob(payload)).rejects.toThrow("MiniMax-H3 Reference requires accepting its license first");
-    expect(apiFetchMock).not.toHaveBeenCalled();
+    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/models/minimax_h3_ref/license-acknowledgment", "tok");
+    expect(apiFetchMock.mock.calls.some(([, , options]) => options?.method === "POST")).toBe(false);
     window.localStorage.setItem("sceneworks-license-ack:minimax_h3_ref", "true");
+    await expect(hookApi.createModelImportJob(payload)).rejects.toThrow("MiniMax-H3 Reference requires accepting its license first");
+    serverAcknowledged = true;
     await act(async () => { await hookApi.createModelImportJob(payload); });
-    const body = apiFetchMock.mock.calls[0][2].body;
-    expect(kind === "multipart" ? body.get("licenseAcknowledged") : JSON.parse(body).licenseAcknowledged).toBe(kind === "multipart" ? "true" : true);
+    const body = apiFetchMock.mock.calls.find(([, , options]) => options?.method === "POST")[2].body;
+    expect(kind === "multipart" ? body.has("licenseAcknowledged") : Object.hasOwn(JSON.parse(body), "licenseAcknowledged")).toBe(false);
     expect(kind === "multipart" ? body.get("baseModel") : JSON.parse(body).baseModel).toBe("minimax_h3_ref");
   });
 });

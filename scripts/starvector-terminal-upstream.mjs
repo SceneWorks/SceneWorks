@@ -1,6 +1,6 @@
 #!/usr/bin/env node
+import { sha256 as hash } from "./lib/file-sha256.mjs";
 import { execFile as callback } from "node:child_process";
-import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -13,7 +13,7 @@ import { loadUpstreamReference, PARITY_SOURCE_INDICES } from "./lib/starvector-t
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 const execFile = promisify(callback);
 const json = async file => JSON.parse(await readFile(file, "utf8"));
-const hash = bytes => createHash("sha256").update(bytes).digest("hex");
+
 export const UPSTREAM_TIER_TIMEOUT_MS = 7_300 * 1_000;
 
 async function regularFile(file, description) {

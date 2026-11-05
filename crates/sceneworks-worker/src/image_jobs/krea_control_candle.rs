@@ -1,16 +1,70 @@
-use super::{
-    admit_conditioning_paths, attach_manifest_text_encoder, gate_tier_key, gate_with_evict_reclaim,
-    krea_model_subdir, lora_label, nvfp4_host_eligible, nvfp4_selected, pose_entries,
-    resolve_adapters, resolve_advanced_or_manifest_u32, resolve_text_style_gain,
-    run_candle_strict_control, trusted_control_weight_revision, AdapterSpec, ApiClient, CancelFlag,
-    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
-    Progress, Settings, Value, WorkerError, WorkerResult,
-};
-use super::{advanced, huggingface_snapshot_dir};
-use super::{
-    ensure_hf_cached_file, resolve_app_managed_model_dir, safe_weight_filename, DownloadContext,
-};
+use super::adapters::resolve_adapters;
+use super::admit_conditioning_paths;
+use super::artifact_resolution::krea_model_subdir;
+use super::conditioning::pose_entries;
+use super::conditioning::resolve_text_style_gain;
+#[cfg(target_os = "macos")]
+use super::krea_control::ensure_krea_control_weights;
+#[cfg(target_os = "macos")]
+use super::krea_control::is_krea_control_model;
+#[cfg(target_os = "macos")]
+use super::krea_control::krea_control_overlay_repo_file;
+#[cfg(target_os = "macos")]
+use super::krea_control::krea_control_payload_overlay_path;
+#[cfg(target_os = "macos")]
+use super::krea_control::resolve_krea_control_base;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_BASE_ENV;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_DEFAULT_SCALE;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_DEFAULT_STEPS;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_ENGINE_ID;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_MLX_REPO;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_FILE;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_REPO;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_REVISION;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_SCALE_CAP;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_WEIGHTS_ENV;
+use super::load_spec::attach_manifest_text_encoder;
+use super::memory::gate_with_evict_reclaim;
+use super::metrics::lora_label;
+use super::nvfp4_host_eligible;
+use super::nvfp4_selected;
+use super::quantization::gate_tier_key;
+use super::run_candle_strict_control;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::strict_control::trusted_control_weight_revision;
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::Progress;
+use crate::advanced;
 use crate::conditioning_fit::ConditioningAdmission;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 // Candle (Windows/CUDA) Krea 2 pose-ControlNet route (sc-8464, epic 8459) — `krea_2_turbo` +
@@ -224,8 +278,11 @@ pub(super) fn resolve_krea_control_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if super::wants_krea_convrot(request) {
-        return Ok(super::resolve_krea_convrot(request, settings).map(|(root, _)| root));
+    if super::artifact_resolution::wants_krea_convrot(request) {
+        return Ok(
+            super::artifact_resolution::resolve_krea_convrot(request, settings)
+                .map(|(root, _)| root),
+        );
     }
     if let Ok(env_dir) = std::env::var(KREA_CONTROL_BASE_ENV) {
         let p = PathBuf::from(env_dir.trim());
@@ -237,19 +294,12 @@ pub(super) fn resolve_krea_control_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Krea control modelPath").map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model).unwrap_or(KREA_CONTROL_BASE_REPO)
         });
@@ -287,8 +337,8 @@ pub(super) fn krea_control_candle_available(request: &ImageRequest, settings: &S
     is_krea_control_model(&request.model)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
-        && if super::wants_krea_convrot(request) {
-            super::resolve_krea_convrot_dit(settings).is_some()
+        && if super::artifact_resolution::wants_krea_convrot(request) {
+            super::artifact_resolution::resolve_krea_convrot_dit(settings).is_some()
         } else {
             matches!(resolve_krea_control_base(request, settings), Ok(Some(_)))
         }
@@ -312,9 +362,7 @@ pub(super) fn krea_control_overlay_repo_file(
         .and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(default)
             .to_owned()
     };
@@ -344,9 +392,7 @@ pub(super) fn krea_control_payload_overlay_path(
         .get("controlWeights")
         .and_then(Value::as_object)
         .and_then(|cw| cw.get("path"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
     else {
         return Ok(None);
     };
@@ -653,11 +699,13 @@ pub(super) async fn generate_candle_krea_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    if super::wants_krea_convrot(request) {
-        super::ensure_krea_convrot_base_present(api, settings, job, request).await?;
+    if super::artifact_resolution::wants_krea_convrot(request) {
+        super::artifact_resolution::ensure_krea_convrot_base_present(api, settings, job, request)
+            .await?;
     }
-    let (base, convrot_dit) = if super::wants_krea_convrot(request) {
-        super::resolve_krea_convrot(request, settings).map(|(root, dit)| (root, Some(dit)))
+    let (base, convrot_dit) = if super::artifact_resolution::wants_krea_convrot(request) {
+        super::artifact_resolution::resolve_krea_convrot(request, settings)
+            .map(|(root, dit)| (root, Some(dit)))
     } else {
         resolve_krea_control_base(request, settings)?.map(|root| (root, None))
     }
@@ -690,12 +738,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         KREA_CONTROL_DEFAULT_SCALE,
         0.0..=KREA_CONTROL_SCALE_CAP,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model).unwrap_or(KREA_CONTROL_BASE_REPO)
         })
@@ -827,10 +870,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         && selected_text_encoder.is_none()
         && krea_control_runtime_evidence_verified(request, settings, tier, &base, &control);
 
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     // sc-13960 two-pass: walk the ladder against raw free, then — only if reclaiming the cudarc pool
     // would step it off a needless rung (a strict improvement; the reclaimed budget only grows) — evict
     // the resident generator and act on the reclaimed walk.

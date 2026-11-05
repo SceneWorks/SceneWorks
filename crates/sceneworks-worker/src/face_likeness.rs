@@ -44,10 +44,7 @@ use sceneworks_core::contracts::JsonObject;
 
 // `WorkerResult` / `WorkerError` are re-exported from the crate root (`error::*`); the backend legs
 // surface model failures through them, the same as every other worker face path.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::{WorkerError, WorkerResult};
 
 /// The recognition method surfaced on every result. Stable string the asset sidecar (sc-4408) and the
@@ -197,8 +194,9 @@ pub(crate) fn face_likeness_fact(
 /// skipped / not applicable / hard-failed before a [`LikenessResult`] was produced) leaves
 /// `rawAdapterSettings` untouched, so the field is OMITTED entirely from the sidecar — no `null`
 /// clutter, no crash. A `Some(result)` writes the [`face_likeness_fact`] block (including the
-/// explicit `detected: false` N/A block). The scoring surfaces call this once per generated asset
-/// just before [`write_image_asset`](crate::image_jobs::write_image_asset) builds its fact.
+/// explicit `detected: false` N/A block). This legacy metadata adapter is retained by the
+/// study and metadata-contract tests; production post-passes return the fact directly.
+#[cfg(test)]
 pub(crate) fn attach_face_likeness(
     raw_settings: &mut JsonObject,
     result: Option<&LikenessResult>,
@@ -276,10 +274,7 @@ fn score_against_source(
 /// The loaded SCRFD + ArcFace backend, abstracted so the [`FaceLikenessScorer`] is backend-agnostic.
 /// MLX on macOS (`mlx-gen-face`), candle off-Mac (`candle-gen-face`); both produce the same
 /// `(det_score, raw 512-d embedding)` for the largest detected face — or `None` when there is no face.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // The test-only zero-cost `Stub` variant is tiny next to the real `Mlx` backend; the size disparity
 // is irrelevant for a per-job singleton (one scorer per generation), and it only exists under `test`.
 #[cfg_attr(test, allow(clippy::large_enum_variant))]
@@ -299,13 +294,7 @@ enum FaceBackend {
 
 /// The canned detection the [`FaceBackend::Stub`] returns for a given image, selected by the image's
 /// first pixel byte (the test encodes intent in pixel 0). Mirrors the three real-backend outcomes.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 #[derive(Clone, Copy)]
 enum StubFace {
     /// A reliable face at `det_score`, embedded as the canned vector (drives a real cosine).
@@ -316,24 +305,12 @@ enum StubFace {
 
 /// Counts every `largest_face` call so a test can prove the SOURCE is embedded exactly once across N
 /// generated-image scores (the explicit caching acceptance criterion), independent of weights.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 struct StubFaceBackend {
     calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 impl StubFaceBackend {
     /// Map an image to its canned detection by pixel 0: `0` ⇒ no face; otherwise a face whose
     /// `det_score` scales with pixel 0 (`0.5 + px/512`, so distinct identities produce distinct
@@ -355,10 +332,7 @@ impl StubFaceBackend {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl FaceBackend {
     /// Detect + embed the largest face of `image`. `Ok(None)` ⇒ no detectable face (a clean N/A,
     /// not an error); `Err` ⇒ a real failure (weights / forward). MLX embeds only the largest
@@ -406,10 +380,7 @@ impl FaceBackend {
 /// The generator-agnostic identity-likeness scorer (sc-4407). Construct it once per job from the loaded
 /// face stack + the source face image — the source embedding is computed ONCE here and cached — then
 /// call [`score`](Self::score) for each generated image. The source is never re-embedded.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct FaceLikenessScorer {
     backend: FaceBackend,
     /// The cached, L2-normalized source embedding. `None` ⇒ no detectable source face: every `score`
@@ -417,6 +388,7 @@ pub(crate) struct FaceLikenessScorer {
     source_normalized: Option<Vec<f32>>,
     /// Count of source embeddings actually computed (always ≤ 1). Lets a test assert the source is
     /// embedded exactly once across N `score` calls — the explicit caching acceptance criterion.
+    #[cfg(test)]
     source_embed_count: usize,
 }
 
@@ -450,10 +422,7 @@ impl FaceLikenessScorer {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl FaceLikenessScorer {
     /// Build the scorer from an already-loaded backend, embedding + caching the source face exactly
     /// once. A source with no detectable face is NOT an error — it yields a scorer whose every `score`
@@ -463,9 +432,12 @@ impl FaceLikenessScorer {
             Some((_det_score, raw)) => (l2_normalized(&raw), 1),
             None => (None, 1),
         };
+        #[cfg(not(test))]
+        let _ = source_embed_count;
         Ok(Self {
             backend,
             source_normalized,
+            #[cfg(test)]
             source_embed_count,
         })
     }
@@ -500,6 +472,7 @@ impl FaceLikenessScorer {
     }
 
     /// Whether the source face embedded — `false` ⇒ the whole job is N/A (no source face).
+    #[cfg(test)]
     pub(crate) fn has_source_face(&self) -> bool {
         self.source_normalized.is_some()
     }
@@ -569,10 +542,7 @@ impl FaceLikenessScorer {
 /// weights bundle or a source image with no detectable face must NEVER abort the generation. Any
 /// error is logged and becomes `None` — the set still renders, the scores are simply absent (the field
 /// is omitted from each sidecar). A `None` here ⇒ pass `None` to [`score_generated_image`].
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn build_face_likeness_scorer(
     weights_dir: &std::path::Path,
     source: &Image,
@@ -598,10 +568,7 @@ pub(crate) fn build_face_likeness_scorer(
 /// field is omitted entirely. Per-image scoring is non-fatal ([`score_or_null`]); a full-body / turned /
 /// profile pose with no reliable frontal face records an honest `detected: false` N/A block, never a
 /// misleading low number.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn score_generated_image(
     scorer: Option<&FaceLikenessScorer>,
     image: &Image,
@@ -844,10 +811,7 @@ mod tests {
     // above. The angle-set producer (`generate_instantid_stream`) calls exactly this surface:
     // construct once from the source, then `score_or_null` + `face_likeness_fact` per finished view.
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     mod angle_set_wiring {
         use super::*;
         use std::sync::atomic::Ordering;

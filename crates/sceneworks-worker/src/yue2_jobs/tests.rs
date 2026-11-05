@@ -12,7 +12,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode as HttpStatus;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Json;
 
 const BF16_REVISION: &str = "1a96eca688d6ae5d7f0feb88573fec89920fcd19";
 const VAE_REVISION: &str = "95535e72a97bc0f09b8ada125d26b4009428c0e8";
@@ -100,9 +100,7 @@ async fn spawn_api(state: ApiState) -> String {
             None => (HttpStatus::NOT_FOUND, Json(json!({"detail": "no version"}))).into_response(),
         }
     }
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job))
-        .route("/api/v1/jobs/:job_id/progress", post(progress))
+    let app = crate::test_api_stub::job_progress_routes(job, progress)
         .route("/api/v1/jobs/:job_id/yue2-eligibility", get(eligibility))
         .route("/api/v1/workers/:worker_id/heartbeat", post(heartbeat))
         .route(
@@ -207,10 +205,7 @@ enum Behavior {
     LongAr { steps: u32, millis: u64 },
     /// Open the run's working directory (with the engine's claim) and wait for `req.cancel`.
     /// (Its test decodes a source run, which only a build with the audio lane can verify.)
-    #[cfg_attr(
-        not(any(target_os = "macos", feature = "backend-candle")),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(native_lane), allow(dead_code))]
     WaitForCancel,
     /// Leave a working directory with a checkpoint, then fail.
     Fail,
@@ -527,7 +522,7 @@ impl Harness {
             .unwrap();
         let state = ApiState::default();
         let url = spawn_api(state.clone()).await;
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.api_url = url;
         settings.worker_id = "test-worker".into();
         settings.data_dir = data.path().to_path_buf();
@@ -814,10 +809,7 @@ async fn transcription_job_publishes_result_and_cleans_failed_partial() {
     }
 }
 
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 fn song_request_json(style: &str) -> Value {
     json!({"style": style, "lyrics": "[verse]\nla", "cot": "full", "seed": 3, "id": "song"})
 }
@@ -1207,7 +1199,7 @@ async fn withdrawn_eligibility_refuses_the_job_at_execution_before_load() {
 /// A cancel reaches the engine's own hook (`GenerationRequest::cancel`), the job reads canceled,
 /// and exactly the run's `.partial` working directory is removed — a decode's source run, which
 /// the job only reads, is untouched.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[tokio::test]
 async fn a_cancel_reaches_the_engine_hook_and_removes_only_the_runs_working_directory() {
     let h = Harness::new().await;
@@ -1588,7 +1580,7 @@ async fn a_cancel_after_the_run_published_still_publishes_it() {
 /// A generic audio job must not run a symbolic-song model: it is refused before anything loads.
 #[tokio::test]
 async fn a_generic_audio_job_for_a_symbolic_song_model_is_refused() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     let api = ApiClient::new(&settings);
     let mut job: JobSnapshot = serde_json::from_value(job_json("generic-yue2", false)).unwrap();
     job.payload = json!({
@@ -1612,7 +1604,7 @@ async fn a_generic_audio_job_for_a_symbolic_song_model_is_refused() {
 /// The catalog's locally derived tiers pin exactly the bytes the linked engine's conversion
 /// produces (`candle_audio_yue2::tier::TIER_PINS`), so a derived snapshot the catalog verifies is
 /// the one the engine loads. Mutation that reds this: change one digit of a catalog pin.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn catalog_derivation_pins_equal_the_engines_tier_pins() {
     use crate::inference_runtime::candle_audio_yue2::tier::{
@@ -1656,7 +1648,7 @@ fn catalog_derivation_pins_equal_the_engines_tier_pins() {
 /// A source run is verified against the identity its producing job recorded before anything
 /// reads it: a decode of a run that is not that run, or a restore of a plan whose identity moved,
 /// is refused before load.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[tokio::test]
 async fn a_source_run_that_is_not_the_recorded_one_is_refused_before_load() {
     let h = Harness::new().await;
@@ -2141,7 +2133,7 @@ async fn fp8_on_metal_is_refused_by_admission_before_loading_weights() {
 }
 
 /// The worker's copies of the engine's run-layout names are the linked engine's.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn run_layout_names_match_the_linked_engine() {
     use crate::inference_runtime::candle_audio_yue2::run;

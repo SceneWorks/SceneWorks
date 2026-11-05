@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useDismissOnOutsideOrEscape } from "../hooks/useDismissOnOutsideOrEscape.js";
+import React, { useRef, useState } from "react";
 import { AssetThumbnail } from "./assetMedia.jsx";
 import { Icon } from "./Icons.jsx";
 
@@ -25,27 +26,7 @@ export function CompactSelector({
   const containerRef = useRef(null);
   const selected = items.find((item) => item.id === selectedId) ?? null;
 
-  useEffect(() => {
-    if (!open) {
-      return undefined;
-    }
-    function onDocMouseDown(event) {
-      if (!containerRef.current?.contains(event.target)) {
-        setOpen(false);
-      }
-    }
-    function onDocKey(event) {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDocMouseDown);
-    document.addEventListener("keydown", onDocKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onDocKey);
-    };
-  }, [open]);
+  useDismissOnOutsideOrEscape(containerRef, open, setOpen);
 
   function renderThumb(item) {
     const asset = item ? getThumbAsset(item) : null;

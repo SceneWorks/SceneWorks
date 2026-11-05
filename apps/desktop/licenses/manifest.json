@@ -1272,7 +1272,7 @@
       "publisher": "Xintao Wang",
       "license": "BSD-3-Clause",
       "homepage": "https://github.com/xinntao/Real-ESRGAN",
-      "usage": "Image upscaler (utility model). SceneWorks installs its own ONNX export of the upstream Real-ESRGAN release weights, re-hosted at SceneWorks/real-esrgan-onnx and reproducible via scripts/spikes/sc3489_export_reference.py; the original BSD-3-Clause weights are published by Xintao Wang at the homepage below.",
+      "usage": "Image upscaler (utility model). SceneWorks installs its own ONNX export of the upstream Real-ESRGAN release weights, re-hosted at SceneWorks/real-esrgan-onnx and reproducible via the archived scripts/spikes/sc3489_export_reference.py (retrieval: docs/archive/historical-artifacts.md); the original BSD-3-Clause weights are published by Xintao Wang at the homepage below.",
       "documents": [
         {
           "label": "BSD 3-Clause License",

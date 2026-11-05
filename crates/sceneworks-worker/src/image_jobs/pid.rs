@@ -1,3 +1,10 @@
+use super::ImageRequest;
+use super::WeightsSource;
+use crate::huggingface_snapshot_dir;
+use crate::safe_weight_filename;
+use crate::Path;
+use crate::Value;
+use crate::WorkerResult;
 // Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849).
 //
 // PiD is an OPTIONAL, per-generation replacement for a model's VAE decoder: when the request opts in
@@ -75,16 +82,10 @@ fn pid_backbone_for(model: &str) -> Option<&'static str> {
         | "krea_2_raw" => Some("qwenimage"),
         // flux (sc-7846): FLUX.1, Boogu-Image, Chroma, and Z-Image — Z-Image is in the FLUX.1 VAE latent
         // space (PiD's zimage tags alias the flux checkpoint), not the qwenimage space.
-        "flux_dev"
-        | "flux_schnell"
-        | "boogu_image"
-        | "boogu_image_turbo"
-        | "boogu_image_edit"
-        | "chroma1_hd"
-        | "chroma1_base"
-        | "chroma1_flash"
-        | "z_image_turbo"
-        | "z_image_edit" => Some("flux"),
+        "flux_dev" | "flux_schnell" | "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
+        | "chroma1_hd" | "chroma1_base" | "chroma1_flash" | "z_image_turbo" | "z_image_edit" => {
+            Some("flux")
+        }
         // flux2 (sc-7847): FLUX.2-dev, every klein-9b variant, Lens, Ideogram 4 (packed 128-ch latent).
         "flux2_dev"
         | "flux2_klein_9b"
@@ -177,7 +178,7 @@ pub(crate) fn pid_effective_dims(
 /// True when the request opted into the PiD decoder via `advanced.usePid` (an opaque pass-through bool,
 /// like `mlxQuantize` / `schedulerShift` — no top-level `ImageRequest` field, so zero contract-snapshot
 /// drift). Accepts a JSON bool or the string `"true"`.
-fn pid_requested(request: &ImageRequest) -> bool {
+pub(super) fn pid_requested(request: &ImageRequest) -> bool {
     request
         .advanced
         .get("usePid")
@@ -262,7 +263,7 @@ fn pid_default_file(
 ///
 /// The caller sets BOTH `LoadSpec::with_pid(checkpoint, gemma)` and `GenerationRequest.use_pid = true`
 /// exactly when this returns `Ok(Some)` — never one without the other (the engine rejects that).
-fn resolve_pid_weights(
+pub(super) fn resolve_pid_weights(
     request: &ImageRequest,
     data_dir: &Path,
     model: &str,
@@ -287,27 +288,18 @@ fn resolve_pid_weights(
         .and_then(Value::as_object);
     let repo = ckpt_cfg
         .and_then(|c| c.get("repo"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .unwrap_or(default_repo);
     // Validate a per-request filename override EARLY — before the cache check below — so a traversal /
     // non-plain-component filename is rejected with a field-pointed `InvalidPayload` rather than silently
     // ignored when the repo happens not to be cached (sc-8821 / F-019). `None` ⇒ use the tier default.
     let filename_override = ckpt_cfg
         .and_then(|c| c.get("filename"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(|s| safe_weight_filename(s, "advanced.pidCheckpoint.filename"))
         .transpose()?;
-    let gemma_repo = request
-        .advanced
-        .get("pidGemma")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(PID_GEMMA_REPO);
+    let gemma_repo =
+        crate::payload::trimmed_string(request.advanced.get("pidGemma")).unwrap_or(PID_GEMMA_REPO);
 
     // Both snapshots must be cached, or fall through to the native VAE (no partial/half-loaded PiD).
     let Some(snapshot) = huggingface_snapshot_dir(data_dir, repo) else {
@@ -319,7 +311,13 @@ fn resolve_pid_weights(
     // predates the res2k file (whole-repo installs mark "installed" without re-fetching) falls back to
     // 2kto4k. The default filenames are trusted consts, so they skip the override's traversal validation.
     let filename = filename_override.unwrap_or_else(|| {
-        pid_default_file(backbone, pid_output_tier(request), &snapshot, default_2kto4k_file).to_owned()
+        pid_default_file(
+            backbone,
+            pid_output_tier(request),
+            &snapshot,
+            default_2kto4k_file,
+        )
+        .to_owned()
     });
     let checkpoint = snapshot.join(filename);
     if !checkpoint.exists() {
@@ -451,7 +449,10 @@ mod pid_tests {
             (4096, 256),
         ] {
             let (ew, eh) = pid_effective_dims(w, h, true, PidOutputTier::Res2k);
-            assert!(ew.is_multiple_of(16) && eh.is_multiple_of(16), "{ew}x{eh} not /16");
+            assert!(
+                ew.is_multiple_of(16) && eh.is_multiple_of(16),
+                "{ew}x{eh} not /16"
+            );
             assert!(ew >= 256 && eh >= 256, "{ew}x{eh} below min");
             assert!(ew.max(eh) <= 512, "{ew}x{eh} base long side exceeds 2K cap");
         }
@@ -484,7 +485,7 @@ mod pid_tests {
     fn pid_default_file_falls_back_when_res2k_absent_or_unsupported() {
         let empty = tempfile::tempdir().unwrap();
         let snap = empty.path(); // no res2k file staged
-        // 2K tier but the res2k file isn't cached yet → graceful fallback to 2kto4k (existing installs).
+                                 // 2K tier but the res2k file isn't cached yet → graceful fallback to 2kto4k (existing installs).
         assert_eq!(
             pid_default_file("flux", PidOutputTier::Res2k, snap, PID_FLUX_FILE),
             PID_FLUX_FILE
@@ -593,9 +594,18 @@ mod pid_tests {
 
     #[test]
     fn pid_requested_reads_bool_and_string() {
-        assert!(pid_requested(&request("qwen_image", json!({ "usePid": true }))));
-        assert!(pid_requested(&request("qwen_image", json!({ "usePid": "true" }))));
-        assert!(!pid_requested(&request("qwen_image", json!({ "usePid": false }))));
+        assert!(pid_requested(&request(
+            "qwen_image",
+            json!({ "usePid": true })
+        )));
+        assert!(pid_requested(&request(
+            "qwen_image",
+            json!({ "usePid": "true" })
+        )));
+        assert!(!pid_requested(&request(
+            "qwen_image",
+            json!({ "usePid": false })
+        )));
         assert!(!pid_requested(&request("qwen_image", json!({}))));
     }
 
@@ -648,7 +658,9 @@ mod pid_tests {
             let error = resolve_pid_weights(&req, dir.path(), &req.model)
                 .expect_err("unsafe pidCheckpoint.filename must be rejected");
             assert!(
-                error.to_string().contains("advanced.pidCheckpoint.filename"),
+                error
+                    .to_string()
+                    .contains("advanced.pidCheckpoint.filename"),
                 "error should point at the offending field: {error}"
             );
         }

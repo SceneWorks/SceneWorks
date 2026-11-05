@@ -1,6 +1,8 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
+import { mediaResponse } from "../api/media.js";
 import { AssetVedaOutcome } from "./VedaOutcome.jsx";
 import React from "react";
-import { isAbortError } from "../api.js";
+import { getMediaTicket, isAbortError, subscribeMediaTicket } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { assetCanCarryWorkflow, saveAssetAs, revealAsset } from "../assetActions.js";
@@ -119,34 +121,65 @@ export async function emptyTrash(trashedAssets, purgeAsset) {
 // Reopens a saved interleaved document: the asset's file points to the segments
 // JSON in assets/documents/, fetched here (served like any project file).
 function DocumentReader({ asset }) {
+  const ticket = useMediaTicket();
+  const [unauthorizedTicket, setUnauthorizedTicket] = React.useState(null);
+  const [retryGeneration, setRetryGeneration] = React.useState(0);
+  React.useEffect(() => {
+    if (unauthorizedTicket !== null && unauthorizedTicket !== ticket) {
+      setUnauthorizedTicket(null);
+      setRetryGeneration((value) => value + 1);
+    }
+  }, [ticket, unauthorizedTicket]);
   const url = assetUrl(asset);
+  const resourceKey = React.useMemo(() => {
+    if (!url) return "";
+    const parsed = new URL(url, "http://sceneworks.invalid");
+    parsed.searchParams.delete("ticket");
+    return parsed.href;
+  }, [url]);
+  const committed = React.useRef({ url, resourceKey, generation: 0 });
+  React.useLayoutEffect(() => {
+    const previous = committed.current;
+    committed.current = {
+      url,
+      resourceKey,
+      generation: previous.generation + (previous.resourceKey === resourceKey ? 0 : 1),
+    };
+  }, [url, resourceKey]);
+  React.useLayoutEffect(() => () => { committed.current.generation += 1; }, []);
   const [segments, setSegments] = React.useState(null);
   const [error, setError] = React.useState("");
 
   React.useEffect(() => {
-    if (!url) {
+    if (!resourceKey) {
       setError("Document file is unavailable.");
       return undefined;
     }
     const controller = new AbortController();
+    const { url: initialUrl, generation } = committed.current;
+    const ownsRequest = () => !controller.signal.aborted && committed.current.generation === generation;
+    let requestTicket = getMediaTicket();
+    setUnauthorizedTicket(null);
     setSegments(null);
     setError("");
-    fetch(url, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`Request failed (${response.status})`);
-        }
-        return response.json();
-      })
-      .then((document) => {
-        setSegments(Array.isArray(document?.segments) ? document.segments : []);
-      })
-      .catch((err) => {
-        if (isAbortError(err)) return;
-        setError(String(err?.message ?? err));
-      });
+    const load = async () => {
+      let response = await mediaResponse(initialUrl, { signal: controller.signal });
+      // Do not restart a live or already completed read solely for rotation.
+      // If the old credential expired during this read, retry once with the new one.
+      if (response.status === 401 && ownsRequest() && committed.current.url !== initialUrl) {
+        requestTicket = getMediaTicket();
+        response = await mediaResponse(committed.current.url, { signal: controller.signal });
+      }
+      if (response.status === 401 && ownsRequest()) setUnauthorizedTicket(requestTicket);
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      const document = await response.json();
+      if (ownsRequest()) setSegments(Array.isArray(document?.segments) ? document.segments : []);
+    };
+    load().catch((err) => {
+      if (ownsRequest() && !isAbortError(err)) setError(String(err?.message ?? err));
+    });
     return () => controller.abort();
-  }, [url]);
+  }, [resourceKey, retryGeneration]);
 
   if (error) {
     return <p className="empty-panel error-text">Couldn't load document: {error}</p>;
@@ -618,6 +651,7 @@ export function AssetDetail({
   // sc-25682: open the depth action for this image (absent when depth cannot run here).
   onEstimateDepth = null,
 }) {
+  useMediaTicket();
   if (!asset) {
     return <aside className="asset-detail empty-panel">No asset selected</aside>;
   }
@@ -938,6 +972,7 @@ function FullscreenPreviewComponent({
   sourceAsset,
   updateAssetStatus,
 }) {
+  React.useSyncExternalStore(subscribeMediaTicket, getMediaTicket, getMediaTicket);
   const hasUpscaleVariants = Boolean(asset.variants?.original && asset.variants?.upscaled);
   const [variantMode, setVariantMode] = React.useState("upscaled");
   React.useEffect(() => {

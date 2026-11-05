@@ -7,6 +7,8 @@
 //! was the only one — it was not); and [`no_value_in_a_built_envelope_is_path_shaped`] seeds the
 //! request with paths on purpose and asserts none of them reach the file.
 
+mod common;
+use common::repo_root;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
@@ -16,19 +18,17 @@ use sceneworks_core::contracts::{Asset, JsonObject};
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::workflow_share::{
     advanced_key_rule, build_workflow_share, build_workflow_share_from, is_path_shaped,
-    parse_workflow_share, AdvancedBuilder, AdvancedBuilderShape, AdvancedDisposition,
-    AdvancedKeySource, SeamDisposition, WebBuilderRef, WorkflowAssetFacts, WorkflowShare,
-    ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION,
-    PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_MAX_BYTES, WORKFLOW_SHARE_SCHEMA_VERSION,
-    WORKFLOW_WRITE_SEAMS,
+    parse_workflow_share, AdvancedDisposition, AdvancedKeySource, WorkflowAssetFacts,
+    WorkflowShare, ADVANCED_KEY_RULES, PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_MAX_BYTES,
+    WORKFLOW_SHARE_SCHEMA_VERSION,
 };
+#[path = "common/workflow_registry.rs"]
+mod workflow_registry;
 use serde_json::{json, Value};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
+use workflow_registry::{
+    AdvancedBuilder, AdvancedBuilderShape, SeamDisposition, WebBuilderRef, ADVANCED_BUILDERS,
+    DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION, WORKFLOW_WRITE_SEAMS,
+};
 
 fn read_repo_file(relative_path: &str) -> String {
     let path = repo_root().join(relative_path);
@@ -739,7 +739,7 @@ const UNACCOUNTED_ADVANCED_ADVICE: &str = "\
     Every place the web app fills `advanced` must be accounted for, because four of those places \
     now feed a lane that embeds the map into the PNG (epic 15945). So either:\n\
     * add the (file, function) pair to `ADVANCED_BUILDERS` in \
-    crates/sceneworks-core/src/workflow_share.rs and classify every key it can emit; or\n\
+    crates/sceneworks-core/tests/common/workflow_registry.rs and classify every key it can emit; or\n\
     * if its lane does not embed yet, add it to `DEFERRED_ADVANCED_BUILDERS` with the story that \
     owns turning it on; or\n\
     * if this is not a job payload at all, RENAME THE LOCAL. This lint reads the name `advanced`, \

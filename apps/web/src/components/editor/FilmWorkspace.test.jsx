@@ -110,6 +110,73 @@ function changeValue(element, value) {
 }
 
 describe("FilmWorkspace", () => {
+  it("does not let a pre-review feed overwrite the accepted running receipt", async () => {
+    const film = draft();
+    const idle = { locator: { id: "run_a", draftId: film.id }, controllerActive: false, record: { state: "finished", shots: [] } };
+    const running = { ...idle, controllerActive: true, controllerOwner: "api-review:run_a" };
+    const view = (run) => ({ run, takeAssets: [], observations: [], selections: [] });
+    let releaseOldFeed;
+    let held = false;
+    let accepted = false;
+    const snapshots = [];
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/film-runs")) return Promise.resolve([accepted ? running : idle]);
+      if (path.endsWith("/planning")) return Promise.resolve(null);
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/review") && options.method === "POST") { accepted = true; return Promise.resolve(view(running)); }
+      if (path.endsWith("/review")) return Promise.resolve(view(accepted ? running : idle));
+      return Promise.resolve({});
+    });
+    const onRuns = vi.fn(() => {
+      if (!held) { held = true; return new Promise((resolve) => { releaseOldFeed = resolve; }); }
+      return undefined;
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AppContext.Provider value={{ activeProject: { id: "project_1" }, token: "", refreshTimelines: vi.fn(), refreshFilmTimeline: onRuns, setSelectedTimelineId: vi.fn() }}>
+        <FilmWorkspace onFilmChange={(value) => snapshots.push(value.run)} />
+      </AppContext.Provider>);
+    });
+    await act(async () => [...container.querySelectorAll('[role="tab"]')].find((item) => item.textContent === "Review").click());
+    await act(async () => [...container.querySelectorAll("button")].find((item) => item.textContent === "Analyze selected takes").click());
+    expect(snapshots.at(-1)?.controllerActive).toBe(true);
+    await act(async () => releaseOldFeed());
+    expect(snapshots.at(-1)?.controllerActive).toBe(true);
+  });
+
+  it("does not reselect a previous run when its delayed review action resolves", async () => {
+    const film = draft();
+    const run = (id) => ({ locator: { id, draftId: film.id }, controllerActive: false, record: { state: "finished", shots: [] } });
+    const a = run("run_a");
+    const b = run("run_b");
+    const view = (value) => ({ run: value, takeAssets: [], observations: [], selections: [] });
+    let resolveAction;
+    let actionSignal;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/film-runs")) return Promise.resolve([a, b]);
+      if (path.endsWith("/planning")) return Promise.resolve(null);
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/review") && options.method === "POST") { actionSignal = options.signal; return new Promise((resolve) => { resolveAction = resolve; }); }
+      if (path.includes("/run_a/review")) return Promise.resolve(view(a));
+      if (path.includes("/run_b/review")) return Promise.resolve(view(b));
+      return Promise.resolve({});
+    });
+    await renderWorkspace();
+    await act(async () => [...container.querySelectorAll('[role="tab"]')].find((item) => item.textContent === "Review").click());
+    await act(async () => [...container.querySelectorAll("button")].find((item) => item.textContent === "Analyze selected takes").click());
+    const selector = container.querySelector('select[aria-label="Review run"]');
+    await act(async () => {
+      changeValue(selector, "run_b");
+      resolveAction(view({ ...a, controllerActive: true }));
+    });
+    expect(actionSignal.aborted).toBe(true);
+    expect(selector.value).toBe("run_b");
+  });
+
   it("offers both start paths when the project has no film draft, and hides in Timeline mode", async () => {
     apiFetchMock.mockImplementation((path) => {
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve([]);
@@ -783,7 +850,7 @@ describe("FilmWorkspace", () => {
       if (path.endsWith("/film-runs")) return Promise.resolve([]);
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
       if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
-      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [], soundSynthesisModels: ["kokoro_82m", "chatterbox_tts", "moss_tts_realtime", "moss_ttsd_v05"], defaultSoundSynthesisModel: "kokoro_82m" });
       if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
       if (path.endsWith("/films/film_1") && options.method === "PUT") {
         savedBody = JSON.parse(options.body);
@@ -793,7 +860,10 @@ describe("FilmWorkspace", () => {
     });
     await renderWorkspace();
     const addLine = [...container.querySelectorAll("button")].find((button) => button.textContent === "Add generated dialogue");
+    expect(addLine.disabled).toBe(false);
     await act(async () => { addLine.click(); await Promise.resolve(); });
+    expect([...container.querySelector('select[aria-label="Sound 1 speech model"]').options].map((option) => option.value))
+      .toEqual(["kokoro_82m", "chatterbox_tts", "moss_tts_realtime", "moss_ttsd_v05"]);
     await act(async () => {
       changeValue(container.querySelector('textarea[aria-label="Sound 1 dialogue text"]'), "The parcel is here.");
       changeValue(container.querySelector('input[aria-label="Sound 1 voice"]'), "am_michael");
@@ -809,6 +879,21 @@ describe("FilmWorkspace", () => {
     expect(savedBody.productionPlan.sound).toMatchObject({ generatedAudio: "include", dialogue: { gain: 0.75, muted: true } });
     expect(savedBody.productionPlan.shots[0].generatedAudio).toBe("mute");
     expect(apiFetchMock.mock.calls.some(([path]) => path.includes("/audio/jobs") || path.endsWith("/export"))).toBe(false);
+  });
+
+  it("does not offer generated dialogue without synthesis facts", async () => {
+    const film = draft();
+    apiFetchMock.mockImplementation((path) => {
+      if (path.endsWith("/film-runs")) return Promise.resolve([]);
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/planning")) return Promise.reject(new Error("No planning operation"));
+      throw new Error(`Unexpected request ${path}`);
+    });
+    await renderWorkspace();
+    const addLine = [...container.querySelectorAll("button")].find((button) => button.textContent === "Add generated dialogue");
+    expect(addLine.disabled).toBe(true);
   });
 
   it("places a staged SFX role as an editable sequence bed", async () => {

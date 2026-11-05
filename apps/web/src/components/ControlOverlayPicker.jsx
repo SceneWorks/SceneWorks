@@ -1,6 +1,7 @@
+import { controlsApi } from "../api/controlsResources.js";
 import React, { useEffect, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
-import { useAppContext } from "../context/AppContext.js";
+import { isAbortError } from "../api.js";
+import { useAppStatic } from "../context/AppContext.js";
 
 // Trained ControlNet overlay picker (sc-10165 B4). Self-contained: fetches the registered overlays for
 // the given backbone (`GET /api/v1/control-overlays?baseModel=…`, project-scoped) and lets the user pick
@@ -9,7 +10,7 @@ import { useAppContext } from "../context/AppContext.js";
 // strict-control lane. Rendered only for backbones whose pose control rides a registered overlay
 // (e.g. Krea 2 Turbo — the Fun-Union backbones carry built-in control weights and never show this).
 export function ControlOverlayPicker({ baseModel, selectedOverlayId, onOverlayChange }) {
-  const { token, activeProject } = useAppContext();
+  const { token, activeProject } = useAppStatic();
   const [overlays, setOverlays] = useState([]);
   const [status, setStatus] = useState("loading"); // loading | ready | error
 
@@ -23,7 +24,7 @@ export function ControlOverlayPicker({ baseModel, selectedOverlayId, onOverlayCh
     if (activeProject?.id) {
       params.set("projectId", activeProject.id);
     }
-    apiFetch(`/api/v1/control-overlays?${params.toString()}`, token, {
+    controlsApi.controlOverlays(params.toString(), token, {
       signal: controller.signal,
     })
       .then((items) => {

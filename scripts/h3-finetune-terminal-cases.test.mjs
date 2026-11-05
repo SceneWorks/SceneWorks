@@ -75,7 +75,7 @@ test('supporting fixture selectors resolve to actual SceneWorks source, not inve
   const sourceFiles = {
     sceneworksCore: await readFile(path.join(root, 'crates/sceneworks-core/tests/minimax_h3_import.rs'), 'utf8'),
     worker: await readFile(path.join(root, 'crates/sceneworks-worker/src/video_jobs/minimax_h3_import_tests.rs'), 'utf8'),
-    api: await readFile(path.join(root, 'apps/rust-api/src/models.rs'), 'utf8'),
+    api: await readFile(path.join(root, 'apps/rust-api/src/models/tests/minimax_h3_import_declaration_tests.rs'), 'utf8'),
   };
   for (const bindings of Object.values(fixtureBindings)) for (const [pkg, target, selector] of Object.values(bindings)) {
     if (pkg === 'sceneworks-core' && target !== 'minimax_h3_import') { await access(path.join(root, `crates/sceneworks-core/tests/${target}.rs`)); continue; }

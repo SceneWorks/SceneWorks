@@ -765,8 +765,7 @@ async fn spawn_overlay_stub(bytes: Vec<u8>) -> String {
             "/api/models/:owner/:repo/tree/:revision",
             get(overlay_tree_stub),
         )
-        .route("/api/v1/jobs/:job_id", get(job_stub))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_stub))
+        .merge(crate::test_api_stub::job_progress_routes(job_stub, progress_stub))
         .route("/*path", get(binary_stub).head(binary_head_stub))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1148,6 +1147,8 @@ async fn lora_url_import_honors_cancel_on_progress_tick() {
     .expect_err("cancel request interrupts the URL import on the report tick");
 
     assert!(matches!(error, WorkerError::Canceled(_)));
+    assert!(!temp.path().join("cancel-target/style.safetensors").exists());
+    assert!(temp.path().join("cancel-target/style.safetensors.partial").is_file());
     assert_eq!(
         job_gets.load(Ordering::SeqCst),
         0,
@@ -1270,7 +1271,8 @@ async fn spawn_tree_stub_with_bodies(
 ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
     use std::sync::{Arc, Mutex};
     type Posts = Arc<Mutex<Vec<Value>>>;
-    type ClaimedRows = Arc<Mutex<Option<(tempfile::TempDir, sceneworks_core::jobs_store::JobsStore)>>>;
+    type ClaimedRows =
+        Arc<Mutex<Option<(tempfile::TempDir, sceneworks_core::jobs_store::JobsStore)>>>;
     type StubState = (Posts, ClaimedRows);
     let bodies: Arc<std::collections::HashMap<String, Vec<u8>>> =
         Arc::new(files.into_iter().collect());
@@ -1324,17 +1326,37 @@ async fn spawn_tree_stub_with_bodies(
         let temp = tempfile::tempdir().unwrap();
         let store = JobsStore::new(temp.path().join("claims.db"));
         store.initialize().unwrap();
-        store.create_job_with_id(job.id.clone(), CreateJob {
-            job_type: job.job_type, project_id: job.project_id, project_name: job.project_name,
-            payload: job.payload, requested_gpu: job.requested_gpu, source_job_id: job.source_job_id,
-            duplicate_of_job_id: job.duplicate_of_job_id, attempts: job.attempts, initial_status: None,
-        }).unwrap();
+        store
+            .create_job_with_id(
+                job.id.clone(),
+                CreateJob {
+                    job_type: job.job_type,
+                    project_id: job.project_id,
+                    project_name: job.project_name,
+                    payload: job.payload,
+                    requested_gpu: job.requested_gpu,
+                    source_job_id: job.source_job_id,
+                    duplicate_of_job_id: job.duplicate_of_job_id,
+                    attempts: job.attempts,
+                    initial_status: None,
+                },
+            )
+            .unwrap();
         let worker_id = job.worker_id.expect("fixture worker owns its claim");
-        store.register_worker(RegisterWorker {
-            worker_id: worker_id.clone(), gpu_id: "cpu".into(), gpu_name: None,
-            capabilities: vec![super::WorkerCapability::ModelImport], loaded_models: vec![], utilization: None,
-        }).unwrap();
-        let claimed = store.claim_next_job(&worker_id).unwrap().expect("actual fixture row is claimable");
+        store
+            .register_worker(RegisterWorker {
+                worker_id: worker_id.clone(),
+                gpu_id: "cpu".into(),
+                gpu_name: None,
+                capabilities: vec![super::WorkerCapability::ModelImport],
+                loaded_models: vec![],
+                utilization: None,
+            })
+            .unwrap();
+        let claimed = store
+            .claim_next_job(&worker_id)
+            .unwrap()
+            .expect("actual fixture row is claimable");
         assert_eq!(claimed.id, job.id);
         *claims.lock().unwrap() = Some((temp, store));
         Json(claimed).into_response()
@@ -1360,8 +1382,7 @@ async fn spawn_tree_stub_with_bodies(
         // stub that simply can't serve the download. Without this the test would pass for the wrong
         // reason and would not actually guard the regression.
         .route("/:owner/:repo/resolve/:revision/*path", get(blob_route))
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .merge(crate::test_api_stub::job_progress_routes(job_route, progress_route))
         .route("/fixture/claimed-model-import", post(claim_fixture_job))
         .route(
             "/api/v1/workers/:worker_id/heartbeat",
@@ -1384,20 +1405,14 @@ async fn spawn_tree_stub_with_bodies(
 /// / `run_lora_download_job` (which fetch into `snapshots/main` via `ensure_hf_files_cached(…, "main", …)`)
 /// otherwise land in the real cache — this is what wrote the krea-2-raw-mlx `snapshots/main` dummy
 /// weights. Mirrors the model_jobs / audio_jobs co-requisite seam tests' `isolate_hf_cache`.
-fn isolate_hf_cache() -> crate::test_env::EnvVars {
-    crate::test_env::EnvVars::set(&[
-        ("HF_HUB_CACHE", ""),
-        ("HUGGINGFACE_HUB_CACHE", ""),
-        ("HF_HOME", ""),
-    ])
-}
+
 
 #[tokio::test]
 async fn model_download_fails_when_the_tier_resolves_no_files() {
     // sc-9909: installing a quant tier whose weights aren't published yet (sc-8513 rollout) resolves
     // ZERO files. That must FAIL with a clear message rather than silently "succeed" and leave an
     // empty cache + a stale completion marker.
-    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
+    let _env = crate::test_env::isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     let (base_url, posts) = spawn_empty_tree_stub().await;
     let mut settings = test_settings(base_url.clone(), None);
@@ -1447,7 +1462,7 @@ async fn model_download_fails_when_one_declared_pattern_matches_nothing() {
     // sc-12283: `allow_pattern_matches` ORs across the filter, so a tier whose transformer matched but
     // whose `tokenizer/*` matched NOTHING passed the aggregate zero-file check, downloaded, completed
     // and wrote an install marker — an "installed" tier that cannot load. This is the #850 shape.
-    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
+    let _env = crate::test_env::isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     // The repo satisfies q8/transformer/* and q8/vae/* but has NO q8/tokenizer/* at all. Sizes are
     // token — the stub serves them verbatim, and this test is about the filter, not the transfer.
@@ -1520,7 +1535,7 @@ async fn lora_download_fails_when_the_declared_adapter_is_absent() {
     // the repo (renamed upstream / typo'd entry / unpublished) resolved zero files, downloaded
     // nothing, and reported the job COMPLETED — while the catalog still read "not installed", because
     // the install probe finds an empty cache. A success post for a fetch of nothing is the bug.
-    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
+    let _env = crate::test_env::isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     // The repo exists but holds a DIFFERENT adapter than the one declared.
     let (base_url, posts) =
@@ -1565,7 +1580,7 @@ async fn lora_download_fails_when_one_of_several_declared_files_is_absent() {
     // sc-12288: `create_lora_download_job` accepts an explicit `files` LIST and the filter ORs across
     // it, so a multi-file adapter that landed one half and not the other passes the aggregate
     // zero-file check and completes as a torn install. Same gap as sc-12283, LoRA side.
-    let _env = isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
+    let _env = crate::test_env::isolate_hf_cache(); // keep the stubbed download in the tempdir, off the real cache (sc-13834)
     let temp = tempdir().expect("tempdir creates");
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("high_noise.safetensors", 8)]).await;
     let mut settings = test_settings(base_url.clone(), None);
@@ -1629,7 +1644,7 @@ async fn lora_download_fails_when_one_of_several_declared_files_is_absent() {
 
 #[tokio::test]
 async fn model_download_rejects_a_path_escaping_revision_before_any_network() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let temp = tempdir().expect("tempdir creates");
     // An unreachable API proves validation fires BEFORE any heartbeat / tree-resolve I/O: with the
     // guard the job errors on the revision; without it, the first thing that happens is a heartbeat
@@ -1662,7 +1677,7 @@ async fn model_download_rejects_a_path_escaping_revision_before_any_network() {
 
 #[tokio::test]
 async fn lora_download_rejects_a_path_escaping_revision_before_any_network() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let temp = tempdir().expect("tempdir creates");
     let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
     settings.data_dir = temp.path().to_path_buf();
@@ -1692,7 +1707,7 @@ async fn lora_download_rejects_a_path_escaping_revision_before_any_network() {
 
 #[tokio::test]
 async fn lora_import_rejects_a_path_escaping_revision() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let temp = tempdir().expect("tempdir creates");
     // Imports heartbeat / post progress BEFORE the HF branch validates, so give them a live stub; the
     // rejection must still come from the revision validator, not a transport error.
@@ -1726,7 +1741,7 @@ async fn lora_import_rejects_a_path_escaping_revision() {
 
 #[tokio::test]
 async fn model_import_rejects_a_path_escaping_revision() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let temp = tempdir().expect("tempdir creates");
     let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let mut settings = test_settings(base_url.clone(), None);
@@ -2135,13 +2150,7 @@ async fn spawn_cancelling_job_stub() -> String {
     ) -> Response {
         Json(worker_snapshot_json(&worker_id)).into_response()
     }
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-        .route(
-            "/api/v1/workers/:worker_id/heartbeat",
-            post(heartbeat_route),
-        );
+    let app = crate::test_api_stub::job_progress_heartbeat_routes(job_route, progress_route, heartbeat_route);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener binds");
@@ -2331,7 +2340,7 @@ impl ManagedImportFixture {
 /// selectable through the plan route.
 #[tokio::test]
 async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let fixture = managed_import_fixture(base_url).await;
     let expected = sha256_hex(&fixture.source);
@@ -2461,7 +2470,7 @@ async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
 /// variant's identity over bytes the registration does not describe.
 #[tokio::test]
 async fn an_install_under_a_registered_variant_id_is_confirmed_against_its_registration() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let variant_id = "nvfp4-krea-2-turbo";
     assert!(
@@ -2515,7 +2524,7 @@ async fn an_install_under_a_registered_variant_id_is_confirmed_against_its_regis
 /// for a refusal that never checked a digest at all.
 #[tokio::test]
 async fn a_hash_mismatched_managed_import_leaves_no_partial_install() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let fixture = managed_import_fixture(base_url).await;
     // The digest the ingest will actually compute over the bytes it staged, derived here from the
@@ -2566,7 +2575,7 @@ async fn a_hash_mismatched_managed_import_leaves_no_partial_install() {
 /// leave nothing behind.
 #[tokio::test]
 async fn a_cancelled_managed_import_leaves_no_partial_install() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let base_url = spawn_cancelling_job_stub().await;
     let fixture = managed_import_fixture(base_url).await;
     let api = ApiClient::new(&fixture.settings);
@@ -2614,7 +2623,14 @@ fn h3_import_job_for_partition(
         .expect("manifest entry");
     // What the API's synchronous gate resolved the family to from the same bytes.
     entry.insert("family".to_owned(), json!("minimax-h3"));
-    entry.insert("baseModel".to_owned(), json!(if partition == "ref2va" { "minimax_h3_ref" } else { "minimax_h3" }));
+    entry.insert(
+        "baseModel".to_owned(),
+        json!(if partition == "ref2va" {
+            "minimax_h3_ref"
+        } else {
+            "minimax_h3"
+        }),
+    );
     entry.insert("minimaxH3Partition".to_owned(), json!(partition));
     entry.insert("importComponentTier".to_owned(), json!("q4"));
     entry.insert(
@@ -2632,7 +2648,7 @@ fn h3_import_job_for_partition(
 /// builds for the arm tests, pinned here against the real job.
 #[tokio::test]
 async fn managed_h3_dit_import_stamps_a_selectable_video_entry() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let fixture = managed_import_fixture_with_id(base_url, "my_h3_finetune").await;
     let source = fixture.settings.data_dir.join("models/incoming/my-h3");
@@ -2717,7 +2733,7 @@ async fn managed_h3_dit_import_stamps_a_selectable_video_entry() {
 /// provider would map it unbound — so the job refuses and nothing is installed or registered.
 #[tokio::test]
 async fn an_h3_directory_with_a_stray_weight_file_is_refused_and_nothing_is_installed() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let fixture = managed_import_fixture_with_id(base_url, "stray_h3").await;
     let source = fixture.settings.data_dir.join("models/incoming/stray-h3");
@@ -2747,7 +2763,7 @@ async fn an_h3_directory_with_a_stray_weight_file_is_refused_and_nothing_is_inst
 
 #[tokio::test]
 async fn h3_import_registration_requires_exact_task_compatibility() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     for (index, declaration, accepted) in [
         (0, json!({}), false),
@@ -2818,19 +2834,35 @@ async fn h3_import_registration_requires_exact_task_compatibility() {
 }
 
 fn write_sdxl_negative_source(path: &std::path::Path) {
-    crate::minimax_h3_import_fixture::write_safetensors(path,&[
-        ("model.diffusion_model.input_blocks.7.0.out_layers.3.weight","F16"),
-        ("model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight","F16"),
-        ("conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight","F16"),
-        ("conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight","F16"),
-        ("first_stage_model.encoder.conv_in.weight","F16"),
-        ("first_stage_model.decoder.conv_out.weight","F16"),
-    ],0x31);
+    crate::minimax_h3_import_fixture::write_safetensors(
+        path,
+        &[
+            (
+                "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+                "F16",
+            ),
+            (
+                "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+                "F16",
+            ),
+            (
+                "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+                "F16",
+            ),
+            (
+                "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+                "F16",
+            ),
+            ("first_stage_model.encoder.conv_in.weight", "F16"),
+            ("first_stage_model.decoder.conv_out.weight", "F16"),
+        ],
+        0x31,
+    );
 }
 
 #[tokio::test]
 async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_path() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (api_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     for kind in ["managed", "remote", "linked"] {
         for declaration_on_entry in [false, true] {
@@ -2865,12 +2897,24 @@ async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_pat
                 // Prove the negative control from bounded content evidence, not by publishing a
                 // runnable SDXL plan that the refused H3 alias would then be expected to destroy.
                 let sceneworks_core::base_weights::BaseWeightDetection::Recognized(verdict) =
-                    sceneworks_core::base_weights::detect_base_weight_file(&fixture.source).unwrap()
-                    else { panic!("negative source must have a recognized family"); };
-                assert_eq!(verdict.family.as_deref(),Some("sdxl"),
-                    "the negative control must contain a supported, different architecture");
-                let checkpoint_id = sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(&root.root_id,"kreamania.safetensors");
-                assert!(store.record(&checkpoint_id).is_err(),"preflight starts without a published target plan");
+                    sceneworks_core::base_weights::detect_base_weight_file(&fixture.source)
+                        .unwrap()
+                else {
+                    panic!("negative source must have a recognized family");
+                };
+                assert_eq!(
+                    verdict.family.as_deref(),
+                    Some("sdxl"),
+                    "the negative control must contain a supported, different architecture"
+                );
+                let checkpoint_id = sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(
+                    &root.root_id,
+                    "kreamania.safetensors",
+                );
+                assert!(
+                    store.record(&checkpoint_id).is_err(),
+                    "preflight starts without a published target plan"
+                );
                 job.payload.remove("sourcePath");
                 job.payload
                     .insert("ownershipMode".to_owned(), json!("linked"));
@@ -2902,9 +2946,19 @@ async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_pat
             .await;
             assert!(posts.lock().unwrap().iter().any(|post| post.get("status").and_then(Value::as_str) == Some("failed") && post.get("error").and_then(Value::as_str).is_some_and(|error| error.contains("family-mismatch") && error.contains("sdxl"))), "must fail for source compatibility, not for incidental setup: {kind}, entry={declaration_on_entry}");
             fixture.assert_nothing_installed(kind);
-            assert!(!posts.lock().unwrap().iter().any(|post|post["status"]=="completed"),"family refusal cannot report completion");
+            assert!(
+                !posts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|post| post["status"] == "completed"),
+                "family refusal cannot report completion"
+            );
             if let Some(id) = linked_id {
-                assert!(store.record(&id).is_err(),"family preflight must not create a target plan");
+                assert!(
+                    store.record(&id).is_err(),
+                    "family preflight must not create a target plan"
+                );
                 assert!(
                     store.resolve(&id).is_err(),
                     "refused linked plan must not remain ready"
@@ -2921,45 +2975,88 @@ async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_pat
 
 #[tokio::test]
 async fn linked_family_preflight_refuses_before_components_without_invalidating_an_existing_owner() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (url,posts) = spawn_tree_stub_with_files(vec![]).await;
     let fixture = managed_import_fixture_with_id(url,"refused_h3_alias").await;
     write_sdxl_negative_source(&fixture.source);
     let original = std::fs::read(&fixture.source).unwrap();
-    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
-    let root = store.approve_root(fixture.source.parent().unwrap()).unwrap();
-    let compiled = store.compile_linked(&root.root_id,"kreamania.safetensors").unwrap();
-    assert_eq!(compiled.plan.family,"sdxl");
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+        &fixture.settings.data_dir,
+    );
+    let root = store
+        .approve_root(fixture.source.parent().unwrap())
+        .unwrap();
+    let compiled = store
+        .compile_linked(&root.root_id, "kreamania.safetensors")
+        .unwrap();
+    assert_eq!(compiled.plan.family, "sdxl");
     let owner = json!({"id":"existing_sdxl_owner","family":"sdxl","type":"image",
         "source":{"provider":"linked-library","rootId":root.root_id,"relativePath":"kreamania.safetensors"},
         "importPlan":{"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}});
-    std::fs::write(&fixture.manifest_path,json!({"schemaVersion":1,"models":[owner]}).to_string()).unwrap();
+    std::fs::write(
+        &fixture.manifest_path,
+        json!({"schemaVersion":1,"models":[owner]}).to_string(),
+    )
+    .unwrap();
     let manifest_before = std::fs::read(&fixture.manifest_path).unwrap();
     let inventory_before = store.inventory().unwrap();
     let mut job = fixture.job(None);
     job.payload.remove("sourcePath");
-    job.payload.insert("linkedRootId".into(),json!(root.root_id));
-    job.payload.insert("linkedRelativePath".into(),json!("kreamania.safetensors"));
+    job.payload
+        .insert("linkedRootId".into(), json!(root.root_id));
+    job.payload
+        .insert("linkedRelativePath".into(), json!("kreamania.safetensors"));
     let entry = job.payload["manifestEntry"].as_object_mut().unwrap();
     entry.remove("family");
-    entry.insert("baseModel".into(),json!("minimax_h3"));
-    entry.insert("minimaxH3Partition".into(),json!("fl2va"));
+    entry.insert("baseModel".into(), json!("minimax_h3"));
+    entry.insert("minimaxH3Partition".into(), json!("fl2va"));
     // No resident/config rows: source mismatch must be conclusive BEFORE any component work.
-    run_claimed_model_import_fixture(&ApiClient::new(&fixture.settings),&fixture.settings,&reqwest::Client::new(),&job).await.unwrap();
+    run_claimed_model_import_fixture(
+        &ApiClient::new(&fixture.settings),
+        &fixture.settings,
+        &reqwest::Client::new(),
+        &job,
+    )
+    .await
+    .unwrap();
     let updates = posts.lock().unwrap();
-    assert!(updates.iter().any(|update| update["status"]=="failed" && update["error"].as_str().is_some_and(|error|error.contains("family-mismatch") && error.contains("sdxl"))),"{updates:?}");
-    assert!(!updates.iter().any(|update|update["status"]=="completed"));
-    assert!(fixture.manifest_entry().is_none(),"refused alias must not publish a model selection");
-    assert_eq!(std::fs::read(&fixture.manifest_path).unwrap(),manifest_before);
-    assert_eq!(store.inventory().unwrap(),inventory_before,"no new persisted plan or invalidation of another owner");
-    assert_eq!(store.plan(&compiled.checkpoint_id,&compiled.plan.plan_id).unwrap(),compiled.plan);
-    assert_eq!(std::fs::read(&fixture.source).unwrap(),original);
-    assert!(store.resolve(&compiled.checkpoint_id).is_ok(),"the existing linked SDXL owner remains ready");
+    assert!(
+        updates.iter().any(|update| update["status"] == "failed"
+            && update["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("family-mismatch") && error.contains("sdxl"))),
+        "{updates:?}"
+    );
+    assert!(!updates.iter().any(|update| update["status"] == "completed"));
+    assert!(
+        fixture.manifest_entry().is_none(),
+        "refused alias must not publish a model selection"
+    );
+    assert_eq!(
+        std::fs::read(&fixture.manifest_path).unwrap(),
+        manifest_before
+    );
+    assert_eq!(
+        store.inventory().unwrap(),
+        inventory_before,
+        "no new persisted plan or invalidation of another owner"
+    );
+    assert_eq!(
+        store
+            .plan(&compiled.checkpoint_id, &compiled.plan.plan_id)
+            .unwrap(),
+        compiled.plan
+    );
+    assert_eq!(std::fs::read(&fixture.source).unwrap(), original);
+    assert!(
+        store.resolve(&compiled.checkpoint_id).is_ok(),
+        "the existing linked SDXL owner remains ready"
+    );
 }
 
 #[tokio::test]
 async fn all_h3_ingestion_workers_produce_equivalent_assemblies_and_original_bytes() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let seed = tempdir().unwrap();
     let native = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
         seed.path(),
@@ -3079,7 +3176,7 @@ async fn all_h3_ingestion_workers_produce_equivalent_assemblies_and_original_byt
 
 #[tokio::test]
 async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let seed = tempdir().unwrap();
     crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(seed.path());
     let original = std::fs::read(seed.path().join("diffusion_pytorch_model.safetensors")).unwrap();
@@ -3109,7 +3206,7 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
         let mut job = h3_import_job(&fixture, &source);
         // Match the typed API: complete resident assembly PLUS the optional config-only row.
         // Replacing residents with the config row correctly fails the immutable closure capture.
-        let residents = crate::minimax_h3_import_fixture::component_downloads("bf16","fl2va");
+        let residents = crate::minimax_h3_import_fixture::component_downloads("bf16", "fl2va");
         let mut downloads = residents.clone();
         downloads.push(json!({"provider":"huggingface","repo":"fixture/base-config","revision":"1111111111111111111111111111111111111111","files":["bf16/transformer/config.json"],"coRequisite":true,"componentId":"import_transformer_config","variant":"bf16"}));
         job.payload["manifestEntry"]["downloads"] = json!(downloads);
@@ -3165,12 +3262,21 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
         .unwrap();
         {
             let updates = posts.lock().unwrap();
-            assert!(!updates.iter().any(|update|update["status"]=="failed"),"{transport}: failure was reported, not successful publication: {updates:?}");
-            assert!(updates.iter().any(|update|update["status"]=="completed"),"{transport}: successful import must emit completed progress: {updates:?}");
+            assert!(
+                !updates.iter().any(|update| update["status"] == "failed"),
+                "{transport}: failure was reported, not successful publication: {updates:?}"
+            );
+            assert!(
+                updates.iter().any(|update| update["status"] == "completed"),
+                "{transport}: successful import must emit completed progress: {updates:?}"
+            );
         }
-        let entry = fixture
-            .manifest_entry()
-            .unwrap_or_else(|| panic!("{transport} was not published; progress={:?}",posts.lock().unwrap()));
+        let entry = fixture.manifest_entry().unwrap_or_else(|| {
+            panic!(
+                "{transport} was not published; progress={:?}",
+                posts.lock().unwrap()
+            )
+        });
         let restarted = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
             &fixture.settings.data_dir,
         );
@@ -3182,10 +3288,20 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
             resolved.plan.context["transformerConfig"]["provenance"]["revision"],
             "1111111111111111111111111111111111111111"
         );
-        assert_eq!(entry["downloads"],json!(residents),"the complete resident assembly remains bound after config-only provisioning");
-        assert!(entry["downloads"].as_array().unwrap().iter().all(|row|
-            row.get("componentId").and_then(Value::as_str)!=Some("import_transformer_config")),
-            "config-only provisioning is not a resident component");
+        assert_eq!(
+            entry["downloads"],
+            json!(residents),
+            "the complete resident assembly remains bound after config-only provisioning"
+        );
+        assert!(
+            entry["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row.get("componentId").and_then(Value::as_str)
+                    != Some("import_transformer_config")),
+            "config-only provisioning is not a resident component"
+        );
         let digest = resolved.plan.semantic_digest().unwrap();
         if let Some(expected) = &semantic {
             assert_eq!(&digest, expected, "{transport}");
@@ -3198,14 +3314,14 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
 
 #[tokio::test]
 async fn h3_import_reports_missing_or_unresolvable_residents_without_publication() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (url,posts) = spawn_tree_stub_with_files(vec![]).await;
     for missing in [false,true] {
         let fixture = managed_import_fixture_with_id(url.clone(),&format!("missing_h3_residents_{missing}")).await;
         let source = fixture.settings.data_dir.join("models/incoming/real-h3-headers");
         crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
         let original = std::fs::read(source.join("diffusion_pytorch_model.safetensors")).unwrap();
-        let mut job = h3_import_job(&fixture,&source);
+        let mut job = h3_import_job(&fixture, &source);
         job.payload["manifestEntry"]["downloads"] = if missing {
             json!([{"provider":"huggingface","repo":"fixture/unavailable-components","revision":"1".repeat(40),
                 "coRequisite":true,"variant":"q4","componentId":"text_encoder","subdir":"q4/text_encoder","files":["q4/text_encoder/model.safetensors"]}])
@@ -3215,39 +3331,100 @@ async fn h3_import_reports_missing_or_unresolvable_residents_without_publication
         };
         posts.lock().unwrap().clear();
         // Ok means the failure report was accepted, NOT that the import completed/published.
-        run_claimed_model_import_fixture(&ApiClient::new(&fixture.settings),&fixture.settings,&reqwest::Client::new(),&job).await.unwrap();
+        run_claimed_model_import_fixture(
+            &ApiClient::new(&fixture.settings),
+            &fixture.settings,
+            &reqwest::Client::new(),
+            &job,
+        )
+        .await
+        .unwrap();
         let updates = posts.lock().unwrap();
-        let reason = if missing {"component unavailable"} else {"component closure is missing"};
-        assert!(updates.iter().any(|update|update["status"]=="failed" && update["error"].as_str().is_some_and(|error|error.contains(reason))),"{updates:?}");
-        assert!(!updates.iter().any(|update|update["status"]=="completed"),"incomplete authority must never report completion");
+        let reason = if missing {
+            "component unavailable"
+        } else {
+            "component closure is missing"
+        };
+        assert!(
+            updates.iter().any(|update| update["status"] == "failed"
+                && update["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains(reason))),
+            "{updates:?}"
+        );
+        assert!(
+            !updates.iter().any(|update| update["status"] == "completed"),
+            "incomplete authority must never report completion"
+        );
         fixture.assert_nothing_installed(reason);
-        assert_eq!(std::fs::read(source.join("diffusion_pytorch_model.safetensors")).unwrap(),original);
+        assert_eq!(
+            std::fs::read(source.join("diffusion_pytorch_model.safetensors")).unwrap(),
+            original
+        );
     }
 }
 
 #[tokio::test]
 async fn manually_rerunning_a_snapshot_is_not_authenticated_import_recovery() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     // This generic control-plane stub deliberately has no server-stored ModelImport ancestry.
     // Real new-ID/multihop success is exercised by rust-api tests::import_repair against mounted
     // retry routes and the actual utility worker, not by manually rerunning this snapshot.
     let (url, posts) = spawn_tree_stub_with_files(vec![]).await;
     let fixture = managed_import_fixture_with_id(url, "recover_h3").await;
-    let staged = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(&fixture.settings.data_dir, "recover_h3");
+    let staged = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+        &fixture.settings.data_dir,
+        "recover_h3",
+    );
     let source = fixture.settings.data_dir.join("models/incoming/recover_h3");
     let job = h3_import_job(&fixture, &source);
-    super::imports::seal_import_recovery_fixture(&fixture.settings.data_dir, &staged.install_dir, &job.payload, &job.id).await.unwrap();
-    let bytes = std::fs::read(staged.install_dir.join("diffusion_pytorch_model.safetensors")).unwrap();
+    super::imports::seal_import_recovery_fixture(
+        &fixture.settings.data_dir,
+        &staged.install_dir,
+        &job.payload,
+        &job.id,
+    )
+    .await
+    .unwrap();
+    let bytes = std::fs::read(
+        staged
+            .install_dir
+            .join("diffusion_pytorch_model.safetensors"),
+    )
+    .unwrap();
     std::fs::remove_dir_all(&source).unwrap();
-    super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings), &fixture.settings, &reqwest::Client::new(), &job).await.unwrap();
-    assert!(fixture.manifest_entry().is_none(), "a client-side old snapshot cannot authenticate recovery");
-    assert!(posts.lock().unwrap().iter().any(|post|post["status"] == "failed"));
-    assert_eq!(std::fs::read(staged.install_dir.join("diffusion_pytorch_model.safetensors")).unwrap(),bytes, "unrelated installs must not be deleted");
+    super::model_jobs::run_model_import_job(
+        &ApiClient::new(&fixture.settings),
+        &fixture.settings,
+        &reqwest::Client::new(),
+        &job,
+    )
+    .await
+    .unwrap();
+    assert!(
+        fixture.manifest_entry().is_none(),
+        "a client-side old snapshot cannot authenticate recovery"
+    );
+    assert!(posts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|post| post["status"] == "failed"));
+    assert_eq!(
+        std::fs::read(
+            staged
+                .install_dir
+                .join("diffusion_pytorch_model.safetensors")
+        )
+        .unwrap(),
+        bytes,
+        "unrelated installs must not be deleted"
+    );
 }
 
 #[tokio::test]
 async fn h3_manifest_publication_failure_rolls_back_and_can_retry() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (url, _) = spawn_tree_stub_with_files(vec![]).await;
     let fixture = managed_import_fixture_with_id(url, "publish_retry_h3").await;
     let source = fixture.settings.data_dir.join("models/incoming/h3");
@@ -3283,7 +3460,7 @@ async fn h3_manifest_publication_failure_rolls_back_and_can_retry() {
 
 #[tokio::test]
 async fn a_refused_linked_h3_alias_cannot_invalidate_an_existing_models_unchanged_plan() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let (url, posts) = spawn_tree_stub_with_files(vec![]).await;
     let fixture = managed_import_fixture_with_id(url, "linked_h3_owner").await;
     let source = fixture.settings.data_dir.join("models/incoming/shared_h3");
@@ -3355,7 +3532,7 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                 .build()
                 .unwrap()
                 .block_on(async {
-                    let _env = isolate_hf_cache();
+                    let _env = crate::test_env::isolate_hf_cache();
                     let (url, posts) = spawn_tree_stub_with_files(vec![]).await;
                     let fixture = managed_import_fixture_with_id(url, "upload_retry_h3").await;
                     let seed = tempdir().unwrap();
@@ -3471,7 +3648,7 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
 
 #[tokio::test]
 async fn convrot_h3_worker_import_stamps_only_inventory_proven_native_precision() {
-    let _env = isolate_hf_cache();
+    let _env = crate::test_env::isolate_hf_cache();
     let seed = tempdir().unwrap();
     let native = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
         seed.path(),

@@ -36,11 +36,23 @@ fn loopback_trusted_only_when_enabled_and_peer_is_local() {
     // local desktop UI/worker bypass the password while LAN clients (other IPs) don't.
     assert!(loopback_trusted(true, Some(addr("127.0.0.1:51234"))));
     assert!(loopback_trusted(true, Some(addr("[::1]:51234"))));
+    assert!(loopback_trusted(
+        true,
+        Some(addr("[::ffff:127.0.0.1]:51234"))
+    ));
     // Enabled but the peer is on the LAN → still gated.
     assert!(!loopback_trusted(true, Some(addr("192.168.1.5:51234"))));
     assert!(!loopback_trusted(true, Some(addr("0.0.0.0:51234"))));
+    assert!(!loopback_trusted(
+        true,
+        Some(addr("[::ffff:192.168.1.5]:51234"))
+    ));
     // A loopback peer alone never trusts without the opt-in (server/Docker default).
     assert!(!loopback_trusted(false, Some(addr("127.0.0.1:51234"))));
+    assert!(!loopback_trusted(
+        false,
+        Some(addr("[::ffff:127.0.0.1]:51234"))
+    ));
     // Unknown peer (e.g. the unit-test oneshot path with no connect info) → not trusted.
     assert!(!loopback_trusted(true, None));
 }
@@ -49,7 +61,7 @@ fn loopback_trusted_only_when_enabled_and_peer_is_local() {
 fn open_bind_override_only_for_explicit_optin() {
     // sc-5720 (API-001): the override that lets an unauthenticated open bind start
     // must require an explicit affirmative value; anything else keeps the refusal.
-    for value in ["1", "true", "TRUE", "yes", "YES", " 1 "] {
+    for value in ["1", "true", "TRUE", "yes", "YES", " 1 ", "On", "YeS"] {
         assert!(open_bind_override_enabled(value), "{value:?} should opt in");
     }
     for value in ["", "0", "false", "no", "off", "2", "enable"] {
@@ -1213,9 +1225,13 @@ async fn cors_preflight_allows_frontend_origin_and_token_header() {
     let request = Request::builder()
         .method("OPTIONS")
         .uri("/api/v1/jobs")
+        .header("host", "localhost:8000")
         .header("origin", "http://localhost:5173")
         .header("access-control-request-method", "POST")
-        .header("access-control-request-headers", "X-SceneWorks-Token")
+        .header(
+            "access-control-request-headers",
+            "X-SceneWorks-Token, X-SceneWorks-Media-Ticket, If-Match",
+        )
         .body(Body::empty())
         .expect("request builds");
 
@@ -1234,6 +1250,18 @@ async fn cors_preflight_allows_frontend_origin_and_token_header() {
         .get("access-control-allow-headers")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.to_ascii_lowercase().contains("x-sceneworks-token")));
+    assert!(response
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("if-match")));
+    assert!(response
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value
+            .to_ascii_lowercase()
+            .contains("x-sceneworks-media-ticket")));
 }
 
 #[tokio::test]
