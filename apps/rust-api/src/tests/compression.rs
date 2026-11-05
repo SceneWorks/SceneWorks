@@ -29,7 +29,10 @@ async fn large_json_negotiates_brotli_gzip_and_identity() {
     write_real_catalog(&temp_dir.path().join("config/manifests"));
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
 
     let (identity_status, identity_headers, identity_body) =
         request_raw(app.clone(), "GET", "/api/v1/models", Body::empty(), &[]).await;

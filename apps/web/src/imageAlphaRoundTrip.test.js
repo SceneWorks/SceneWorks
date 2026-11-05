@@ -20,16 +20,10 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// konva's node build pulls in the native `canvas` package; nothing here mounts a <Stage>, so keep
-// it out of the import graph the same way `ImageEditor.test.jsx` does.
-vi.mock("react-konva", async () => {
-  const React = await import("react");
-  const passthrough = (name) => ({ children }) => React.createElement("div", { "data-konva": name }, children);
-  return { Stage: passthrough("stage"), Layer: passthrough("layer"), Image: () => null, Rect: () => null };
-});
-
+// The export owner is canvas-only; these pure fixtures no longer import the React/Konva screen.
 import { addLayer, createLayer, singleLayerWorking } from "./imageLayers.js";
-import { compositeWorkingToCanvas, workingToPngFile } from "./screens/ImageEditor.jsx";
+import { compositeWorkingToCanvas, workingToPngFile } from "./screens/imageEditor/export.js";
+
 import {
   alphaHistogram,
   blobBytes,
