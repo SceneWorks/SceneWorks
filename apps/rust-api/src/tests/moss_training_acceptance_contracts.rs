@@ -356,7 +356,7 @@ async fn adapter_import_cpu_contract() {
             "capabilities":["gpu","lora_train","lora_train_execute"],"loadedModels":[]
         })).await;
         assert_eq!(status, StatusCode::OK, "{gpu}");
-        let (status, project) = request(app.clone(), "POST", "/api/v1/projects", json!({"name":"CPU import contract"})).await;
+        let (status, project) = crate::tests::support::create_project(app.clone(), &"CPU import contract").await;
         assert_eq!(status, StatusCode::CREATED, "{project}");
         let incoming = settings.data_dir.join("loras/incoming");
         std::fs::create_dir_all(&incoming).unwrap();
@@ -597,13 +597,8 @@ async fn pre_model_library_and_dispatch_cpu_contract() {
     let mut worker = worker_settings(url, &settings, "cpu".into());
     worker.backend_mlx_enabled = false;
     worker.backend_candle_enabled = false;
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"CPU dispatcher refusal"}),
-    )
-    .await;
+    let (status, project) =
+        crate::tests::support::create_project(app.clone(), &"CPU dispatcher refusal").await;
     assert_eq!(status, StatusCode::CREATED, "{project}");
     for adapter in &adapters {
         for matches_parent in [true, false] {

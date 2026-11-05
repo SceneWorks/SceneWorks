@@ -121,13 +121,7 @@ pub(super) fn seed_iris_depth_export_only(data_dir: &std::path::Path) {
 }
 
 pub(super) async fn project(app: &axum::Router) -> String {
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Iris Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Iris Project").await;
     project["id"].as_str().expect("project id").to_owned()
 }
 

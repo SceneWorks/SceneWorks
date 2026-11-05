@@ -28,7 +28,9 @@ use sceneworks_core::contracts::{
     QueueSummary, RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
     WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
-use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
+#[cfg(test)]
+use sceneworks_core::hf_home::huggingface_hub_cache_dir;
+use sceneworks_core::hf_home::huggingface_repo_cache_path;
 use sceneworks_core::image_request::{
     default_count as image_default_count, default_resolution as image_default_resolution,
 };
@@ -90,6 +92,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 mod auth;
+mod uploads;
 use auth::{access_control, cors_layer, is_authorized, AuthThrottle};
 mod catalog_scan_supervisor;
 mod startup;
@@ -141,7 +144,7 @@ mod assets;
 use assets::{
     delete_asset, get_asset, get_asset_poster, import_asset, list_assets, move_asset_to_character,
     move_asset_to_library, purge_asset, sweep_stale_asset_uploads, update_asset_status,
-    update_asset_tags, write_upload_field_to_dir, write_upload_field_to_temp_file,
+    update_asset_tags, write_upload_field_to_temp_file,
 };
 mod workflows;
 use workflows::{get_asset_workflow, inspect_workflow, max_inspect_multipart_body_bytes};
@@ -786,36 +789,7 @@ fn parent_pid_to_watch() -> Option<i32> {
     (pid > 1 && pid <= i64::from(i32::MAX)).then_some(pid as i32)
 }
 
-/// True while `pid` names a live process. `kill(pid, None)` checks for the
-/// process without delivering a signal: `Ok` means it's alive; `EPERM` means it
-/// exists but we may not signal it (still alive); `ESRCH` is the only "gone"
-/// case and yields false.
-#[cfg(unix)]
-fn pid_alive(pid: i32) -> bool {
-    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
-        Ok(()) => true,
-        Err(errno) => errno == nix::errno::Errno::EPERM,
-    }
-}
-
-/// True while `pid` names a live process. The workspace forbids `unsafe`, so we
-/// can't `OpenProcess`/`WaitForSingleObject` directly; instead we shell out to
-/// `tasklist` (the same liveness probe the desktop shell uses to reap sidecars).
-/// `tasklist /FO CSV` quotes every field, so a live PID appears as `"<pid>"` in a
-/// data row while the no-match case prints only an `INFO:` banner — anchoring on
-/// the quoted PID is locale-proof and immune to the digits colliding with another
-/// column. A probe we can't even launch is treated as "alive" so a transient
-/// failure never makes the worker self-terminate spuriously.
-#[cfg(windows)]
-fn pid_alive(pid: i32) -> bool {
-    let Ok(output) = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output()
-    else {
-        return true;
-    };
-    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
-}
+use sceneworks_core::process::pid_alive;
 
 /// Resolves once the watched parent process disappears, polling every
 /// [`PARENT_POLL_INTERVAL`]. With no parent to watch (`None`) it stays pending

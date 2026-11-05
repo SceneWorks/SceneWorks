@@ -126,13 +126,8 @@ fn npy(height: u32, width: u32) -> Vec<u8> {
 }
 
 async fn project(app: &axum::Router) -> String {
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Iris Task Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Iris Task Project").await;
     project["id"].as_str().expect("project id").to_owned()
 }
 

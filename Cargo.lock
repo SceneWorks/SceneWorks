@@ -7166,6 +7166,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "mime_guess",
+ "nix 0.29.0",
  "parking_lot",
  "png 0.18.1",
  "remove_dir_all",

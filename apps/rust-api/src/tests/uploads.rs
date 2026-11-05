@@ -348,13 +348,8 @@ async fn an_uploaded_rgba_png_reaches_the_asset_store_with_its_alpha_intact() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Transparent reference" }),
-    )
-    .await;
+    let (_, created) =
+        crate::tests::support::create_project(app.clone(), &"Transparent reference").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
 
@@ -435,13 +430,8 @@ async fn an_uploaded_rgb_png_is_still_stored_unchanged() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Opaque reference" }),
-    )
-    .await;
+    let (_, created) =
+        crate::tests::support::create_project(app.clone(), &"Opaque reference").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
 
@@ -508,13 +498,8 @@ async fn a_transcoded_upload_keeps_its_alpha_into_the_stored_png() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Transcoded transparent import" }),
-    )
-    .await;
+    let (_, created) =
+        crate::tests::support::create_project(app.clone(), &"Transcoded transparent import").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
 

@@ -1,5 +1,7 @@
+mod common;
+use common::fixture_path;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sceneworks_core::training::target_supports_resolution_buckets;
 use sceneworks_core::training::{
@@ -20,19 +22,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-fn fixture_path(relative_path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("tests")
-        .join("fixtures")
-        .join("rust_migration_contracts")
-        .join("training")
-        .join(relative_path)
-}
-
 fn load_fixture(relative_path: &str) -> Value {
-    let path = fixture_path(relative_path);
+    let path = fixture_path(&format!("training/{relative_path}"));
     let payload = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     serde_json::from_str(&payload)
@@ -632,7 +623,7 @@ fn regen_target_registry_fixture() {
     }
     let pretty = serde_json::to_string_pretty(&builtin_training_targets())
         .expect("builtin registry serializes");
-    fs::write(fixture_path("target-registry.json"), pretty + "\n").expect("write fixture");
+    fs::write(fixture_path("training/target-registry.json"), pretty + "\n").expect("write fixture");
 }
 
 #[test]
@@ -644,7 +635,7 @@ fn regen_preset_registry_fixture() {
     let pretty =
         serde_json::to_string_pretty(&sceneworks_core::training::builtin_training_presets())
             .expect("builtin preset registry serializes");
-    fs::write(fixture_path("preset-registry.json"), pretty + "\n").expect("write fixture");
+    fs::write(fixture_path("training/preset-registry.json"), pretty + "\n").expect("write fixture");
 }
 
 #[test]

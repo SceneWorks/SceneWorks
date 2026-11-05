@@ -280,11 +280,10 @@ async fn materialization_replaces_invalid_cache_deterministically_and_survives_c
     drop(catalog);
 
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Catalog materialization"}),
+        &"Catalog materialization",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -537,11 +536,10 @@ async fn materialization_none_policy_allows_identical_verified_content() {
     let catalog_id = catalog.descriptor().id.clone();
     drop(catalog);
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Duplicate policy"}),
+        &"Duplicate policy",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -670,11 +668,10 @@ async fn timed_out_cache_verifier_case(verifier_delay: Duration) {
     drop(catalog);
 
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Late cache replacement"}),
+        &"Late cache replacement",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();

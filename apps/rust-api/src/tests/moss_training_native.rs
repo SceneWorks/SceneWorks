@@ -536,7 +536,7 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
     });
     // Catch assertion failures so this owned router is shut down and joined even on failure.
     let outcome = std::panic::AssertUnwindSafe(async {
-        let (_, project) = request(app.clone(), "POST", "/api/v1/projects", json!({"name":"Native MOSS CPU"})).await;
+        let (_, project) = crate::tests::support::create_project(app.clone(), &"Native MOSS CPU").await;
         let project_id = project["id"].as_str().unwrap();
         let worker = worker_settings(api_url, &settings);
         let (status, registered) = request(app.clone(), "POST", "/api/v1/workers/register", json!({
