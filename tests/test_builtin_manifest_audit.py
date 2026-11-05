@@ -711,7 +711,7 @@ def test_control_weight_authority_audit_detects_absence_and_fallback_mutations()
 
 AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
     # Shared resolver receives MODEL_TABLE's default (or the frozen canonical FLUX3 identity).
-    "image_jobs/base.rs": "unwrap_or(default_repo)",
+    "image_jobs/artifact_resolution.rs": "unwrap_or(default_repo)",
     "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
     "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
     "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
@@ -729,6 +729,11 @@ AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
 }
 
 
+def _before_test_module(source: str) -> str:
+    # A cfg(test) import is not the end of production. Stop at the actual inline/external test module.
+    return re.split(r"\n#\[cfg\(test\)\]\s*(?:#\[[^\n]+\]\s*)*mod\s+\w+\s*(?:\{|;)", source, maxsplit=1)[0]
+
+
 def _worker_sources() -> dict[str, str]:
     return {
         path.relative_to(WORKER_SOURCE_PATH).as_posix(): path.read_text(encoding="utf-8")
@@ -744,7 +749,7 @@ def _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
         for relative_path, source in sources.items()
         if re.search(
             r"\.model_manifest_entry\s*\.get\(\"repo\"\)",
-            source.split("\n#[cfg(test)]", maxsplit=1)[0],
+            _before_test_module(source),
         )
     }
     assert actual_lanes == set(audited_lanes), (
@@ -753,7 +758,7 @@ def _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
         f"removed={sorted(set(audited_lanes) - actual_lanes)}"
     )
     for relative_path, fallback_marker in audited_lanes.items():
-        source = sources[relative_path].split("\n#[cfg(test)]", maxsplit=1)[0]
+        source = _before_test_module(sources[relative_path])
         reads = list(re.finditer(r"\.model_manifest_entry\s*\.get\(\"repo\"\)", source))
         assert reads, f"{relative_path}: inventoried lane no longer contains a top-level repo read"
         for read in reads:
@@ -787,7 +792,7 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
 
 
 def _assert_minimax_h3_candle_uses_exact_installed_roots(source: str) -> None:
-    production = source.split("\n#[cfg(test)]", maxsplit=1)[0]
+    production = _before_test_module(source)
     assert '.model_manifest_entry.get("repo")' not in production, (
         "MiniMax-H3 Candle must not accept a top-level manifest repo override; its q4/q8 and "
         "bf16/shared components come from two separately pinned installed snapshots"
@@ -851,7 +856,7 @@ def test_manifest_model_path_is_only_an_optional_override():
         # selected an imported Krea/SDXL route, and declines attribution when every path source is
         # absent. It does not affect generation's normal repo resolution.
         "image_jobs.rs",
-        "image_jobs/base.rs",
+        "image_jobs/artifact_resolution.rs",
         "image_jobs/flux1_control_candle.rs",
         "image_jobs/flux_ipadapter.rs",
         "image_jobs/instantid.rs",
@@ -873,7 +878,7 @@ def test_manifest_model_path_is_only_an_optional_override():
     }
     actual_readers: list[str] = []
     for path in WORKER_SOURCE_PATH.rglob("*.rs"):
-        source = path.read_text(encoding="utf-8").split("\n#[cfg(test)]", maxsplit=1)[0]
+        source = _before_test_module(path.read_text(encoding="utf-8"))
         for match in re.finditer(
             r'request\.model_manifest_entry\.get\("modelPath"\)',
             source,

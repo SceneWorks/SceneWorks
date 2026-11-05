@@ -182,13 +182,14 @@ pub(super) fn prepare_qwen_comfyui_sources(
     if super::request_is_checkpoint_plan_backed(request) {
         return Ok(None);
     }
-    let descriptor = super::imported_generate_request_supported(
+    let descriptor = super::routing::imported_generate_request_supported(
         request,
         "qwen-image",
         gen_core::ImportedModelSource::ComfyUiTree,
     );
     if descriptor.as_ref().is_none_or(|descriptor| {
-        super::imported_model_quant(request, descriptor, "ComfyUI Qwen-Image").is_err()
+        super::krea_imported::imported_model_quant(request, descriptor, "ComfyUI Qwen-Image")
+            .is_err()
     }) {
         return Ok(None);
     }
@@ -207,7 +208,7 @@ pub(super) fn prepare_qwen_comfyui_sources(
             paths
         }
     };
-    paths.adapters = super::resolve_prepared_adapters(request, settings)?;
+    paths.adapters = super::adapters::resolve_prepared_adapters(request, settings)?;
     Ok(Some(paths))
 }
 

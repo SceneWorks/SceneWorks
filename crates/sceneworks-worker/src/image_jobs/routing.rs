@@ -68,6 +68,8 @@ use super::instantid::INSTANTID_ENGINE;
 use super::kolors::kolors_control_available;
 #[cfg(not(target_os = "macos"))]
 use super::kolors_control;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::kolors_control_available;
 #[cfg(not(target_os = "macos"))]
 use super::kolors_ipadapter;
 #[cfg(not(target_os = "macos"))]
@@ -140,6 +142,8 @@ use super::qwen::qwen_edit_available;
 use super::qwen_comfyui_candle;
 #[cfg(not(target_os = "macos"))]
 use super::qwen_control;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::qwen_control_available;
 #[cfg(not(target_os = "macos"))]
 use super::qwen_edit_candle;
 #[cfg(not(target_os = "macos"))]
@@ -176,6 +180,8 @@ use super::zimage::CHARACTER_ANGLE_SET_ORDER;
 use super::zimage_comfyui_candle;
 #[cfg(not(target_os = "macos"))]
 use super::zimage_control;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_control_available;
 #[cfg(not(target_os = "macos"))]
 use super::zimage_edit_candle_available;
 #[cfg(not(target_os = "macos"))]
