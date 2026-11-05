@@ -41,7 +41,7 @@ apps/rust-api/src/jobs.rs sceneworks_worker::latest_training_resume_step
 apps/rust-api/src/jobs.rs sceneworks_worker::resolve_model_convert_output
 apps/rust-api/src/jobs.rs sceneworks_worker::resolve_training_output_dir_under
 apps/rust-api/src/jobs.rs sceneworks_worker::training_resume_stem
-apps/rust-api/src/lib.rs sceneworks_worker::Settings::from_env
+apps/rust-api/src/lib.rs sceneworks_worker::Settings::try_from_env
 apps/rust-api/src/lib.rs sceneworks_worker::WORKER_ENTRY_STACK_BYTES
 apps/rust-api/src/lib.rs sceneworks_worker::WorkerError
 apps/rust-api/src/lib.rs sceneworks_worker::WorkerResult

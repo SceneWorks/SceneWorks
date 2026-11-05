@@ -1,14 +1,38 @@
+use super::adapters::resolve_adapters;
+use super::admit_candle_base;
+use super::artifact_resolution::resolve_weights_dir;
+use super::conditioning::load_reference_image;
+use super::conditioning::resolve_text_style_gain;
+use super::events::consume_gen_events;
+use super::geometry::fit_engine_image;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::attach_required_components;
+use super::load_spec::attach_selected_decoder;
+use super::load_spec::candle_certified_load_spec;
+use super::load_spec::load_spec;
+use super::memory::candle_resolved_tier_key;
+use super::memory::optimized_shared_memory_context;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::resolve_pid_weights;
 use super::resolve_seed;
-use super::{
-    admit_candle_base, attach_manifest_text_encoder, attach_required_components,
-    attach_selected_decoder, candle_certified_load_spec, candle_resolved_tier_key,
-    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, load_spec,
-    optimized_shared_memory_context, pid_effective_dims, pid_output_tier, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
-    resolve_text_style_gain, resolve_weights_dir, safetensors_tensor_bytes_with_prefixes,
-    start_cached_gen_stream, ApiClient, CandleBaseEvidence, Image, ImagePlan, ImageRequest,
-    JobSnapshot, JsonObject, Path, Settings, Value, WorkerError, WorkerResult,
-};
+use super::safetensors_tensor_bytes_with_prefixes;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::stream::drive_gen_items;
+use super::stream::start_cached_gen_stream;
+use super::CandleBaseEvidence;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 // Candle (Windows/CUDA) Krea 2 image-edit route (epic 10871) — the Kontext-style dual-conditioned edit

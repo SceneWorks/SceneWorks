@@ -1,11 +1,59 @@
+use super::adapters::resolve_prepared_adapters;
+use super::adapters::PreparedAdapters;
+#[cfg(not(target_os = "macos"))]
+use super::admit_candle_load_spec_floor;
+use super::checkpoint_plan::checkpoint_plan_bespoke_primary_pin;
+use super::checkpoint_plan::request_is_checkpoint_plan_backed;
+use super::conditioning::load_reference_image;
+use super::conditioning::non_empty;
+use super::conditioning::pose_entries;
+use super::events::consume_gen_events;
+use super::geometry::fit_engine_image;
+use super::krea_imported::imported_dit_file;
+use super::krea_imported::imported_model_quant;
+use super::mlx_model;
+use super::pid::resolve_pid_weights;
+use super::render::generate_one_with_hires;
+use super::render::resolve_hires_fix_plan;
+use super::resolve_seed;
+use super::routing::PreparedFileDispatch;
+use super::sampling::normalize_sampling_knob;
+use super::sampling::read_advanced_guidance_method;
+use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+#[cfg(target_os = "macos")]
+use super::sdxl::SDXL_EDIT_STRENGTH;
+#[cfg(target_os = "macos")]
+use super::sdxl::SDXL_INPAINT_STRENGTH;
+use super::stream::drive_gen_items;
+use super::stream::start_cached_gen_stream;
+use super::Conditioning;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::PromptEnhance;
+use super::WeightsSource;
+use crate::advanced;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Uuid;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // Shared MLX/Candle in-place loader for a fused SDXL LDM/A1111 checkpoint (sc-14024).
 // The checkpoint supplies UNet + CLIP-L + OpenCLIP-bigG + VAE. MLX borrows only tokenizer assets
 // from the installed SDXL turnkey; candle stages its existing tokenizer + fp16-fix VAE components.
 
 #[cfg(target_os = "macos")]
-const SDXL_IMPORTED_ENGINE: &str = "mlx_sdxl_imported";
+pub(super) const SDXL_IMPORTED_ENGINE: &str = "mlx_sdxl_imported";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const SDXL_IMPORTED_ENGINE: &str = "candle_sdxl_imported";
+pub(super) const SDXL_IMPORTED_ENGINE: &str = "candle_sdxl_imported";
 
 const SDXL_IMPORTED_DEFAULT_STEPS: u32 = 30;
 const SDXL_IMPORTED_DEFAULT_GUIDANCE: f32 = 7.0;
@@ -13,25 +61,25 @@ const SDXL_IMPORTED_DEFAULT_GUIDANCE: f32 = 7.0;
 // module. The Windows Candle build does not include that MLX-only file, so keep its imported SDXL
 // conditioning defaults explicit and byte-identical here.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const SDXL_EDIT_STRENGTH: f32 = 0.6;
+pub(super) const SDXL_EDIT_STRENGTH: f32 = 0.6;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const SDXL_INPAINT_STRENGTH: f32 = 0.85;
-const SDXL_CLIP_L_REPO: &str = "openai/clip-vit-large-patch14";
-const SDXL_CLIP_L_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
+pub(super) const SDXL_INPAINT_STRENGTH: f32 = 0.85;
+pub(super) const SDXL_CLIP_L_REPO: &str = "openai/clip-vit-large-patch14";
+pub(super) const SDXL_CLIP_L_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 // Compiled on every platform: `SDXL_IMPORTED_COMPONENT_SOURCES` is now the ONE table both the
 // bespoke candle lane and the backend-agnostic plan route read, so its cells cannot be gated to one
 // backend without splitting it in two.
 const SDXL_CLIP_BIGG_REPO: &str = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k";
-const SDXL_CLIP_BIGG_REVISION: &str = "743c27bd53dfe508a0ade0f50698f99b39d03bec";
+pub(super) const SDXL_CLIP_BIGG_REVISION: &str = "743c27bd53dfe508a0ade0f50698f99b39d03bec";
 const SDXL_VAE_REPO: &str = "madebyollin/sdxl-vae-fp16-fix";
 const SDXL_VAE_REVISION: &str = "207b116dae70ace3637169f1ddd2434b91b3a8cd";
 
-struct PreparedSdxlImportedSources {
+pub(super) struct PreparedSdxlImportedSources {
     checkpoint: gen_core::PinnedWeightsFile,
     adapters: PreparedAdapters,
 }
 
-fn resolve_imported_sdxl_pin(
+pub(super) fn resolve_imported_sdxl_pin(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<gen_core::PinnedWeightsFile>> {
@@ -87,10 +135,8 @@ fn resolve_imported_sdxl_pin(
         // Select inside the already-confined target, then reconstruct the caller-visible child and
         // re-confine/pin that exact lexical entry. A child symlink must never inherit trust from its
         // parent directory.
-        imported_dit_file(&confined).and_then(|file| {
-            file.file_name()
-                .map(|name| Path::new(raw_path).join(name))
-        })
+        imported_dit_file(&confined)
+            .and_then(|file| file.file_name().map(|name| Path::new(raw_path).join(name)))
     } else if imported_dit_file(Path::new(raw_path)).is_some() {
         Some(PathBuf::from(raw_path))
     } else {
@@ -98,16 +144,12 @@ fn resolve_imported_sdxl_pin(
     };
     candidate
         .map(|file| {
-            crate::paths::pin_app_managed_model_file(
-                settings,
-                &file,
-                "Imported SDXL checkpoint",
-            )
+            crate::paths::pin_app_managed_model_file(settings, &file, "Imported SDXL checkpoint")
         })
         .transpose()
 }
 
-fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
+pub(super) fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
     if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced) {
         return false;
     }
@@ -171,21 +213,17 @@ fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
 }
 
 #[cfg(test)]
-fn resolve_imported_sdxl_file(
+pub(super) fn resolve_imported_sdxl_file(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    Ok(resolve_imported_sdxl_pin(request, settings)?
-        .map(|pin| pin.loader_path().to_path_buf()))
+    Ok(resolve_imported_sdxl_pin(request, settings)?.map(|pin| pin.loader_path().to_path_buf()))
 }
 
 #[cfg(test)]
-fn sdxl_imported_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn sdxl_imported_available(request: &ImageRequest, settings: &Settings) -> bool {
     sdxl_imported_request_shape_available(request)
-        && matches!(
-            resolve_imported_sdxl_file(request, settings),
-            Ok(Some(_))
-        )
+        && matches!(resolve_imported_sdxl_file(request, settings), Ok(Some(_)))
 }
 
 /// Resolve imported SDXL img2img/edit/inpaint/outpaint conditioning. The exact registered provider
@@ -212,12 +250,8 @@ fn resolve_imported_sdxl_conditioning(
             project_path,
         )?;
         let image = fit_engine_image(image, width, height, &request.fit_mode)?;
-        let strength = advanced::f32_clamped(
-            &request.advanced,
-            "strength",
-            SDXL_EDIT_STRENGTH,
-            0.0..=1.0,
-        );
+        let strength =
+            advanced::f32_clamped(&request.advanced, "strength", SDXL_EDIT_STRENGTH, 0.0..=1.0);
         return Ok((
             vec![Conditioning::Reference {
                 image,
@@ -302,7 +336,7 @@ fn resolve_imported_sdxl_conditioning(
     ))
 }
 
-fn prepare_sdxl_imported_sources(
+pub(super) fn prepare_sdxl_imported_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedSdxlImportedSources>> {
@@ -336,14 +370,8 @@ async fn stage_sdxl_component_file(
         cancel_message: "SDXL generation canceled while staging shared components.",
         fresh_download: false,
     };
-    crate::downloads::ensure_hf_cached_file_atomically(
-        &context,
-        repo,
-        revision,
-        file,
-        destination,
-    )
-    .await?;
+    crate::downloads::ensure_hf_cached_file_atomically(&context, repo, revision, file, destination)
+        .await?;
     Ok(())
 }
 
@@ -391,7 +419,7 @@ async fn stage_sdxl_tokenizer(
 /// adapter binds `FusedCheckpoint`/`Generate` on this backend — and then refused it with
 /// `[checkpoint-plan:missing-component] … 'ldm_tokenizer'`, so the family had no servable shape at
 /// all on the universal route (sc-20644 SDXL row).
-fn resolve_sdxl_ldm_tokenizer_root_cache_only(
+pub(super) fn resolve_sdxl_ldm_tokenizer_root_cache_only(
     settings: &Settings,
     checkpoint_id: &str,
 ) -> WorkerResult<PathBuf> {
@@ -417,7 +445,7 @@ fn resolve_sdxl_ldm_tokenizer_root_cache_only(
 ///
 /// The single copy-and-rename both cache-only resolvers use, so the two of them cannot drift in how
 /// they refuse a missing install or in how they avoid publishing a half-written file.
-fn mirror_cached_sdxl_component_file(
+pub(super) fn mirror_cached_sdxl_component_file(
     settings: &Settings,
     checkpoint_id: &str,
     repo: &str,
@@ -436,7 +464,7 @@ fn mirror_cached_sdxl_component_file(
     )
 }
 
-fn mirror_cached_sdxl_component_file_with_copy(
+pub(super) fn mirror_cached_sdxl_component_file_with_copy(
     settings: &Settings,
     checkpoint_id: &str,
     repo: &str,
@@ -508,12 +536,16 @@ fn mirror_cached_sdxl_component_file_with_copy(
     Ok(())
 }
 
-fn promote_cached_sdxl_component(staging: &Path, destination: &Path) -> std::io::Result<()> {
+pub(super) fn promote_cached_sdxl_component(
+    staging: &Path,
+    destination: &Path,
+) -> std::io::Result<()> {
     // Readers see either the prior complete component or the newly copied one. The
     // tempfile's safe platform implementation atomically replaces an existing
     // destination on both Unix and Windows. Never unlink the visible destination
     // before the staged file takes its place.
-    tempfile::TempPath::try_from_path(staging)?.persist(destination)
+    tempfile::TempPath::try_from_path(staging)?
+        .persist(destination)
         .map_err(|error| error.error)
 }
 
@@ -645,7 +677,7 @@ async fn attach_imported_sdxl_components(
 /// This never DOWNLOADS: it mirrors assets already in the app-managed Hugging Face cache, and
 /// refuses during PLANNING with an actionable install-it-from-the-Model-Manager diagnostic when
 /// they are absent (epic 17625 AC9 / E7).
-fn resolve_sdxl_imported_component_dir_cache_only(
+pub(super) fn resolve_sdxl_imported_component_dir_cache_only(
     settings: &Settings,
     family: &str,
     component: &str,
@@ -676,7 +708,7 @@ fn resolve_sdxl_imported_component_dir_cache_only(
     Ok(Some(destination_dir))
 }
 
-async fn generate_sdxl_imported_stream(
+pub(super) async fn generate_sdxl_imported_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -744,8 +776,8 @@ async fn generate_sdxl_imported_stream(
     );
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, "sdxl")?;
     let use_pid = pid_weights.is_some();
-    let negative_prompt = (!request.negative_prompt.trim().is_empty())
-        .then(|| request.negative_prompt.clone());
+    let negative_prompt =
+        (!request.negative_prompt.trim().is_empty()).then(|| request.negative_prompt.clone());
     let (width, height) = (request.width, request.height);
     let (conditioning, mode_tag, strength) =
         resolve_imported_sdxl_conditioning(request, settings, project_path)?;
@@ -765,10 +797,7 @@ async fn generate_sdxl_imported_stream(
     raw_settings.insert("realModelInference".to_owned(), Value::Bool(true));
     raw_settings.insert("numInferenceSteps".to_owned(), json!(steps));
     raw_settings.insert("guidanceScale".to_owned(), json!(guidance));
-    raw_settings.insert(
-        "engine".to_owned(),
-        Value::String(descriptor.id.to_owned()),
-    );
+    raw_settings.insert("engine".to_owned(), Value::String(descriptor.id.to_owned()));
     raw_settings.insert(
         "importedCheckpoint".to_owned(),
         Value::String(request.model.clone()),
@@ -822,81 +851,87 @@ async fn generate_sdxl_imported_stream(
         spec,
         "SDXL imported checkpoint load failed".to_owned(),
         move |model, tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                if let Some(hires_fix) = hires_fix {
-                    let (out_width, out_height, pixels) = generate_one_with_hires(
-                        model,
-                        &prompt,
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
+                    }
+                    if let Some(hires_fix) = hires_fix {
+                        let (out_width, out_height, pixels) = generate_one_with_hires(
+                            model,
+                            &prompt,
+                            width,
+                            height,
+                            seed,
+                            steps,
+                            Some(guidance),
+                            negative_prompt.clone(),
+                            None,
+                            &[],
+                            None,
+                            None,
+                            sampler.as_deref(),
+                            scheduler.as_deref(),
+                            scheduler_shift,
+                            guidance_method.as_deref(),
+                            use_pid,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            &enhance,
+                            Some(hires_fix),
+                            preview,
+                            gen_core::PromptEnhancementSink::default(),
+                            &cancel,
+                            on_progress,
+                        )?;
+                        return Ok(Some((seed, out_width, out_height, pixels)));
+                    }
+                    let request = GenerationRequest {
+                        prompt,
+                        negative_prompt: negative_prompt.clone(),
                         width,
                         height,
-                        seed,
-                        steps,
-                        Some(guidance),
-                        negative_prompt.clone(),
-                        None,
-                        &[],
-                        None,
-                        None,
-                        sampler.as_deref(),
-                        scheduler.as_deref(),
+                        count: 1,
+                        seed: Some(seed as u64),
+                        steps: Some(steps),
+                        guidance: Some(guidance),
+                        sampler: sampler.clone(),
+                        scheduler: scheduler.clone(),
                         scheduler_shift,
-                        guidance_method.as_deref(),
+                        guidance_method: guidance_method.clone(),
                         use_pid,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        &enhance,
-                        Some(hires_fix),
+                        conditioning: conditioning.clone(),
                         preview,
-                        gen_core::PromptEnhancementSink::default(),
-                        &cancel,
-                        on_progress,
-                    )?;
-                    return Ok(Some((seed, out_width, out_height, pixels)));
-                }
-                let request = GenerationRequest {
-                    prompt,
-                    negative_prompt: negative_prompt.clone(),
-                    width,
-                    height,
-                    count: 1,
-                    seed: Some(seed as u64),
-                    steps: Some(steps),
-                    guidance: Some(guidance),
-                    sampler: sampler.clone(),
-                    scheduler: scheduler.clone(),
-                    scheduler_shift,
-                    guidance_method: guidance_method.clone(),
-                    use_pid,
-                    conditioning: conditioning.clone(),
-                    preview,
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
-                let output = model.generate(&request, &mut *on_progress).map_err(|error| {
-                    WorkerError::Engine(format!(
-                        "SDXL imported checkpoint generation failed: {error}"
-                    ))
-                })?;
-                match output {
-                    GenerationOutput::Images(mut images) => {
-                        let image = images.pop().ok_or_else(|| {
-                            WorkerError::Engine(
-                                "SDXL imported checkpoint produced no image".to_owned(),
-                            )
+                        cancel: cancel.clone(),
+                        ..Default::default()
+                    };
+                    let output = model
+                        .generate(&request, &mut *on_progress)
+                        .map_err(|error| {
+                            WorkerError::Engine(format!(
+                                "SDXL imported checkpoint generation failed: {error}"
+                            ))
                         })?;
-                        Ok(Some((seed, image.width, image.height, image.pixels)))
+                    match output {
+                        GenerationOutput::Images(mut images) => {
+                            let image = images.pop().ok_or_else(|| {
+                                WorkerError::Engine(
+                                    "SDXL imported checkpoint produced no image".to_owned(),
+                                )
+                            })?;
+                            Ok(Some((seed, image.width, image.height, image.pixels)))
+                        }
+                        _ => Err(WorkerError::Engine(
+                            "SDXL imported checkpoint returned non-image output".to_owned(),
+                        )),
                     }
-                    _ => Err(WorkerError::Engine(
-                        "SDXL imported checkpoint returned non-image output".to_owned(),
-                    )),
-                }
-            })
+                },
+            )
         },
     );
 

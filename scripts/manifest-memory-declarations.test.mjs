@@ -346,7 +346,7 @@ test("the model table and strict-control table parse from their Rust sources", (
 test("a missing source table is a hard failure, never an empty projection", () => {
   assert.throws(() => parseEngineModelTable("// nothing here"), /MODEL_TABLE/);
   assert.throws(() => parseStrictControlEngines("// nothing here"), /STRICT_CONTROL_ENGINES/);
-  assert.throws(() => rustStringSlice("// nothing here", "WIRED_MLX_POSE_FAMILIES"), /base\.rs/);
+  assert.throws(() => rustStringSlice("// nothing here", "WIRED_MLX_POSE_FAMILIES"), /routing\.rs/);
   assert.throws(() => parseRequestContextLanes("// nothing here"), /RULES/);
 });
 
