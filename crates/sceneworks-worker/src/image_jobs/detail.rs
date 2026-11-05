@@ -24,6 +24,8 @@ use super::write_workflow_chunk;
 use super::AdapterSpec;
 use super::CancelFlag;
 use super::Conditioning;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::ControlKind;
 #[cfg(target_os = "macos")]
 use super::ControlKind;
 use super::GenerationOutput;

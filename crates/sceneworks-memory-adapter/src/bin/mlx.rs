@@ -1087,7 +1087,7 @@ impl FluxOneArtifact {
 ///
 /// A member normally has exactly one. Ideogram has two, because its bf16 tier ships from a
 /// DIFFERENT repository at a DIFFERENT revision than its packed `q4`/`q8` tiers
-/// (`image_jobs/base.rs` `IDEOGRAM_BF16_REPO`, and the manifest's own third `downloads[]` entry).
+/// (`image_jobs/artifact_resolution.rs` `IDEOGRAM_BF16_REPO`, and the manifest's own third `downloads[]` entry).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TurnkeyFamily {
     repository_env: &'static str,
@@ -1600,7 +1600,7 @@ struct Flux2Arm {
     /// The registry id handed to the production catalog loader (E4).
     provider: &'static str,
     /// The CATALOG model id. It is the anchor key's `modelId`, and it is also what the worker binds
-    /// as `LoadSpec::resolved_route` (`image_jobs/base.rs` — `spec.with_resolved_route(request.model)`),
+    /// as `LoadSpec::resolved_route` (`image_jobs/load_spec.rs` — `spec.with_resolved_route(request.model)`),
     /// which is the discriminator `KleinArtifactInventory::validate_resolved_route` refuses a
     /// cross-variant artifact with. Two members share `provider` and differ only here.
     model_id: &'static str,
@@ -1792,7 +1792,7 @@ struct KreaBaseArm {
     ///
     /// **FALSE for Raw, and that is the point of this field.** The shipped worker passes
     /// `LoadSpec::quantize = None` for the Krea image engines at EVERY tier —
-    /// `crates/sceneworks-worker/src/image_jobs/base.rs`,
+    /// `crates/sceneworks-worker/src/image_jobs/quantization.rs`,
     /// `mlx_load_quant_for_resolved_artifact` returns `None` for
     /// `"krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | …` — and the tier travels instead on
     /// `MlxRequestPlan::with_resolved_artifact_tier`, i.e. on the directory the spec opens. Turbo
@@ -1852,7 +1852,7 @@ struct KreaBaseLifecycleMetrics {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SdxlArm {
     /// The catalog model id — `planned.target.modelId`, and the spec's `resolved_route` (the
-    /// worker binds exactly this at `image_jobs/base.rs:8785`).
+    /// worker binds exactly this at `image_jobs/quantization.rs`).
     model_id: &'static str,
     execution_path: &'static str,
     still_calibration: &'static str,
@@ -2089,7 +2089,7 @@ struct MageArm {
     ///
     /// It is the SCALE, never the decision: whether a `guidance` reaches the engine at all is read
     /// off the loaded descriptor's `supports_guidance`, exactly as production reads it
-    /// (`image_jobs/base.rs` `resolve_guidance`). On a distilled member the engine advertises
+    /// (`image_jobs/sampling.rs` `resolve_guidance`). On a distilled member the engine advertises
     /// `supports_guidance: false` and refuses ANY scale — including this 1.0 — so the value here is
     /// simply never sent. See [`mage_request`].
     guidance: f32,
@@ -3146,7 +3146,7 @@ const BERNINI_ADMISSION_BLOCKER: &str = concat!(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SenseNovaArm {
     /// The catalog model id — `planned.target.modelId`, and the spec's `resolved_route`. The
-    /// worker binds exactly this (`image_jobs/base.rs` `.with_resolved_route(request.model)`), and
+    /// worker binds exactly this (`image_jobs/load_spec.rs` `.with_resolved_route(request.model)`), and
     /// `mlx-gen-sensenova`'s `validate_resolved_artifact_binding` refuses a route whose repository
     /// identity the weights path does not carry.
     model_id: &'static str,
