@@ -712,6 +712,12 @@ def test_control_weight_authority_audit_detects_absence_and_fallback_mutations()
 AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
     # Shared resolver receives MODEL_TABLE's default (or the frozen canonical FLUX3 identity).
     "image_jobs/artifact_resolution.rs": "unwrap_or(default_repo)",
+    # These production readers were formerly hidden by an early cfg(test) import.
+    "image_jobs/flux2_control_candle.rs": "FLUX2_CONTROL_CANDLE_BASE_REPO",
+    "image_jobs/kolors_control.rs": "KOLORS_CONTROL_DEFAULT_REPO",
+    "image_jobs/krea_control.rs": "KREA_CONTROL_MLX_REPO",
+    "image_jobs/qwen_control.rs": "QWEN_CONTROL_DEFAULT_REPO",
+    "image_jobs/zimage_control.rs": "zimage_control_base_default_repo(&request.model)",
     "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
     "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
     "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
@@ -857,6 +863,11 @@ def test_manifest_model_path_is_only_an_optional_override():
         # absent. It does not affect generation's normal repo resolution.
         "image_jobs.rs",
         "image_jobs/artifact_resolution.rs",
+        "image_jobs/flux2_control_candle.rs",
+        "image_jobs/kolors_control.rs",
+        "image_jobs/krea_control.rs",
+        "image_jobs/qwen_control.rs",
+        "image_jobs/zimage_control.rs",
         "image_jobs/flux1_control_candle.rs",
         "image_jobs/flux_ipadapter.rs",
         "image_jobs/instantid.rs",
