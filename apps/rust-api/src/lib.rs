@@ -54,7 +54,7 @@ use sceneworks_core::project_store::{
     FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR,
     POSE_UPLOADS_CACHE_DIR,
 };
-use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
+use sceneworks_core::time::now_unix_seconds;
 use sceneworks_core::training::{
     build_training_plan, builtin_training_presets, builtin_training_targets, BuildTrainingPlan,
     LoraTrainingRequest, TrainingDataset, TrainingPresetProvenance, TrainingTarget,
@@ -350,6 +350,8 @@ pub(crate) use defaults::*;
 // `main.rs` (`run`/`run_worker`), the handler modules' `use super::*` (`AppState`),
 // and `tests.rs` (`Settings`) keep resolving these paths unchanged.
 mod server;
+#[cfg(test)]
+mod test_hooks;
 pub use server::{run, run_worker, AppState, Settings};
 
 // The theme-preferences route. Its GET (the pre-auth theme read) is public, but its
@@ -463,59 +465,6 @@ pub(crate) use sceneworks_core::MAX_PROMPT_CHARS;
 // pass-through bag threaded to the worker, so it has no per-key schema — bound its total
 // serialized size instead. 64 KiB is generous for legitimate advanced settings.
 const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
-// Thread-local (not a process-global atomic) so a test overriding the cap to
-// exercise the size limit can't leak that value into other LoRA-upload tests
-// running concurrently on sibling threads. `#[tokio::test]` uses a current-thread
-// runtime, so the upload handler runs on the same thread that sets the override.
-#[cfg(test)]
-thread_local! {
-    static TEST_MAX_LORA_UPLOAD_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    // sc-15950: same override, same reasoning, for `POST /api/v1/workflows/inspect`. The real cap
-    // is `MAX_UPLOAD_BYTES` (2 GiB), which no test can send, so the oversized-body branch is only
-    // reachable through a lowered cap.
-    static TEST_MAX_WORKFLOW_INSPECT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-#[cfg(test)]
-static TEST_MAX_MODEL_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-// sc-8819 (F-017): count how many times the model/LoRA catalogs are assembled (which
-// each trigger the whole per-model filesystem install-state probe sweep) so a test can
-// assert a preset job-create builds each catalog once, not 2–3×. Thread-local, and the
-// counter is bumped on the caller's async task thread (before the catalog's inner
-// `spawn_blocking`), so under the `#[tokio::test]` current-thread runtime the count is
-// observed on the test thread and is immune to parallel tests on sibling threads.
-#[cfg(test)]
-thread_local! {
-    static TEST_MODEL_CATALOG_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static TEST_LORA_CATALOG_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn test_reset_catalog_build_counters() {
-    TEST_MODEL_CATALOG_BUILDS.with(|cell| cell.set(0));
-    TEST_LORA_CATALOG_BUILDS.with(|cell| cell.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn test_model_catalog_builds() -> usize {
-    TEST_MODEL_CATALOG_BUILDS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-pub(crate) fn test_lora_catalog_builds() -> usize {
-    TEST_LORA_CATALOG_BUILDS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-pub(crate) fn test_note_model_catalog_build() {
-    TEST_MODEL_CATALOG_BUILDS.with(|cell| cell.set(cell.get() + 1));
-}
-
-#[cfg(test)]
-pub(crate) fn test_note_lora_catalog_build() {
-    TEST_LORA_CATALOG_BUILDS.with(|cell| cell.set(cell.get() + 1));
-}
 
 struct ApiJson<T>(T);
 
@@ -1536,11 +1485,8 @@ fn create_app_with_state_mode(
         model_catalog_cache: Arc::new(ModelCatalogCache::default()),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
         #[cfg(test)]
-        model_size_estimate_test_hook: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        model_size_estimate_disabled_override: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        video_platform_override: Arc::new(Mutex::new(None)),
+        test_hooks: Arc::default(),
+
         external_lora_cache: Arc::new(Mutex::new(external_loras::ExternalLoraCache::default())),
         external_base_model_cache: Arc::new(Mutex::new(
             external_base_models::ExternalBaseModelCache::default(),
@@ -1564,42 +1510,6 @@ fn create_app_with_state_mode(
         )),
         catalog_scan_preflight_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         catalog_scan_work_slots: Arc::new(tokio::sync::Semaphore::new(2)),
-        #[cfg(test)]
-        catalog_scan_before_driver_start_once: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        catalog_scan_stop_after_pass_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        #[cfg(test)]
-        catalog_scan_before_terminal_exit_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        #[cfg(test)]
-        catalog_scan_terminal_exit_reached: Arc::new(tokio::sync::Notify::new()),
-        #[cfg(test)]
-        catalog_scan_terminal_exit_release: Arc::new(tokio::sync::Notify::new()),
-        #[cfg(test)]
-        catalog_scan_preflight_delay_ms_once: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        #[cfg(test)]
-        catalog_scan_preflight_started: Arc::new(tokio::sync::Notify::new()),
-        #[cfg(test)]
-        catalog_scan_preflight_admission_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        #[cfg(test)]
-        catalog_scan_preflight_execution_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        #[cfg(test)]
-        catalog_scan_preflight_test_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        #[cfg(test)]
-        catalog_scan_injected_sqlite_busy_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        #[cfg(test)]
-        catalog_scan_contention_backoff_started: Arc::new(tokio::sync::Notify::new()),
-        #[cfg(test)]
-        catalog_scan_busy_lease_cancel_barrier_once: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        progress_before_accept_once: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        sse_snapshot_before_subscribe_once: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        progress_side_effects_fail_once: Arc::new(Mutex::new(false)),
-        #[cfg(test)]
-        progress_side_effects_fail_job_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        #[cfg(test)]
-        progress_side_effects_attempts: Arc::new(Mutex::new(HashMap::new())),
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();
@@ -4589,56 +4499,15 @@ fn normalize_inline_job_lora(lora: &Value, lora_id: &str) -> Value {
     }
 }
 
-fn json_size_to_u64(value: &Value) -> Option<u64> {
-    if let Some(value) = value.as_u64() {
-        return Some(value);
-    }
-    value.as_str().and_then(|value| value.parse::<u64>().ok())
-}
+use sceneworks_core::payload_util::json_size_to_u64;
 
-fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return true;
-    }
-    patterns
-        .iter()
-        .any(|pattern| pattern_matches(pattern, path))
-}
+use sceneworks_core::model_artifacts::artifact_selection::allow_pattern_matches;
 
-fn pattern_matches(pattern: &str, value: &str) -> bool {
-    let (pattern, value) = if cfg!(windows) {
-        (pattern.to_ascii_lowercase(), value.to_ascii_lowercase())
-    } else {
-        (pattern.to_owned(), value.to_owned())
-    };
-    glob::Pattern::new(&pattern).is_ok_and(|pattern| pattern.matches(&value))
-}
+use sceneworks_core::model_artifacts::artifact_selection::pattern_matches;
 
-fn quote_huggingface_repo(repo: &str) -> String {
-    let mut output = String::new();
-    for byte in repo.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
-            output.push(char::from(byte));
-        } else {
-            output.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    output
-}
+use sceneworks_core::display_util::quote_path as quote_huggingface_repo;
 
-fn format_bytes(value: u64) -> String {
-    let mut size = value as f64;
-    for unit in ["B", "KB", "MB", "GB", "TB"] {
-        if size < 1024.0 || unit == "TB" {
-            if unit == "B" {
-                return format!("{} {unit}", size as u64);
-            }
-            return format!("{size:.1} {unit}");
-        }
-        size /= 1024.0;
-    }
-    format!("{size:.1} TB")
-}
+use sceneworks_core::display_util::format_bytes;
 
 fn string_array_field(payload: &Value, field: &str) -> Vec<String> {
     payload
@@ -4752,9 +4621,7 @@ fn slugify_lora_id(value: &str) -> String {
     sceneworks_core::slug::slugify_with(value, "lora", None, '_')
 }
 
-fn now_rfc3339() -> String {
-    format_unix_seconds(now_unix_seconds())
-}
+use sceneworks_core::time::utc_now as now_rfc3339;
 
 fn huggingface_repo_cache_exists(path: &FsPath) -> bool {
     path.join("snapshots").is_dir() || path.join("blobs").is_dir()
@@ -4842,45 +4709,6 @@ struct ArtifactRemoval {
     /// unsupported volume, item too large, …). Nothing was deleted for these, so the
     /// caller can prompt the user before falling back to a permanent delete.
     trash_failed_paths: Vec<String>,
-}
-
-#[cfg(test)]
-static TEST_TRASH_OUTCOMES: std::sync::OnceLock<Mutex<HashMap<PathBuf, bool>>> =
-    std::sync::OnceLock::new();
-
-#[cfg(test)]
-pub(crate) struct TestTrashOutcomesGuard {
-    paths: Vec<PathBuf>,
-}
-
-#[cfg(test)]
-impl Drop for TestTrashOutcomesGuard {
-    fn drop(&mut self) {
-        let mut outcomes = TEST_TRASH_OUTCOMES.get_or_init(Default::default).lock();
-        for path in &self.paths {
-            outcomes.remove(path);
-        }
-    }
-}
-
-/// Install one-shot deterministic OS-trash outcomes for route tests. A `true`
-/// outcome removes the path as if the trash move succeeded; `false` leaves it
-/// in place and reports the same recoverable failure as `trash::delete`.
-#[cfg(test)]
-pub(crate) fn test_trash_outcomes(
-    entries: impl IntoIterator<Item = (PathBuf, bool)>,
-) -> TestTrashOutcomesGuard {
-    let mut outcomes = TEST_TRASH_OUTCOMES.get_or_init(Default::default).lock();
-    let mut paths = Vec::new();
-    for (path, succeeds) in entries {
-        assert!(
-            outcomes.insert(path.clone(), succeeds).is_none(),
-            "test trash outcome already registered for {}",
-            path.display()
-        );
-        paths.push(path);
-    }
-    TestTrashOutcomesGuard { paths }
 }
 
 /// Move a single path to the operating-system trash (Windows Recycle Bin / macOS
@@ -6517,21 +6345,22 @@ fn required_finite_f64_field(payload: &Value, field: &str) -> Result<f64, ApiErr
     Ok(value)
 }
 
-fn env_string(name: &str, default: &str) -> String {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| default.to_owned())
-}
+use sceneworks_core::env_util::env_string;
 
-fn env_path_or(name: &str, default: &FsPath) -> PathBuf {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default.to_path_buf())
-}
+use sceneworks_core::env_util::env_path_or;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use test_hooks::{
+    test_lora_catalog_builds, test_model_catalog_builds, test_note_lora_catalog_build,
+    test_note_model_catalog_build, test_reset_catalog_build_counters, test_trash_outcomes,
+    TestTrashOutcomesGuard,
+};
+#[cfg(test)]
+use test_hooks::{
+    TEST_MAX_LORA_UPLOAD_BYTES, TEST_MAX_MODEL_UPLOAD_BYTES, TEST_MAX_WORKFLOW_INSPECT_BYTES,
+    TEST_TRASH_OUTCOMES,
+};

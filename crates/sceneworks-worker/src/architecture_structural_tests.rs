@@ -164,7 +164,7 @@ fn dispatch_and_both_routing_oracles_decide_every_known_job_kind() {
         .collect::<BTreeSet<_>>();
     let gaps = include_str!("../../sceneworks-core/src/jobs_store/routing/gaps.rs");
     for (source, name) in [
-        (super::WORKER, "run_utility_job_inner"),
+        (super::UTILITY_DISPATCH, "dispatch_utility_job"),
         (gaps, "mac_rust_supported"),
         (gaps, "candle_supported"),
     ] {
@@ -191,29 +191,38 @@ fn dispatch_and_both_routing_oracles_decide_every_known_job_kind() {
     .map(str::to_owned)
     .collect();
     assert_eq!(
-        dispatch_variants_for(super::WORKER, "run_utility_job_inner", false, false),
+        dispatch_variants_for(
+            super::UTILITY_DISPATCH,
+            "dispatch_utility_job",
+            false,
+            false
+        ),
         expected.difference(&native_only).cloned().collect()
     );
 }
 
 #[test]
 fn worker_entry_delegates_to_the_guarded_dispatcher() {
-    struct Calls(usize);
+    struct Calls {
+        target: &'static str,
+        count: usize,
+    }
     impl<'ast> Visit<'ast> for Calls {
         fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-            if matches!(call.func.as_ref(), Expr::Path(path) if path.path.is_ident("run_utility_job_inner"))
-            {
-                self.0 += 1;
+            if matches!(call.func.as_ref(), Expr::Path(path) if path.path.is_ident(self.target)) {
+                self.count += 1;
             }
             visit::visit_expr_call(self, call);
         }
     }
-    let mut calls = Calls(0);
-    calls.visit_item_fn(&function(super::WORKER, "run_utility_job"));
-    assert_eq!(
-        calls.0, 1,
-        "the load-progress wrapper must execute the checked dispatcher"
-    );
+    for (caller, target) in [
+        ("run_utility_job", "run_utility_job_inner"),
+        ("run_utility_job_inner", "dispatch_utility_job"),
+    ] {
+        let mut calls = Calls { target, count: 0 };
+        calls.visit_item_fn(&function(super::UTILITY_DISPATCH, caller));
+        assert_eq!(calls.count, 1, "{caller} must execute the checked {target}");
+    }
 }
 
 #[test]
@@ -234,10 +243,13 @@ fn dispatch_ast_ignores_comments_strings_nested_matches_and_guarded_arms() {
         dispatch_variants(source, "run_utility_job"),
         BTreeSet::from(["First".into(), "Second".into()])
     );
-    let missing =
-        super::WORKER.replacen("JobType::PromptRefine =>", "_removed_prompt_refine =>", 1);
-    assert_ne!(missing, super::WORKER);
-    assert!(!dispatch_variants(&missing, "run_utility_job_inner").contains("PromptRefine"));
+    let missing = super::UTILITY_DISPATCH.replacen(
+        "JobType::PromptRefine =>",
+        "_removed_prompt_refine =>",
+        1,
+    );
+    assert_ne!(missing, super::UTILITY_DISPATCH);
+    assert!(!dispatch_variants(&missing, "dispatch_utility_job").contains("PromptRefine"));
 }
 
 fn capability_errors(contracts: &str, jobs_store: &str) -> Vec<String> {
@@ -1154,6 +1166,28 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
             "crates/sceneworks-core/src/model_artifacts/artifact_selection.rs",
             "safe_download_dir",
         ),
+        (
+            "crates/sceneworks-core/src/model_artifacts/artifact_selection.rs",
+            "pattern_matches",
+        ),
+        (
+            "crates/sceneworks-core/src/model_artifacts/artifact_selection.rs",
+            "allow_pattern_matches",
+        ),
+        ("crates/sceneworks-core/src/display_util.rs", "format_bytes"),
+        ("crates/sceneworks-core/src/display_util.rs", "quote_path"),
+        (
+            "crates/sceneworks-core/src/payload_util.rs",
+            "json_size_to_u64",
+        ),
+        ("crates/sceneworks-core/src/env_util.rs", "env_string"),
+        (
+            "crates/sceneworks-core/src/env_util.rs",
+            "env_trimmed_string",
+        ),
+        ("crates/sceneworks-core/src/env_util.rs", "env_path_or"),
+        ("crates/sceneworks-core/src/time.rs", "utc_now"),
+        ("crates/sceneworks-core/src/time.rs", "civil_from_days"),
         ("crates/sceneworks-core/src/ids.rs", "is_safe_id"),
         ("crates/sceneworks-core/src/ids.rs", "is_safe_id_with_max"),
         (
@@ -1657,5 +1691,238 @@ fn confinement_policy_has_one_core_type_and_the_shared_function_uses_it() {
     assert!(
         definitions("const PROSE: &str = \"enum Confinement { Lexical, SymlinkSafe }\";")
             .is_empty()
+    );
+}
+
+/// Traverse the authored Rust module graph (all platform cfgs), excluding only explicit test
+/// modules; a test declaration midway through a file never hides later production items.
+#[test]
+fn capture_adapters_are_not_product_runtime_dependencies() {
+    fn is_test_module(module: &syn::ItemMod) -> bool {
+        module.attrs.iter().any(|attr| {
+            attr.path().is_ident("cfg")
+                && attr.parse_args::<syn::Meta>().is_ok_and(
+                    |meta| matches!(meta, syn::Meta::Path(path) if path.is_ident("test")),
+                )
+        })
+    }
+    #[derive(Default)]
+    struct References(Vec<String>);
+    impl<'ast> Visit<'ast> for References {
+        fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+            if !is_test_module(node) {
+                visit::visit_item_mod(self, node);
+            }
+        }
+        fn visit_ident(&mut self, node: &'ast syn::Ident) {
+            // Imports use syn::UseTree identifiers rather than syn::Path nodes.
+            if node == "sceneworks_memory_adapter" {
+                self.0.push(node.to_string());
+            }
+            visit::visit_ident(self, node);
+        }
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            let tokens = node.tokens.to_string();
+            if tokens.contains("sceneworks_memory_adapter")
+                || tokens.contains("sceneworks-memory-adapter/src/")
+            {
+                self.0.push(tokens);
+            }
+            visit::visit_macro(self, node);
+        }
+        fn visit_expr_lit(&mut self, node: &'ast syn::ExprLit) {
+            if let syn::Lit::Str(value) = &node.lit {
+                let value = value.value();
+                let name = value.rsplit(['/', '\\']).next().unwrap();
+                if [
+                    "memory-mlx-adapter",
+                    "memory-candle-adapter",
+                    "memory-mlx-adapter.exe",
+                    "memory-candle-adapter.exe",
+                ]
+                .contains(&name)
+                {
+                    self.0.push(value);
+                }
+            }
+            visit::visit_expr_lit(self, node);
+        }
+    }
+    fn module_path(module: &syn::ItemMod, source_dir: &Path, module_dir: &Path) -> PathBuf {
+        for attr in &module.attrs {
+            if attr.path().is_ident("path") {
+                if let syn::Meta::NameValue(value) = &attr.meta {
+                    if let Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(path),
+                        ..
+                    }) = &value.value
+                    {
+                        return source_dir.join(path.value());
+                    }
+                }
+            }
+        }
+        let file = module_dir.join(format!("{}.rs", module.ident));
+        if file.is_file() {
+            file
+        } else {
+            module_dir.join(module.ident.to_string()).join("mod.rs")
+        }
+    }
+    fn scan_items(
+        items: &[Item],
+        source_dir: &Path,
+        module_dir: &Path,
+        seen: &mut BTreeSet<PathBuf>,
+        offenders: &mut Vec<String>,
+    ) {
+        for item in items {
+            if let Item::Mod(module) = item {
+                if is_test_module(module) {
+                    continue;
+                }
+                if let Some((_, items)) = &module.content {
+                    let nested = module_dir.join(module.ident.to_string());
+                    scan_items(items, &nested, &nested, seen, offenders);
+                } else {
+                    scan_file(
+                        &module_path(module, source_dir, module_dir),
+                        false,
+                        seen,
+                        offenders,
+                    );
+                }
+            } else {
+                let mut references = References::default();
+                references.visit_item(item);
+                offenders.extend(
+                    references
+                        .0
+                        .into_iter()
+                        .map(|reference| format!("{}: {reference}", source_dir.display())),
+                );
+            }
+        }
+    }
+    fn scan_file(
+        path: &Path,
+        crate_root: bool,
+        seen: &mut BTreeSet<PathBuf>,
+        offenders: &mut Vec<String>,
+    ) {
+        assert!(
+            path.is_file(),
+            "unresolved product module {}",
+            path.display()
+        );
+        let path = path.canonicalize().unwrap();
+        if !seen.insert(path.clone()) {
+            return;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        let file = parse(&source);
+        let parent = path.parent().unwrap();
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        let module_dir = if crate_root || stem == "mod" {
+            parent.to_path_buf()
+        } else {
+            parent.join(stem)
+        };
+        scan_items(&file.items, parent, &module_dir, seen, offenders);
+    }
+    let manifests = workspace_manifests();
+    let inbound: Vec<_> = internal_edges(&manifests)
+        .into_iter()
+        .filter(|(_, to)| to == "sceneworks-memory-adapter")
+        .collect();
+    assert!(
+        inbound.is_empty(),
+        "capture tooling acquired product callers: {inbound:?}"
+    );
+    // The dependency check inspects package identities even under aliases/target/dev tables.
+    let mut mutated = manifests.clone();
+    let product = mutated
+        .iter_mut()
+        .find(|(name, _)| name == "sceneworks-core")
+        .unwrap();
+    let dependency: toml::Value = "[target.'cfg(windows)'.dependencies]\ncapture_alias = { package = \"sceneworks-memory-adapter\", path = \"../sceneworks-memory-adapter\" }".parse().unwrap();
+    product
+        .1
+        .as_table_mut()
+        .unwrap()
+        .insert("target".into(), dependency["target"].clone());
+    assert!(internal_edges(&mutated)
+        .iter()
+        .any(|(_, to)| to == "sceneworks-memory-adapter"));
+    let mut seen = BTreeSet::new();
+    let mut offenders = Vec::new();
+    let workspace = read_manifest(&root().join("Cargo.toml"));
+    for member in workspace["workspace"]["members"].as_array().unwrap() {
+        let directory = root().join(member.as_str().unwrap());
+        let manifest = read_manifest(&directory.join("Cargo.toml"));
+        if manifest["package"]["name"].as_str() == Some("sceneworks-memory-adapter") {
+            continue;
+        }
+        let mut roots = BTreeSet::new();
+        for candidate in ["src/lib.rs", "src/main.rs", "build.rs"] {
+            if directory.join(candidate).is_file() {
+                roots.insert(directory.join(candidate));
+            }
+        }
+        if let Some(path) = manifest
+            .get("lib")
+            .and_then(|lib| lib.get("path"))
+            .and_then(toml::Value::as_str)
+        {
+            roots.insert(directory.join(path));
+        }
+        if let Some(bins) = manifest.get("bin").and_then(toml::Value::as_array) {
+            for bin in bins {
+                if let Some(path) = bin.get("path").and_then(toml::Value::as_str) {
+                    roots.insert(directory.join(path));
+                }
+            }
+        }
+        let bins = directory.join("src/bin");
+        if bins.is_dir()
+            && manifest["package"]
+                .get("autobins")
+                .and_then(toml::Value::as_bool)
+                != Some(false)
+        {
+            for entry in std::fs::read_dir(bins).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_some_and(|ext| ext == "rs") {
+                    roots.insert(path);
+                } else if path.is_dir() && path.join("main.rs").is_file() {
+                    roots.insert(path.join("main.rs"));
+                }
+            }
+        }
+        for path in roots {
+            scan_file(&path, true, &mut seen, &mut offenders);
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "product code reaches capture tooling: {offenders:?}"
+    );
+    for mutation in [
+        "use sceneworks_memory_adapter as protocol;",
+        "include!(\"../../sceneworks-memory-adapter/src/bin/mlx.rs\");",
+        "fn launch() { Command::new(\"memory-mlx-adapter\"); }",
+        "#[cfg(test)] mod tests { fn fixture() {} } fn live() { sceneworks_memory_adapter::planned(); }",
+    ] {
+        let mut references = References::default();
+        references.visit_file(&parse(mutation));
+        assert!(!references.0.is_empty(), "boundary must catch {mutation}");
+    }
+    let mut tests = References::default();
+    tests.visit_file(&parse(
+        "#[cfg(test)] mod tests { use sceneworks_memory_adapter as fixture; }",
+    ));
+    assert!(
+        tests.0.is_empty(),
+        "explicit test ownership is distinct from product callers"
     );
 }

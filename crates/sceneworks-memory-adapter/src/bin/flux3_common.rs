@@ -114,9 +114,7 @@ pub(super) struct Plan {
 pub(super) fn plan(request: &Value, lane: &str) -> Result<Plan, String> {
     let planned = protocol::planned(request)?;
     let checkpoint = checkpoint(
-        planned
-            .pointer("/target/provider")
-            .and_then(Value::as_str)
+        protocol::plan_optional_str(planned, "/target/provider")
             .ok_or_else(|| "FLUX3 target.provider must name a native checkpoint".to_owned())?,
     )?;
     protocol::validate_still_geometry(request, "FLUX3 calibration")?;
@@ -128,7 +126,7 @@ pub(super) fn plan(request: &Value, lane: &str) -> Result<Plan, String> {
         ("/target/mode", "text_to_image"),
         ("/loadShape", protocol::LOAD_SHAPE_EAGER),
     ] {
-        if planned.pointer(pointer).and_then(Value::as_str) != Some(expected) {
+        if protocol::plan_optional_str(planned, pointer) != Some(expected) {
             return Err(format!("FLUX3 planned{pointer} must be {expected:?}"));
         }
     }
@@ -138,22 +136,17 @@ pub(super) fn plan(request: &Value, lane: &str) -> Result<Plan, String> {
                 .to_owned(),
         );
     }
-    let tier = planned
-        .pointer("/target/tier")
-        .and_then(Value::as_str)
+    let tier = protocol::plan_optional_str(planned, "/target/tier")
         .ok_or_else(|| "FLUX3 planned.target.tier must be a string".to_owned())?;
     let fingerprint = fingerprint_for(lane, tier, checkpoint.provider)?;
     let fixture = format!(
         "{}-{lane}-{tier}-1024-seed26243-step{}",
         checkpoint.label, checkpoint.steps
     );
-    if planned.get("fixture").and_then(Value::as_str) != Some(fixture.as_str()) {
+    if protocol::plan_optional_str(planned, "/fixture") != Some(fixture.as_str()) {
         return Err(format!("FLUX3 planned.fixture must be {fixture:?}"));
     }
-    if planned
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        != Some(fingerprint.as_str())
+    if protocol::plan_optional_str(planned, "/calibrationFingerprint") != Some(fingerprint.as_str())
     {
         return Err(format!(
             "FLUX3 plan/provider calibration mismatch: expected {fingerprint}"

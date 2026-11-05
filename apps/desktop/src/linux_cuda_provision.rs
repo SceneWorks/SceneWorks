@@ -7,17 +7,21 @@
 
 use std::fs;
 #[cfg(test)]
-#[cfg(test)]
 use std::io::Read;
+#[cfg(test)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use futures_util::StreamExt;
-use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
 use tauri::AppHandle;
 
-use crate::cuda_provision_check::write_component_marker;
+use crate::cuda_provision_check::{
+    all_markers_current, build_client, download_verified, extract_libraries, invalidate_markers,
+    top_marker_current, write_marker, LibraryFilter,
+};
+use crate::cuda_provision_check::{
+    component_provisioned_with, dir_has_shared_object, write_component_marker,
+};
 #[cfg(target_os = "linux")]
 use crate::setup::{emit, gpu_runtime_dir};
 
@@ -130,19 +134,6 @@ const COMPONENTS: &[Component] = &[
     },
 ];
 
-fn dir_has_shared_object(dir: &Path, basename: &str) -> bool {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            return false;
-        };
-        entry.path().is_file() && (name == basename || name.starts_with(&format!("{basename}.")))
-    })
-}
-
 fn runtime_complete(root: &Path) -> bool {
     COMPONENTS.iter().all(|component| {
         component
@@ -153,41 +144,26 @@ fn runtime_complete(root: &Path) -> bool {
 }
 
 fn component_complete(root: &Path, component: &Component) -> bool {
-    fs::read_to_string(root.join(format!(".component-{}.ok", component.slug)))
-        .map(|value| value.trim() == REDIST_VERSION)
-        .unwrap_or(false)
-        && component
-            .sentinels
-            .iter()
-            .all(|name| dir_has_shared_object(&root.join(component.dest), name))
+    component_provisioned_with(
+        root,
+        &root.join(component.dest),
+        component.slug,
+        REDIST_VERSION,
+        component.sentinels,
+        dir_has_shared_object,
+    )
 }
 
 fn already_provisioned(root: &Path) -> bool {
-    top_marker_current(root) && runtime_complete(root)
-}
-
-fn top_marker_current(root: &Path) -> bool {
-    fs::read_to_string(root.join(".redist-marker"))
-        .map(|value| value.trim() == REDIST_VERSION)
-        .unwrap_or(false)
+    top_marker_current(root, REDIST_VERSION) && runtime_complete(root)
 }
 
 fn all_component_markers_current(root: &Path) -> bool {
-    COMPONENTS
-        .iter()
-        .all(|component| component_complete(root, component))
-}
-
-fn write_marker(root: &Path) -> Result<(), String> {
-    fs::write(root.join(".redist-marker"), REDIST_VERSION)
-        .map_err(|error| format!("write marker: {error}"))
-}
-
-fn invalidate_markers(root: &Path) {
-    let _ = fs::remove_file(root.join(".redist-marker"));
-    for component in COMPONENTS {
-        let _ = fs::remove_file(root.join(format!(".component-{}.ok", component.slug)));
-    }
+    all_markers_current(
+        root,
+        REDIST_VERSION,
+        COMPONENTS.iter().map(|component| component.slug),
+    ) && runtime_complete(root)
 }
 
 #[cfg(test)]
@@ -202,36 +178,7 @@ fn extract_shared_objects(
     prefixes: Option<&[&str]>,
     dest: &Path,
 ) -> Result<usize, String> {
-    fs::create_dir_all(dest).map_err(|error| format!("create {}: {error}", dest.display()))?;
-    let file = fs::File::open(wheel).map_err(|error| format!("open wheel: {error}"))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|error| format!("open zip: {error}"))?;
-    let mut written = 0;
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|error| format!("read zip entry: {error}"))?;
-        let Some(path) = entry.enclosed_name() else {
-            continue;
-        };
-        let Some(base) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !base.contains(".so")
-            || prefixes.is_some_and(|prefixes| {
-                !prefixes
-                    .iter()
-                    .any(|prefix| base == *prefix || base.starts_with(&format!("{prefix}.")))
-            })
-        {
-            continue;
-        }
-        let mut output =
-            fs::File::create(dest.join(base)).map_err(|error| format!("write {base}: {error}"))?;
-        std::io::copy(&mut entry, &mut output)
-            .map_err(|error| format!("extract {base}: {error}"))?;
-        written += 1;
-    }
-    Ok(written)
+    extract_libraries(wheel, dest, LibraryFilter::SharedObjects(prefixes))
 }
 
 fn promote_component(stage: &Path, dest: &Path) -> Result<(), String> {
@@ -256,7 +203,8 @@ fn install_from_staged(source: &Path, root: &Path) -> Result<(), String> {
             source.display()
         ));
     }
-    let pinned_source = top_marker_current(source) || all_component_markers_current(source);
+    let pinned_source =
+        top_marker_current(source, REDIST_VERSION) || all_component_markers_current(source);
     if !pinned_source {
         return Err(format!(
             "{GPU_RUNTIME_DIR_ENV} ({}) has no current `{REDIST_VERSION}` marker evidence; \
@@ -272,7 +220,7 @@ fn install_from_staged(source: &Path, root: &Path) -> Result<(), String> {
     // Invalidate every live completion witness before the first mutation. If the
     // staged copy is interrupted, the next launch cannot trust old markers over a
     // partially replaced runtime and will re-provision instead of starting a worker.
-    invalidate_markers(root);
+    invalidate_markers(root, COMPONENTS.iter().map(|component| component.slug));
     let stage_root = root.join(".staged-install");
     let _ = fs::remove_dir_all(&stage_root);
     fs::create_dir_all(&stage_root)
@@ -525,32 +473,14 @@ async fn fetch_component(
     let tmp = root.join(".download-tmp");
     fs::create_dir_all(&tmp).map_err(|error| format!("create temp dir: {error}"))?;
     let wheel = tmp.join(format!("{}.whl", component.slug));
-    let response = client
-        .get(component.url)
-        .send()
-        .await
-        .map_err(|error| format!("download {}: {error}", component.label))?
-        .error_for_status()
-        .map_err(|error| format!("download {}: {error}", component.label))?;
-    let mut file = fs::File::create(&wheel).map_err(|error| format!("create wheel: {error}"))?;
-    let mut hasher = Sha256::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("download {}: {error}", component.label))?;
-        hasher.update(&chunk);
-        file.write_all(&chunk)
-            .map_err(|error| format!("write {}: {error}", component.label))?;
-    }
-    file.flush()
-        .map_err(|error| format!("write {}: {error}", component.label))?;
-    drop(file);
-    let actual = format!("{:x}", hasher.finalize());
-    if actual != component.sha256 {
-        return Err(format!(
-            "{}: sha256 mismatch (expected {}, got {actual})",
-            component.label, component.sha256
-        ));
-    }
+    download_verified(
+        client,
+        component.url,
+        component.label,
+        component.sha256,
+        &wheel,
+    )
+    .await?;
 
     let stage = tmp.join(format!("extract-{}", component.slug));
     let _ = fs::remove_dir_all(&stage);
@@ -613,14 +543,14 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
             );
             install_from_staged(&source, &root)?;
             validate_runtime_dependencies(&root)?;
-            write_marker(&root)?;
+            write_marker(&root, REDIST_VERSION)?;
             emit(app, "provision", "GPU runtime ready (pre-staged).", false);
             return Ok(());
         }
     }
     if all_component_markers_current(&root) {
         validate_runtime_dependencies(&root)?;
-        write_marker(&root)?;
+        write_marker(&root, REDIST_VERSION)?;
         emit(
             app,
             "provision",
@@ -635,11 +565,7 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
         "Downloading Linux GPU runtime (first run, ~1.9 GB)…",
         false,
     );
-    let client = reqwest::Client::builder()
-        .connect_timeout(sceneworks_core::network_policy::HTTP_CONNECT_TIMEOUT)
-        .read_timeout(sceneworks_core::network_policy::DOWNLOAD_READ_TIMEOUT)
-        .build()
-        .map_err(|error| format!("http client: {error}"))?;
+    let client = build_client()?;
     for (index, component) in COMPONENTS.iter().enumerate() {
         if component_complete(&root, component) {
             emit(
@@ -674,7 +600,7 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
         return Err("Linux GPU runtime is incomplete after extraction".to_owned());
     }
     validate_runtime_dependencies(&root)?;
-    write_marker(&root)?;
+    write_marker(&root, REDIST_VERSION)?;
     emit(app, "provision", "Linux GPU runtime ready.", false);
     Ok(())
 }
@@ -798,7 +724,7 @@ mod tests {
         let root_guard = scratch("marker");
         let root = root_guard.path();
         touch_runtime(root);
-        write_marker(root).expect("write current marker");
+        write_marker(root, REDIST_VERSION).expect("write current marker");
         assert!(already_provisioned(root));
         fs::remove_file(root.join("cudnn/lib/libcudnn.so.fixture")).expect("remove sentinel");
         assert!(!already_provisioned(root));
@@ -809,7 +735,7 @@ mod tests {
         let source_guard = scratch("staged-source");
         let source = source_guard.path();
         touch_runtime(source);
-        write_marker(source).expect("mark pinned source");
+        write_marker(source, REDIST_VERSION).expect("mark pinned source");
         let target_guard = scratch("staged-target");
         let target = target_guard.path();
         install_from_staged(source, target).expect("install complete stage");
@@ -819,7 +745,7 @@ mod tests {
         let partial_guard = scratch("staged-partial");
         let partial = partial_guard.path();
         touch_runtime(partial);
-        write_marker(partial).expect("mark pinned partial source");
+        write_marker(partial, REDIST_VERSION).expect("mark pinned partial source");
         fs::remove_file(partial.join("cufft/lib/libcufft.so.fixture"))
             .expect("remove fixture sentinel");
         let rejected_guard = scratch("staged-rejected");
@@ -861,7 +787,7 @@ mod tests {
         let source_guard = scratch("staged-interrupted-source");
         let source = source_guard.path();
         touch_runtime(source);
-        write_marker(source).expect("mark pinned source");
+        write_marker(source, REDIST_VERSION).expect("mark pinned source");
         // The first component can promote, then the second component fails.
         fs::remove_dir_all(source.join(COMPONENTS[1].dest)).expect("remove later staged component");
 
@@ -869,11 +795,11 @@ mod tests {
         let target = target_guard.path();
         touch_runtime(target);
         mark_components(target);
-        write_marker(target).expect("mark prior live runtime");
+        write_marker(target, REDIST_VERSION).expect("mark prior live runtime");
         assert!(already_provisioned(target));
 
         install_from_staged(source, target).expect_err("staged install must fail partway");
-        assert!(!top_marker_current(target));
+        assert!(!top_marker_current(target, REDIST_VERSION));
         assert!(!all_component_markers_current(target));
         assert!(!already_provisioned(target));
     }
@@ -1034,7 +960,7 @@ mod tests {
         let root_guard = scratch("network-smoke");
         let root = root_guard.path();
         let component = &COMPONENTS[0];
-        let client = reqwest::Client::builder().build().expect("HTTP client");
+        let client = build_client().expect("HTTP client");
         tauri::async_runtime::block_on(fetch_component(&client, root, component))
             .expect("download, hash, and extract pinned Linux wheel");
         assert!(component_complete(root, component));

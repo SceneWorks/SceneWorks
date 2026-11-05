@@ -16,7 +16,7 @@ const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "audio", "utility"];
 // headroom for catalog growth so an in-order scan cannot evict the entries the next scan is about
 // to read and degrade into a zero-hit cycle.
 const MODEL_SIZE_CACHE_LIMIT: usize = 256;
-const MODEL_CATALOG_PROBE_CONCURRENCY: usize = 16;
+pub(super) const MODEL_CATALOG_PROBE_CONCURRENCY: usize = 16;
 static MODEL_CATALOG_PROBE_PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
     std::sync::OnceLock::new();
 // Failed estimates (offline, rate-limited, or size-less repo metadata) are
@@ -41,8 +41,6 @@ const MODEL_SIZE_POSITIVE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 pub(crate) struct ModelCatalogCache {
     state: Mutex<ModelCatalogCacheState>,
     build_serializer: tokio::sync::Mutex<()>,
-    #[cfg(test)]
-    before_publish_test_hook: Mutex<Option<ModelCatalogBeforePublishTestHook>>,
 }
 
 #[derive(Default)]
@@ -92,143 +90,6 @@ impl ModelCatalogCache {
     #[cfg(test)]
     pub(crate) fn generation(&self) -> u64 {
         self.state.lock().generation
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_before_publish_test_hook(&self, hook: ModelCatalogBeforePublishTestHook) {
-        *self.before_publish_test_hook.lock() = Some(hook);
-    }
-
-    #[cfg(test)]
-    async fn pause_before_publish_for_test(&self) {
-        let hook = self.before_publish_test_hook.lock().take();
-        if let Some(hook) = hook {
-            hook.pause().await;
-        }
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct ModelCatalogBeforePublishTestHook {
-    reached: Arc<tokio::sync::Semaphore>,
-    release: Arc<tokio::sync::Semaphore>,
-}
-
-#[cfg(test)]
-impl ModelCatalogBeforePublishTestHook {
-    pub(crate) fn blocked() -> Self {
-        Self {
-            reached: Arc::new(tokio::sync::Semaphore::new(0)),
-            release: Arc::new(tokio::sync::Semaphore::new(0)),
-        }
-    }
-
-    pub(crate) async fn wait_until_reached(&self) {
-        self.reached
-            .acquire()
-            .await
-            .expect("model-catalog publish hook remains open")
-            .forget();
-    }
-
-    pub(crate) fn release(&self) {
-        self.release.add_permits(1);
-    }
-
-    async fn pause(&self) {
-        self.reached.add_permits(1);
-        self.release
-            .acquire()
-            .await
-            .expect("model-catalog publish hook remains open")
-            .forget();
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct ModelSizeEstimateTestHook {
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-    followers: Arc<std::sync::atomic::AtomicUsize>,
-    started: Arc<tokio::sync::Semaphore>,
-    joined: Arc<tokio::sync::Semaphore>,
-    release: Option<Arc<tokio::sync::Semaphore>>,
-    response: Arc<Mutex<Option<u64>>>,
-}
-
-#[cfg(test)]
-impl ModelSizeEstimateTestHook {
-    pub(crate) fn immediate(response: Option<u64>) -> Self {
-        Self {
-            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            followers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            started: Arc::new(tokio::sync::Semaphore::new(0)),
-            joined: Arc::new(tokio::sync::Semaphore::new(0)),
-            release: None,
-            response: Arc::new(Mutex::new(response)),
-        }
-    }
-
-    pub(crate) fn blocked(response: Option<u64>) -> Self {
-        Self {
-            release: Some(Arc::new(tokio::sync::Semaphore::new(0))),
-            ..Self::immediate(response)
-        }
-    }
-
-    pub(crate) fn call_count(&self) -> usize {
-        self.calls.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub(crate) fn follower_count(&self) -> usize {
-        self.followers.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub(crate) async fn wait_for_call(&self) {
-        self.started
-            .acquire()
-            .await
-            .expect("model-size test hook remains open")
-            .forget();
-    }
-
-    pub(crate) async fn wait_for_follower(&self) {
-        self.joined
-            .acquire()
-            .await
-            .expect("model-size test hook remains open")
-            .forget();
-    }
-
-    pub(crate) fn set_response(&self, response: Option<u64>) {
-        *self.response.lock() = response;
-    }
-
-    pub(crate) fn release_one(&self) {
-        self.release
-            .as_ref()
-            .expect("blocked model-size test hook")
-            .add_permits(1);
-    }
-
-    fn note_follower(&self) {
-        self.followers
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.joined.add_permits(1);
-    }
-
-    async fn request(&self) -> Option<u64> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.started.add_permits(1);
-        if let Some(release) = &self.release {
-            release
-                .acquire()
-                .await
-                .expect("model-size test hook remains open")
-                .forget();
-        }
-        *self.response.lock()
     }
 }
 
@@ -3467,26 +3328,41 @@ pub(crate) async fn remove_tier_artifacts(
 /// Best-effort (ignores errors) and only ever unlinks EMPTY directories, so a sibling tier's
 /// surviving files can never be removed by it.
 async fn remove_empty_dirs(dir: &FsPath) {
-    let mut children: Vec<PathBuf> = Vec::new();
-    if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            children.push(entry.path());
-        }
-    } else {
-        return;
-    }
-    for child in children {
-        if child.is_dir() {
-            Box::pin(remove_empty_dirs(&child)).await;
-        }
-    }
-    let _ = tokio::fs::remove_dir(dir).await;
+    let dir = dir.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || remove_empty_dirs_on_disk(&dir)).await;
 }
 
-/// Prune a download-matrix repo cache dir after a tier delete: remove emptied snapshot/blob
-/// subtrees, and — when no payload remains (no blobs, no snapshot files) — the whole repo cache
-/// dir, so a fully-drained repo doesn't linger as a bare `refs/` skeleton. Best-effort.
+fn remove_empty_dirs_on_disk(dir: &FsPath) {
+    let mut pending = vec![(dir.to_path_buf(), false)];
+    while let Some((path, visited)) = pending.pop() {
+        if visited {
+            let _ = std::fs::remove_dir(&path);
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        let children = entries
+            .map_while(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        pending.push((path, true));
+        for child in children.into_iter().rev() {
+            if child.is_dir() {
+                pending.push((child, false));
+            }
+        }
+    }
+}
+
+/// Prune a download-matrix repo cache after tier removal. The whole walk is
+/// blocking and best effort; no filesystem work runs on the async worker.
 async fn prune_empty_repo_cache(repo_cache: &FsPath) {
+    let repo_cache = repo_cache.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || prune_empty_repo_cache_on_disk(&repo_cache)).await;
+}
+
+fn prune_empty_repo_cache_on_disk(repo_cache: &FsPath) {
     let Some(source_root) = repo_cache.parent() else {
         return;
     };
@@ -3498,8 +3374,8 @@ async fn prune_empty_repo_cache(repo_cache: &FsPath) {
     let Ok(snapshots_root) = source_library.snapshots_root_from_repository_root(repo_cache) else {
         return;
     };
-    remove_empty_dirs(&snapshots_root).await;
-    remove_empty_dirs(&repo_cache.join("blobs")).await;
+    remove_empty_dirs_on_disk(&snapshots_root);
+    remove_empty_dirs_on_disk(&repo_cache.join("blobs"));
     let has_blobs = std::fs::read_dir(repo_cache.join("blobs"))
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false);
@@ -3507,7 +3383,7 @@ async fn prune_empty_repo_cache(repo_cache: &FsPath) {
         .iter()
         .any(|snapshot| !snapshot_files(snapshot).is_empty());
     if !has_blobs && !has_snapshot_files {
-        let _ = tokio::fs::remove_dir_all(repo_cache).await;
+        let _ = std::fs::remove_dir_all(repo_cache);
     }
 }
 
@@ -5287,10 +5163,7 @@ async fn build_and_publish_model_catalog_snapshot(
         let snapshot = Arc::new(models);
 
         #[cfg(test)]
-        state
-            .model_catalog_cache
-            .pause_before_publish_for_test()
-            .await;
+        state.test_hooks.pause_model_catalog_before_publish().await;
 
         let mut cache_state = state.model_catalog_cache.state.lock();
         if cache_state.generation == generation {
@@ -11466,73 +11339,6 @@ where
     Ok(output)
 }
 
-#[cfg(test)]
-static TEST_CATALOG_PROBES_ACTIVE: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-static TEST_CATALOG_PROBES_PEAK: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-pub(crate) fn test_reset_catalog_probe_concurrency() {
-    use std::sync::atomic::Ordering;
-    // DRAIN, do not clobber. Delayed probes run via spawn_blocking on pool OS threads
-    // that cannot be cancelled mid-sleep, and the probe tests run concurrently in one
-    // binary against these process-global atomics (their sleeps are bounded: <=250ms).
-    // Storing 0 into ACTIVE while a concurrent test's probe was mid-sleep made that
-    // probe's later decrement wrap to usize::MAX, and the next probe's `+ 1` panicked
-    // with "attempt to add with overflow" — a cross-test 500 that only surfaced on the
-    // slower hosted macos-26 runners once the workspace suite moved there (sc-17723).
-    // Waiting live probes out keeps ACTIVE's +1/-1 pairing intact, so it can never go
-    // below zero; only PEAK is forced. The probe tests additionally serialize behind
-    // catalog_probe_test_lock() in tests/catalog.rs, which also keeps a neighbor's
-    // probes from clobbering a PEAK measurement — this drain is the belt-and-braces
-    // for any future probe user outside that lock.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while TEST_CATALOG_PROBES_ACTIVE.load(Ordering::SeqCst) != 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "catalog probe stragglers did not drain within 10s — a probe thread is leaking"
-        );
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    TEST_CATALOG_PROBES_PEAK.store(0, Ordering::SeqCst);
-}
-
-#[cfg(test)]
-pub(crate) fn test_catalog_probe_peak() -> usize {
-    TEST_CATALOG_PROBES_PEAK.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-#[cfg(test)]
-pub(crate) fn test_catalog_probe_limit() -> usize {
-    MODEL_CATALOG_PROBE_CONCURRENCY
-}
-
-#[cfg(test)]
-fn test_delay_catalog_probe(model: &Value) {
-    use std::sync::atomic::Ordering;
-
-    let Some(delay_ms) = model
-        .get("__testCatalogProbeDelayMs")
-        .and_then(Value::as_u64)
-    else {
-        return;
-    };
-    // saturating_add / checked_sub: with the draining reset above, ACTIVE can no longer
-    // underflow — but these keep any future reset-style edit from reintroducing the
-    // wrap-then-panic class (a straggler now parks at 0 instead of poisoning every later
-    // sample with usize::MAX).
-    let active = TEST_CATALOG_PROBES_ACTIVE
-        .fetch_add(1, Ordering::SeqCst)
-        .saturating_add(1);
-    TEST_CATALOG_PROBES_PEAK.fetch_max(active, Ordering::SeqCst);
-    std::thread::sleep(Duration::from_millis(delay_ms));
-    let _ = TEST_CATALOG_PROBES_ACTIVE.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-        count.checked_sub(1)
-    });
-}
-
 fn apply_model_catalog_size_fields(
     model: &mut Value,
     download_context: Option<&DownloadContext>,
@@ -13496,7 +13302,11 @@ pub(crate) fn manifest_download_size_bytes(model: &Value, download: &Value) -> O
 
 fn model_size_estimation_disabled(_state: &AppState) -> bool {
     #[cfg(test)]
-    if let Some(disabled) = *_state.model_size_estimate_disabled_override.lock() {
+    if let Some(disabled) = *_state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock()
+    {
         return disabled;
     }
     matches!(
@@ -13520,7 +13330,12 @@ pub(crate) async fn estimate_huggingface_download_size(
             ModelSizeLookup::Cached(cached) => return cached,
             ModelSizeLookup::Follow(in_flight) => {
                 #[cfg(test)]
-                if let Some(hook) = state.model_size_estimate_test_hook.lock().clone() {
+                if let Some(hook) = state
+                    .test_hooks
+                    .model_size_estimate_test_hook
+                    .lock()
+                    .clone()
+                {
                     hook.note_follower();
                 }
                 match in_flight.wait().await {
@@ -13563,7 +13378,13 @@ async fn estimate_huggingface_download_size_request(
     files: &[String],
 ) -> Option<u64> {
     #[cfg(test)]
-    let test_hook = { state.model_size_estimate_test_hook.lock().clone() };
+    let test_hook = {
+        state
+            .test_hooks
+            .model_size_estimate_test_hook
+            .lock()
+            .clone()
+    };
     #[cfg(test)]
     if let Some(hook) = test_hook {
         return hook.request().await;
@@ -19277,5 +19098,51 @@ mod model_contract_metadata_tests {
         let missing = require_model_by_id(&state, "missing").await.unwrap_err();
         assert_eq!(missing.status, StatusCode::NOT_FOUND);
         assert_eq!(missing.detail, "Model not found");
+    }
+}
+
+#[cfg(test)]
+pub(crate) use crate::test_hooks::{
+    test_catalog_probe_limit, test_catalog_probe_peak, test_delay_catalog_probe,
+    test_reset_catalog_probe_concurrency, ModelCatalogBeforePublishTestHook,
+    ModelSizeEstimateTestHook,
+};
+
+#[cfg(test)]
+mod io_offload_tests {
+    use super::*;
+    #[tokio::test]
+    async fn prune_keeps_snapshot_and_blob_payloads_but_removes_empty_skeletons() {
+        for kind in ["snapshot", "blob", "empty"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let repository = temporary.path().join("models--fixture--repo");
+            std::fs::create_dir_all(repository.join("snapshots/revision/empty")).unwrap();
+            std::fs::create_dir_all(repository.join("blobs")).unwrap();
+            std::fs::create_dir_all(repository.join("refs")).unwrap();
+            std::fs::write(repository.join("refs/main"), b"revision").unwrap();
+            let payload = match kind {
+                "snapshot" => repository.join("snapshots/revision/payload.bin"),
+                _ => repository.join("blobs/payload.bin"),
+            };
+            if kind != "empty" {
+                std::fs::write(&payload, b"fixture-payload").unwrap();
+            }
+            prune_empty_repo_cache(&repository).await;
+            if kind == "empty" {
+                assert!(!repository.exists());
+            } else {
+                assert_eq!(std::fs::read(payload).unwrap(), b"fixture-payload");
+            }
+        }
+    }
+    #[tokio::test]
+    async fn prune_refuses_a_path_outside_the_repository_namespace() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("user-data");
+        std::fs::create_dir_all(directory.join("snapshots/empty")).unwrap();
+        std::fs::write(directory.join("keep.txt"), b"keep").unwrap();
+        prune_empty_repo_cache(&directory).await;
+        assert_eq!(std::fs::read(directory.join("keep.txt")).unwrap(), b"keep");
+        assert!(directory.join("snapshots/empty").is_dir());
     }
 }

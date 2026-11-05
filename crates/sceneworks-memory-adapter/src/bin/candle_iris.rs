@@ -24,12 +24,9 @@
 //! reads the resident model and its empty-prompt states.
 
 use super::*;
-use gen_core_iris::depth::{plan_depth_input, DepthRequest, DepthResolution, IrisDepthEstimator};
+use gen_core_iris::depth::{plan_depth_input, IrisDepthEstimator};
 use gen_core_iris::TEXT_ENCODER_COMPONENT;
-use runtime_cuda::gen_core::{
-    InputSizing, MemoryCalibrationIdentity, MemoryProviderContract, TargetSize, Transform,
-    TransformRequest,
-};
+use runtime_cuda::gen_core::{MemoryCalibrationIdentity, MemoryProviderContract, Transform};
 use runtime_cuda::providers::iris as engine;
 
 /// The label the depth and restoration fixtures carry in their name. Neither request takes a
@@ -39,7 +36,7 @@ const SEED: u64 = 25_690;
 const GENERATION_SEED: u64 = 16_402;
 const GENERATION_STEPS: u32 = 2;
 /// Restoration upscales by the release's default factor, so the source is the plan geometry / 4.
-const RESTORE_SCALE: u32 = 4;
+use protocol::IRIS_RESTORE_CAPTURE_SCALE as RESTORE_SCALE;
 
 /// `candle-gen-iris`'s three production calibration identities at the pin, as literals for the
 /// reason every identity table in this binary is one (it is `compile_error!` on macOS, where the
@@ -205,32 +202,9 @@ impl Loaded {
     }
 }
 
-/// One planned request of a loaded route.
-enum Planned {
-    Generation(Box<GenerationRequest>),
-    Depth(DepthRequest),
-    Restore(TransformRequest),
-}
+use protocol::IrisPlanned as Planned;
 
-/// The restoration capture's request: the plan geometry is the OUTPUT, so the source is it over
-/// the capture scale, taken at its own size. No seed, strength or step count — the restorer is one
-/// deterministic forward and refuses each of them by name.
-fn restoration_request(width: u32, height: u32) -> TransformRequest {
-    TransformRequest {
-        image: source_image(width / RESTORE_SCALE, height / RESTORE_SCALE),
-        target: TargetSize::Scale(RESTORE_SCALE as f32),
-        input_sizing: InputSizing::Original,
-        ..Default::default()
-    }
-}
-
-fn source_image(width: u32, height: u32) -> Image {
-    Image {
-        width,
-        height,
-        pixels: protocol::synthetic_reference_rgb(width, height),
-    }
-}
+use protocol::iris_restoration_request as restoration_request;
 
 /// Build the one request a route's capture runs at the plan geometry, and the geometry the ENGINE
 /// admits that request at — which must be the plan's, or the record would price another shape.
@@ -241,16 +215,12 @@ fn plan_request(
 ) -> Result<(Planned, MemoryGeometry), String> {
     match loaded {
         Loaded::Generation(_) => Ok((
-            Planned::Generation(Box::new(GenerationRequest {
-                prompt: "a portrait of a person in a sunlit studio, editorial photograph"
-                    .to_owned(),
+            Planned::Generation(Box::new(protocol::iris_generation_request(
                 width,
                 height,
-                count: 1,
-                seed: Some(GENERATION_SEED),
-                steps: Some(GENERATION_STEPS),
-                ..Default::default()
-            })),
+                GENERATION_SEED,
+                GENERATION_STEPS,
+            ))),
             MemoryGeometry {
                 width,
                 height,
@@ -260,11 +230,7 @@ fn plan_request(
             },
         )),
         Loaded::Depth(model) => {
-            let request = DepthRequest {
-                image: source_image(width, height),
-                resolution: DepthResolution::Capped(width.max(height)),
-                cancel: Default::default(),
-            };
+            let request = protocol::iris_depth_request(width, height);
             let plan = plan_depth_input(
                 width,
                 height,
@@ -447,10 +413,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             selection.strategy
         ));
     }
-    let planned_fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let planned_fixture = protocol::planned_fixture(request)?;
     let expected_fixture = fixture(route, width, height);
     if planned_fixture != expected_fixture {
         return Err(format!(
@@ -459,11 +422,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             route.provider
         ));
     }
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
-        .to_owned();
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?.to_owned();
     let expected_fingerprint = calibration_fingerprint(route);
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(

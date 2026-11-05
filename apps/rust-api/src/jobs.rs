@@ -2090,7 +2090,7 @@ pub(crate) async fn update_job_progress(
     // deterministic. Take the hook before awaiting so the competing request is
     // not blocked by the same mutex.
     #[cfg(test)]
-    let progress_barrier = state.progress_before_accept_once.lock().take();
+    let progress_barrier = state.test_hooks.progress_before_accept_once.lock().take();
     #[cfg(test)]
     if let Some(barrier) = progress_barrier {
         barrier.wait().await;
@@ -2279,7 +2279,7 @@ async fn apply_progress_side_effects(
     // resumed registration must upsert rather than duplicate.
     #[cfg(test)]
     if clear_terminal_side_effects
-        && std::mem::take(&mut *state.progress_side_effects_fail_once.lock())
+        && std::mem::take(&mut *state.test_hooks.progress_side_effects_fail_once.lock())
     {
         return Err(ApiError::internal(
             "injected post-acceptance progress side-effect failure",
@@ -2288,11 +2288,13 @@ async fn apply_progress_side_effects(
     #[cfg(test)]
     if clear_terminal_side_effects
         && state
+            .test_hooks
             .progress_side_effects_fail_job_ids
             .lock()
             .contains(&job_id)
     {
         *state
+            .test_hooks
             .progress_side_effects_attempts
             .lock()
             .entry(job_id.clone())

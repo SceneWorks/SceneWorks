@@ -176,6 +176,14 @@ pub(crate) fn object_or_empty(payload: &JsonObject, key: &str) -> JsonObject {
         .unwrap_or_default()
 }
 
+/// A byte count from a JSON unsigned integer or an untrimmed integer string.
+/// Floats, negative values, surrounding whitespace and overflow are rejected.
+pub fn json_size_to_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
