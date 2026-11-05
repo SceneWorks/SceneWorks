@@ -1701,9 +1701,9 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
 fn scail2_cold_admission_uses_a_fresh_bounded_probe_without_blocking_the_request_runtime() {
     const CANDLE: &str = include_str!("candle.rs");
     const GPU: &str = include_str!("../gpu.rs");
-    const VRAM: &str = include_str!("../vram_gate.rs");
+    let vram = crate::source_tests::facade_source("vram_gate.rs");
     assert!(CANDLE.contains("live_capped_budget_fresh_blocking(&gpu_id)"));
-    assert!(VRAM.contains("crate::gpu::nvidia_vram_budget_gb_fresh_blocking(gpu_id)"));
+    assert!(vram.contains("crate::gpu::nvidia_vram_budget_gb_fresh_blocking(gpu_id)"));
     let helper = GPU
         .split_once("pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(")
         .expect("fresh blocking NVIDIA helper")
