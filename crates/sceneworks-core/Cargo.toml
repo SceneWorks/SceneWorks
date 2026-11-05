@@ -13,6 +13,7 @@ test-support = []
 model-inference-proof = []
 
 [dependencies]
+reqwest = { workspace = true, features = ["rustls-tls", "json", "stream"] }
 tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "macros"] }
 sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "67f525f7c5d6abd07b49d3fa3f3d8d73513b805f" }
 sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "67f525f7c5d6abd07b49d3fa3f3d8d73513b805f" }

@@ -1,5 +1,6 @@
 pub mod admission_geometry;
 pub mod angle_kps;
+pub mod api_control;
 pub mod app_paths;
 pub mod asset_index;
 pub mod base_weights;

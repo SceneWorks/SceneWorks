@@ -27,6 +27,28 @@ fn parse_credentials_env_tolerates_invalid_json() {
 }
 
 #[test]
+fn parse_credentials_env_warns_without_logging_the_body() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().extend_from_slice(bytes); Ok(bytes.len()) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).without_time().with_writer(move || Capture(writer.clone())).finish();
+    tracing::subscriber::with_default(subscriber, || {
+        assert!(parse_credentials_env("{never-log-this-secret:").is_empty());
+    });
+    let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(logged.contains("WARN"));
+    assert!(logged.contains("SCENEWORKS_CREDENTIALS"));
+    assert!(!logged.contains("never-log-this-secret"));
+}
+
+#[test]
 fn secret_bearing_debug_output_is_redacted() {
     let mut settings =
         test_settings("https://huggingface.co".to_owned(), Some("hf-secret-token"));
