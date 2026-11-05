@@ -1,5 +1,6 @@
+mod common;
+use common::fixture_path;
 use std::fs;
-use std::path::PathBuf;
 
 use sceneworks_core::contracts::{
     Asset, Character, GenerationSet, InterleavedDocument, JobProtocolFixture, LoraManifest,
@@ -10,16 +11,6 @@ use sceneworks_core::contracts::{
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
-
-fn fixture_path(relative_path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("tests")
-        .join("fixtures")
-        .join("rust_migration_contracts")
-        .join(relative_path)
-}
 
 fn load_fixture(relative_path: &str) -> Value {
     let path = fixture_path(relative_path);

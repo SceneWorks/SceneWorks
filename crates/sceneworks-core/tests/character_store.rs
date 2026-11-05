@@ -1,3 +1,5 @@
+mod common;
+use common::fixture_path;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,16 +11,6 @@ use sceneworks_core::project_store::{
     UploadAsset,
 };
 use serde_json::{json, Map, Value};
-
-fn fixture_path(relative_path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("tests")
-        .join("fixtures")
-        .join("rust_migration_contracts")
-        .join(relative_path)
-}
 
 fn read_json(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).expect("json reads")).expect("json parses")
