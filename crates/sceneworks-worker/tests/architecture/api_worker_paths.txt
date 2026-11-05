@@ -1,5 +1,4 @@
 # Reviewed API -> worker Rust paths, including test-support embedding seams.
-
 apps/rust-api/src/catalogs.rs sceneworks_worker::catalog_image_fetch::fetch_verified_catalog_image
 apps/rust-api/src/catalogs.rs sceneworks_worker::catalog_image_fetch::verify_catalog_image_bytes
 apps/rust-api/src/catalogs.rs sceneworks_worker::catalog_parquet_scanner
@@ -57,16 +56,16 @@ apps/rust-api/src/main.rs sceneworks_worker::WorkerError::Engine
 apps/rust-api/src/main.rs sceneworks_worker::flux3_training_config_witness
 apps/rust-api/src/main.rs sceneworks_worker::iris_rank_entry
 apps/rust-api/src/main.rs sceneworks_worker::run_on_worker_entry_thread
-apps/rust-api/src/models.rs sceneworks_worker::ConvertSourceState::FileMissing
-apps/rust-api/src/models.rs sceneworks_worker::ConvertSourceState::Ready
-apps/rust-api/src/models.rs sceneworks_worker::ConvertSourceState::RepoNotCached
-apps/rust-api/src/models.rs sceneworks_worker::convert_source_state
-apps/rust-api/src/models.rs sceneworks_worker::flux3_receipted_snapshot
-apps/rust-api/src/models.rs sceneworks_worker::flux3_runtime_tier_bundle_check
-apps/rust-api/src/models.rs sceneworks_worker::image_text_encoder_options
-apps/rust-api/src/models.rs sceneworks_worker::resolve_image_text_encoder_selection
-apps/rust-api/src/models.rs sceneworks_worker::resolve_model_convert_output
-apps/rust-api/src/models.rs sceneworks_worker::text_encoder_options_for_adapter
+apps/rust-api/src/models/catalog.rs sceneworks_worker::image_text_encoder_options
+apps/rust-api/src/models/catalog.rs sceneworks_worker::resolve_image_text_encoder_selection
+apps/rust-api/src/models/catalog.rs sceneworks_worker::text_encoder_options_for_adapter
+apps/rust-api/src/models/convert.rs sceneworks_worker::ConvertSourceState::FileMissing
+apps/rust-api/src/models/convert.rs sceneworks_worker::ConvertSourceState::Ready
+apps/rust-api/src/models/convert.rs sceneworks_worker::ConvertSourceState::RepoNotCached
+apps/rust-api/src/models/convert.rs sceneworks_worker::convert_source_state
+apps/rust-api/src/models/convert.rs sceneworks_worker::resolve_model_convert_output
+apps/rust-api/src/models/install_state.rs sceneworks_worker::flux3_receipted_snapshot
+apps/rust-api/src/models/install_state.rs sceneworks_worker::flux3_runtime_tier_bundle_check
 apps/rust-api/src/models/tests/download_receipt_tests.rs sceneworks_worker::flux3_receipted_snapshot
 apps/rust-api/src/models/tests/imported_checkpoint_product_surface_tests.rs sceneworks_worker::minimax_h3_import_fixture::ManagedMiniMaxH3Import
 apps/rust-api/src/models/tests/imported_checkpoint_product_surface_tests.rs sceneworks_worker::minimax_h3_import_fixture::shared_component_snapshot
