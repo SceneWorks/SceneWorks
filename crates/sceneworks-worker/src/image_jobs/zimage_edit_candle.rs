@@ -1,6 +1,11 @@
-use super::{huggingface_snapshot_dir, resolve_app_managed_model_dir, standard_tier_subdir};
-use super::{non_empty, ImageRequest, PathBuf, Settings, WorkerResult};
-
+use super::conditioning::non_empty;
+use super::standard_tier_subdir;
+use super::ImageRequest;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::PathBuf;
+use crate::Settings;
+use crate::WorkerResult;
 // Candle (Windows/CUDA) Z-Image img2img / edit route (sc-6595, epic 5480) — pixel-conditioned editing
 // on Z-Image-Turbo off-Mac through the registered generator's `Conditioning::Reference` path. Both
 // `z_image_edit` and `z_image_turbo` (mode `edit_image`) reach this one adapter-capable load path.

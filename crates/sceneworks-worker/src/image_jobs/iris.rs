@@ -144,7 +144,7 @@ mod tests {
         stage_text_encoder(data.path());
         let settings = settings_at(data.path());
         let backbone = data.path().join("backbone");
-        let spec = super::super::attach_required_components(
+        let spec = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(backbone.clone())),
             "iris_3b",
             &crate::test_env::shipped_catalog_entry("iris_3b"),
@@ -169,7 +169,7 @@ mod tests {
         let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let settings = settings_at(data.path());
-        let error = super::super::attach_required_components(
+        let error = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(data.path().join("backbone"))),
             "iris_3b",
             &crate::test_env::shipped_catalog_entry("iris_3b"),
@@ -191,7 +191,7 @@ mod tests {
         for file in ["config.json", "tokenizer.json", "tokenizer_config.json"] {
             stage(data.path(), TE_REPO, TE_REVISION, file);
         }
-        let error = super::super::attach_required_components(
+        let error = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(data.path().join("backbone"))),
             "iris_3b",
             &crate::test_env::shipped_catalog_entry("iris_3b"),
@@ -360,10 +360,10 @@ mod tests {
     #[test]
     fn the_steps_ceiling_admits_the_models_own_default() {
         assert_eq!(
-            super::super::max_requested_steps(gen_core_iris::DEFAULT_STEPS),
+            crate::image_jobs::sampling::max_requested_steps(gen_core_iris::DEFAULT_STEPS),
             gen_core_iris::DEFAULT_STEPS
         );
-        assert_eq!(super::super::max_requested_steps(40), 80);
+        assert_eq!(crate::image_jobs::sampling::max_requested_steps(40), 80);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -976,7 +976,7 @@ mod tests {
                 // Candle `generate_candle_stream_using` off-Mac (sc-25680) — so progress, cancel,
                 // failure and knob shaping are pinned per backend by one set of assertions.
                 #[cfg(target_os = "macos")]
-                let arm = super::super::generate_stream_using(
+                let arm = crate::image_jobs::mlx::generate_stream_using(
                     &api,
                     &settings,
                     &job,
@@ -987,7 +987,7 @@ mod tests {
                     loader,
                 );
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                let arm = super::super::generate_candle_stream_using(
+                let arm = super::super::candle::generate_candle_stream_using(
                     &api,
                     &settings,
                     &job,
@@ -996,7 +996,7 @@ mod tests {
                     "cuda",
                     &mut asset_writes,
                     loader,
-                    Arc::new(super::super::NativeMossStreamRuntime),
+                    Arc::new(super::super::moss::NativeMossStreamRuntime),
                 );
                 let outcome = tokio::time::timeout(Duration::from_secs(60), arm)
                     .await
@@ -1722,7 +1722,7 @@ mod tests {
     /// *Mutation that reds this:* move/drop the `evict_resident_transform()` before the probe.
     #[test]
     fn the_candle_arm_evicts_a_resident_transform_before_probing_vram() {
-        let base = include_str!("base.rs");
+        let base = include_str!("candle.rs");
         let body = &base[base
             .find("async fn generate_candle_stream_using(")
             .expect("candle arm")..];

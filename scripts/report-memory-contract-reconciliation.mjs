@@ -82,7 +82,7 @@ function manifestFixedPoint() {
       engineFacts,
       enginesSource: read("crates/sceneworks-worker/src/engines.rs"),
       strictControlSource: read("crates/sceneworks-worker/src/image_jobs/strict_control.rs"),
-      imageRoutingSource: read("crates/sceneworks-worker/src/image_jobs/base.rs"),
+      imageRoutingSource: read("crates/sceneworks-worker/src/image_jobs/routing.rs"),
       routeRegistrySource: read("crates/sceneworks-worker/src/memory_route_registry.rs"),
     });
     return { current: projected.body === body };
@@ -109,7 +109,7 @@ function projectionPlan() {
       ),
       enginesSource: read("crates/sceneworks-worker/src/engines.rs"),
       strictControlSource: read("crates/sceneworks-worker/src/image_jobs/strict_control.rs"),
-      imageRoutingSource: read("crates/sceneworks-worker/src/image_jobs/base.rs"),
+      imageRoutingSource: read("crates/sceneworks-worker/src/image_jobs/routing.rs"),
       routeRegistrySource: read("crates/sceneworks-worker/src/memory_route_registry.rs"),
     });
   } catch (error) {

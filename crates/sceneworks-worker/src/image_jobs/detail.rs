@@ -1,3 +1,73 @@
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::resolve_weights_dir;
+use super::backend_label;
+use super::conditioning::load_reference_alpha;
+use super::conditioning::load_reference_image;
+use super::detail_workflow_share;
+use super::events::encode_preview_data_url;
+use super::events::PreviewSlot;
+use super::image_progress;
+#[cfg(not(target_os = "macos"))]
+use super::load_spec::candle_certified_hf_artifact_path;
+#[cfg(not(target_os = "macos"))]
+use super::load_spec::resolve_sdxl_components;
+#[cfg(not(target_os = "macos"))]
+use super::memory::admit_sdxl_bespoke_memory;
+use super::mlx_model;
+use super::quantization::resolve_quant;
+use super::reattach_alpha;
+#[cfg(target_os = "macos")]
+use super::sdxl::engine_image_to_rgb;
+use super::workflow_source;
+use super::write_workflow_chunk;
+#[cfg(target_os = "macos")]
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::Conditioning;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::ControlKind;
+#[cfg(target_os = "macos")]
+use super::ControlKind;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::Image;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::Progress;
+#[cfg(target_os = "macos")]
+use super::Quant;
+use super::WeightsSource;
+use crate::advanced;
+use crate::cancel_requested_peek;
+use crate::first_safetensors_path;
+use crate::fresh_asset_id;
+use crate::heartbeat;
+use crate::huggingface_snapshot_dir;
+use crate::now_rfc3339;
+use crate::progress_report_interval;
+use crate::shutdown_requested;
+use crate::task_join_error;
+use crate::update_job;
+use crate::ApiClient;
+use crate::CancelJoinGuard;
+use crate::Duration;
+use crate::Instant;
+use crate::JobSnapshot;
+use crate::JobStatus;
+use crate::JsonObject;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use crate::Path;
+use crate::PathBuf;
+use crate::ProgressStage;
+use crate::ProjectStore;
+use crate::Settings;
+use crate::Uuid;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use crate::WorkerStatus;
+use serde_json::json;
 /// The xinsir tile ControlNet repo (parity with Python `TILE_CONTROLNET_REPO`).
 const TILE_CONTROLNET_REPO: &str = "xinsir/controlnet-tile-sdxl-1.0";
 const TILE_CONTROLNET_REVISION: &str = "1ae8d9529efe58f7362a987363ff86a7904dc84f";
@@ -14,16 +84,16 @@ fn engine_image_to_rgb(image: Image) -> WorkerResult<image::RgbImage> {
 
 /// The locked detail recipe (sc-2437 round-2 spike defaults), resolved from `advanced`.
 #[derive(Clone)]
-struct DetailParams {
-    strength: f32,
-    cn_scale: f32,
-    steps: u32,
-    guidance: f32,
-    tile: u32,
-    overlap: u32,
-    prompt: String,
-    negative: String,
-    seed: i64,
+pub(super) struct DetailParams {
+    pub(super) strength: f32,
+    pub(super) cn_scale: f32,
+    pub(super) steps: u32,
+    pub(super) guidance: f32,
+    pub(super) tile: u32,
+    pub(super) overlap: u32,
+    pub(super) prompt: String,
+    pub(super) negative: String,
+    pub(super) seed: i64,
 }
 
 /// Events emitted by the blocking tiled-detail pass. Tile completion is load-bearing progress;
@@ -50,7 +120,7 @@ fn resolve_detail_params(request: &ImageRequest) -> DetailParams {
 
 /// Round a tile dimension up to the nearest multiple of 8 and clamp to the engine's
 /// `[512, 2048]` SDXL bounds, so an arbitrary-sized crop can be run through the engine.
-fn engine_dim(value: u32) -> u32 {
+pub(super) fn engine_dim(value: u32) -> u32 {
     value.div_ceil(8).saturating_mul(8).clamp(512, 2048)
 }
 
@@ -58,7 +128,7 @@ fn engine_dim(value: u32) -> u32 {
 /// SDXL detail is supported by the same packed-aware UNet/adapter loader as the registered control
 /// route; the shared admission validates the actual tensor headers before construction.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn resolve_candle_detail_components(
+pub(super) fn resolve_candle_detail_components(
     request: &ImageRequest,
     settings: &Settings,
     _weights_dir: &Path,
@@ -68,7 +138,7 @@ fn resolve_candle_detail_components(
 
 /// Raised-cosine alpha ramp over the `overlap` borders so tiles blend seamlessly
 /// (parity with Python `_detail_feather`). Row-major `tile_h`×`tile_w` weights.
-fn detail_feather(tile_w: u32, tile_h: u32, overlap: u32) -> Vec<f32> {
+pub(super) fn detail_feather(tile_w: u32, tile_h: u32, overlap: u32) -> Vec<f32> {
     fn ramp(n: u32, overlap: u32) -> Vec<f32> {
         let mut weights = vec![1.0f32; n as usize];
         if overlap > 0 && n > overlap {
@@ -121,7 +191,7 @@ fn detail_spec(
     )
 }
 
-trait DetailTileRefiner {
+pub(super) trait DetailTileRefiner {
     #[allow(clippy::too_many_arguments)]
     fn refine_tile(
         &self,
@@ -239,7 +309,7 @@ fn detail_refine_tile_generator(
 
 /// Tiled feathered detail refine (parity with Python `_refine_tiled_detail`). Returns the
 /// recomposed image + the tile count. Runs on the blocking thread (the generator is `!Send`).
-fn refine_tiled_detail(
+pub(super) fn refine_tiled_detail(
     generator: &(impl DetailTileRefiner + ?Sized),
     source: &image::RgbImage,
     params: &DetailParams,
@@ -334,7 +404,12 @@ fn refine_tiled_detail(
 /// dark rounded-corner vignette — most of the frame in the common single-tile case. Guard only
 /// against a literal divide-by-zero; every pixel is covered by ≥1 tile because the tile origins
 /// are clamped to the boundary, so `wsum` is strictly positive in practice (sc-8229).
-fn compose_feathered(acc: &[f32], wsum: &[f32], width: u32, height: u32) -> image::RgbImage {
+pub(super) fn compose_feathered(
+    acc: &[f32],
+    wsum: &[f32],
+    width: u32,
+    height: u32,
+) -> image::RgbImage {
     let mut out = image::RgbImage::new(width, height);
     for gy in 0..height {
         for gx in 0..width {
@@ -675,34 +750,34 @@ pub(crate) async fn run_image_detail_job(
         let blocking = {
             let spec = detail_spec(weights_dir, control_file, quant, adapters);
             crate::load_progress::spawn(async move {
-            crate::generator_cache::with_cached_generator(
-                "sdxl",
-                spec,
-                "sdxl detail load failed",
-                move |generator| {
-                    let preview_tx = tx.clone();
-                    let preview = gen_core::PreviewSink::new(move |frame| {
-                        let _ = preview_tx.try_send(DetailEvent::Preview(frame));
-                    });
-                    let mut on_tile = |done: usize, total: usize| {
-                        // A closed channel means the consumer loop returned early (POST failure /
-                        // 409); trip the engine flag so refinement bails instead of grinding
-                        // unheard (sc-8804, F-003 — the swallowed-closed-channel leak).
-                        if tx.blocking_send(DetailEvent::Tile { done, total }).is_err() {
-                            cancel.cancel();
-                        }
-                    };
-                    refine_tiled_detail(
-                        generator,
-                        &source,
-                        &params_ref,
-                        &preview,
-                        &cancel,
-                        &mut on_tile,
-                    )
-                },
-            )
-            .await
+                crate::generator_cache::with_cached_generator(
+                    "sdxl",
+                    spec,
+                    "sdxl detail load failed",
+                    move |generator| {
+                        let preview_tx = tx.clone();
+                        let preview = gen_core::PreviewSink::new(move |frame| {
+                            let _ = preview_tx.try_send(DetailEvent::Preview(frame));
+                        });
+                        let mut on_tile = |done: usize, total: usize| {
+                            // A closed channel means the consumer loop returned early (POST failure /
+                            // 409); trip the engine flag so refinement bails instead of grinding
+                            // unheard (sc-8804, F-003 — the swallowed-closed-channel leak).
+                            if tx.blocking_send(DetailEvent::Tile { done, total }).is_err() {
+                                cancel.cancel();
+                            }
+                        };
+                        refine_tiled_detail(
+                            generator,
+                            &source,
+                            &params_ref,
+                            &preview,
+                            &cancel,
+                            &mut on_tile,
+                        )
+                    },
+                )
+                .await
             })
         };
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -712,7 +787,7 @@ pub(crate) async fn run_image_detail_job(
                 &candle_provider_spec,
                 candle_memory_context,
             )
-                .map_err(|error| WorkerError::Engine(format!("SDXL detail load failed: {error}")))?;
+            .map_err(|error| WorkerError::Engine(format!("SDXL detail load failed: {error}")))?;
             let preview_tx = tx.clone();
             let preview = gen_core::PreviewSink::new(move |frame| {
                 let _ = preview_tx.try_send(DetailEvent::Preview(frame));
@@ -757,91 +832,91 @@ pub(crate) async fn run_image_detail_job(
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
         loop {
-        tokio::select! {
-            maybe_event = rx.recv() => {
-                let Some(event) = maybe_event else {
-                    break;
-                };
-                if canceled {
-                    continue; // drain so the blocking sender never blocks; terminal posts after stop.
-                }
-                let (done, total) = match event {
-                    DetailEvent::Tile { done, total } => (done, total),
-                    DetailEvent::Preview(frame) => {
-                        // Match the shared image stream's latest-wins preview contract. Encoding stays
-                        // off the async runtime; the data URL rides the next tile progress POST.
-                        let encoded = crate::load_progress::spawn_blocking(move || {
-                            let data_url = encode_preview_data_url(&frame)?;
-                            Some(PreviewSlot {
-                                index: 0,
-                                current: frame.current,
-                                total: frame.total,
-                                data_url,
+            tokio::select! {
+                maybe_event = rx.recv() => {
+                    let Some(event) = maybe_event else {
+                        break;
+                    };
+                    if canceled {
+                        continue; // drain so the blocking sender never blocks; terminal posts after stop.
+                    }
+                    let (done, total) = match event {
+                        DetailEvent::Tile { done, total } => (done, total),
+                        DetailEvent::Preview(frame) => {
+                            // Match the shared image stream's latest-wins preview contract. Encoding stays
+                            // off the async runtime; the data URL rides the next tile progress POST.
+                            let encoded = crate::load_progress::spawn_blocking(move || {
+                                let data_url = encode_preview_data_url(&frame)?;
+                                Some(PreviewSlot {
+                                    index: 0,
+                                    current: frame.current,
+                                    total: frame.total,
+                                    data_url,
+                                })
                             })
-                        })
-                        .await
-                        .map_err(|error| {
-                            crate::task_join_error("detail preview encode task", error)
-                        })?;
-                        if let Some(slot) = encoded {
-                            latest_preview = Some(slot);
+                            .await
+                            .map_err(|error| {
+                                crate::task_join_error("detail preview encode task", error)
+                            })?;
+                            if let Some(slot) = encoded {
+                                latest_preview = Some(slot);
+                            }
+                            continue;
                         }
+                    };
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API poll
+                    // so a quit stops the tile pass at this step, matching a user cancel.
+                    if shutdown_requested()
+                        || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
+                            last_cancel_check = Instant::now();
+                            cancel_requested_peek(api, &job.id).await
+                        })
+                    {
+                        begin_detail_cancel(api, &job.id, &cancel, backend).await;
+                        canceled = true;
                         continue;
                     }
-                };
-                // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API poll
-                // so a quit stops the tile pass at this step, matching a user cancel.
-                if shutdown_requested()
-                    || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
-                        last_cancel_check = Instant::now();
-                        cancel_requested_peek(api, &job.id).await
-                    })
-                {
-                    begin_detail_cancel(api, &job.id, &cancel, backend).await;
-                    canceled = true;
-                    continue;
+                    update_job(
+                        api,
+                        &job.id,
+                        image_progress(
+                            JobStatus::Running,
+                            ProgressStage::Generating,
+                            0.45 + 0.5 * (done as f64 / total.max(1) as f64),
+                            &format!("Refining detail tile {done}/{total}."),
+                            latest_preview.as_ref().map(|slot| {
+                                json!({
+                                    "previewFrame": {
+                                        "imageIndex": slot.index,
+                                        "current": slot.current,
+                                        "total": slot.total,
+                                        "dataUrl": slot.data_url,
+                                    }
+                                })
+                                .as_object()
+                                .cloned()
+                                .expect("detail preview result is an object")
+                            }),
+                            backend,
+                        ),
+                    )
+                    .await?;
+                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
                 }
-                update_job(
-                    api,
-                    &job.id,
-                    image_progress(
-                        JobStatus::Running,
-                        ProgressStage::Generating,
-                        0.45 + 0.5 * (done as f64 / total.max(1) as f64),
-                        &format!("Refining detail tile {done}/{total}."),
-                        latest_preview.as_ref().map(|slot| {
-                            json!({
-                                "previewFrame": {
-                                    "imageIndex": slot.index,
-                                    "current": slot.current,
-                                    "total": slot.total,
-                                    "dataUrl": slot.data_url,
-                                }
-                            })
-                            .as_object()
-                            .cloned()
-                            .expect("detail preview result is an object")
-                        }),
-                        backend,
-                    ),
-                )
-                .await?;
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-            }
-            _ = interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                // sc-9618: honor a process shutdown on every tick (local flag read, unthrottled).
-                if !canceled && (shutdown_requested()
-                    || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
-                        last_cancel_check = Instant::now();
-                        cancel_requested_peek(api, &job.id).await
-                    }))
-                {
-                    begin_detail_cancel(api, &job.id, &cancel, backend).await;
-                    canceled = true;
+                _ = interval.tick() => {
+                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    // sc-9618: honor a process shutdown on every tick (local flag read, unthrottled).
+                    if !canceled && (shutdown_requested()
+                        || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
+                            last_cancel_check = Instant::now();
+                            cancel_requested_peek(api, &job.id).await
+                        }))
+                    {
+                        begin_detail_cancel(api, &job.id, &cancel, backend).await;
+                        canceled = true;
+                    }
                 }
             }
-        }
         }
         Ok(())
     }

@@ -1,3 +1,18 @@
+use super::conditioning::load_reference_image;
+use super::conditioning::PoseInput;
+use super::Conditioning;
+use super::ControlKind;
+use super::Image;
+use super::ImageRequest;
+use crate::huggingface_snapshot_dir;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 // Shared worker strict-control driver (epic 8236, sc-8243). The single source of truth for the
 // Fun-Union family of strict-control engines and the one preprocess → conditioning core all of them
 // share. Collapses the per-engine duplication that previously lived in `zimage.rs` / `flux2.rs` /
@@ -25,14 +40,14 @@
 /// Per-engine streams accept only an exact shipped tuple or an API-canonicalized registered overlay
 /// carrying explicit catalog authority and an immutable revision.
 #[derive(Clone, Copy, Debug)]
-struct StrictControlEngine {
+pub(super) struct StrictControlEngine {
     /// The mlx-gen registry id (`crate::inference_runtime::load(engine_id, spec)`).
     engine_id: &'static str,
     /// The default Fun-Union control-weights HF repo for this engine.
-    repo: &'static str,
+    pub(super) repo: &'static str,
     /// The `ControlKind`s this engine accepts. Pose is the proven tier on every engine; canny / depth
     /// are unlocked per-model by sc-8248 / sc-8249 / sc-8250 (the driver supports them generically here).
-    supported_kinds: &'static [ControlKind],
+    pub(super) supported_kinds: &'static [ControlKind],
 }
 
 /// The shared strict-control catalog (S0 table). SINGLE SOURCE OF TRUTH for `(engine_id, control_repo,
@@ -122,7 +137,7 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
 
 /// The catalog row for a registry strict-control engine id, or `None` if it is not registered here
 /// (e.g. the SDXL tile detail path, which must never route through this driver).
-fn strict_control_engine(engine_id: &str) -> Option<&'static StrictControlEngine> {
+pub(super) fn strict_control_engine(engine_id: &str) -> Option<&'static StrictControlEngine> {
     STRICT_CONTROL_ENGINES
         .iter()
         .find(|entry| entry.engine_id == engine_id)
@@ -133,7 +148,7 @@ fn strict_control_engine(engine_id: &str) -> Option<&'static StrictControlEngine
 /// engine id (a programming error: only registered strict-control streams call this with their
 /// own engine id). Existing bespoke off-Mac lanes keep their own per-lane default-repo constants; the
 /// backend-neutral SDXL route consumes this shared row on both platforms.
-fn strict_control_default_repo(engine_id: &str) -> &'static str {
+pub(super) fn strict_control_default_repo(engine_id: &str) -> &'static str {
     let catalog_repo = strict_control_engine(engine_id)
         .unwrap_or_else(|| panic!("{engine_id} is not a registered strict-control engine"))
         .repo;
@@ -152,7 +167,7 @@ fn strict_control_default_repo(engine_id: &str) -> &'static str {
 /// plus a pinned 40-hex revision. The public jobs API always removes a
 /// caller-supplied stamp before performing that lookup, so raw payloads cannot
 /// turn this into a generic repository escape hatch.
-fn trusted_control_weight_revision(
+pub(super) fn trusted_control_weight_revision(
     request: &ImageRequest,
     engine_id: &str,
     repo: &str,
@@ -198,7 +213,7 @@ fn trusted_control_weight_revision(
 /// Validate a requested [`ControlKind`] against an engine's `supported_kinds` (the [`STRICT_CONTROL_ENGINES`]
 /// authority). `Ok(())` when supported; a clear, actionable `InvalidPayload` otherwise. An unknown engine
 /// id is itself an error — only registered catalog engines route here.
-fn validate_control_kind(engine_id: &str, kind: &ControlKind) -> WorkerResult<()> {
+pub(super) fn validate_control_kind(engine_id: &str, kind: &ControlKind) -> WorkerResult<()> {
     let Some(entry) = strict_control_engine(engine_id) else {
         return Err(WorkerError::InvalidPayload(format!(
             "{engine_id} is not a registered strict-control engine"
@@ -222,7 +237,7 @@ fn validate_control_kind(engine_id: &str, kind: &ControlKind) -> WorkerResult<()
 /// A stable lowercase label for a [`ControlKind`] (telemetry / error messages / the `controlMode` request
 /// field). `Other(name)` carries its bespoke name verbatim. Delegates to the preprocessor registry
 /// (sc-10160) so the label is one source of truth across train-prep and inference.
-fn control_kind_label(kind: &ControlKind) -> String {
+pub(super) fn control_kind_label(kind: &ControlKind) -> String {
     crate::control_preprocess::control_kind_label(kind)
 }
 
@@ -230,9 +245,8 @@ fn control_kind_label(kind: &ControlKind) -> String {
 /// every current job omits `controlMode`, so existing pose jobs are byte-preserved). `advanced.controlMode`
 /// — when a future per-model exposure story sets it — selects `canny` / `depth` / `pose`. An unknown value
 /// is rejected loudly rather than silently falling back.
-fn requested_control_kind(request: &ImageRequest) -> WorkerResult<ControlKind> {
-    let Some(mode) = crate::payload::trimmed_string(request.advanced.get("controlMode"))
-    else {
+pub(super) fn requested_control_kind(request: &ImageRequest) -> WorkerResult<ControlKind> {
+    let Some(mode) = crate::payload::trimmed_string(request.advanced.get("controlMode")) else {
         return Ok(ControlKind::Pose);
     };
     match mode.to_ascii_lowercase().as_str() {
@@ -247,7 +261,7 @@ fn requested_control_kind(request: &ImageRequest) -> WorkerResult<ControlKind> {
 
 /// A decoded user-supplied control map (`advanced.controlImage` asset id), already at native resolution.
 /// Present iff the job carries an explicit control map to use verbatim instead of a preprocessor.
-fn resolve_user_control_map(
+pub(super) fn resolve_user_control_map(
     request: &ImageRequest,
     settings: &Settings,
     project_path: &Path,
@@ -276,7 +290,12 @@ fn resolve_user_control_map(
         }
         return Ok(Some(control));
     }
-    let image = load_reference_image(&settings.data_dir, &request.project_id, asset_id, project_path)?;
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
     Ok(Some(image))
 }
 
@@ -285,7 +304,7 @@ fn resolve_user_control_map(
 /// canonical "input image" the picker sends), else the character `referenceAssetId` (so a control job
 /// that only carried a reference still has something to derive from). Pure (request only) so the
 /// precedence is unit-testable without asset I/O.
-fn control_source_asset_id(request: &ImageRequest) -> Option<&str> {
+pub(super) fn control_source_asset_id(request: &ImageRequest) -> Option<&str> {
     request
         .source_asset_id
         .as_deref()
@@ -308,7 +327,7 @@ fn control_source_asset_id(request: &ImageRequest) -> Option<&str> {
 /// a source nor a reference is present — the pose tier never needs a source (its skeleton is synthetic),
 /// and canny/depth then surface the shared driver's clear "requires a source image" error rather than
 /// silently producing nothing.
-fn resolve_control_source(
+pub(super) fn resolve_control_source(
     request: &ImageRequest,
     settings: &Settings,
     project_path: &Path,
@@ -316,7 +335,12 @@ fn resolve_control_source(
     let Some(asset_id) = control_source_asset_id(request) else {
         return Ok(None);
     };
-    let image = load_reference_image(&settings.data_dir, &request.project_id, asset_id, project_path)?;
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
     Ok(Some(image))
 }
 
@@ -374,7 +398,7 @@ fn depth_control_image(
 /// cache on first use. The ~100 MB Small checkpoint is fetched only on the first depth job (it never
 /// bloats a base download). Shared by every strict-control engine that admits `ControlKind::Depth` —
 /// the MLX registry paths (macOS) and the candle strict-control trio (off-Mac, sc-8304).
-async fn ensure_depth_estimator_dir(
+pub(super) async fn ensure_depth_estimator_dir(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -389,7 +413,8 @@ async fn ensure_depth_estimator_dir(
             return Ok(p);
         }
     }
-    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, DEPTH_ANYTHING_V2_SMALL_REPO)
+    if let Some(snapshot) =
+        huggingface_snapshot_dir(&settings.data_dir, DEPTH_ANYTHING_V2_SMALL_REPO)
     {
         if snapshot.join(DEPTH_ANYTHING_V2_FILE).is_file() {
             return Ok(snapshot);
@@ -433,7 +458,7 @@ async fn ensure_depth_estimator_dir(
 /// Used by the MLX registry strict-control paths (macOS) and the candle strict-control trio (off-Mac,
 /// sc-8304) alike; dead only on a candle-disabled box off Mac (no strict-control caller there).
 #[allow(clippy::too_many_arguments)]
-fn preprocess_control_entry(
+pub(super) fn preprocess_control_entry(
     kind: &ControlKind,
     user_control: Option<&Image>,
     pose: Option<&PoseInput>,
@@ -496,7 +521,7 @@ fn preprocess_control_entry(
 /// identity img2img-init `Reference` (flux2 / z-image opt-in tier). [`ControlKind::Depth`] uses the
 /// dedicated `Conditioning::Depth` variant; every other kind uses `Conditioning::Control { kind, scale }`.
 /// Byte-identical to the old per-engine construction for the pose tier.
-fn build_control_conditioning(
+pub(super) fn build_control_conditioning(
     control: Image,
     kind: ControlKind,
     scale: f32,
