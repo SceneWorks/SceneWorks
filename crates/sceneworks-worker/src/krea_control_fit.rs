@@ -80,7 +80,7 @@
 
 #[path = "krea_control_fit/ladder.rs"]
 mod ladder;
-pub(crate) use ladder::*;
+use ladder::fit_ladder_for_tier;
 
 use super::*;
 use gen_core::{
