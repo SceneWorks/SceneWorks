@@ -1,3 +1,4 @@
+import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -2169,11 +2170,11 @@ test("the derivation is defined per LANE, read off the Rust that declares and wi
 
 test("the shipped derivation reaches every lane through its REAL admission source (epic 22505)", async () => {
   const [derivation, admission, vram, candleStrategy, mlxFitGate] = await Promise.all([
-    readFile(new URL(`../${SOURCE_PATHS.anchorDerivation}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.anchorAdmission}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.anchorAdmissionImageVram}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.anchorAdmissionImageCandle}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.mlxFitGate}`, import.meta.url), "utf8"),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorDerivation}`, import.meta.url)),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorAdmission}`, import.meta.url)),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorAdmissionImageVram}`, import.meta.url)),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorAdmissionImageCandle}`, import.meta.url)),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.mlxFitGate}`, import.meta.url)),
   ]);
   const lanes = parseAnchorDerivationLanes(derivation, {
     "video:mlx": { law: "video", sources: [admission] },
