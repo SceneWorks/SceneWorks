@@ -1,3 +1,4 @@
+import { useSamplerControls } from "../hooks/useSamplerControls.js";
 import { PresetCard } from "./presets/PresetCard.jsx";
 import { EditorHeadSection } from "./presets/EditorHeadSection.jsx";
 import { KindSection } from "./presets/KindSection.jsx";
@@ -18,7 +19,7 @@ import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { MAX_PRESET_LORAS, loraMatchesModel, loraWeight, presetLoraId, presetLoras, presetSaveValidation, presetValidation, workflowModes } from "../presetUtils.js";
-import { effectiveLimits, samplerOptionsFromModel, schedulerOptionsFromModel, stepsMenuFromModel } from "../samplerOptions.js";
+import { effectiveLimits } from "../samplerOptions.js";
 import { useValidation } from "../validation/useValidation.js";
 
 import { useAppStatic } from "../context/AppContext.js";
@@ -198,7 +199,6 @@ function qualityLabel(value) {
   return qualityChoices.find(([id]) => id === value)?.[1] ?? null;
 }
 
-
 function formLorasFromPreset(preset) {
   return presetLoras(preset)
     .map((lora) => {
@@ -349,8 +349,7 @@ export function PresetManagerScreen() {
   const addableLoras = availableLoras.filter((lora) => !selectedIds.includes(lora.id));
   const showLoraEmptyState = !availableLoras.length && !form.loras.length;
 
-  const samplerMenu = selectedModel ? samplerOptionsFromModel(selectedModel) : [];
-  const schedulerMenu = selectedModel ? schedulerOptionsFromModel(selectedModel) : [];
+  const { samplerOptions: samplerMenu, schedulerOptions: schedulerMenu, stepsMenu } = useSamplerControls(selectedModel, null, { reconcile: "none", emptyMenus: true });
 
   // Resolution/duration/fps menus come from the selected model's effective limits, the
   // same source the studios read — so the editor can't offer a default the studio would
@@ -360,7 +359,7 @@ export function PresetManagerScreen() {
   const fpsOptions = fpsOptionsForModel(selectedModel);
   // `steps` has NO fallback menu, unlike the three above: absent means "any count", which is every
   // model but the distilled ones (sc-19502).
-  const defaultsOptions = { resolutions: resolutionOptions, durations: durationOptions, fps: fpsOptions, steps: stepsMenuFromModel(selectedModel) };
+  const defaultsOptions = { resolutions: resolutionOptions, durations: durationOptions, fps: fpsOptions, steps: stepsMenu };
 
   const validation = presetValidation({ loras: form.loras }, loras, selectedModel);
   const valueErrors = defaultValueErrors(form, isVideo, defaultsOptions);
