@@ -146,10 +146,7 @@ fn inert_preflight(
     inputs: PreparedTrainingInputs,
     expected: &[u8],
 ) -> WorkerResult<TrainingPreflight> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         // This is the production descriptor-only validator, never load_trainer/validate/train.
         let prepared = preflight_training_run_with_inputs(settings, plan, false, inputs)?;
@@ -170,10 +167,7 @@ fn inert_preflight(
         assert_eq!(std::fs::read(&paths[0]).unwrap(), expected);
         Ok(prepared)
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         // No trainer registry exists in this build. Exercise the same pure snapshot mapper;
         // the real no-backend preflight still refuses the absent registry before any copy.
@@ -335,10 +329,7 @@ async fn copy_and_hash_leave_runtime_live_and_preserve_exact_snapshot_and_contex
         let (prepared, ()) =
             tokio::try_join!(run, control).expect("weights-free preflight snapshots succeed");
         let root = gate.root.lock().unwrap().clone().unwrap();
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
+        #[cfg(native_lane)]
         {
             assert!(
                 root.exists(),
@@ -463,10 +454,7 @@ fn unclaimed_completed_preflight_handoff_explicitly_releases_snapshots() {
             })
             .count()
     };
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     assert_eq!(roots(), 1);
     let worker = handoff.clone();
     drop(handoff);
@@ -478,10 +466,7 @@ fn unclaimed_completed_preflight_handoff_explicitly_releases_snapshots() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test(flavor = "current_thread")]
 async fn production_dry_run_preserves_summary_and_closes_prepared_inputs_without_a_trainer() {
     let (_dir, mut settings, plan, _) = fixture();
