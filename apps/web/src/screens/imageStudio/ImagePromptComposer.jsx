@@ -1,3 +1,4 @@
+import { StudioGuideButton } from "../../components/StudioFields.jsx";
 import React from "react";
 import { ImageEditSourcePickerField } from "../../components/AssetPicker.jsx";
 import { Icon } from "../../components/Icons.jsx";
@@ -18,7 +19,7 @@ export function ImagePromptComposer({
   macModeTabBlock,
   batchMode,
   setBatchMode,
-  setGuideOpen,
+  openGuide,
   onOpenPresets,
   batchPromptsText,
   resolutionOptions,
@@ -137,9 +138,7 @@ export function ImagePromptComposer({
               <Icon.Stars size={13} /> Batch
             </button>
             <div className="prompt-hero-links">
-              <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
-                <Icon.Book size={14} /> Prompt guide
-              </button>
+              <StudioGuideButton onOpen={openGuide} />
               {onOpenPresets ? (
                 <button className="hero-link" onClick={onOpenPresets} type="button">
                   <Icon.Folder size={14} /> Saved presets
@@ -308,9 +307,7 @@ export function ImagePromptComposer({
           {!structuredPromptModel && promptHint ? (
             <p className="prompt-hint">
               {promptHint}{" "}
-              <button className="prompt-hint-link" onClick={() => setGuideOpen(true)} type="button">
-                Prompt guide →
-              </button>
+              <StudioGuideButton onOpen={openGuide} hint />
             </p>
           ) : null}
 

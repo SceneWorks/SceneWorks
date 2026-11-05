@@ -1,4 +1,7 @@
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
+import { useStudioAdvancedSettings } from "../hooks/useStudioAdvancedSettings.js";
+import { useStudioPromptGuide } from "../hooks/useStudioPromptGuide.js";
+import { StudioPromptGuide, CharacterLookFields } from "../components/StudioFields.jsx";
 import { useSamplerControls } from "../hooks/useSamplerControls.js";
 import { preferredOption, preferredResolution, formatResolutionLabel } from "../studioDefaults.js";
 import { ImageAdvancedPanel } from "./imageStudio/ImageAdvancedPanel.jsx";
@@ -26,7 +29,6 @@ import { MultiPhaseEditor } from "../components/MultiPhaseEditor.jsx";
 import { buildTurboFinishPhases, modelSupportsMultiPhase, multiPhaseIssues as computeMultiPhaseIssues, serializePhases } from "../imageMultiPhase.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 
-import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 
 import { linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
@@ -378,7 +380,6 @@ export function ImageStudio() {
     handleLoadBatch, handleDeleteBatch, handleImportBatch, handleNewBatch,
   } = useBatchPromptState({ saved, createPromptBatch, updatePromptBatch, deletePromptBatch });
 
-  const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
   const [textEncoderSelection, setTextEncoderSelection] = useState({
     modelId: saved.model ?? null,
@@ -425,8 +426,26 @@ export function ImageStudio() {
   downloadConditionalComponents
   });
 
-  const [seed, setSeed] = useState(saved.seed ?? "");
-  const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
+  const {
+    advancedOpen,
+    setAdvancedOpen,
+    seed,
+    setSeed,
+    negativePrompt,
+    setNegativePrompt,
+    sampler,
+    setSampler,
+    scheduler,
+    setScheduler,
+    schedulerShift,
+    setSchedulerShift,
+    stepsOverride,
+    setStepsOverride,
+    guidanceOverride,
+    setGuidanceOverride,
+    toggleAdvanced
+  } = useStudioAdvancedSettings(saved, { schedulerShift: mossEdit ? 5 : null, steps: mossEdit ? 30 : "", guidanceScale: mossEdit ? 4 : "" });
+
   const [resolution, setResolution] = useState(saved.resolution ?? (mossEdit ? "512x512" : "1024x1024"));
   const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
   // Multi-image reference set for a multi-reference edit (sc-6211, FLUX.2-dev). Drives the plural
@@ -532,9 +551,7 @@ export function ImageStudio() {
   // Configurable sampler / scheduler (epic 1753). Restored from per-workspace
   // settings; reset to the selected model's manifest defaults whenever the
   // model changes.
-  const [sampler, setSampler] = useState(saved.sampler ?? "default");
-  const [scheduler, setScheduler] = useState(saved.scheduler ?? "default");
-  const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? (mossEdit ? 5 : null));
+
   // sc-25681: the CFG interval (two raw inputs, "" = the model's own bound) and the caption-
   // overflow policy ("default" = the checkpoint's own), for a model that declares them (Iris-3B).
   const [cfgInterval, setCfgInterval] = useState(saved.cfgInterval ?? "");
@@ -546,8 +563,7 @@ export function ImageStudio() {
   // Steps / guidance: previously worker-only knobs surfaced via this same
   // advanced panel. "" represents "use the model default" so the user can
   // clear the override.
-  const [stepsOverride, setStepsOverride] = useState(saved.steps ?? (mossEdit ? 30 : ""));
-  const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? (mossEdit ? 4 : ""));
+
   // Advanced resolution override: a custom Width/Height to experiment beyond the model's
   // pre-declared Aspect options (e.g. Krea 2 up to 4K). "" = "use the Aspect dropdown" for
   // that axis, mirroring the Steps/Guidance overrides. Effective dims are derived below and
@@ -633,7 +649,7 @@ export function ImageStudio() {
   // ever falling back to sending raw plain text.
   const [expanding, setExpanding] = useState(false);
   const [submitError, setSubmitError] = useState("");
-  const [guideOpen, setGuideOpen] = useState(false);
+
   // Prompt tools (epic UI-refinement): which inline prompt-tool panel is open —
   // null | "describe" (reference-image caption) | "refine" (rewrite my prompt).
   // Replaces the always-rendered ReferenceCaptionPicker + RefinePromptControl pair
@@ -912,10 +928,10 @@ export function ImageStudio() {
   const promptHint = promptHintFor(selectedModel?.ui);
   // Prompt guide for the selected model; fall back to the generic image guide
   // when a model declares none, so the button is always useful (sc-1817).
-  const promptGuide = selectedModel?.ui?.promptGuide ?? {
+  const { guideOpen, openGuide, closeGuide, promptGuide } = useStudioPromptGuide(selectedModel, {
     title: "Image Prompt Guide",
     path: "/prompt-guides/generic-image.md",
-  };
+  });
   // Reference-tuning hints declared by the model (ui.*). InstantID raises the
   // reference-strength default and exposes a second "Identity structure" slider
   // (controlnetConditioningScale); models without these keys (e.g. Kolors) keep the
@@ -1569,7 +1585,7 @@ export function ImageStudio() {
     );
     setStepsOverride("");
     setGuidanceOverride("");
-  }, [model, resolutionOptions, samplerOptions, schedulerOptions, samplerDefault, schedulerDefault, guidanceMethodOptions, selectedModel, mossEdit, setMossImage, setMossDmdSteps]);
+  }, [model, resolutionOptions, samplerOptions, schedulerOptions, samplerDefault, schedulerDefault, guidanceMethodOptions, selectedModel, mossEdit, setMossImage, setMossDmdSteps, setSampler, setScheduler, setSchedulerShift, setStepsOverride, setGuidanceOverride]);
   useMossImageTransition({
     model,
     mossEditTransition,
@@ -2791,7 +2807,7 @@ export function ImageStudio() {
             macModeTabBlock={macModeTabBlock}
             batchMode={batchMode}
             setBatchMode={setBatchMode}
-            setGuideOpen={setGuideOpen}
+            openGuide={openGuide}
             onOpenPresets={onOpenPresets}
             batchPromptsText={batchPromptsText}
             resolutionOptions={resolutionOptions}
@@ -3039,28 +3055,9 @@ export function ImageStudio() {
             {mode === "character_image" ? (
               <>
                 <div className="control-grid compact-controls">
-                  <label>
-                    Character
-                    <select onChange={(event) => changeCharacterId(event.target.value)} value={characterId}>
-                      <option value="">Select character</option>
-                      {characters.map((character) => (
-                        <option key={character.id} value={character.id}>
-                          {character.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Look
-                    <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
-                      <option value="">Default look</option>
-                      {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
-                        <option key={look.id} value={look.id}>
-                          {look.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <CharacterLookFields characters={characters} characterId={characterId} lookId={characterLookId}
+                    onCharacterChange={changeCharacterId} onLookChange={setCharacterLookId} characterPlaceholder="Select character" />
+
                 </div>
                 {flux3LayoutAvailable && !orderedCharacterReferences ? <button type="button"
                   onClick={() => changeReferenceAssetIds(referenceAssetId ? [referenceAssetId] : [])}>Edit reference images</button> : null}
@@ -3358,7 +3355,7 @@ export function ImageStudio() {
           ) : null}
 
           <ImageAdvancedPanel
-            setAdvancedOpen={setAdvancedOpen}
+            toggleAdvanced={toggleAdvanced}
             advancedOpen={advancedOpen}
             setRequestedGpu={setRequestedGpu}
             requestedGpu={requestedGpu}
@@ -3522,9 +3519,7 @@ export function ImageStudio() {
           />
         </div>
       </form>
-      {guideOpen ? (
-        <PromptGuideModal guide={promptGuide} modelName={selectedModel?.name} onClose={() => setGuideOpen(false)} />
-      ) : null}
+      <StudioPromptGuide open={guideOpen} guide={promptGuide} modelName={selectedModel?.name} onClose={closeGuide} />
     </section>
     </ModelAvailabilityGate>
   );
