@@ -1312,6 +1312,11 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         ("crates/sceneworks-core/src/hashing.rs", "hex"),
         ("crates/sceneworks-core/src/hashing.rs", "hex_prefix"),
         ("crates/sceneworks-core/src/hashing.rs", "sha256_bytes"),
+        ("crates/sceneworks-core/src/process.rs", "pid_alive"),
+        (
+            "crates/sceneworks-core/src/contracts.rs",
+            "is_raster_image_asset",
+        ),
         (
             "crates/sceneworks-core/src/hashing.rs",
             "update_sha256_with",
