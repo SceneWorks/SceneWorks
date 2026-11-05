@@ -105,7 +105,7 @@ export async function looksLikeWorkflowCandidate(file) {
 
 // ---- The envelope an already-imported asset is carrying -------------------------------------
 
-// `IMPORTED_WORKFLOW_KEY` in `crates/sceneworks-core/src/project_store.rs`, mirrored.
+// `IMPORTED_WORKFLOW_KEY` in `crates/sceneworks-core/src/project_store/uploads.rs`, mirrored.
 //
 // Import clears this key unconditionally before writing its own, so what is under it is either the
 // envelope THIS install's reader parsed and sanitized, or nothing — a caller-supplied
@@ -485,7 +485,7 @@ export function workflowReplaySeed(share) {
 
 // A `WorkflowShare` (plus this install's resolution report) as a studio recipe.
 //
-// The shape is the one `crates/sceneworks-core/src/project_store.rs` writes for a generated
+// The shape is the one `crates/sceneworks-core/src/project_store/asset_sidecars.rs` writes for a generated
 // asset, because that is what the ImageStudio injection effect reads — this returns the same
 // object the "Use this recipe" path hands it, so there is exactly one prefill path.
 //

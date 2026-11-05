@@ -599,13 +599,13 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     ("core", "hf_home.rs", "huggingface", CacheRole::HfCache),
     (
         "core",
-        "project_store.rs",
+        "project_store/keypoints.rs",
         "keypoint-uploads",
         CacheRole::Upload,
     ),
     (
         "core",
-        "project_store.rs",
+        "project_store/poses.rs",
         "pose_detect",
         CacheRole::Scratch,
     ),
@@ -3013,20 +3013,30 @@ fn synthetic_fixture_cache_roles_do_not_authorize_new_destinations() {
         (
             "minimax_h3_import_fixture.rs",
             "fixture-hub",
-            CacheRole::HfCache,
+            Some(CacheRole::HfCache),
         ),
         (
             "minimax_h3_import_fixture.rs",
             "synthetic-component-staging",
-            CacheRole::Scratch,
+            Some(CacheRole::Scratch),
+        ),
+        (
+            "video_jobs/minimax_h3_import_tests.rs",
+            "source-library",
+            None,
         ),
     ] {
         assert_eq!(
-            allowed.get(&("worker".into(), file.into(), subdir.into())),
-            Some(&role),
-            "fixture role is exact, not permission for arbitrary generated weight caches"
+            allowed.get(&("worker".into(), file.into(), subdir.into())).copied(),
+            role,
+            "fixture role or test-only absence is exact, not permission for arbitrary generated weight caches"
         );
     }
+    let tree = read_tree(&repo_root().join("crates/sceneworks-worker/src"));
+    assert!(
+        test_only_files(&tree, "lib.rs").contains("video_jobs/minimax_h3_import_tests.rs"),
+        "the #[path] import regression fixture must remain compiler-derived test-only source"
+    );
     let discovered = cache_destinations(
         "let p = data_dir.join(\"cache\").join(\"fixture-hub-new-unregistered\");",
         &BTreeMap::new(),
@@ -4407,5 +4417,44 @@ fn scanner_parsers_recognise_the_shapes_they_must_judge() {
     assert_eq!(
         include_paths("include!(\"tests/hf_and_family.rs\");"),
         vec!["tests/hf_and_family.rs".to_owned()]
+    );
+}
+
+#[test]
+fn scanner_follows_test_path_modules_without_hiding_production_aliases() {
+    let tree = [
+        (
+            "lib.rs",
+            r##"
+            #[cfg(test)]
+            #[path = "fixtures.rs"]
+            mod tests;
+            #[path = "shared.rs"]
+            pub mod shipping;
+            #[cfg(test)]
+            #[path = "shared.rs"]
+            mod test_alias;
+            const DECOY: &str = "#[path = \"shipping.rs\"] mod unrelated;";
+            mod live;
+        "##,
+        ),
+        (
+            "fixtures.rs",
+            "#[path = \"nested/stub.rs\"] pub(crate) mod stub;",
+        ),
+        ("nested/stub.rs", "fn mocked_http() {}"),
+        ("shared.rs", "fn production() {}"),
+        ("live.rs", "fn production() {}"),
+        ("shipping.rs", "fn unreferenced_but_scanned() {}"),
+    ]
+    .into_iter()
+    .map(|(path, code)| (path.to_owned(), code.to_owned()))
+    .collect();
+    assert_eq!(
+        test_only_files(&tree, "lib.rs"),
+        ["fixtures.rs", "nested/stub.rs"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     );
 }
