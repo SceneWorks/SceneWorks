@@ -1,6 +1,84 @@
 use super::*;
 use crate::dto::{VectorSampling, MAX_VECTOR_WALL_TIME_MS};
 
+pub(super) async fn create_generation_job_with_binding(
+    state: AppState,
+    job_type: JobType,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    mut payload: JsonObject,
+    requested_gpu: String,
+    admission: (Option<JobStatus>, Option<Value>),
+) -> Result<JobSnapshot, ApiError> {
+    let (initial_status, mut download_binding) = admission;
+    model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
+    // sc-26687 / sc-26690: freeze the server-trusted provenance of the checkpoint this job
+    // admitted, in the SAME transaction that enqueues it, so a later re-import or rescan cannot
+    // change the identity the generated asset will report.
+    //
+    // Typed handlers mint the primary with their own canonical resolver. The source seam fills
+    // runtime companions and canonicalizes the utility roles; mere presence of a primary in an
+    // arbitrary incoming payload is not authority. Unbound/builtin entries honestly get None.
+    let model_provenance = match payload.get("modelManifestEntry").and_then(Value::as_object) {
+        Some(entry) => {
+            // Imported component terms are independent of the author's terms. Covered here are
+            // typed generation jobs with a server-resolved primary; queue_model_import_job owns
+            // the component-download gate. Raw POST /jobs admission is gated separately in
+            // jobs.rs::create_job on its actual canonical selection, before atomic enqueue.
+            crate::models::ensure_inherited_component_licenses_acknowledged(
+                &state,
+                entry,
+                payload
+                    .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .await?;
+            sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                &state.settings.data_dir,
+                entry,
+            )
+            .map_err(|error| ApiError::internal(format!("resolve model provenance: {error}")))?
+        }
+        None => None,
+    };
+    let empty = JsonObject::new();
+    let entry = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    validate_expected_imported_model_reference(&payload, entry, model_provenance.as_ref())?;
+    // Freeze the admitted selection for retry/duplicate too, including requests that were not
+    // themselves replays. A later same-id catalog rebind must not change their weights.
+    if let Some(reference) = imported_reference_from_provenance(entry, model_provenance.as_ref()) {
+        payload.insert("expectedImportedModelRef".to_owned(), reference);
+    }
+    if let Some(binding) = download_binding.as_mut().and_then(Value::as_object_mut) {
+        binding.insert("payload".to_owned(), json!(payload));
+    }
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job_with_download_binding(
+            CreateJob {
+                job_type,
+                project_id,
+                project_name,
+                payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status,
+            },
+            model_provenance.as_ref(),
+            download_binding.as_ref(),
+        )
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok(job)
+}
+
 /// The single backend this API instance can actually enqueue for — the one authority every
 /// enqueue-time capability gate must key off.
 ///

@@ -48,7 +48,6 @@ apps/rust-api/src/lib.rs sceneworks_worker::WorkerResult
 apps/rust-api/src/lib.rs sceneworks_worker::cuda_failure_is_blocking
 apps/rust-api/src/lib.rs sceneworks_worker::cuda_preflight
 apps/rust-api/src/lib.rs sceneworks_worker::metal_preflight
-apps/rust-api/src/lib.rs sceneworks_worker::prompt_enhancement_max_tokens
 apps/rust-api/src/lib.rs sceneworks_worker::recover_stranded_model_conversions
 apps/rust-api/src/lib.rs sceneworks_worker::request_shutdown
 apps/rust-api/src/lib.rs sceneworks_worker::run_worker_loop
@@ -230,3 +229,4 @@ apps/rust-api/src/training.rs sceneworks_worker::installed_aux_training_model_di
 apps/rust-api/src/training.rs sceneworks_worker::iris_plan_memory_error
 apps/rust-api/src/training.rs sceneworks_worker::iris_task_objective
 apps/rust-api/src/training.rs sceneworks_worker::iris_training_install_refusal
+apps/rust-api/src/validators.rs sceneworks_worker::prompt_enhancement_max_tokens

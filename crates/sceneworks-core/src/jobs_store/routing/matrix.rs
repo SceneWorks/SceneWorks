@@ -80,7 +80,14 @@ const API_MODEL_CATALOG: &str = concat!(
     include_str!("../../../../../apps/rust-api/src/models/hf_cache_health.rs"),
     include_str!("../../../../../apps/rust-api/src/models/size_estimate.rs"),
 );
-const API_CONTRACT_ENTRY: &str = include_str!("../../../../../apps/rust-api/src/lib.rs");
+const API_CONTRACT_ENTRY: &str = concat!(
+    include_str!("../../../../../apps/rust-api/src/lib.rs"),
+    include_str!("../../../../../apps/rust-api/src/web_assets.rs"),
+    include_str!("../../../../../apps/rust-api/src/project_files.rs"),
+    include_str!("../../../../../apps/rust-api/src/job_redaction.rs"),
+    include_str!("../../../../../apps/rust-api/src/validators.rs"),
+    include_str!("../../../../../apps/rust-api/src/file_serving.rs"),
+);
 const API_DTO: &str = include_str!("../../../../../apps/rust-api/src/dto.rs");
 const WORKER_DISPATCH: &str = include_str!("../../../../sceneworks-worker/src/lib.rs");
 // Preserve the complete former base compilation unit in this existing source digest.

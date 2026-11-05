@@ -1947,3 +1947,25 @@ fn capture_adapters_are_not_product_runtime_dependencies() {
         "explicit test ownership is distinct from product callers"
     );
 }
+
+#[test]
+fn api_lib_does_not_gain_helper_implementations() {
+    let source = std::fs::read_to_string(root().join("apps/rust-api/src/lib.rs")).unwrap();
+    let existing: BTreeSet<_> = include_str!("../tests/architecture/api_lib_helpers.txt")
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let added: Vec<_> = parse(&source)
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(function) => Some(function.sig.ident.to_string()),
+            _ => None,
+        })
+        .filter(|name| !existing.contains(name.as_str()))
+        .collect();
+    assert!(
+        added.is_empty(),
+        "new API helper implementations belong in an area owner, not lib.rs: {added:?}"
+    );
+}

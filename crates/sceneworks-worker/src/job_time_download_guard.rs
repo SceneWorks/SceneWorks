@@ -580,7 +580,12 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     ("rust-api", "lib.rs", "model-uploads", CacheRole::Upload),
     ("rust-api", "poses.rs", "pose-uploads", CacheRole::Upload),
     // Generated media thumbnails.
-    ("rust-api", "lib.rs", "media-thumbnails", CacheRole::Scratch),
+    (
+        "rust-api",
+        "project_files.rs",
+        "media-thumbnails",
+        CacheRole::Scratch,
+    ),
     // The jobs database.
     ("rust-api", "server.rs", "jobs.db", CacheRole::Runtime),
     // Upload-sweep helpers that forward a subdir parameter.
