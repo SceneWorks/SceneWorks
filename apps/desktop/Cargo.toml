@@ -43,6 +43,12 @@ tauri-plugin-updater = "2"
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
+# Shared provisioning tests use local HTTP and inert wheel fixtures on every host.
+# Shipping macOS keeps these downloader/archive dependencies platform-gated below.
+reqwest = { workspace = true, features = ["stream"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
+sha2 = { workspace = true }
+futures-util = { workspace = true, features = ["alloc"] }
 # Test fixtures that own their scratch directory and remove it on Drop (sc-17707).
 # The hand-rolled `temp_dir()/…-{pid}` scratch helpers this replaces cleaned up on a
 # trailing line, which a panicking test skips, and keyed uniqueness on the PID, so a
