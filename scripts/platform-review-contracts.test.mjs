@@ -26,7 +26,7 @@ const LTX_CAMPAIGN_PLANS = [
 
 async function source(path) {
   const entry = new URL(`../${path}`, import.meta.url);
-  return path.endsWith(".rs") ? rustFacadeSource(entry.pathname) : readFile(entry, "utf8");
+  return path.endsWith(".rs") ? rustFacadeSource(entry) : readFile(entry, "utf8");
 }
 
 const CANDLE_FACTS_UPLOAD_IF = "always() && (steps.verify_candle_capabilities.outcome == 'failure' || (github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && steps.verify_candle_capabilities.outcome == 'success'))";
@@ -4913,7 +4913,7 @@ test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", as
   );
   const adapterWithTests = await rustSourceWithTests(new URL(
     "../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url,
-  ).pathname);
+  ));
   assert.match(
     rustFunctionSource(adapterWithTests, "ltx_frame_envelope_is_derived_from_the_declared_durations_and_fps"),
     new RegExp(

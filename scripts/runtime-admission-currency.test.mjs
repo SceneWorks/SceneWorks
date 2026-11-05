@@ -25,7 +25,7 @@ import { rustFacadeSource, rustFacadeFunction, rustProductionSource } from "./li
 
 async function source(path) {
   const entry = new URL(`../${path}`, import.meta.url);
-  return path.endsWith(".rs") ? rustProductionSource(entry.pathname) : readFile(entry, "utf8");
+  return path.endsWith(".rs") ? rustProductionSource(entry) : readFile(entry, "utf8");
 }
 
 /** Every Rust module that decides admission or assembles the evidence admission reads. */
