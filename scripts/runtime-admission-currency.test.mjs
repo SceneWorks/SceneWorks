@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { withoutRustTestModules } from "./lib/rust-source-slices.mjs";
-import { rustFacadeSource, rustFacadeFunction } from "./lib/rust-facade-source.mjs";
+import { rustFacadeSource, rustFacadeFunction, rustProductionSource } from "./lib/rust-facade-source.mjs";
 
 // sc-22738 — Michael's standing rule, verbatim (2026-09-07): "The App Runtime should ALWAYS
 // continue behaving as if the measurement were valid."
@@ -24,7 +24,8 @@ import { rustFacadeSource, rustFacadeFunction } from "./lib/rust-facade-source.m
 // else may mention these identifiers in production code.
 
 async function source(path) {
-  return readFile(new URL(`../${path}`, import.meta.url), "utf8");
+  const entry = new URL(`../${path}`, import.meta.url);
+  return path.endsWith(".rs") ? rustProductionSource(entry) : readFile(entry, "utf8");
 }
 
 /** Every Rust module that decides admission or assembles the evidence admission reads. */
