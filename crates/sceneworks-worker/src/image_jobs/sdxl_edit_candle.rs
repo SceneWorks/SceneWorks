@@ -1,13 +1,39 @@
-use super::{
-    admit_sdxl_bespoke_memory, consume_gen_events, dense_tier_subdir, drive_gen_items,
-    fit_engine_image, load_reference_image, non_empty, pid_effective_dims, pid_output_tier,
-    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
-    resolve_pid_weights, resolve_sdxl_components, resolve_seed, standard_tier_subdir,
-    start_gen_stream, uses_standard_tier_layout, ApiClient, Image, ImagePlan, ImageRequest,
-    JobSnapshot, JsonObject, Path, PathBuf, SdxlEdit, SdxlEditPaths, SdxlEditRequest, Settings,
-    Value, WorkerError, WorkerResult,
-};
-use super::{advanced, huggingface_snapshot_dir, resolve_app_managed_model_dir};
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::dense_tier_subdir;
+use super::conditioning::load_reference_image;
+use super::conditioning::non_empty;
+use super::events::consume_gen_events;
+use super::geometry::fit_engine_image;
+use super::load_spec::resolve_sdxl_components;
+use super::memory::admit_sdxl_bespoke_memory;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::resolve_pid_weights;
+use super::resolve_seed;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::standard_tier_subdir;
+use super::stream::drive_gen_items;
+use super::stream::start_gen_stream;
+use super::uses_standard_tier_layout;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::SdxlEdit;
+use super::SdxlEditPaths;
+use super::SdxlEditRequest;
+use crate::advanced;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 // Candle (Windows/CUDA) SDXL img2img / inpaint / outpaint edit route (sc-5487, epic 5480) — pixel-

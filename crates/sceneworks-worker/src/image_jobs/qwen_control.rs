@@ -1,16 +1,43 @@
-use super::advanced;
+use super::adapters::resolve_adapters;
+use super::conditioning::pose_entries;
+use super::load_spec::attach_manifest_text_encoder;
+#[cfg(target_os = "macos")]
+use super::qwen::qwen_control_raw_settings;
+#[cfg(target_os = "macos")]
+use super::qwen::QWEN_CONTROL_ENGINE_ID;
+#[cfg(target_os = "macos")]
+use super::qwen::QWEN_CONTROL_FILE;
+use super::run_candle_strict_control;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::standard_tier_subdir;
+use super::strict_control::trusted_control_weight_revision;
 use super::tier_resolver::qwen_control_tier_subdir;
-use super::{
-    attach_manifest_text_encoder, pose_entries, resolve_adapters, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
-    ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot,
-    JsonObject, Path, PathBuf, Progress, QwenFunControl, QwenFunControlPaths,
-    QwenFunControlRequest, Settings, Value, WorkerError, WorkerResult,
-};
-use super::{
-    ensure_hf_cached_file, huggingface_snapshot_dir, resolve_app_managed_model_dir,
-    safe_weight_filename, standard_tier_subdir, DownloadContext,
-};
+use super::CancelFlag;
+use super::CandleStrictControl;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::Progress;
+use super::QwenFunControl;
+use super::QwenFunControlPaths;
+use super::QwenFunControlRequest;
+use crate::advanced;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 
 // Candle (Windows/CUDA) Qwen-Image 2512-Fun-Controlnet-Union (strict control) route (sc-5489 origin /
