@@ -1926,7 +1926,7 @@
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-readers": [
                   {
-                    "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+                    "path": "crates/sceneworks-worker/src/candle_memory_strategy/selection.rs",
                     "anchor": "verified_candidates"
                   }
                 ],
