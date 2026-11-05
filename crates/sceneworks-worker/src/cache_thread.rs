@@ -78,7 +78,7 @@ pub(crate) fn get_or_load_by_key<K: Eq + std::hash::Hash, T>(
 
 /// Thread-local sibling for `!Send` models. Release the lookup borrow before
 /// building, then hold a shared borrow through use, exactly like the prior callers.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(native_lane, test))]
 pub(crate) fn get_or_load_local<T>(
     cell: &std::cell::RefCell<Option<T>>,
     matches: impl FnOnce(&T) -> bool,
