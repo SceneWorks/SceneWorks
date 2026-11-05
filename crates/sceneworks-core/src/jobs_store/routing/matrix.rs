@@ -72,8 +72,25 @@ const API_MODEL_CATALOG: &str = include_str!("../../../../../apps/rust-api/src/m
 const API_CONTRACT_ENTRY: &str = include_str!("../../../../../apps/rust-api/src/lib.rs");
 const API_DTO: &str = include_str!("../../../../../apps/rust-api/src/dto.rs");
 const WORKER_DISPATCH: &str = include_str!("../../../../sceneworks-worker/src/lib.rs");
-const WORKER_IMAGE_DISPATCH: &str =
-    include_str!("../../../../sceneworks-worker/src/image_jobs/base.rs");
+// Preserve the complete former base compilation unit in this existing source digest.
+// These are its explicit current production owners, rather than a directory scan.
+const WORKER_IMAGE_DISPATCH: &str = concat!(
+    include_str!("../../../../sceneworks-worker/src/image_jobs/geometry.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/routing.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/artifact_resolution.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/quantization.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/load_spec.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/adapters.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/load_policy.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/memory.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/sampling.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/conditioning.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/render.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/mlx.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/candle.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/metrics.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/events.rs"),
+);
 const WORKER_IMAGE_QWEN_EDIT_CANDLE: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/qwen_edit_candle.rs");
 const WORKER_IMAGE_PULID: &str =
@@ -125,12 +142,46 @@ const WEB_SIMPLE_VIDEO: &str =
     include_str!("../../../../../apps/web/src/simple/SimpleVideoStudio.jsx");
 const WEB_VIDEO_VALIDATION: &str =
     include_str!("../../../../../apps/web/src/videoStudioValidation.js");
-const WEB_VIDEO_STUDIO: &str = include_str!("../../../../../apps/web/src/screens/VideoStudio.jsx");
+// The studio owner was split; keep the same provenance key over every moved source.
+const WEB_VIDEO_STUDIO: &str = concat!(
+    include_str!("../../../../../apps/web/src/screens/VideoStudio.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoAdvancedPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoGenerationSettings.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoPromptComposer.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoReviewPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoSourcePanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useLtx25Controls.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoExecutionTier.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoModeSelection.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoModelSelection.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoPresetState.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoRecipeReplay.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoReferences.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoSubmission.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoTurboControls.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/videoTierHelpers.js"),
+);
 const WEB_SIMPLE_AUDIO: &str =
     include_str!("../../../../../apps/web/src/simple/simpleAudioParts.jsx");
 const WEB_SIMPLE_AUDIO_STUDIO: &str =
     include_str!("../../../../../apps/web/src/simple/SimpleAudioStudio.jsx");
-const WEB_AUDIO_STUDIO: &str = include_str!("../../../../../apps/web/src/screens/AudioStudio.jsx");
+// The studio owner was split; keep the same provenance key over every moved source.
+const WEB_AUDIO_STUDIO: &str = concat!(
+    include_str!("../../../../../apps/web/src/screens/AudioStudio.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioAdvancedPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioGenerationSettings.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioPromptComposer.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioReviewPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioVoiceReferencePanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/audioStudioHelpers.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioDraft.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioModelDefaults.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioModelSelection.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioScript.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioSettingsWriter.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioSubmission.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioVoiceLibrary.js"),
+);
 const WEB_UPSCALE_ENGINES: &str = include_str!("../../../../../apps/web/src/upscaleEngines.js");
 const WEB_VIDEO_UPSCALE: &str =
     include_str!("../../../../../apps/web/src/screens/VideoUpscalePanel.jsx");

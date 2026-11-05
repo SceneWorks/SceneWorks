@@ -704,7 +704,7 @@ pub async fn fetch_attached_catalog_images(
 /// Pipeline-only sibling that proves the caller already owns the shared
 /// catalog-processing lease. The fetch-specific compatibility lock remains
 /// held for the complete pass, while the shared lease can span later stages.
-#[cfg(any(test, native_lane))]
+#[cfg(native_lane)]
 pub(crate) async fn fetch_attached_catalog_images_under_processing_lease(
     registry: &CatalogRegistry,
     catalog_id: &str,

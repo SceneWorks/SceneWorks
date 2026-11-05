@@ -788,7 +788,7 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 | `apps/web/src/screens/characterPanels.jsx` | `usePoseController` | The Pose Library form's extras. |
 | `apps/web/src/screens/DocumentStudio.jsx` | `submit` | The interleaved-document lane. |
 | `apps/web/src/imageJobs.js` | `buildUpscaleJobBody` | The standalone upscale job. Registered as emitting **no** `advanced` map, so the day it grows a knob the lint demands a classification. |
-| `apps/web/src/screens/VideoStudio.jsx` | `submit` | The Video Studio's ~20-knob builder. |
+| `apps/web/src/screens/videoStudio/useVideoSubmission.js` | `submit` | The Video Studio's ~20-knob builder. |
 | `apps/web/src/components/editor/useEditorGeneration.js` | `buildBasePayload` | The timeline editor's shared video payload. |
 | `apps/web/src/screens/EditorScreen.jsx` | `extendSelectedClip` | Timeline extend. |
 | `apps/web/src/screens/EditorScreen.jsx` | `replaceSelectedItem` | Timeline replace. |
@@ -846,7 +846,7 @@ Until sc-16113 that list was a decision record and nothing more. It said, in its
 that no video lane could start embedding while its keys sat in it — and nothing enforced that.
 Adding a `write_workflow_chunk` + `embeddable_workflow_share` call to a real video-lane PNG write in
 `crates/sceneworks-worker/src/video_jobs/seedvr2.rs` left every lint green while all of
-`VideoStudio.jsx`'s unclassified keys were dropped from the written file, with nothing anywhere to
+`videoStudio/useVideoSubmission.js`'s unclassified keys were dropped from the written file, with nothing anywhere to
 say so.
 
 **sc-15956 is the story the gate was built for, and it did its job.** All six video builders moved
@@ -951,10 +951,10 @@ what is left.
 
 The back-check that every `ADVANCED_BUILDERS` entry is named by some embedding seam means the two
 halves of a new lane cannot be split across two PRs: classifying the ~15 video keys on their own
-would leave `VideoStudio.jsx::submit` registered with no seam behind it, which fails. Move the
+would leave `videoStudio/useVideoSubmission.js::submit` registered with no seam behind it, which fails. Move the
 builder up and add the `WORKFLOW_WRITE_SEAMS` entry in the same change.
 
-And `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` hard-codes `VideoStudio.jsx::submit`
+And `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` hard-codes `videoStudio/useVideoSubmission.js::submit`
 as its deferred example, so promoting that builder turns that mutation proof into a "did not panic
 as expected" failure. Re-point it at whatever is still deferred; the proof is that *some* deferred
 builder is refused, not that one particular one is. Both surprises are loud rather than silent,

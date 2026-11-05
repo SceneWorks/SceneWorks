@@ -448,7 +448,7 @@ mod tests {
             flux3_layout: Some(&layout),
             ..Default::default()
         };
-        let images = super::super::render_on_surface(
+        let images = crate::image_jobs::render::render_on_surface(
             &generator,
             "scene",
             64,

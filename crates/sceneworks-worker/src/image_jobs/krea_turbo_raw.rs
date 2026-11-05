@@ -1,3 +1,40 @@
+use super::adapters::resolve_adapters;
+#[cfg(not(target_os = "macos"))]
+use super::admit_candle_base;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::conditioning::model_supports_img2img;
+use super::conditioning::non_empty;
+use super::conditioning::pose_entries;
+use super::conditioning::resolve_text_style_gain;
+use super::events::consume_gen_events;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::attach_selected_decoder;
+use super::load_spec::load_spec;
+use super::mlx_model;
+use super::quantization::resolve_quant;
+use super::resolve_seed;
+use super::sampling::resolve_steps;
+use super::stream::drive_gen_items;
+use super::stream::start_cached_gen_stream;
+use super::CancelFlag;
+#[cfg(not(target_os = "macos"))]
+use super::CandleBaseEvidence;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::Progress;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // ---------------------------------------------------------------------------
 // Krea 2 single-phase "turbo-on-Raw" (epic 13879 S3, sc-13883): the Raw base
 // DiT run through the DISTILLED TURBO SAMPLING REGIME when the accelerator-role turbo
@@ -33,12 +70,12 @@
 /// The SceneWorks model id whose LoRA-training/Raw base this accelerator lane runs on. The
 /// accelerator LoRA is family `krea_2`, surfaced under Raw (`krea_2_raw.loraCompatibility.types`
 /// gained `"acceleration"`, sc-13882).
-const KREA_RAW_MODEL_ID: &str = "krea_2_raw";
+pub(super) const KREA_RAW_MODEL_ID: &str = "krea_2_raw";
 
 /// The registered engine id supplying the TURBO sampling regime (fixed mu 1.15 / 8 steps /
 /// CFG-free). Routing a Raw job to this engine is what selects `render_turbo` over `render_base`
 /// in the pinned Krea engine — the whole mechanism this lane relies on.
-const KREA_TURBO_ENGINE_ID: &str = "krea_2_turbo";
+pub(super) const KREA_TURBO_ENGINE_ID: &str = "krea_2_turbo";
 
 /// True when a selected LoRA declares the ACCELERATOR sampling-regime role (`role: accelerator`,
 /// e.g. the builtin `krea2_turbo_accel`, sc-13882). The sampling-regime sibling of
@@ -47,7 +84,7 @@ const KREA_TURBO_ENGINE_ID: &str = "krea_2_turbo";
 /// steps, CFG off). Selecting it auto-switches a Raw job to the turbo regime (this lane). Reads the
 /// marker straight off the payload `loras` entry — it must round-trip via `serializeLora`
 /// (web) / `serialize_job_lora` (rust-api), which forward `role` exactly like `conditioningRole`.
-fn lora_declares_accelerator_role(lora: &Value) -> bool {
+pub(super) fn lora_declares_accelerator_role(lora: &Value) -> bool {
     lora.as_object()
         .and_then(|obj| obj.get("role"))
         .and_then(Value::as_str)
@@ -70,7 +107,7 @@ fn request_has_accelerator_lora(request: &ImageRequest) -> bool {
 /// Turbo-on-Raw img2img is out of scope for this t2i story (sc-13883): the correct S3 behavior is for
 /// img2img reference jobs to keep running normally (Raw regime, LoRA additive), only plain t2i +
 /// accelerator taking the turbo regime.
-fn request_carries_img2img_reference(request: &ImageRequest) -> bool {
+pub(super) fn request_carries_img2img_reference(request: &ImageRequest) -> bool {
     model_supports_img2img(request) && non_empty(&request.reference_asset_id)
 }
 
@@ -85,7 +122,7 @@ fn request_carries_img2img_reference(request: &ImageRequest) -> bool {
 /// [`krea_edit_available`]'s job-shape gate; placed AFTER the edit/control lanes and BEFORE the generic
 /// `mlx_available` arm so it wins over plain Raw t2i (which would run the 52-step true-CFG regime and
 /// never accelerate).
-fn krea_turbo_on_raw_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn krea_turbo_on_raw_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == KREA_RAW_MODEL_ID
         && request.mode != "edit_image"
         && pose_entries(request).is_empty()
@@ -177,7 +214,7 @@ fn krea_turbo_on_raw_generate_one(
 /// [`generate_krea_edit_stream`]'s blocking-thread + streamed-events shape and reuses
 /// [`consume_gen_events`]; differs in the plain t2i shape (no source references) and the engine-id
 /// swap that selects the turbo sampling regime while keeping the Raw base weights.
-async fn generate_krea_turbo_on_raw_stream(
+pub(super) async fn generate_krea_turbo_on_raw_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -261,24 +298,28 @@ async fn generate_krea_turbo_on_raw_stream(
         spec,
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let (out_w, out_h, pixels) = krea_turbo_on_raw_generate_one(
-                    generator,
-                    &prompt,
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    text_style_gain,
-                    preview,
-                    &cancel,
-                    on_progress,
-                )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
-            })
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
+                    }
+                    let (out_w, out_h, pixels) = krea_turbo_on_raw_generate_one(
+                        generator,
+                        &prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        text_style_gain,
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    Ok(Some((seed, out_w, out_h, pixels)))
+                },
+            )
         },
     );
 
