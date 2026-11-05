@@ -1,3 +1,52 @@
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::artifact_resolution::resolved_mlx_artifact_provenance;
+use super::artifact_resolution::resolved_mlx_artifact_tier;
+use super::conditioning::load_reference_image;
+use super::conditioning::parse_poses;
+use super::conditioning::pose_entries;
+use super::conditioning::should_fit_edit_source;
+use super::conditioning::stage_likeness;
+use super::events::consume_gen_events;
+use super::geometry::fit_engine_image;
+use super::mlx_model;
+use super::quantization::resolve_quant;
+use super::resolve_seed;
+use super::sampling::mlx_raw_settings;
+use super::sampling::normalize_sampling_knob;
+use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::resolve_guidance;
+use super::sampling::resolve_negative_prompt;
+use super::sampling::resolve_steps;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_cached_gen_stream;
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::Conditioning;
+use super::ControlKind;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::Progress;
+use super::Quant;
+use super::WeightsSource;
+use crate::advanced;
+use crate::huggingface_snapshot_dir;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // ---------------------------------------------------------------------------
 // Kolors advanced conditioning (macOS, epic 3090): img2img (sc-4765) + the
 // IP-Adapter-Plus reference (sc-4767). Both ride the base `generate_stream`
@@ -31,7 +80,7 @@ const KOLORS_EDIT_STRENGTH: f32 = 0.6;
 /// `strength` is the torch `advanced.strength` (default 0.6) forwarded verbatim to the engine's
 /// `Reference` (img2img init) — its `init_time_step(steps, strength)` matches the diffusers
 /// `KolorsImg2ImgPipeline` start step.
-fn resolve_kolors_edit_init(
+pub(super) fn resolve_kolors_edit_init(
     request: &ImageRequest,
     settings: &Settings,
     project_path: &Path,
@@ -58,8 +107,12 @@ fn resolve_kolors_edit_init(
     } else {
         source
     };
-    let strength =
-        advanced::f32_clamped(&request.advanced, "strength", KOLORS_EDIT_STRENGTH, 0.05..=1.0);
+    let strength = advanced::f32_clamped(
+        &request.advanced,
+        "strength",
+        KOLORS_EDIT_STRENGTH,
+        0.05..=1.0,
+    );
     Ok(Some((image, strength)))
 }
 
@@ -67,7 +120,7 @@ fn resolve_kolors_edit_init(
 /// `referenceAssetId` + the IP scale (`advanced.ipAdapterScale`, default 0.6). Once the IP-Adapter
 /// is installed via [`resolve_kolors_ip_adapter_dir`] + `LoadSpec::with_ip_adapter`, the engine
 /// treats this `Reference` as the image prompt (decoupled cross-attn) rather than an img2img init.
-fn resolve_kolors_ip_reference(
+pub(super) fn resolve_kolors_ip_reference(
     request: &ImageRequest,
     settings: &Settings,
     project_path: &Path,
@@ -86,8 +139,12 @@ fn resolve_kolors_ip_reference(
         reference_id,
         project_path,
     )?;
-    let scale =
-        advanced::f32_clamped(&request.advanced, "ipAdapterScale", KOLORS_IP_SCALE, 0.0..=1.0);
+    let scale = advanced::f32_clamped(
+        &request.advanced,
+        "ipAdapterScale",
+        KOLORS_IP_SCALE,
+        0.0..=1.0,
+    );
     Ok((image, scale))
 }
 
@@ -95,16 +152,21 @@ fn resolve_kolors_ip_reference(
 /// CLIP-ViT-L/14-336 + `ip_adapter_plus_general.safetensors`). Errors loudly if the snapshot or
 /// either required file is absent — the model-download flow fetches the repo (`refs/pr/4`) ahead of
 /// generation, like the base weights; mirrors the SDXL/FLUX IP-Adapter dir resolvers.
-fn resolve_kolors_ip_adapter_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+pub(super) fn resolve_kolors_ip_adapter_dir(settings: &Settings) -> WorkerResult<PathBuf> {
     let missing = || {
         WorkerError::InvalidPayload(format!(
             "Kolors IP-Adapter weights not found (download {KOLORS_IP_ADAPTER_REPO})."
         ))
     };
-    let snapshot = huggingface_snapshot_dir(&settings.data_dir, KOLORS_IP_ADAPTER_REPO)
-        .ok_or_else(missing)?;
-    if !snapshot.join("ip_adapter_plus_general.safetensors").exists()
-        || !snapshot.join("image_encoder").join("model.safetensors").exists()
+    let snapshot =
+        huggingface_snapshot_dir(&settings.data_dir, KOLORS_IP_ADAPTER_REPO).ok_or_else(missing)?;
+    if !snapshot
+        .join("ip_adapter_plus_general.safetensors")
+        .exists()
+        || !snapshot
+            .join("image_encoder")
+            .join("model.safetensors")
+            .exists()
     {
         return Err(missing());
     }
@@ -138,7 +200,7 @@ const KOLORS_POSE_IMG2IMG_STRENGTH: f32 = 1.0;
 /// (the identity) whose base weights resolve. Routed to the combined control stream rather than the
 /// base path. Mirrors the torch `_pose_entries` gate (poses ONLY with a reference). The ControlNet /
 /// IP-Adapter checkpoints are validated in the stream so a missing one errors loudly.
-fn kolors_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn kolors_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == "kolors"
         && !pose_entries(request).is_empty()
         && request
@@ -156,9 +218,12 @@ fn resolve_kolors_controlnet_dir(settings: &Settings) -> WorkerResult<PathBuf> {
             "Kolors pose ControlNet weights not found (download {KOLORS_CONTROLNET_REPO})."
         ))
     };
-    let snapshot = huggingface_snapshot_dir(&settings.data_dir, KOLORS_CONTROLNET_REPO)
-        .ok_or_else(missing)?;
-    if !snapshot.join("diffusion_pytorch_model.safetensors").exists() {
+    let snapshot =
+        huggingface_snapshot_dir(&settings.data_dir, KOLORS_CONTROLNET_REPO).ok_or_else(missing)?;
+    if !snapshot
+        .join("diffusion_pytorch_model.safetensors")
+        .exists()
+    {
         return Err(missing());
     }
     Ok(snapshot)
@@ -273,7 +338,7 @@ fn kolors_control_generate_one(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn kolors_control_raw_settings(
+pub(super) fn kolors_control_raw_settings(
     request: &ImageRequest,
     repo: &str,
     steps: u32,
@@ -295,7 +360,7 @@ fn kolors_control_raw_settings(
 /// (pose ControlNet) + the shared IP-Adapter identity reference + an img2img init from that
 /// reference, in one combined engine pass (sc-5012). Mirrors [`generate_zimage_control_stream`]'s
 /// blocking-thread + streamed-events shape, reusing [`consume_gen_events`].
-async fn generate_kolors_control_stream(
+pub(super) async fn generate_kolors_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -334,8 +399,12 @@ async fn generate_kolors_control_stream(
     let guidance = resolve_guidance(request, &kolors);
     let negative_prompt = resolve_negative_prompt(request, &kolors);
     let control_scale = kolors_pose_control_scale(request);
-    let ip_scale =
-        advanced::f32_clamped(&request.advanced, "ipAdapterScale", KOLORS_IP_SCALE, 0.0..=1.0);
+    let ip_scale = advanced::f32_clamped(
+        &request.advanced,
+        "ipAdapterScale",
+        KOLORS_IP_SCALE,
+        0.0..=1.0,
+    );
     // Curated unified-sampler selection (epic 7114, sc-7432): the combined-pose tier builds its own
     // `GenerationRequest`, so read + N3-normalize the knob against the linked kolors descriptor (the
     // same advertised set base.rs uses for the generic kolors path). N1: unset ⇒ `None` ⇒ native default.
@@ -401,13 +470,7 @@ async fn generate_kolors_control_stream(
     let resolved_artifact = if crate::mlx_fit_gate::manifest_declares_decode_quality_policies(
         &request.model_manifest_entry,
     ) {
-        resolved_mlx_artifact_provenance(
-            request,
-            settings,
-            &repo,
-            &weights_dir,
-            effective_tier,
-        )?
+        resolved_mlx_artifact_provenance(request, settings, &repo, &weights_dir, effective_tier)?
     } else {
         None
     };

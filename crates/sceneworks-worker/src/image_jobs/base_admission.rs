@@ -6,10 +6,24 @@
 //! catalog tier, so they use an explicitly weaker on-disk weights floor. Both checks
 //! run before the handler hands control to `start_*_gen_stream`.
 
-use super::*;
-
+use super::memory::gate_with_evict_reclaim;
+use super::nvfp4_host_eligible;
+use super::nvfp4_selected;
+use super::quantization::gate_tier_key;
+use super::ImageRequest;
+use super::LoadSpec;
+#[cfg(test)]
+use super::WeightsSource;
+use super::NVFP4_TIER;
 use crate::fit_gate::BYTES_PER_GIB;
 use crate::vram_gate::LoadPlan;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 
 /// Sum the exact files/directories a bespoke load consumes without double-counting a
 /// file already covered by a recursively scanned directory.
