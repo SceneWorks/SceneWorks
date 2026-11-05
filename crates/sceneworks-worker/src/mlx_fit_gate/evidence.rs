@@ -720,6 +720,7 @@ pub(super) fn binding_phase(conditioning: u64, denoise: u64, decode: u64) -> Est
 /// this same shape on both backends; every image caller here passes [`MemoryBackend::Mlx`], which
 /// is what the field was hardcoded to before.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn estimate_evidence(
     contract: &MemoryProviderContract,
     backend: gen_core::MemoryBackend,
@@ -782,6 +783,7 @@ pub(super) fn intra_transformer_evicted_bytes(contract: &MemoryProviderContract)
 /// Historical floor arithmetic retained for Candle and compatibility callers. Production MLX
 /// image/video fallbacks use `mlx_fallback_weights_bytes`, which requires exact stream facts.
 /// The shared core implementation owns staged peak clamps and intra-transformer eviction rules.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn estimate_floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
@@ -800,6 +802,7 @@ pub(crate) fn estimate_floor_weights_bytes(
 /// architecture facts (`video_admission::architecture_facts_from_contract`). All three inputs are
 /// ignored unless the composition engages `BoundedTransformerResidency`.
 #[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn image_floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
@@ -829,6 +832,7 @@ pub(crate) fn image_floor_weights_bytes(
 /// MLX fallback weights: only an exact loader inventory can grant streaming credit.
 /// A component marked bounded is still materialized in windows; unknown auxiliary inventories
 /// remain fully charged. Unlike the phase estimator this deliberately keeps later-phase weights.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn mlx_fallback_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
@@ -908,6 +912,7 @@ pub(super) fn floor_weights_bytes(
 
 /// Video callers share the declared parameter builder; the image builder below layers the
 /// provider's decode-quality authority over the same non-decode parameters.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn estimate_floor_smallest_parameters(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],

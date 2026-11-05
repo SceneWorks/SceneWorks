@@ -310,6 +310,7 @@ pub(crate) fn bind_decode_quality_policies_from_manifest(
     })
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn attach_decode_quality_binding(
     mut spec: LoadSpec,
     binding: DecodeQualityPolicyBinding,
@@ -334,6 +335,7 @@ impl MlxRequestPlan {
     /// Bind the already-resolved artifact tier without reinterpreting `LoadSpec::quantize`.
     /// Prepacked Krea q4/q8 artifacts intentionally load with `quantize=None`; this explicit axis is
     /// therefore required for request/evidence identity even when no calibration provenance exists.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn with_resolved_artifact_tier(
         mut self,
         resolved_tier: Option<&str>,
@@ -353,6 +355,7 @@ impl MlxRequestPlan {
         Ok(self)
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn for_spec_and_manifest(
         engine_id: &'static str,
         model_id: &str,
@@ -377,6 +380,7 @@ impl MlxRequestPlan {
     /// Prepared-spec planner used by imported single-file routes. Provider queries and token
     /// validation are fallible contract operations here: failures propagate to the job instead of
     /// being silently converted into an unmeasured/raw-restat estimate.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn try_for_spec_and_manifest(
         engine_id: &'static str,
         model_id: &str,
@@ -947,6 +951,7 @@ pub(super) fn active_component_floors(
     sceneworks_core::memory_contracts::active_component_floors(declared, selected)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
     match tier.quant {
         Some(gen_core::Quant::Q4) => "q4",
