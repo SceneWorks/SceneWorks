@@ -335,6 +335,31 @@ fn architecture_documentation_matrix_covers_every_known_job_type() {
         "ARCHITECTURE.md must have exactly one row for every known JobType"
     );
 
+    let cpu_note = ARCHITECTURE
+        .split_once("<!-- non-gpu-job-types:start -->")
+        .expect("CPU list start")
+        .1
+        .split_once("<!-- non-gpu-job-types:end -->")
+        .expect("CPU list end")
+        .0;
+    let documented_cpu: Vec<_> = cpu_note
+        .split('`')
+        .enumerate()
+        .filter_map(|(index, name)| (index % 2 == 1).then_some(name))
+        .collect();
+    let actual_cpu = sceneworks_core::jobs_store::NON_GPU_JOB_TYPES;
+    let documented_cpu_set: BTreeSet<_> = documented_cpu.iter().copied().collect();
+    let expected_cpu: BTreeSet<_> = actual_cpu.iter().copied().collect();
+    assert_eq!(
+        documented_cpu.len(),
+        documented_cpu_set.len(),
+        "ARCHITECTURE.md has duplicate CPU utility kinds"
+    );
+    assert_eq!(
+        documented_cpu_set, expected_cpu,
+        "ARCHITECTURE.md CPU utility kinds must match NON_GPU_JOB_TYPES"
+    );
+
     assert!(
         !ARCHITECTURE.contains("Proof (file:line)"),
         "architecture anchors must name durable modules/functions, not line numbers"

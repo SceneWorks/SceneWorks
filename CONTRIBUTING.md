@@ -90,28 +90,24 @@ That expands to `npm run check:rust-derived-docs`, `cargo fmt --all -- --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo test`, and `cargo build`.
 Clippy warnings **fail** the build, so keep it clean.
 
-> **Why a node check leads the Rust gate (sc-16268).** `docs/generated/memory-matrix.*` and
-> `docs/generated/tier-integrity.*` are
-> DERIVED from Rust sources (`engines.rs`, `mlx_fit_gate.rs`, `memory_strategy.rs`,
-> `vram_gate.rs`, `image_jobs/instantid.rs`, the memory adapters, `Cargo.toml`), so a
-> Rust-only change can make them stale. Those checks used to live only in `npm run check`,
-> which meant the gate contributors are told to run went green while CI's `parity` lane went
-> red. They run in under a second each; when one fails, regenerate with
-> `npm run generate:memory-matrix` or
-> `npm run generate:tier-integrity` and commit the result.
+> **Derived documentation before the Rust gate.** `check:rust-derived-docs` currently runs
+> `check:tier-integrity` for `docs/generated/tier-integrity.*`. When it fails, regenerate with
+> `npm run generate:tier-integrity` and commit the result. The former memory-matrix and
+> pin-keyed measurement gates were deliberately dismantled; a refactor does not require a
+> new measurement campaign or re-enabling those gates.
 
-**The "neither" build** — CI's `parity` lane runs the Rust clippy on **Linux with
-default features (no `backend-candle`)**. The worker's generation harness
-(`crates/sceneworks-worker/src/image_jobs/base.rs`) is compiled only on macOS **or** the
-`backend-candle` lane, so anything used *only* by that gated code is dead on this "neither
+**The "neither" build** — CI's `parity-rust` lane runs the Rust clippy on **Linux with
+default features (no `backend-candle`)**. The worker's native image route executors
+(`crates/sceneworks-worker/src/image_jobs/dispatch.rs`) and providers are compiled only on macOS
+**or** the `backend-candle` lane, so anything used *only* by that gated code is dead on this "neither
 backend" build and fails `-D warnings`. On Linux/Windows, run the native check with:
 
 ```bash
 npm run rust:check:neither
 ```
 
-On macOS, use the Linux `parity` CI lane for this check: native macOS clippy always
-compiles `base.rs` and cannot exercise the neither backend. The manual command's Docker
+On macOS, use the Linux `parity-rust` CI lane for this check: native macOS clippy always
+includes the MLX image implementation and cannot exercise the neither backend. The manual command's Docker
 wrapper on macOS requires an explicit request to validate in a container. The neither and candle
 checks remain manual local commands; pushes do not run a Rust preflight hook.
 
@@ -127,7 +123,7 @@ checks remain manual local commands; pushes do not run a Rust preflight hook.
 > macOS or off-Mac `backend-candle`. Use `any(test, native_lane)` for helpers with portable tests.
 >
 > `npm run rust:check` on **macOS cannot catch a violation** (there `target_os` is always
-> `macos`, so `base.rs` always compiles) — use the native neither check or the CI parity
+> `macos`, so native image code always compiles) — use the native neither check or the CI `parity-rust`
 > lane. This trap has bitten sc-10404 (`PhaseTimer`) and sc-8390
 > (`run_blocking_with_heartbeat`).
 
@@ -139,9 +135,9 @@ and `generate_candle_video` live — and **neither** `npm run rust:check` (macOS
 
 Two CI lanes cover it, and the split matters:
 
-- **`check.yml`'s `candle` job** typechecks it on a hosted Linux runner, on every PR *and* on
-  the merge queue's speculative merge. It runs the same `rust:check:candle` below, stub `nvcc`
-  and all, so it catches the compile class — a cfg-gated symbol gone missing, a signature
+- **`check.yml`'s `candle` job** typechecks it on a hosted Linux runner, on relevant PRs
+  and main pushes. There is no active merge queue; `merge_group` is a dormant retained
+  trigger. It runs the same `rust:check:candle` below, stub `nvcc` and all, so it catches the compile class — a cfg-gated symbol gone missing, a signature
   changed out from under a caller, dead code under `-D warnings`. This is the fast feedback,
   and it is what stops a candle-side semantic conflict from merging.
 - **`windows-candle.yml`** is the only lane that *runs* candle tests, because `cargo test`
@@ -163,9 +159,9 @@ So the three Rust configurations each have a local command:
 
 | command | configuration | CI lane |
 | --- | --- | --- |
-| `npm run rust:check` | macOS / mlx | `nax-worker` |
-| `npm run rust:check:neither` | Linux, candle **off** | `parity` |
-| `npm run rust:check:candle` | not-macOS, candle **on** | `windows-candle` |
+| `npm run rust:check` | host configuration (macOS includes MLX) | `check.yml` → `parity-rust` on hosted Linux defaults; `macos-mlx.yml` covers native worker validation |
+| `npm run rust:check:neither` | Linux, candle **off** | `check.yml` → `parity-rust` |
+| `npm run rust:check:candle` | not-macOS, candle **on** | `check.yml` → `candle` (typecheck); `windows-candle.yml` runs native candle tests |
 
 > **`rust:check:candle` TYPECHECKS — it does not run the candle tests.** `cargo test` links,
 > which needs a real libcuda, so candle-gated `#[test]`s still execute for the first time on

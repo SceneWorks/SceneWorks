@@ -5360,29 +5360,7 @@ fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), Api
 /// [`sceneworks_core::jobs_store::routing`]'s `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible` +
 /// `VIDEO_MODEL_CAPS`, the candle claim gate, THIS list plus the per-mode required-asset `match`
 /// below it, and the worker's dispatch arm.
-pub(crate) const VIDEO_JOB_MODES: &[&str] = &[
-    "image_to_video",
-    "text_to_video",
-    "first_last_frame",
-    "extend_clip",
-    "video_bridge",
-    "replace_person",
-    // Bernini editing / reference-driven video modes (sc-4703).
-    "video_to_video",
-    "reference_to_video",
-    "reference_video_to_video",
-    // Bernini multi-source-video modes (sc-5425): mv2v (multiple source clips)
-    // and ads2v (source video + reference video + reference images).
-    "multi_video_to_video",
-    "ads2v",
-    // SCAIL-2 standalone character animation (sc-5448 / sc-5449, epic 5439): reference
-    // character image + driving video → animated clip. It was wired end-to-end — catalog
-    // `capabilities`, `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate,
-    // the worker's `generate_scail2` — and offered in the Video Studio, but never added
-    // HERE, so every submission 400'd on "Unsupported video mode" and the mode was
-    // unreachable from the moment it shipped (GH #2074).
-    "animate_character",
-];
+pub(crate) use sceneworks_core::video_request::VIDEO_JOB_MODES;
 
 fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {

@@ -31,6 +31,32 @@ use crate::payload_util::{
     optional_i64, optional_id, parse_u32, string_list,
 };
 
+/// Every wire mode the video enqueue API admits. Model/backend eligibility is
+/// checked separately; MCP reachability compares its emitted modes to this contract.
+pub const VIDEO_JOB_MODES: &[&str] = &[
+    "image_to_video",
+    "text_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+    // Bernini editing / reference-driven video modes (sc-4703).
+    "video_to_video",
+    "reference_to_video",
+    "reference_video_to_video",
+    // Bernini multi-source-video modes (sc-5425): mv2v (multiple source clips)
+    // and ads2v (source video + reference video + reference images).
+    "multi_video_to_video",
+    "ads2v",
+    // SCAIL-2 standalone character animation (sc-5448 / sc-5449, epic 5439): reference
+    // character image + driving video → animated clip. It was wired end-to-end — catalog
+    // `capabilities`, `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate,
+    // the worker's `generate_scail2` — and offered in the Video Studio, but never added
+    // HERE, so every submission 400'd on "Unsupported video mode" and the mode was
+    // unreachable from the moment it shipped (GH #2074).
+    "animate_character",
+];
+
 /// Defaults matching the Python `video_request_from_job` (`.get(key, default)`).
 const DEFAULT_MODE: &str = "image_to_video";
 const DEFAULT_MODEL: &str = "ltx_2_3";
