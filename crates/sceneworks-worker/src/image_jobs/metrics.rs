@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use super::is_dense_te_tier;
 use super::mlx_model;
 use super::nvfp4_host_eligible;

@@ -54,7 +54,6 @@ use super::NVFP4_TIER;
 use crate::advanced;
 use crate::conditioning_fit::ConditioningAdmission;
 use crate::ensure_hf_cached_file;
-use crate::gpu;
 use crate::huggingface_snapshot_dir;
 use crate::resolve_app_managed_model_dir;
 use crate::safe_weight_filename;
