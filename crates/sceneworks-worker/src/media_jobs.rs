@@ -768,6 +768,71 @@ fn parse_ffmpeg_measured_time(stderr: &str) -> Option<f64> {
     })
 }
 
+/// Input stream declarations must survive independently of the diagnostic tail. Shared with the
+/// H3 reference decoder, which must not mistake an output audio stream for source audio.
+#[derive(Default)]
+pub(crate) struct FfmpegInputStreams {
+    input: bool,
+    finished: bool,
+    pub(crate) audio: bool,
+}
+
+impl FfmpegInputStreams {
+    pub(crate) fn read_line(&mut self, line: &str) {
+        if self.finished {
+            return;
+        }
+        if !self.input {
+            if !line.trim_start().starts_with("Input #") {
+                return;
+            }
+            self.input = true;
+        }
+        if line.trim_start().starts_with("Output #") {
+            self.finished = true;
+            return;
+        }
+        self.audio |= line.contains("Stream #") && line.contains(": Audio:");
+    }
+}
+
+#[derive(Default)]
+struct FfmpegProbeMetadata {
+    input_streams: FfmpegInputStreams,
+    saw_header_duration: bool,
+    header_duration: Option<f64>,
+    measured_time: Option<f64>,
+    frame_count: Option<usize>,
+}
+
+impl FfmpegProbeMetadata {
+    fn read_line(&mut self, line: &str) {
+        self.input_streams.read_line(line);
+        // Preserve the old first-header policy, including an initial Duration: N/A.
+        if !self.saw_header_duration && line.contains("Duration:") {
+            self.saw_header_duration = true;
+            self.header_duration = parse_ffmpeg_header_duration(line);
+        }
+        if let Some(time) = parse_ffmpeg_measured_time(line) {
+            self.measured_time = Some(time);
+        }
+        if let Some(frames) = parse_ffmpeg_frame_count(line) {
+            self.frame_count = Some(frames);
+        }
+    }
+}
+
+async fn read_ffmpeg_probe_stderr(
+    pipe: tokio::process::ChildStderr,
+) -> std::io::Result<sceneworks_core::media_process::ParsedStderr<FfmpegProbeMetadata>> {
+    sceneworks_core::media_process::read_stderr_lines(
+        pipe,
+        FfmpegProbeMetadata::default(),
+        FfmpegProbeMetadata::read_line,
+    )
+    .await
+}
+
 /// Measure the seekable duration of `source_path` so [`frame_seek_timestamp`] has a real bound to
 /// clamp against (sc-19549).
 ///
@@ -791,7 +856,13 @@ async fn probe_source_duration(ffmpeg: &str, source_path: &Path) -> WorkerResult
 
     let mut header = Command::new(&program);
     header.args(["-hide_banner", "-i", &path]);
-    let header = run_ffmpeg_probe_command(header).await.map_err(|error| {
+    let header = run_ffmpeg_probe_command_with_stderr(
+        header,
+        ffmpeg_execution_timeout(),
+        read_ffmpeg_probe_stderr,
+    )
+    .await
+    .map_err(|error| {
         if error.kind() == std::io::ErrorKind::TimedOut {
             WorkerError::Io(error)
         } else {
@@ -800,8 +871,7 @@ async fn probe_source_duration(ffmpeg: &str, source_path: &Path) -> WorkerResult
             ))
         }
     })?;
-    let header_stderr = String::from_utf8_lossy(&header.stderr).into_owned();
-    if let Some(duration) = parse_ffmpeg_header_duration(&header_stderr) {
+    if let Some(duration) = header.stderr.data.header_duration {
         return Ok(duration);
     }
 
@@ -817,7 +887,13 @@ async fn probe_source_duration(ffmpeg: &str, source_path: &Path) -> WorkerResult
         "null",
         "-",
     ]);
-    let measured = run_ffmpeg_probe_command(measured).await.map_err(|error| {
+    let measured = run_ffmpeg_probe_command_with_stderr(
+        measured,
+        ffmpeg_execution_timeout(),
+        read_ffmpeg_probe_stderr,
+    )
+    .await
+    .map_err(|error| {
         if error.kind() == std::io::ErrorKind::TimedOut {
             WorkerError::Io(error)
         } else {
@@ -826,12 +902,11 @@ async fn probe_source_duration(ffmpeg: &str, source_path: &Path) -> WorkerResult
             ))
         }
     })?;
-    let measured_stderr = String::from_utf8_lossy(&measured.stderr).into_owned();
-    parse_ffmpeg_measured_time(&measured_stderr).ok_or_else(|| {
+    measured.stderr.data.measured_time.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "Could not determine the duration of {path}: ffmpeg reported neither a container \
              duration nor a measured time. ffmpeg said: {}",
-            ffmpeg_stderr_tail(&measured_stderr)
+            ffmpeg_stderr_tail(&String::from_utf8_lossy(measured.stderr.as_ref()))
         ))
     })
 }
@@ -2557,7 +2632,13 @@ pub(crate) async fn probe_source_frame_count_command_with_timeout(
     command: Command,
     execution_timeout: Duration,
 ) -> WorkerResult<Option<usize>> {
-    let output = match run_ffmpeg_probe_command_with_timeout(command, execution_timeout).await {
+    let output = match run_ffmpeg_probe_command_with_stderr(
+        command,
+        execution_timeout,
+        read_ffmpeg_probe_stderr,
+    )
+    .await
+    {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
             return Err(WorkerError::Io(error));
@@ -2565,8 +2646,7 @@ pub(crate) async fn probe_source_frame_count_command_with_timeout(
         Err(_) => return Ok(None),
     };
     // ffmpeg writes `frame=<N>` progress lines to stderr; the last one is the final decoded count.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(parse_ffmpeg_frame_count(&stderr))
+    Ok(output.stderr.data.frame_count)
 }
 
 /// Extract the last `frame=<N>` counter ffmpeg prints to stderr (the progress token may be padded
@@ -3498,7 +3578,7 @@ pub(crate) async fn mux_audio(
     // centisecond-rounded container header. Failure is typed, never an infinite-pad fallback.
     // Use the ordinary runner with the SAME job context: cancellation/heartbeat failure during
     // this decode kills/reaps its owned child and returns before the audio pass can start.
-    let measured = run_ffmpeg_capture_stderr(
+    let measured = run_ffmpeg_with_stderr(
         vec![
             ffmpeg.to_owned(),
             "-hide_banner".into(),
@@ -3511,9 +3591,10 @@ pub(crate) async fn mux_audio(
             "-".into(),
         ],
         context,
+        read_ffmpeg_probe_stderr,
     )
     .await?;
-    let frames = parse_ffmpeg_frame_count(&measured).ok_or_else(|| {
+    let frames = measured.data.frame_count.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "Could not measure finished timeline picture frames: {}",
             picture_path.display()
@@ -3540,12 +3621,16 @@ async fn source_has_audio_stream(ffmpeg: &str, source_path: &Path) -> bool {
     let program = resolve_probe_program(ffmpeg);
     let mut command = Command::new(&program);
     command.args(["-hide_banner", "-i", &source_path.display().to_string()]);
-    let Ok(output) = run_ffmpeg_probe_command(command).await else {
+    let Ok(output) = run_ffmpeg_probe_command_with_stderr(
+        command,
+        ffmpeg_execution_timeout(),
+        read_ffmpeg_probe_stderr,
+    )
+    .await
+    else {
         return false;
     };
-    String::from_utf8_lossy(&output.stderr)
-        .lines()
-        .any(|line| line.contains("Stream #") && line.contains(": Audio:"))
+    output.stderr.data.input_streams.audio
 }
 
 pub(crate) fn output_dimensions(aspect_ratio: &str, resolution: u32) -> (u32, u32) {
@@ -4057,7 +4142,6 @@ async fn run_ffmpeg_capture_stderr_inner(
     Ok(String::from_utf8_lossy(&stderr).into_owned())
 }
 
-#[cfg(native_lane)]
 pub(crate) async fn run_ffmpeg_with_stderr<G, H, S>(
     args: Vec<String>,
     context: Option<FfmpegContext<'_>>,
@@ -4213,33 +4297,49 @@ mod ffmpeg_cleanup_error_tests {
     }
 }
 
-async fn run_ffmpeg_probe_command(command: Command) -> std::io::Result<std::process::Output> {
-    run_ffmpeg_probe_command_with_timeout(command, ffmpeg_execution_timeout()).await
-}
-
 /// The duration/frame-count probes used to call `Command::output()` directly. Keep their output
 /// contract while exposing the same explicit timeout → kill → reap lifecycle as the shared runner.
+#[cfg(test)]
 pub(crate) async fn run_ffmpeg_probe_command_with_timeout(
     command: Command,
     execution_timeout: Duration,
 ) -> std::io::Result<std::process::Output> {
-    let output = sceneworks_core::media_process::run_command(
+    let output = run_ffmpeg_probe_command_with_stderr(
+        command,
+        execution_timeout,
+        sceneworks_core::media_process::read_stderr_tail,
+    )
+    .await?;
+    Ok(std::process::Output {
+        status: output.status,
+        stdout: Vec::new(),
+        stderr: output.stderr,
+    })
+}
+
+async fn run_ffmpeg_probe_command_with_stderr<G, H, S>(
+    command: Command,
+    execution_timeout: Duration,
+    read_stderr: G,
+) -> std::io::Result<sceneworks_core::media_process::ProcessOutput<(), S>>
+where
+    G: FnOnce(tokio::process::ChildStderr) -> H,
+    H: std::future::Future<Output = std::io::Result<S>> + Send + 'static,
+    S: AsRef<[u8]> + Send + 'static,
+{
+    sceneworks_core::media_process::run_command_with_stderr(
         command,
         None,
         execution_timeout,
         std::future::pending::<std::convert::Infallible>(),
         sceneworks_core::media_process::discard_stdout,
+        read_stderr,
     )
     .await
     .map_err(|error| match error {
         sceneworks_core::media_process::ProcessError::Spawn(error)
         | sceneworks_core::media_process::ProcessError::Io(error) => error,
         sceneworks_core::media_process::ProcessError::Control(never, _) => match never {},
-    })?;
-    Ok(std::process::Output {
-        status: output.status,
-        stdout: Vec::new(),
-        stderr: output.stderr,
     })
 }
 
@@ -4262,6 +4362,112 @@ pub(crate) async fn run_ffmpeg_with_stdin_chunks_and_timeout(
     run_ffmpeg_capture_stderr_inner(args, context, Some(chunks), execution_timeout)
         .await
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod streaming_probe_tests {
+    use super::*;
+
+    #[test]
+    fn structured_probe_metadata_survives_long_diagnostics_and_chunk_boundaries() {
+        let mut log = String::from(
+            "Input #0, mov, from 'source.mp4':\n  Duration: 00:00:12.50, start: 0\n  Stream #0:1: Audio: aac\nOutput #0, null, to '-':\nframe= 300 time=00:00:12.50\r",
+        );
+        log.push_str(&"unrelated diagnostic ".repeat(20_000));
+        log.push_str("\nfinished\n");
+        let limit = sceneworks_core::media_process::STDERR_LIMIT;
+        assert!(log.len() > 4 * limit);
+        assert!(!log[log.len() - limit..].contains("Audio:"));
+        for size in [7, 8192, log.len()] {
+            let mut parser = sceneworks_core::media_process::ParsedStderr::new(
+                FfmpegProbeMetadata::default(),
+                FfmpegProbeMetadata::read_line,
+            );
+            for chunk in log.as_bytes().chunks(size) {
+                parser.push(chunk);
+                assert!(parser.buffered_log_bytes() <= 2 * limit);
+            }
+            let output = parser.complete();
+            assert!(output.as_ref().len() <= limit);
+            assert!(output.data.input_streams.audio);
+            assert_eq!(output.data.header_duration, Some(12.5));
+            assert_eq!(output.data.measured_time, Some(12.5));
+            assert_eq!(output.data.frame_count, Some(300));
+        }
+    }
+
+    #[test]
+    fn structured_probe_preserves_unknown_header_and_rejects_output_only_audio() {
+        let mut metadata = FfmpegProbeMetadata::default();
+        for line in [
+            "Input #0, rawvideo, from 'source':",
+            "Duration: N/A, start: 0",
+            "Output #0, null, to '-':",
+            "Duration: 00:00:99.00, start: 0",
+            "Stream #0:1: Audio: pcm_s16le",
+            "frame= 2 time=00:00:00.08",
+            "frame= 3 time=00:00:00.12",
+        ] {
+            metadata.read_line(line);
+        }
+        assert!(!metadata.input_streams.audio);
+        assert_eq!(metadata.header_duration, None);
+        assert_eq!(metadata.measured_time, Some(0.12));
+        assert_eq!(metadata.frame_count, Some(3));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn source_probes_retain_early_metadata_through_the_shared_process_runner() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::test_env::EnvVars::set(&[("SCENEWORKS_FFMPEG", "")]);
+        let scratch = tempfile::tempdir().unwrap();
+        let program = scratch.path().join("ffmpeg-fixture");
+        let script = r#"#!/bin/sh
+case "$*" in
+  *headerless*)
+    case "$*" in
+      *-map*) printf 'frame= 72 time=00:00:03.00\r' >&2 ;;
+      *) printf 'Input #0, rawvideo:\nDuration: N/A, start: 0\n' >&2 ;;
+    esac ;;
+  *) printf 'Input #0, mov:\nDuration: 00:00:12.50, start: 0\nStream #0:1: Audio: aac\nframe= 300 time=00:00:12.50\r' >&2 ;;
+esac
+i=0
+while [ "$i" -lt 4096 ]; do
+  printf 'unrelated diagnostic after structured metadata\n' >&2
+  i=$((i + 1))
+done
+exit 1
+"#;
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let ffmpeg = program.to_str().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            assert!(source_has_audio_stream(ffmpeg, Path::new("source.mp4")).await);
+            assert_eq!(
+                probe_source_duration(ffmpeg, Path::new("source.mp4"))
+                    .await
+                    .unwrap(),
+                12.5
+            );
+            assert_eq!(
+                probe_source_duration(ffmpeg, Path::new("headerless"))
+                    .await
+                    .unwrap(),
+                3.0
+            );
+            let mut command = Command::new(&program);
+            command.arg("source.mp4");
+            assert_eq!(
+                probe_source_frame_count_command_with_timeout(command, Duration::from_secs(5))
+                    .await
+                    .unwrap(),
+                Some(300)
+            );
+        })
+        .await
+        .expect("bounded metadata-only fixture processes");
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
