@@ -422,7 +422,7 @@ export function EditorScreen() {
       id: `track_audio_${crypto.randomUUID().replaceAll("-", "")}`,
       name: `Audio ${count + 1}`,
       kind: "audio",
-      // Mirrors project_store.rs `default_timeline_tracks` (sc-22712). The server defaults both if
+      // Mirrors project_store/timelines.rs `default_timeline_tracks` (sc-22712). The server defaults both if
       // they are absent; writing them keeps the shape the client saves identical to the one it
       // reads back, so a round trip through the editor never looks like a change.
       role: "sound",

@@ -1,3 +1,5 @@
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::dispatch::VideoRouteOutcome;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -1064,7 +1066,7 @@ pub(super) async fn generate_candle_video(
     request: &VideoRequest,
     project_path: &Path,
     backend: &str,
-) -> WorkerResult<(DecodedVideo, &'static str, Value, Option<Value>)> {
+) -> WorkerResult<VideoRouteOutcome> {
     generate_candle_video_using(
         api,
         settings,
@@ -1096,7 +1098,67 @@ pub(super) async fn generate_candle_video_using(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
-) -> WorkerResult<(DecodedVideo, &'static str, Value, Option<Value>)> {
+) -> WorkerResult<VideoRouteOutcome> {
+    let prepared = prepare_candle_video_route(api, settings, job, request).await?;
+    let (conditioning, replacement_status) = resolve_candle_video_route_conditioning(
+        api,
+        settings,
+        job,
+        request,
+        project_path,
+        &prepared,
+    )
+    .await?;
+    if prepared.engine_id == "svd_xt" {
+        execute_candle_svd_route(
+            api,
+            settings,
+            job,
+            request,
+            backend,
+            prepared,
+            conditioning,
+            replacement_status,
+            load_generator,
+        )
+        .await
+    } else {
+        execute_candle_registry_video_route(
+            api,
+            settings,
+            job,
+            request,
+            backend,
+            prepared,
+            conditioning,
+            replacement_status,
+            load_generator,
+        )
+        .await
+    }
+}
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+struct PreparedCandleVideoRoute {
+    engine_id: &'static str,
+    adapter: &'static str,
+    repo: String,
+    is_mochi: bool,
+    is_ltx: bool,
+    svd_preflight: Option<SvdVramPreflight>,
+    model_dir: PathBuf,
+    wan_quant: Option<Quant>,
+    ltx25_options: Option<super::ltx::Ltx25GenerationOptions>,
+    frames: u32,
+    ltx_gemma_dir: Option<PathBuf>,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn prepare_candle_video_route(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<PreparedCandleVideoRoute> {
     let engine_id = candle_video_engine_id(&request.model).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("{} is not a candle video engine", request.model))
     })?;
@@ -1205,7 +1267,7 @@ pub(super) async fn generate_candle_video_using(
             request.model
         )));
     }
-    let (mut model_dir, wan_quant) = if is_mochi {
+    let (model_dir, wan_quant) = if is_mochi {
         // `resolve_mochi_model_dir` already returned the TIER dir. The VRAM fit gate (sc-12306) runs
         // here, and the quant marker comes back OUT of it — see `mochi_vram_preflight` for why the
         // marker is bundled into the gated return rather than read alongside a free-standing check.
@@ -1255,9 +1317,35 @@ pub(super) async fn generate_candle_video_using(
     } else {
         None
     };
+    Ok(PreparedCandleVideoRoute {
+        engine_id,
+        adapter,
+        repo,
+        is_mochi,
+        is_ltx,
+        svd_preflight,
+        model_dir,
+        wan_quant,
+        ltx25_options,
+        frames,
+        ltx_gemma_dir,
+    })
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn resolve_candle_video_route_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    prepared: &PreparedCandleVideoRoute,
+) -> WorkerResult<(Vec<Conditioning>, Option<Value>)> {
+    let engine_id = prepared.engine_id;
+    let is_ltx = prepared.is_ltx;
     // Resolve the exact native conditioning lane: LTX replace/clip modes are asynchronous; I2V/FLF
     // and the older Wan14/SVD reference lanes use the synchronous helper.
-    let (conditioning, replacement_status) = if is_ltx && request.mode == "replace_person" {
+    Ok(if is_ltx && request.mode == "replace_person" {
         let (conditioning, status) = resolve_ltx_replace_conditioning(
             api,
             settings,
@@ -1278,38 +1366,97 @@ pub(super) async fn generate_candle_video_using(
             resolve_candle_video_conditioning(settings, request, project_path, engine_id)?,
             None,
         )
-    };
+    })
+}
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+// Preserve the existing borrowed job context and one-shot loader ownership.
+#[allow(clippy::too_many_arguments)]
+async fn execute_candle_svd_route(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    backend: &str,
+    prepared: PreparedCandleVideoRoute,
+    conditioning: Vec<Conditioning>,
+    replacement_status: Option<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<VideoRouteOutcome> {
+    let PreparedCandleVideoRoute {
+        engine_id,
+        model_dir,
+        svd_preflight,
+        repo,
+        adapter,
+        ..
+    } = prepared;
     // SVD-XT (sc-5493): image→video only — no prompt / negative / guidance (the engine uses its
     // frame-wise CFG ramp), a model-fixed burst (≤25 frames), the user `fps` as the playback cadence,
     // and the motion micro-conditioning knobs (motion_bucket_id / noise_aug_strength / decode_chunk /
     // conditioning_fps). Mirrors the MLX `generate_svd`; the conditioning is the source `Reference`
     // resolved above.
-    if engine_id == "svd_xt" {
-        let input = candle_svd_input(
-            engine_id,
-            model_dir,
-            conditioning,
-            request,
-            svd_preflight.expect("svd_xt must pass its VRAM preflight before model resolution"),
-        );
-        let mut raw_settings = svd_raw_settings(request);
-        if let Value::Object(map) = &mut raw_settings {
-            map.insert("repo".to_owned(), Value::String(repo.clone()));
-        }
-        let decoded = generate_video_using(
-            api,
-            settings,
-            job,
-            backend,
-            &request.advanced,
-            input,
-            load_generator,
-        )
-        .await?;
-        return Ok((decoded, adapter, raw_settings, replacement_status));
-    }
 
+    let input = candle_svd_input(
+        engine_id,
+        model_dir,
+        conditioning,
+        request,
+        svd_preflight.expect("svd_xt must pass its VRAM preflight before model resolution"),
+    );
+    let mut raw_settings = svd_raw_settings(request);
+    if let Value::Object(map) = &mut raw_settings {
+        map.insert("repo".to_owned(), Value::String(repo.clone()));
+    }
+    let decoded = generate_video_using(
+        api,
+        settings,
+        job,
+        backend,
+        &request.advanced,
+        input,
+        load_generator,
+    )
+    .await?;
+    Ok(VideoRouteOutcome {
+        decoded,
+        adapter,
+        raw_settings,
+        replacement_status,
+    })
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+// Preserve the existing borrowed job context and one-shot loader ownership.
+#[allow(clippy::too_many_arguments)]
+async fn execute_candle_registry_video_route(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    backend: &str,
+    prepared: PreparedCandleVideoRoute,
+    conditioning: Vec<Conditioning>,
+    replacement_status: Option<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<VideoRouteOutcome> {
+    let PreparedCandleVideoRoute {
+        engine_id,
+        adapter,
+        repo,
+        is_mochi,
+        is_ltx,
+        mut model_dir,
+        wan_quant,
+        ltx25_options,
+        frames,
+        ltx_gemma_dir,
+        ..
+    } = prepared;
     let is_wan = engine_id == "wan2_2_ti2v_5b"
         || engine_id == "wan2_2_t2v_14b"
         || engine_id == "wan2_2_i2v_14b";
@@ -1453,7 +1600,12 @@ pub(super) async fn generate_candle_video_using(
         load_generator,
     )
     .await?;
-    Ok((decoded, adapter, raw_settings, replacement_status))
+    Ok(VideoRouteOutcome {
+        decoded,
+        adapter,
+        raw_settings,
+        replacement_status,
+    })
 }
 
 // ---------------------------------------------------------------------------
