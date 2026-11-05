@@ -2415,7 +2415,7 @@ mod tests {
                     loader,
                 );
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                let arm = lane::generate_candle_stream_using(
+                let arm = lane::candle::generate_candle_stream_using(
                     &api,
                     &settings,
                     &job,
@@ -2424,7 +2424,7 @@ mod tests {
                     "cuda",
                     &mut asset_writes,
                     loader,
-                    Arc::new(lane::NativeMossStreamRuntime),
+                    Arc::new(lane::moss::NativeMossStreamRuntime),
                 );
                 let outcome = tokio::time::timeout(std::time::Duration::from_secs(120), arm)
                     .await

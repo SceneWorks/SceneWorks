@@ -281,8 +281,11 @@ pub(super) fn resolve_krea_control_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if super::wants_krea_convrot(request) {
-        return Ok(super::resolve_krea_convrot(request, settings).map(|(root, _)| root));
+    if super::artifact_resolution::wants_krea_convrot(request) {
+        return Ok(
+            super::artifact_resolution::resolve_krea_convrot(request, settings)
+                .map(|(root, _)| root),
+        );
     }
     if let Ok(env_dir) = std::env::var(KREA_CONTROL_BASE_ENV) {
         let p = PathBuf::from(env_dir.trim());
@@ -337,8 +340,8 @@ pub(super) fn krea_control_candle_available(request: &ImageRequest, settings: &S
     is_krea_control_model(&request.model)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
-        && if super::wants_krea_convrot(request) {
-            super::resolve_krea_convrot_dit(settings).is_some()
+        && if super::artifact_resolution::wants_krea_convrot(request) {
+            super::artifact_resolution::resolve_krea_convrot_dit(settings).is_some()
         } else {
             matches!(resolve_krea_control_base(request, settings), Ok(Some(_)))
         }
@@ -699,11 +702,13 @@ pub(super) async fn generate_candle_krea_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    if super::wants_krea_convrot(request) {
-        super::ensure_krea_convrot_base_present(api, settings, job, request).await?;
+    if super::artifact_resolution::wants_krea_convrot(request) {
+        super::artifact_resolution::ensure_krea_convrot_base_present(api, settings, job, request)
+            .await?;
     }
-    let (base, convrot_dit) = if super::wants_krea_convrot(request) {
-        super::resolve_krea_convrot(request, settings).map(|(root, dit)| (root, Some(dit)))
+    let (base, convrot_dit) = if super::artifact_resolution::wants_krea_convrot(request) {
+        super::artifact_resolution::resolve_krea_convrot(request, settings)
+            .map(|(root, dit)| (root, Some(dit)))
     } else {
         resolve_krea_control_base(request, settings)?.map(|root| (root, None))
     }

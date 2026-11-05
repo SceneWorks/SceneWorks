@@ -256,7 +256,11 @@ use super::flux2::MAX_KLEIN_EDIT_REFERENCES;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::flux2_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_comfyui_candle::flux2_comfyui_quant;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::flux2_control_candle_available;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::resolve_flux2_edit_candle_base;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::flux2_edit_candle_available;
 #[cfg(target_os = "macos")]
@@ -324,6 +328,8 @@ use super::krea_control::KREA_CONTROL_OVERLAY_FILE;
 use super::krea_control::KREA_CONTROL_OVERLAY_PIN;
 #[cfg(target_os = "macos")]
 use super::krea_control::KREA_CONTROL_OVERLAY_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle::krea_control_payload_overlay_path;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::krea_control_candle_available;
 #[cfg(target_os = "macos")]
