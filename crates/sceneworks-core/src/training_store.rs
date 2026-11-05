@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection};
@@ -1223,14 +1222,16 @@ const PREPARED_FPS_ERROR: &str = "metadata fps must be a finite number in 0.01..
 /// Header-only admission check for uploaded prepared examples. Runtime-specific validators still
 /// validate the selected workflow and all referenced condition tensors at dry-run/execute time.
 fn validate_ltx_prepared_bundle_header(path: &Path) -> ProjectStoreResult<()> {
-    let header = crate::lora_family::read_safetensors_header(path).map_err(|error| {
-        ProjectStoreError::BadRequest(format!("Invalid LTX prepared safetensors bundle: {error}"))
-    })?;
-    let object = header.as_object().ok_or_else(|| {
-        ProjectStoreError::BadRequest(
-            "Invalid LTX prepared safetensors bundle: header must be an object".to_owned(),
-        )
-    })?;
+    let header = crate::safetensors::read_file_header(
+        path,
+        crate::safetensors::MAX_ADAPTER_HEADER_BYTES,
+        crate::safetensors::HeaderJsonPolicy::Standard,
+    )
+    .map_err(|error| invalid_prepared_bundle(&error.to_string()))?;
+    let object = header
+        .value
+        .as_object()
+        .expect("shared reader requires an object");
     let metadata = object
         .get("__metadata__")
         .and_then(Value::as_object)
@@ -1310,26 +1311,19 @@ fn validate_ltx_prepared_bundle_header(path: &Path) -> ProjectStoreResult<()> {
         }
         next_offset = end;
     }
-    validate_prepared_payload_length(path, next_offset)?;
+    validate_prepared_payload_length(header.file_len, header.data_start, next_offset)?;
     require_prepared_float_tensor(object, "video_latents", &video_shape)?;
     require_prepared_float_tensor(object, "audio_latents", &audio_shape)?;
     Ok(())
 }
 
 fn validate_prepared_payload_length(
-    path: &Path,
+    physical_bytes: u64,
+    data_start: u64,
     declared_data_bytes: u64,
 ) -> ProjectStoreResult<()> {
-    let physical_bytes = fs::metadata(path)?.len();
-    let mut file = fs::File::open(path)?;
-    let mut header_length_bytes = [0_u8; 8];
-    file.read_exact(&mut header_length_bytes).map_err(|_| {
-        invalid_prepared_bundle("file is missing its safetensors header-length prefix")
-    })?;
-    let header_bytes = u64::from_le_bytes(header_length_bytes);
-    let expected_bytes = 8_u64
-        .checked_add(header_bytes)
-        .and_then(|bytes| bytes.checked_add(declared_data_bytes))
+    let expected_bytes = data_start
+        .checked_add(declared_data_bytes)
         .ok_or_else(|| invalid_prepared_bundle("declared payload length overflows"))?;
     if physical_bytes != expected_bytes {
         return Err(invalid_prepared_bundle(&format!(
