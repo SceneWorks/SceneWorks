@@ -61,6 +61,8 @@ use super::cached_lora_hash_for_file;
 use super::cached_model_hash_for_file;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::candle::resolve_candle_lane_inputs;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::candle_strict_control::CandleStrictControl;
 #[cfg(target_os = "macos")]
 use super::checkpoint_plan::checkpoint_plan_adapter;
 #[cfg(target_os = "macos")]
@@ -209,6 +211,24 @@ use super::flux1_control::flux1_control_repo_file;
 use super::flux1_control::FLUX1_CONTROL_FILE;
 #[cfg(target_os = "macos")]
 use super::flux1_control::FLUX1_CONTROL_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::flux1_control_adapter_source_bytes;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::flux1_control_candle_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::flux1_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::is_flux1_control_model;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::FLUX1_CONTROL_CANDLE_BASE_REPO;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::FLUX1_CONTROL_CANDLE_DEFAULT_SCALE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::FLUX1_CONTROL_CANDLE_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::FLUX1_CONTROL_CANDLE_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::FLUX1_CONTROL_CANDLE_REVISION;
 #[cfg(target_os = "macos")]
 use super::flux2::build_edit_conditioning;
 #[cfg(target_os = "macos")]
@@ -258,11 +278,41 @@ use super::flux2_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::flux2_comfyui_candle::flux2_comfyui_quant;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::flux2_control_adapter_source_bytes;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::flux2_control_candle_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::flux2_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::FLUX2_CONTROL_CANDLE_DEFAULT_SCALE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::FLUX2_CONTROL_CANDLE_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::FLUX2_CONTROL_CANDLE_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::FLUX2_CONTROL_CANDLE_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::flux2_control_candle_available;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::flux2_edit_adapter_source_bytes;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::flux2_edit_candle_mode;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::flux2_edit_candle_reference_ids;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::flux2_edit_candle_repo;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::is_flux2_edit_candle_model;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::flux2_edit_candle::resolve_flux2_edit_candle_base;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::flux2_edit_candle_available;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux_ipadapter::FLUX_IPADAPTER_ADAPTER_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux_ipadapter::FLUX_IPADAPTER_ENCODER_REVISION;
 #[cfg(target_os = "macos")]
 use super::geometry::fit_engine_image;
 #[cfg(native_lane)]
@@ -300,6 +350,18 @@ use super::instantid::PULID_MLX_REVISION;
 use super::iris_upscale_overlay;
 #[cfg(target_os = "macos")]
 use super::kolors::kolors_control_available;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::kolors_control_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::kolors_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::KOLORS_CONTROL_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::KOLORS_CONTROL_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::KOLORS_CONTROL_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_ipadapter::KOLORS_IPADAPTER_REVISION;
 #[cfg(target_os = "macos")]
 use super::krea_control::krea_control_calibration_provenance;
 #[cfg(target_os = "macos")]
@@ -329,7 +391,15 @@ use super::krea_control::KREA_CONTROL_OVERLAY_PIN;
 #[cfg(target_os = "macos")]
 use super::krea_control::KREA_CONTROL_OVERLAY_REVISION;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle::krea_control_overlay_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::krea_control_candle::krea_control_payload_overlay_path;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle::krea_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle::resolve_krea_control_base;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle::KREA_CONTROL_OVERLAY_REVISION;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::krea_control_candle_available;
 #[cfg(target_os = "macos")]
@@ -346,7 +416,7 @@ use super::krea_imported::krea_imported_available;
 use super::krea_imported::krea_imported_base_tier_complete;
 #[cfg(native_lane)]
 use super::krea_imported::krea_imported_conditioning;
-#[cfg(native_lane)]
+#[cfg(target_os = "macos")]
 use super::krea_imported::krea_imported_control_available;
 #[cfg(native_lane)]
 use super::krea_imported::krea_imported_img2img_requested;
@@ -470,6 +540,16 @@ use super::pulid::PULID_BISENET_FILE;
 use super::pulid::PULID_EVA_FILE;
 #[cfg(target_os = "macos")]
 use super::pulid::PULID_MLX_REPO;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::pulid_candle::pulid_candle_revision;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::pulid_candle::PULID_CANDLE_ADAPTER_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::pulid_candle::PULID_CANDLE_FACE_REPO;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::pulid_candle::PULID_CANDLE_FACE_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::pulid_candle::PULID_CANDLE_MLX_REVISION;
 #[cfg(target_os = "macos")]
 use super::quantization::mlx_load_quant_for_resolved_artifact;
 #[cfg(target_os = "macos")]
@@ -500,6 +580,22 @@ use super::qwen::QWEN_CONTROL_ENGINE_ID;
 use super::qwen::QWEN_LIGHTNING_LORA_REVISION;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::qwen_comfyui_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::qwen_control_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::qwen_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::QWEN_CONTROL_DEFAULT_REPO;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::QWEN_CONTROL_DEFAULT_SCALE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::QWEN_CONTROL_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::QWEN_CONTROL_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::QWEN_CONTROL_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_edit_candle::QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::qwen_edit_candle_available;
 use super::reattach_alpha;
@@ -606,6 +702,8 @@ use super::sdxl_imported::SDXL_CLIP_BIGG_REVISION;
 use super::sdxl_imported::SDXL_CLIP_L_REPO;
 #[cfg(native_lane)]
 use super::sdxl_imported::SDXL_CLIP_L_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::sdxl_ipadapter::SDXL_IPADAPTER_REVISION;
 #[cfg(target_os = "macos")]
 use super::sensenova::resolve_sensenova_img_cfg;
 #[cfg(target_os = "macos")]
@@ -691,6 +789,40 @@ use super::zimage::ZIMAGE_CONTROL_FILE;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::zimage_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::is_zimage_base_model;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::is_zimage_control_model;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_control_base_default_repo;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_control_guidance;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_control_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_control_steps;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_strict_control_test_cfg;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_BASE_DEFAULT_STEPS;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_BASE_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_BASE_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_DEFAULT_SCALE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_DEFAULT_STEPS;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::zimage_identity_candle_strength;
 #[cfg(native_lane)]
 use super::AdapterKind;
@@ -749,7 +881,7 @@ use crate::safe_download_dir;
 use crate::strip_jsonc_comments;
 #[cfg(native_lane)]
 use crate::ApiClient;
-#[cfg(native_lane)]
+#[cfg(target_os = "macos")]
 use crate::Duration;
 #[cfg(native_lane)]
 use crate::JobSnapshot;
@@ -766,6 +898,7 @@ use crate::WorkerError;
 #[cfg(native_lane)]
 use crate::WorkerResult;
 use crate::INSTALL_MARKER;
+#[cfg(native_lane)]
 use sceneworks_core::checkpoint_import::CheckpointContainerV1;
 use serde_json::json;
 use sha2::Digest;
@@ -30113,10 +30246,18 @@ mod qwen_image_2_1_tiers {
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         {
             let request = request(&entry, None);
-            let gate = super::super::gate_tier_key(false, &dir, &request.advanced, &entry, false);
+            let gate = super::super::quantization::gate_tier_key(
+                false,
+                &dir,
+                &request.advanced,
+                &entry,
+                false,
+            );
             assert_eq!(gate, "bf16", "the VRAM gate prices the tier that loads");
             assert_eq!(
-                super::super::candle_quant_for_resolved_tier(&request, gate, &dir, true, false),
+                super::super::memory::candle_quant_for_resolved_tier(
+                    &request, gate, &dir, true, false
+                ),
                 (None, None),
                 "Candle never sends LoadSpec.quantize against the dense root"
             );

@@ -16,6 +16,7 @@ use super::sdxl_imported::resolve_sdxl_ldm_tokenizer_root_cache_only;
 use super::stream::drive_gen_items;
 #[cfg(not(target_os = "macos"))]
 use super::stream::start_cached_gen_stream_after_cold_admission;
+#[cfg(target_os = "macos")]
 use super::stream::start_cached_gen_stream_with_request_state;
 #[cfg(not(target_os = "macos"))]
 use super::stream::ColdLoadAdmission;

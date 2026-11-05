@@ -5,10 +5,6 @@ use super::super::memory::{
     capability_downtier_floor, krea_turbo_capability_reject_message, krea_turbo_memory_route,
     krea_unverified_resident_decision,
 };
-use super::super::tier_quality_rank;
-use super::choose_downtier;
-use super::DowntierPick;
-use super::TierFit;
 use serde_json::{Map, Value};
 
 fn historical_builtin_krea_turbo_manifest() -> Map<String, Value> {
