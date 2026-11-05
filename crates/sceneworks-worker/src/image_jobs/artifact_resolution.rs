@@ -14,6 +14,8 @@ use super::uses_standard_tier_layout;
 use super::ImageRequest;
 use super::ResolvedModel;
 use crate::huggingface_snapshot_dir;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use crate::model_jobs::huggingface_pinned_snapshot_dir;
 use crate::resolve_app_managed_model_dir;
 use crate::ApiClient;
 use crate::JobSnapshot;
@@ -1477,7 +1479,7 @@ const KREA_CONVROT_DIT_FILE: &str = "krea2_turbo_int8_convrot.safetensors";
 /// off macOS and the worker only advertises the `int8_convrot` capability on the candle lane, so this
 /// never fires on the MLX path even if a stray flag arrives. Confined to `krea_2_turbo`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn wants_krea_convrot(request: &ImageRequest) -> bool {
+pub(super) fn wants_krea_convrot(request: &ImageRequest) -> bool {
     request.model == "krea_2_turbo"
         && request
             .advanced
@@ -1526,7 +1528,7 @@ pub(super) fn resolve_krea_convrot(
 /// it can claim the Krea control lane before the shared bf16 tokenizer/TE/VAE surface is fetched on
 /// demand; generation then calls [`ensure_krea_convrot_base_present`] before resolving the full pair.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn resolve_krea_convrot_dit(settings: &Settings) -> Option<PathBuf> {
+pub(super) fn resolve_krea_convrot_dit(settings: &Settings) -> Option<PathBuf> {
     huggingface_snapshot_dir(&settings.data_dir, KREA_CONVROT_REPO)
         .map(|root| root.join(KREA_CONVROT_DIT_FILE))
         .filter(|file| file.is_file())

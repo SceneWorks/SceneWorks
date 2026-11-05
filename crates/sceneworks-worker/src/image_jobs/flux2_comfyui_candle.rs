@@ -210,7 +210,7 @@ pub(super) fn prepare_flux2_comfyui_sources(
     if super::request_is_checkpoint_plan_backed(request) {
         return Ok(None);
     }
-    let Some(_descriptor) = super::imported_generate_request_supported(
+    let Some(_descriptor) = super::routing::imported_generate_request_supported(
         request,
         "flux2",
         gen_core::ImportedModelSource::ComfyUiTree,
@@ -237,7 +237,7 @@ pub(super) fn prepare_flux2_comfyui_sources(
         }
     };
     paths.quant = quant;
-    paths.adapters = super::resolve_prepared_adapters(request, settings)?;
+    paths.adapters = super::adapters::resolve_prepared_adapters(request, settings)?;
     Ok(Some(paths))
 }
 
@@ -279,7 +279,8 @@ pub(super) fn flux2_comfyui_quant(request: &ImageRequest) -> WorkerResult<Quant>
             .get(*key)
             .is_some_and(|value| !value.is_null())
     });
-    let (selected, _) = super::imported_model_quant(request, &descriptor, "ComfyUI FLUX.2")?;
+    let (selected, _) =
+        super::krea_imported::imported_model_quant(request, &descriptor, "ComfyUI FLUX.2")?;
     match selected {
         Some(Quant::Q4) => Ok(Quant::Q4),
         Some(Quant::Q8) => Ok(Quant::Q8),

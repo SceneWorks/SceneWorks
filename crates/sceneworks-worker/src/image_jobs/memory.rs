@@ -510,9 +510,9 @@ pub(super) fn verified_only_memory_family_label(engine_id: &str) -> Option<&'sta
 /// into its ordinary progress message rather than creating a dialog, toast, or separate UI surface.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct AutoTierStreamingDisclosure {
-    tier: String,
-    measured_materialization_ms_per_block: Option<f64>,
-    measured_materialization_ms_per_step: Option<u64>,
+    pub(super) tier: String,
+    pub(super) measured_materialization_ms_per_block: Option<f64>,
+    pub(super) measured_materialization_ms_per_step: Option<u64>,
 }
 
 pub(super) const AUTO_TIER_STREAMING_DISCLOSURE_KEY: &str = "memoryStrategyDisclosure";

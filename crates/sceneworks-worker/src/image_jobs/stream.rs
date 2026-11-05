@@ -592,7 +592,7 @@ pub(super) struct ColdLoadAdmission<A> {
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 impl<A> ColdLoadAdmission<A> {
-    fn new(incoming_reclaimable_weight_bytes: u64, admit: A) -> Self {
+    pub(super) fn new(incoming_reclaimable_weight_bytes: u64, admit: A) -> Self {
         Self {
             incoming_reclaimable_weight_bytes,
             admit,

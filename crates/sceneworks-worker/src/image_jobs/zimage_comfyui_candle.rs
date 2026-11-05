@@ -161,13 +161,13 @@ pub(super) fn prepare_zimage_comfyui_sources(
     if super::request_is_checkpoint_plan_backed(request) {
         return Ok(None);
     }
-    let descriptor = super::imported_generate_request_supported(
+    let descriptor = super::routing::imported_generate_request_supported(
         request,
         "z-image",
         gen_core::ImportedModelSource::ComfyUiTree,
     );
     if descriptor.as_ref().is_none_or(|descriptor| {
-        super::imported_model_quant(request, descriptor, "ComfyUI Z-Image").is_err()
+        super::krea_imported::imported_model_quant(request, descriptor, "ComfyUI Z-Image").is_err()
     }) {
         return Ok(None);
     }
@@ -187,7 +187,7 @@ pub(super) fn prepare_zimage_comfyui_sources(
             paths
         }
     };
-    paths.adapters = super::resolve_prepared_adapters(request, settings)?;
+    paths.adapters = super::adapters::resolve_prepared_adapters(request, settings)?;
     Ok(Some(paths))
 }
 
@@ -347,13 +347,14 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", ZIMAGE_COMFYUI_DEFAULT_STEPS, 1..=50);
     let raw_settings = zimage_comfyui_raw_settings(request, steps, adapter_count);
-    let conditioning = super::resolve_img2img_init_generic(request, settings, project_path)?
-        .map(|(image, strength)| Conditioning::Reference {
-            image,
-            strength: Some(strength),
-        })
-        .into_iter()
-        .collect::<Vec<_>>();
+    let conditioning =
+        super::conditioning::resolve_img2img_init_generic(request, settings, project_path)?
+            .map(|(image, strength)| Conditioning::Reference {
+                image,
+                strength: Some(strength),
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
 
     // Per-image work items retain the exact resolved conditioning beside each seed/prompt.
     let work: Vec<(i64, String, Vec<Conditioning>)> = (0..request.count as usize)
