@@ -1,14 +1,39 @@
-use super::{
-    admit_conditioning_paths, apply_candle_image_load_shape, candle_artifact_path_matches,
-    candle_certified_artifact_path, candle_pinned_hf_artifact_path, consume_gen_events,
-    drive_gen_items_scored, load_reference_image, non_empty, resolve_advanced_or_manifest_f32_with,
-    resolve_advanced_or_manifest_u32_with, resolve_character_image_likeness_source, resolve_seed,
-    stage_likeness, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, IpAdapterFlux,
-    IpAdapterFluxPaths, IpAdapterFluxRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
-    Value, WorkerError, WorkerResult,
-};
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
-use super::{resolve_app_managed_model_dir, standard_tier_subdir, DownloadContext};
+use super::admit_conditioning_paths;
+use super::conditioning::load_reference_image;
+use super::conditioning::non_empty;
+use super::conditioning::resolve_character_image_likeness_source;
+use super::conditioning::stage_likeness;
+use super::events::consume_gen_events;
+use super::load_policy::apply_candle_image_load_shape;
+use super::load_spec::candle_artifact_path_matches;
+use super::load_spec::candle_certified_artifact_path;
+use super::load_spec::candle_pinned_hf_artifact_path;
+use super::resolve_seed;
+use super::sampling::resolve_advanced_or_manifest_f32_with;
+use super::sampling::resolve_advanced_or_manifest_u32_with;
+use super::standard_tier_subdir;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_gen_stream;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::IpAdapterFlux;
+use super::IpAdapterFluxPaths;
+use super::IpAdapterFluxRequest;
+use crate::advanced;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 // Candle (Windows/CUDA) FLUX XLabs IP-Adapter reference route (sc-5872, epic 5480) — reference-image

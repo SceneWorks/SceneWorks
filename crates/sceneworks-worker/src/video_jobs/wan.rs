@@ -2315,9 +2315,14 @@ const VIDEO_STALL_GRACE: Duration = Duration::from_secs(60);
 
 /// The effective forward-progress stall timeout for one resolved engine input.
 #[cfg(native_lane)]
-fn video_stall_timeout(input: &VideoGenInput) -> VideoStallTimeoutPolicy {
-    video_stall_timeout_policy(
-        std::env::var("SCENEWORKS_VIDEO_STALL_SECS").ok().as_deref(),
+fn video_stall_timeout(input: &VideoGenInput) -> WorkerResult<VideoStallTimeoutPolicy> {
+    let raw_override = std::env::var("SCENEWORKS_VIDEO_STALL_SECS");
+    sceneworks_core::env_util::env_u64_any_with(&["SCENEWORKS_VIDEO_STALL_SECS"], 0, true, |_| {
+        raw_override.clone()
+    })
+    .map_err(WorkerError::InvalidPayload)?;
+    Ok(video_stall_timeout_policy(
+        raw_override.ok().as_deref(),
         input.engine_id,
         input.width,
         input.height,
@@ -2329,7 +2334,7 @@ fn video_stall_timeout(input: &VideoGenInput) -> VideoStallTimeoutPolicy {
             reference_image_short_edge: input.reference_image_short_edge,
             reference_image_resize_mode: input.reference_image_resize_mode,
         },
-    )
+    ))
 }
 
 /// Resolve the forward-progress timeout without reading process-global state (the test seam).
@@ -2740,7 +2745,7 @@ pub(super) async fn generate_video_using(
     // identity alone, whether or not the provider's compile closure has moved since capture.
 
     let cancel = CancelFlag::new();
-    let stall_policy = video_stall_timeout(&input);
+    let stall_policy = video_stall_timeout(&input)?;
     let stall_timeout = stall_policy.timeout;
     let log_engine_id = input.engine_id;
     tracing::info!(

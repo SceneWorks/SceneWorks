@@ -1,12 +1,28 @@
-use super::huggingface_snapshot_dir;
-use super::{
-    consume_gen_events, drive_gen_items, prepare_cached_candle_base_floor,
-    prepare_manifest_text_encoder_with_file_pins, resolve_advanced_or_manifest_u32, resolve_seed,
-    start_cached_gen_stream_after_cold_admission, ApiClient, ColdLoadAdmission, GenerationOutput,
-    GenerationRequest, ImageRequest, JobSnapshot, JsonObject, LoadSpec, Path, PathBuf,
-    PreparedAdapters, PreparedFileDispatch, Settings, Value, WeightsSource, WorkerError,
-    WorkerResult,
-};
+use super::adapters::PreparedAdapters;
+use super::events::consume_gen_events;
+use super::load_spec::prepare_manifest_text_encoder_with_file_pins;
+use super::prepare_cached_candle_base_floor;
+use super::resolve_seed;
+use super::routing::PreparedFileDispatch;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::stream::drive_gen_items;
+use super::stream::start_cached_gen_stream_after_cold_admission;
+use super::stream::ColdLoadAdmission;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::WeightsSource;
+use crate::huggingface_snapshot_dir;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 // Candle (Windows/CUDA) in-place ComfyUI Qwen-Image txt2img route (epic 10451 Phase 2b, sc-10670 +
@@ -166,13 +182,14 @@ pub(super) fn prepare_qwen_comfyui_sources(
     if super::request_is_checkpoint_plan_backed(request) {
         return Ok(None);
     }
-    let descriptor = super::imported_generate_request_supported(
+    let descriptor = super::routing::imported_generate_request_supported(
         request,
         "qwen-image",
         gen_core::ImportedModelSource::ComfyUiTree,
     );
     if descriptor.as_ref().is_none_or(|descriptor| {
-        super::imported_model_quant(request, descriptor, "ComfyUI Qwen-Image").is_err()
+        super::krea_imported::imported_model_quant(request, descriptor, "ComfyUI Qwen-Image")
+            .is_err()
     }) {
         return Ok(None);
     }
@@ -191,7 +208,7 @@ pub(super) fn prepare_qwen_comfyui_sources(
             paths
         }
     };
-    paths.adapters = super::resolve_prepared_adapters(request, settings)?;
+    paths.adapters = super::adapters::resolve_prepared_adapters(request, settings)?;
     Ok(Some(paths))
 }
 

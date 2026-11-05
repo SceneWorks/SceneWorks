@@ -13309,10 +13309,7 @@ fn model_size_estimation_disabled(_state: &AppState) -> bool {
     {
         return disabled;
     }
-    matches!(
-        std::env::var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE").as_deref(),
-        Ok("1" | "true" | "TRUE" | "yes" | "YES")
-    )
+    sceneworks_core::env_util::env_flag("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", false)
 }
 
 pub(crate) async fn estimate_huggingface_download_size(
