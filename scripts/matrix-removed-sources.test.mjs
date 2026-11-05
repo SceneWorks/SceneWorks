@@ -3,8 +3,9 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { rustFacadeSources, rustProductionSources } from "./lib/rust-facade-source.mjs";
 import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
 
 /**
@@ -50,9 +51,22 @@ async function matrixFixture(t) {
     "scripts/lib/file-sha256.mjs",
     "scripts/lib/source-revision.mjs",
     "scripts/lib/manifest-memory-declarations.mjs",
+    "scripts/lib/rust-facade-source.mjs",
+    "scripts/lib/rust-source-slices.mjs",
   ];
   const files = new Set([...modules, ...Object.values(SOURCE_PATHS), ...REMOVED_SOURCES,
     "docs/generated/memory-matrix.json"]);
+  // The generator reads authored sibling modules after structural splits. Copy the same source
+  // closure into this disposable fixture; the probe still mutates only its seven retired inputs.
+  const repository = new URL("../", import.meta.url);
+  for (const [name, relative] of Object.entries(SOURCE_PATHS)) {
+    if (!relative.endsWith(".rs")) continue;
+    const entry = new URL(relative, repository);
+    const sources = name === "mlxFitGate"
+      ? await rustProductionSources(entry, new Set(), true)
+      : await rustFacadeSources(entry);
+    for (const source of sources) files.add(path.relative(fileURLToPath(repository), source.path));
+  }
   for (const relative of files) {
     const destination = path.join(root, relative);
     await mkdir(path.dirname(destination), { recursive: true });
