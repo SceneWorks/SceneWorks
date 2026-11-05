@@ -1,3 +1,50 @@
+#[cfg(not(target_os = "macos"))]
+use super::adapters::resolve_adapters;
+#[cfg(not(target_os = "macos"))]
+use super::admit_candle_base_floor_with_resident_overlay;
+use super::artifact_resolution::model_repo;
+use super::conditioning::load_reference_image;
+use super::events::consume_gen_events;
+#[cfg(not(target_os = "macos"))]
+use super::load_spec::apply_declared_candle_image_load_shape;
+#[cfg(not(target_os = "macos"))]
+use super::load_spec::candle_certified_load_spec;
+use super::load_spec::load_spec;
+#[cfg(not(target_os = "macos"))]
+use super::memory::candle_base_memory_request_mode;
+#[cfg(not(target_os = "macos"))]
+use super::memory::optimized_shared_memory_context;
+use super::mlx_model;
+use super::resolve_seed;
+use super::sampling::resolve_guidance;
+use super::sampling::resolve_negative_prompt;
+use super::sampling::resolve_steps;
+use super::stream::drive_gen_items;
+use super::stream::start_cached_gen_stream;
+#[cfg(not(target_os = "macos"))]
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::Conditioning;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::Progress;
+use super::Quant;
+#[cfg(not(target_os = "macos"))]
+use crate::huggingface_snapshot_dir;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+#[cfg(not(target_os = "macos"))]
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // ---------------------------------------------------------------------------
 // Bernini still-image companion (macOS, epic 4699 / sc-5424): the full Qwen2.5-VL semantic planner +
 // Wan2.2-A14B renderer producing a SINGLE image. The Bernini engine descriptor is `Modality::Both`,
@@ -30,7 +77,7 @@ const BERNINI_IMAGE_ADAPTER: &str = "mlx_bernini";
 /// path because that path leaves `frames`/`video_mode` unset, which the engine would treat as a
 /// (multi-frame) video request — so Bernini stills must use this dedicated path.
 #[cfg(target_os = "macos")]
-fn bernini_image_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn bernini_image_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == "bernini_image"
         && crate::video_jobs::bernini::resolve_bernini_model_dir(settings).is_ok()
 }
@@ -40,7 +87,7 @@ fn bernini_image_available(request: &ImageRequest, settings: &Settings) -> bool 
 /// (`resolve_vit_mode`/`task_to_vit_mode`); both still tasks resolve to `vae_txt_vit_wapg`. Shared by
 /// the MLX and candle (sc-10996) still lanes — the engine task string is backend-neutral.
 #[cfg(native_lane)]
-fn bernini_image_engine_task(mode: &str) -> &'static str {
+pub(super) fn bernini_image_engine_task(mode: &str) -> &'static str {
     if mode == "edit_image" {
         "i2i"
     } else {
@@ -53,7 +100,7 @@ fn bernini_image_engine_task(mode: &str) -> &'static str {
 /// users with ample RAM). Mirrors the video path's [`crate::video_jobs::resolve_bernini_quant`] (Q4
 /// default, not the generic image `resolve_quant`'s Q8 default — the snapshot is ~93 GB at bf16).
 #[cfg(target_os = "macos")]
-fn resolve_bernini_image_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
+pub(super) fn resolve_bernini_image_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
     match crate::payload::tier_for_bits(request.quant_bits(), "q4") {
         "bf16" => (None, None),
         "q4" => (Some(Quant::Q4), Some(4)),
@@ -103,7 +150,7 @@ fn bernini_image_raw_settings(
 // build would otherwise see it as dead code under `-D warnings`.
 #[allow(clippy::too_many_arguments)]
 #[cfg(any(target_os = "macos", test))]
-fn bernini_image_generate_one(
+pub(super) fn bernini_image_generate_one(
     generator: &dyn Generator,
     prompt: &str,
     negative_prompt: Option<String>,
@@ -214,7 +261,7 @@ fn bernini_image_generate_one_with_memory(
 /// special-casing (standard guidance family), and no reference-fit (the engine resizes the source
 /// internally).
 #[cfg(target_os = "macos")]
-async fn generate_bernini_image_stream(
+pub(super) async fn generate_bernini_image_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -289,7 +336,9 @@ async fn generate_bernini_image_stream(
     let raw_settings =
         bernini_image_raw_settings(request, &repo, steps, quant_bits, guidance, task);
     let count = request.count as usize;
-    let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
+    let seeds: Vec<i64> = (0..count)
+        .map(|index| resolve_seed(request, index))
+        .collect();
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
 
@@ -360,7 +409,7 @@ async fn generate_bernini_image_stream(
 /// `mlx_bernini` label (parity with `candle_adapter_label`, though Bernini's bespoke stream passes it
 /// directly rather than through that generic map).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_BERNINI_IMAGE_ADAPTER: &str = "candle_bernini";
+pub(super) const CANDLE_BERNINI_IMAGE_ADAPTER: &str = "candle_bernini";
 
 /// The turnkey candle Bernini snapshot repo (sc-11003): the converted full-Bernini tree (`transformer/`
 /// `transformer_2/` `text_encoder/` `vae/` `tokenizer/` `mllm/` `connector/` `vit_decoder/`) the
@@ -370,7 +419,7 @@ const CANDLE_BERNINI_IMAGE_ADAPTER: &str = "candle_bernini";
 const CANDLE_BERNINI_REPO: &str = "SceneWorks/bernini";
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn bernini_adapter_resident_bytes(
+pub(crate) fn bernini_adapter_resident_bytes(
     adapters: &[AdapterSpec],
     quant: Option<Quant>,
 ) -> WorkerResult<u64> {
@@ -381,11 +430,7 @@ pub(super) fn bernini_adapter_resident_bytes(
     let expert_bytes = |expert| {
         let stack: Vec<_> = adapters
             .iter()
-            .filter(|adapter| {
-                adapter
-                    .moe_expert
-                    .is_none_or(|target| target == expert)
-            })
+            .filter(|adapter| adapter.moe_expert.is_none_or(|target| target == expert))
             .cloned()
             .collect();
         gen_core::adapter_stack_resident_bytes(&stack, gen_core::AdapterResidencyMode::Additive)
@@ -407,7 +452,7 @@ pub(super) fn bernini_adapter_resident_bytes(
 /// load rather than silently stubbing, and the routing decision needs no staged 168 GB weights. Both
 /// t2i and i2i (`edit_image`) route here; the stream enforces the i2i source (`sourceAssetId`).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn bernini_image_candle_available(request: &ImageRequest) -> bool {
+pub(super) fn bernini_image_candle_available(request: &ImageRequest) -> bool {
     request.model == "bernini_image"
 }
 
@@ -424,7 +469,7 @@ const CANDLE_BERNINI_TIERS: &[&str] = &["bf16", "q8", "q4"];
 /// reports the precise gap). Used both for a tier subfolder (`<root>/bf16/transformer`) and a legacy
 /// flat snapshot (`<root>/transformer`).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_bernini_tree_present(dir: &Path) -> bool {
+pub(super) fn candle_bernini_tree_present(dir: &Path) -> bool {
     dir.join("transformer").is_dir()
 }
 
@@ -432,7 +477,7 @@ fn candle_bernini_tree_present(dir: &Path) -> bool {
 /// subfolders (`bf16/`|`q8/`|`q4/` each with a `transformer/` tree) or is a legacy flat tree
 /// (`transformer/` AT root). The env/managed sentinels accept either shape.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_bernini_snapshot_ok(root: &Path) -> bool {
+pub(super) fn candle_bernini_snapshot_ok(root: &Path) -> bool {
     candle_bernini_tree_present(root)
         || CANDLE_BERNINI_TIERS
             .iter()
@@ -481,7 +526,7 @@ pub(crate) fn resolve_candle_bernini_model_dir(settings: &Settings) -> WorkerRes
 /// validated baseline, so a packed tier is strictly opt-in (`mlxQuantize:4`|`:8`). `<= 0` also pins
 /// bf16.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
+pub(super) fn candle_bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
     match crate::payload::tier_for_bits(bits, "bf16") {
         "bf16" => &["bf16", "q8", "q4"],
         "q4" => &["q4", "q8", "bf16"],
@@ -496,7 +541,7 @@ fn candle_bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
     all(test, target_os = "macos"),
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn candle_bernini_tier_quant(tier: &str) -> Option<Quant> {
+pub(super) fn candle_bernini_tier_quant(tier: &str) -> Option<Quant> {
     match tier {
         "q4" => Some(Quant::Q4),
         "q8" => Some(Quant::Q8),
@@ -577,7 +622,7 @@ pub(crate) fn resolve_candle_bernini_tier_dir_and_quant(
 /// single still. The candle descriptor advertises LoRA/LoKr, and the resolved request adapter stack is
 /// installed through the generator load spec.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-async fn generate_candle_bernini_image_stream(
+pub(super) async fn generate_candle_bernini_image_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -673,10 +718,11 @@ async fn generate_candle_bernini_image_stream(
         Vec::new()
     };
 
-    let raw_settings =
-        bernini_image_raw_settings(request, &repo, steps, tier_bits, guidance, task);
+    let raw_settings = bernini_image_raw_settings(request, &repo, steps, tier_bits, guidance, task);
     let count = request.count as usize;
-    let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
+    let seeds: Vec<i64> = (0..count)
+        .map(|index| resolve_seed(request, index))
+        .collect();
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
 

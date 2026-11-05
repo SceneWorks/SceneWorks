@@ -15,9 +15,9 @@
 //! the [`crate::engines::MODEL_TABLE`] dispatch table + links its provider crate.
 
 use super::*;
-// Used only by the generation harness in base.rs (the metrics builders), which is
-// itself `include!`d only on macOS / the backend-candle lane — so gate the import to
-// match, or the Linux-no-candle "neither" build sees it as unused (`-D warnings`).
+// The metrics owner uses this contract type only in the native image lanes.
+// Keep the parent binding behind that same gate so the Linux default build
+// retains its strict unused-import check.
 #[cfg(native_lane)]
 use sceneworks_core::contracts::GenerationMetrics;
 use sceneworks_core::image_request::ImageRequest;
@@ -820,407 +820,21 @@ async fn run_image_generate_job_unexplained(
     // Real in-process MLX inference on macOS for engine-backed models; otherwise the
     // procedural stub (keeps non-macOS + not-yet-ported models working).
     #[cfg(target_os = "macos")]
-    let handled = if let Some(route) = route {
-        match route.kind() {
-            ImageRoute::ZImageControl => {
-                // Z-Image strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
-                generate_zimage_control_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::ZImageBaseControl => {
-                // Base (full-CFG) Z-Image strict control (advanced.poses on `z_image`) → base
-                // Fun-Controlnet-Union, one image per pose (sc-8251).
-                generate_zimage_base_control_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::QwenControl => {
-                // Qwen strict-pose (advanced.poses) → InstantX ControlNet-Union, one image per pose.
-                generate_qwen_control_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::KolorsControl => {
-                // Kolors strict-pose (advanced.poses + a reference) → the combined pose ControlNet
-                // + IP-Adapter identity + img2img pass (sc-4766 / engine sc-5012), one image per pose.
-                generate_kolors_control_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::KreaControl => {
-                // Krea 2 Turbo strict-pose (advanced.poses on `krea_2_turbo`) → the trained control-branch
-                // overlay on the frozen dense base (sc-8465, epic 8459 S5), one image per pose. The MLX
-                // twin of the candle `CandleImageRoute::KreaControl` lane.
-                generate_krea_control_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::Flux1DevControl => {
-                // FLUX.1-dev strict control (advanced.poses) → Shakker Union-Pro-2.0, one image per pose
-                // (pose / canny / depth via advanced.controlMode).
-                generate_flux1_dev_control_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::Flux2DevControl => {
-                // FLUX.2-dev strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
-                generate_flux2_dev_control_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::Flux2Edit => {
-                // FLUX.2-klein edit/reference (mode edit_image or a reference) → edit variant.
-                generate_flux2_edit_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::QwenEdit => {
-                // Qwen-Image-Edit (mode edit_image / Character-Studio reference / best-effort
-                // pose / angle set) → the engine's `qwen_image_edit` model (sc-3397).
-                generate_qwen_edit_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::KreaEdit => {
-                // Krea 2 Raw Kontext-style edit (mode edit_image + a source) → the `krea_2_edit`
-                // engine: source as in-context VAE tokens + Qwen3-VL grounding (epic 10871, sc-10882).
-                generate_krea_edit_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::KreaTurboOnRaw => {
-                // Krea 2 Raw t2i + the accelerator (turbo) LoRA (sc-13882) → the distilled Turbo
-                // sampling regime (fixed mu 1.15 / ~8 steps / CFG-off) on the Raw base + LoRA additive
-                // (epic 13879 S3, sc-13883). Routes to the `krea_2_turbo` engine while loading the Raw
-                // weights — the engine-id sibling of the `krea_2_turbo_edit` vs `krea_2_edit` edit pick.
-                generate_krea_turbo_on_raw_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::KreaMultiPhase => {
-                // Krea 2 Raw t2i + an explicit `advanced.phases` list (epic 13879 S4, sc-13884) → the
-                // multi-phase denoise driver: ONE Raw trajectory / global sigma schedule, per-phase
-                // guidance (CFG on/off) + per-phase toggling of the job's load-time LoRA stack (by
-                // index). Reference/edit/pose/PiD shapes are rejected loudly before the load (renders
-                // from pure noise). Takes precedence over the S3 turbo-on-Raw regime above.
-                generate_krea_multiphase_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::CheckpointPlan => {
-                // Plan-driven checkpoint (epic 20398, sc-20634): a persisted ImportPlanV1 resolved
-                // and re-verified before load; provider selected by family/source/operation through
-                // the registry. txt2img, `count` renders each its own seed.
-                let PreparedImageRoute::CheckpointPlan(sources) = route else {
-                    unreachable!("checkpoint plan route missing its prepared sources")
-                };
-                generate_checkpoint_plan_stream(
-                    api,
-                    settings,
-                    job,
-                    *sources,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::KreaImportedControl => {
-                // Imported single-file Krea 2 checkpoint + strict-pose set: the trained pose
-                // control-branch overlay rides the file-loaded imported DiT (the imported twin of
-                // the `KreaControl` arm above), one pose-locked image per pose.
-                let PreparedImageRoute::KreaImportedControl(sources) = route else {
-                    unreachable!("Krea imported-control route missing its prepared sources")
-                };
-                generate_krea_imported_control_stream(
-                    api,
-                    settings,
-                    job,
-                    PreparedFileDispatch {
-                        plan: &plan,
-                        sources: *sources,
-                    },
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::KreaImported => {
-                // Imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): pair the
-                // imported DiT with a resident `krea_2` base tier (shared TE/VAE/tokenizer) and load via
-                // the S0b MLX native single-file entrypoint. txt2img, `count` renders each its own seed.
-                let PreparedImageRoute::KreaImported(sources) = route else {
-                    unreachable!("Krea imported route missing its prepared sources")
-                };
-                generate_krea_imported_stream(
-                    api,
-                    settings,
-                    job,
-                    PreparedFileDispatch {
-                        plan: &plan,
-                        sources: *sources,
-                    },
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::MageFinetuned => {
-                // A full base fine-tune's own checkpoint (sc-15036): pair the trained transformer
-                // with the installed Mage-Flow base's shared text encoder + VAE and render through
-                // `load_finetuned`. txt2img, `count` renders each its own seed.
-                let PreparedImageRoute::MageFinetuned(transformer) = route else {
-                    unreachable!("Mage fine-tuned route missing its prepared transformer")
-                };
-                generate_mage_finetuned_stream(
-                    api,
-                    settings,
-                    job,
-                    *transformer,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::SdxlImported => {
-                let PreparedImageRoute::SdxlImported(sources) = route else {
-                    unreachable!("SDXL imported route missing its prepared sources")
-                };
-                generate_sdxl_imported_stream(
-                    api,
-                    settings,
-                    job,
-                    PreparedFileDispatch {
-                        plan: &plan,
-                        sources: *sources,
-                    },
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::InstantId => {
-                // InstantID identity-preserving character image (sc-3345): single identity or
-                // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
-                generate_instantid_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::SdxlControl => {
-                generate_sdxl_control_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::PulidFlux => {
-                // PuLID-FLUX face-identity character image (sc-3344): FLUX.1-dev backbone +
-                // EVA/IDFormer/CA injection via the native face stack, one image per seed.
-                generate_pulid_flux_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::SdxlAdvanced => {
-                // SDXL reference (IP-Adapter) / img2img edit / inpaint / outpaint (epic 3041,
-                // sc-3060) → the engine's advanced conditioning paths.
-                generate_sdxl_advanced_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::SensenovaEdit => {
-                // SenseNova-U1 instruction edit + Character Studio on the unified
-                // `sensenova_u1_8b` / `_fast` ids (sc-3900).
-                generate_sensenova_edit_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::Bernini => {
-                // Bernini still-image companion (sc-5424): t2i / i2i on the `bernini_image` id,
-                // routed to the same `engine_id:"bernini"` planner+renderer with `frames:1`.
-                generate_bernini_image_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::FluxIpAdapterPoseReject => {
-                return Err(WorkerError::InvalidPayload(
-                    "FLUX.1 IP-Adapter reference conditioning cannot be combined with strict pose control; \
-                     this backend has separate IP-Adapter and ControlNet providers, so refusing rather \
-                     than silently dropping either requested conditioning".to_owned(),
-                ));
-            }
-            ImageRoute::PoseControlBaseMissing => {
-                // A strict-pose job on a WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
-                // base/overlay snapshot is NOT installed (its `…_control_available` weight-gate failed, so
-                // it fell through). Refuse loudly rather than silently rendering an unconditioned image via
-                // the plain MLX lane and dropping the poses (sc-11796 for krea, generalized to every wired
-                // family in sc-11814) — the MLX twin of the candle `PoseControlBaseMissing` reject.
-                return Err(WorkerError::InvalidPayload(format!(
-                    "strict pose (advanced.poses) requested for model '{}', but its control base snapshot \
-                     is not installed — refusing rather than silently generating an unconditioned image; \
-                     install the control base model to enable strict-pose generation",
-                    request.model
-                )));
-            }
-            ImageRoute::PoseReject => {
-                // No-silent-T2I (sc-5968): control intent on an MLX model with NO pose-control lane
-                // that `mlx_available` would otherwise render as plain txt2img, dropping the intent.
-                // Refuse loudly — the MLX twin of the candle `PoseReject` reject.
-                return Err(WorkerError::InvalidPayload(format!(
-                    "control intent (advanced.poses/controlMode/controlImage/controlWeights) is not supported for model '{}' on the MLX backend — \
-                     refusing rather than silently generating an unconditioned image (wired MLX control \
-                     families: {})",
-                    request.model,
-                    WIRED_MLX_POSE_FAMILIES.join(", ")
-                )));
-            }
-            ImageRoute::Mlx => {
-                generate_stream(
-                    api,
-                    settings,
-                    job,
-                    &plan,
-                    &project_path,
-                    backend,
-                    &mut asset_writes,
-                )
-                .await?;
-            }
-        }
-        true
-    } else {
-        false
-    };
+    let handled = matches!(
+        dispatch::execute_mlx_image_route(
+            route,
+            api,
+            settings,
+            job,
+            &request,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes
+        )
+        .await?,
+        dispatch::ImageRouteOutcome::Handled
+    );
     // Windows/CUDA candle execution path (sc-3675, epic 3672). The macOS dispatch above is MLX-bound;
     // this branch executes the single route selected by `resolve_candle_image_route`, covering the
     // generic registered-generator stream plus the bespoke edit, reference, identity, control,
@@ -1228,512 +842,21 @@ async fn run_image_generate_job_unexplained(
     // harness. Gated on `backend_candle_enabled` (default off), so disabling Candle preserves the stub
     // behavior.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let handled = match route {
-        Some(route) => {
-            match route.kind() {
-                // InstantID (sc-5491, epic 5480): the candle InstantID provider's bespoke path (the
-                // off-Mac sibling of the macOS `ImageRoute::InstantId` arm).
-                CandleImageRoute::InstantId => {
-                    generate_instantid_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                CandleImageRoute::SdxlControl => {
-                    generate_sdxl_control_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // SDXL img2img / inpaint / outpaint edit (sc-5487) — diverted before the txt2img arm
-                // because `sdxl`/`realvisxl` ARE candle txt2img ids (an `edit_image` job would otherwise
-                // be caught there and lose the source/mask). Disjoint from the IP-Adapter lane.
-                CandleImageRoute::SdxlEdit => {
-                    generate_candle_sdxl_edit_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // FLUX.2-klein reference / img2img edit (sc-5487) — `flux2_klein_9b` IS a candle txt2img
-                // id, so an `edit_image` job must divert here first. No torch path for klein edit.
-                CandleImageRoute::Flux2Edit => {
-                    generate_candle_flux2_edit_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Qwen-Image-Edit reference / dual-latent edit (sc-5487) — `qwen_image_edit` is its own
-                // model id, routed to the bespoke candle QwenEdit stream (disjoint from the qwen control
-                // lane, which is `qwen_image` + `advanced.poses`).
-                CandleImageRoute::QwenEdit => {
-                    generate_candle_qwen_edit_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Z-Image img2img / edit (sc-6595) — `z_image_turbo` IS a candle txt2img id, so an
-                // `edit_image` job must divert here first (disjoint from the Z-Image control lane).
-                CandleImageRoute::ZimageEdit => {
-                    // The catalog alias resolves to the registered Turbo provider so edit requests
-                    // participate in the same shared request-scope memory lifecycle as text-to-image.
-                    generate_candle_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // In-place ComfyUI Z-Image base (sc-10668, epic 10451): an `external_base_*` id whose
-                // forwarded row carries the DiT/TE/VAE component paths — render the user's ComfyUI weights
-                // in place via `runtime_cuda::providers::z_image::load_from_comfyui_components`.
-                CandleImageRoute::ZimageComfyui => {
-                    let PreparedCandleImageRoute::ZimageComfyui(sources) = route else {
-                        unreachable!("Z-Image ComfyUI route missing its prepared sources")
-                    };
-                    generate_candle_zimage_comfyui_stream(
-                        api,
-                        settings,
-                        job,
-                        PreparedFileDispatch {
-                            plan: &plan,
-                            sources: *sources,
-                        },
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                CandleImageRoute::QwenImageComfyui => {
-                    let PreparedCandleImageRoute::QwenImageComfyui(sources) = route else {
-                        unreachable!("Qwen ComfyUI route missing its prepared sources")
-                    };
-                    generate_candle_qwen_comfyui_stream(
-                        api,
-                        settings,
-                        job,
-                        PreparedFileDispatch {
-                            plan: &plan,
-                            sources: *sources,
-                        },
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // In-place ComfyUI FLUX.2-dev fp8-mixed base (sc-10680, epic 10451): an `external_base_*`
-                // id whose forwarded row carries the DiT component path — render the user's ComfyUI
-                // weights in place via `runtime_cuda::providers::flux2::load_from_comfyui_dit` (inline-scale fp8 dequant
-                // + BFL→diffusers remap; TE/VAE/tokenizer from a resident FLUX.2-dev snapshot).
-                CandleImageRoute::Flux2Comfyui => {
-                    let PreparedCandleImageRoute::Flux2Comfyui(sources) = route else {
-                        unreachable!("FLUX.2 ComfyUI route missing its prepared sources")
-                    };
-                    generate_candle_flux2_comfyui_stream(
-                        api,
-                        settings,
-                        job,
-                        PreparedFileDispatch {
-                            plan: &plan,
-                            sources: *sources,
-                        },
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Bernini still-image companion (sc-10996, epic 6562): `bernini_image` t2i / i2i on the
-                // `engine_id:"bernini"` planner+renderer with `frames:1` — the Windows/CUDA sibling of the
-                // macOS `ImageRoute::Bernini` arm. NOT `is_candle_engine` (its engine is `Modality::Video`),
-                // so it has its own bespoke stream that forces `frames:1` + the engine task string, exactly
-                // like the MLX `generate_bernini_image_stream`.
-                CandleImageRoute::Bernini => {
-                    generate_candle_bernini_image_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // SDXL IP-Adapter-Plus reference conditioning (sc-5488) — diverted before the txt2img arm
-                // (else the reference silently drops on the shared `sdxl`/`realvisxl` txt2img id).
-                CandleImageRoute::SdxlIpAdapter => {
-                    generate_candle_sdxl_ipadapter_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Kolors IP-Adapter-Plus reference conditioning (sc-5488).
-                CandleImageRoute::KolorsIpAdapter => {
-                    generate_candle_kolors_ipadapter_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // FLUX XLabs IP-Adapter reference conditioning (sc-5872).
-                CandleImageRoute::FluxIpAdapter => {
-                    generate_candle_flux_ipadapter_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // PuLID-FLUX face identity (sc-5492) — `pulid_flux_dev` is its own model id (never an
-                // `is_candle_engine` txt2img id), routed to the bespoke candle PulidFlux stream.
-                CandleImageRoute::Pulid => {
-                    generate_candle_pulid_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Qwen-Image strict-pose ControlNet (sc-5489) — diverted before the txt2img arm (else the
-                // poses silently drop on the shared `qwen_image` txt2img id).
-                CandleImageRoute::QwenControl => {
-                    generate_candle_qwen_control_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Kolors strict-pose ControlNet (sc-5489).
-                CandleImageRoute::KolorsControl => {
-                    generate_candle_kolors_control_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                CandleImageRoute::KolorsCompositeReject => {
-                    return Err(WorkerError::InvalidPayload(
-                        "Kolors Candle does not compose IP-Adapter identity with pose ControlNet or PiD; refusing the crossed request before model load".to_owned(),
-                    ));
-                }
-                // Z-Image strict-pose Fun-ControlNet (sc-5489).
-                CandleImageRoute::ZimageControl => {
-                    generate_candle_zimage_control_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736, epic 6564) — `flux2_dev` +
-                // `advanced.poses` is the bespoke candle Flux2Control lane, diverted before the txt2img arm.
-                CandleImageRoute::Flux2Control => {
-                    generate_candle_flux2_control_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412, epic 8236) — `flux_dev` +
-                // `advanced.poses` is the bespoke candle Flux1DevControl lane, diverted before the txt2img arm.
-                CandleImageRoute::Flux1Control => {
-                    generate_candle_flux1_control_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Krea 2 pose-ControlNet (sc-8464, epic 8459) — `krea_2_turbo` + `advanced.poses` is the
-                // bespoke candle Krea2Control lane (a trained control-branch overlay on the frozen Turbo
-                // base), diverted before the registry txt2img arm.
-                CandleImageRoute::KreaControl => {
-                    generate_candle_krea_control_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Krea 2 Kontext-style dual-conditioned edit (epic 10871) — `krea_2_raw` + `edit_image` +
-                // a source, routed to the bespoke candle KreaEdit stream (disjoint from the Krea control
-                // lane, which is `krea_2_turbo` + `advanced.poses`).
-                CandleImageRoute::KreaEdit => {
-                    generate_candle_krea_edit_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Krea 2 Raw t2i + an explicit `advanced.phases` list (epic 13879 S4, sc-13884; candle
-                // sc-13887) → the multi-phase denoise driver: ONE Raw trajectory / global sigma schedule,
-                // per-phase guidance (CFG on/off) + per-phase toggling of the job's load-time LoRA stack (by
-                // index). Reference/edit/pose/PiD shapes are rejected loudly before the load (renders from
-                // pure noise). Takes precedence over the S3 turbo-on-Raw regime. The candle engine honors
-                // the backend-agnostic `GenerationRequest::phases` (inference PR #204); the handler is the
-                // SAME backend-neutral `generate_krea_multiphase_stream` the macOS `KreaMultiPhase` arm runs.
-                CandleImageRoute::KreaMultiPhase => {
-                    generate_krea_multiphase_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Krea 2 Raw t2i + the accelerator (turbo) LoRA (sc-13882) → the distilled Turbo sampling
-                // regime (fixed mu 1.15 / ~8 steps / CFG-off) on the Raw base + LoRA additive (epic 13879
-                // S3, sc-13883; candle sc-13887). Routes to the `krea_2_turbo` candle engine while loading
-                // the Raw weights — the engine keys the regime on that descriptor id (inference PR #204).
-                // The handler is the SAME backend-neutral `generate_krea_turbo_on_raw_stream` the macOS
-                // `KreaTurboOnRaw` arm runs.
-                CandleImageRoute::KreaTurboOnRaw => {
-                    generate_krea_turbo_on_raw_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Imported/user Krea 2 single-file t2i (sc-14023): pair the imported bare DiT with
-                // the resident Krea base tier and load it through the selected runtime's native-file
-                // entrypoint. The resolver has already proved this is a non-builtin, single-file,
-                // unconditioned request; keep it distinct from the builtin registry path.
-                CandleImageRoute::KreaImported => {
-                    let PreparedCandleImageRoute::KreaImported(sources) = route else {
-                        unreachable!("Krea imported route missing its prepared sources")
-                    };
-                    generate_krea_imported_stream(
-                        api,
-                        settings,
-                        job,
-                        PreparedFileDispatch {
-                            plan: &plan,
-                            sources: *sources,
-                        },
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                CandleImageRoute::KreaImportedControl => {
-                    generate_krea_imported_control_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                CandleImageRoute::CheckpointPlan => {
-                    let PreparedCandleImageRoute::CheckpointPlan(sources) = route else {
-                        unreachable!("checkpoint plan route missing its prepared sources")
-                    };
-                    generate_checkpoint_plan_stream(
-                        api,
-                        settings,
-                        job,
-                        *sources,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                CandleImageRoute::MageFinetuned => {
-                    let PreparedCandleImageRoute::MageFinetuned(transformer) = route else {
-                        unreachable!("Mage fine-tuned route missing its prepared transformer")
-                    };
-                    generate_mage_finetuned_stream(
-                        api,
-                        settings,
-                        job,
-                        *transformer,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                CandleImageRoute::SdxlImported => {
-                    let PreparedCandleImageRoute::SdxlImported(sources) = route else {
-                        unreachable!("SDXL imported route missing its prepared sources")
-                    };
-                    generate_sdxl_imported_stream(
-                        api,
-                        settings,
-                        job,
-                        PreparedFileDispatch {
-                            plan: &plan,
-                            sources: *sources,
-                        },
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane must be
-                // REJECTED with a clear error, not silently rendered as plain txt2img (poses dropped) and
-                // not rerouted. The candle worker CLAIMS these (jobs_store `image_job_candle_pose_reject`)
-                // precisely to fail them loudly here.
-                CandleImageRoute::PoseReject => {
-                    return Err(WorkerError::InvalidPayload(format!(
-                        "control intent (advanced.poses/controlMode/controlImage/controlWeights) is not supported for model '{}' on the candle backend — \
-                         refusing rather than silently generating an unconditioned image (wired candle control \
-                         families: {})",
-                        request.model,
-                        WIRED_CANDLE_POSE_FAMILIES.join(", ")
-                    )));
-                }
-                CandleImageRoute::FluxIpAdapterPoseReject => {
-                    return Err(WorkerError::InvalidPayload(
-                        "FLUX.1 IP-Adapter reference conditioning cannot be combined with strict pose control; \
-                         this backend has separate IP-Adapter and ControlNet providers, so refusing rather \
-                         than silently dropping either requested conditioning".to_owned(),
-                    ));
-                }
-                // No-silent-T2I (sc-11171, F-008): a strict-pose job on a WIRED candle pose family whose
-                // control base snapshot is NOT installed (the family's `…_control_available` weight-gate
-                // failed, so it fell through to here). The scheduler routed it to candle weight-blind
-                // (`zimage_control_candle_eligible` & siblings check only the payload), so REFUSE loudly
-                // rather than silently rendering plain txt2img and dropping the poses.
-                CandleImageRoute::PoseControlBaseMissing => {
-                    return Err(WorkerError::InvalidPayload(format!(
-                        "strict pose (advanced.poses) requested for model '{}' on the candle backend, but \
-                         its control base snapshot is not installed — refusing rather than silently \
-                         generating an unconditioned image; install the control base model to enable \
-                         strict-pose generation",
-                        request.model
-                    )));
-                }
-                // Registry-driven candle generation. Mage Edit is named separately by the resolver so
-                // an edit without its required source can never fall through as plain T2I; both variants
-                // use the same generic stream once their request shapes are resolved.
-                CandleImageRoute::MageEdit
-                | CandleImageRoute::MossImageEdit
-                | CandleImageRoute::QwenImage21Edit
-                | CandleImageRoute::Flux3Reference
-                | CandleImageRoute::SenseNovaEdit
-                | CandleImageRoute::KolorsEdit
-                | CandleImageRoute::CandleTxt2Img => {
-                    generate_candle_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-            }
-            true
-        }
-        // Candle disabled (default) or no candle engine matched → stub exactly as before.
-        None => false,
-    };
+    let handled = matches!(
+        dispatch::execute_candle_image_route(
+            route,
+            api,
+            settings,
+            job,
+            &request,
+            &plan,
+            &project_path,
+            backend,
+            &mut asset_writes
+        )
+        .await?,
+        dispatch::ImageRouteOutcome::Handled
+    );
     #[cfg(not(native_lane))]
     let handled = false;
 
@@ -3675,8 +2798,7 @@ fn stub_rgb8(width: u32, height: u32, seed: i64) -> Vec<u8> {
 // resolvers) carry their own `#[cfg(target_os = "macos")]`. So these two includes compile on macOS
 // AND on the Windows candle build.
 #[cfg(native_lane)]
-// MLX/candle generator stream helpers.
-include!("image_jobs/stream.rs");
+mod stream;
 
 // Iris-3B generation-task wiring (sc-25679 MLX / sc-25680 Candle / sc-25681 controls): its tests
 // drive the MLX `generate_stream` arm and the Candle `generate_candle_stream` arm end to end.
@@ -3719,14 +2841,43 @@ use tier_resolver::{
 };
 
 #[cfg(native_lane)]
-// base image routing (MLX) + neutral txt2img generation harness + the candle execution path.
-include!("image_jobs/base.rs");
+mod adapters;
+#[cfg(native_lane)]
+mod artifact_resolution;
+#[cfg(native_lane)]
+mod candle;
+#[cfg(native_lane)]
+mod conditioning;
+#[cfg(native_lane)]
+mod events;
+#[cfg(native_lane)]
+mod geometry;
+#[cfg(native_lane)]
+mod load_policy;
+#[cfg(native_lane)]
+mod load_spec;
+#[cfg(native_lane)]
+mod memory;
+#[cfg(native_lane)]
+mod metrics;
+#[cfg(native_lane)]
+mod mlx;
+#[cfg(native_lane)]
+mod moss;
+#[cfg(native_lane)]
+mod quantization;
+#[cfg(native_lane)]
+mod render;
+#[cfg(native_lane)]
+mod routing;
+#[cfg(native_lane)]
+mod sampling;
 // Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849). The
 // weight-resolution helper (`resolve_pid_weights`) is backend-neutral, so it compiles on BOTH face
 // backends: the generic MLX lanes (base.rs/qwen.rs `generate*`, macOS-only) AND the candle InstantID
 // Angles/Poses lane (instantid.rs, sc-8373), which now decodes through the `sdxl` PiD student off-Mac.
 #[cfg(native_lane)]
-include!("image_jobs/pid.rs");
+mod pid;
 // Shared strict-control driver (epic 8236, sc-8243): the `(engine_id, control_repo, supported_kinds)`
 // single source of truth + the preprocess (pose/canny/depth/user-passthrough) → `Conditioning::Control`
 // core the three MLX registry strict-control paths (zimage/flux2/qwen below) route through. Off-Mac the
@@ -3734,26 +2885,21 @@ include!("image_jobs/pid.rs");
 // `preprocess_control_entry` (pose/canny/depth), so this is gated to either platform (the candle build
 // off-Mac, MLX on macOS) rather than macOS-only.
 #[cfg(native_lane)]
-include!("image_jobs/strict_control.rs");
+mod strict_control;
 // Generic SDXL OpenPose ControlNet. One backend-neutral route drives the registered `sdxl`
 // provider on both MLX and Candle; platform bundles select the implementation behind the registry.
+#[cfg(target_os = "macos")]
+mod flux1_control;
+#[cfg(target_os = "macos")]
+mod flux2;
+#[cfg(target_os = "macos")]
+mod krea_edit;
+#[cfg(target_os = "macos")]
+mod qwen;
 #[cfg(native_lane)]
-include!("image_jobs/sdxl_control.rs");
+mod sdxl_control;
 #[cfg(target_os = "macos")]
-// Z-Image strict-pose and prompt augmentation helpers.
-include!("image_jobs/zimage.rs");
-#[cfg(target_os = "macos")]
-// FLUX.2 edit routing and conditioning.
-include!("image_jobs/flux2.rs");
-#[cfg(target_os = "macos")]
-// FLUX.1-dev strict-control (Shakker Union-Pro-2.0) routing.
-include!("image_jobs/flux1_control.rs");
-#[cfg(target_os = "macos")]
-// Qwen control/edit routing.
-include!("image_jobs/qwen.rs");
-#[cfg(target_os = "macos")]
-// Krea 2 Kontext-style image-edit routing (epic 10871).
-include!("image_jobs/krea_edit.rs");
+mod zimage;
 // Krea 2 single-phase turbo-on-Raw routing (epic 13879 S3, sc-13883): the accelerator LoRA on a
 // `krea_2_raw` t2i job → the distilled Turbo sampling regime (fixed mu 1.15 / ~8 steps / CFG-off).
 // Shared by the MLX path (macOS) AND the candle lane (Windows/Linux CUDA, sc-13887): the whole file
@@ -3762,7 +2908,7 @@ include!("image_jobs/krea_edit.rs");
 // engine (inference PR #204) keys the turbo regime on the `krea_2_turbo` descriptor id exactly like
 // MLX.
 #[cfg(native_lane)]
-include!("image_jobs/krea_turbo_raw.rs");
+mod krea_turbo_raw;
 // Krea 2 multi-phase denoise routing (epic 13879 S4, sc-13884): a `krea_2_raw` t2i job carrying an
 // explicit `advanced.phases` list → the multi-phase driver (one Raw trajectory / global schedule,
 // per-phase guidance + per-phase toggling of the job's load-time LoRA stack by index). Shared by the
@@ -3770,104 +2916,86 @@ include!("image_jobs/krea_turbo_raw.rs");
 // `GenerationRequest::phases` contract, which the candle Krea engine also honors (inference PR #204),
 // so the shape-detection + `advanced.phases` parse/validate + engine invocation are all backend-neutral.
 #[cfg(native_lane)]
-include!("image_jobs/krea_multiphase.rs");
+mod checkpoint_plan;
 #[cfg(target_os = "macos")]
-// Krea 2 pose-ControlNet (MLX) strict-pose routing (sc-8465, epic 8459 S5).
-include!("image_jobs/krea_control.rs");
+mod krea_control;
 #[cfg(native_lane)]
-// Imported single-file Krea 2 checkpoint routing (epic 14015 S0c, sc-14018/sc-14023): a user-imported
-// `krea_2`-family DiT single file → paired with a resident base tier (shared TE/VAE/tokenizer) and
-// loaded through the selected runtime's native single-file entrypoint, bypassing the registry
-// snapshot-dir path. Shared by MLX and Candle so global import acceptance always has a real route.
-include!("image_jobs/krea_imported.rs");
+mod krea_imported;
 #[cfg(native_lane)]
-// Plan-driven checkpoint routing (epic 20398, sc-20634): a user model bound to a persisted
-// `ImportPlanV1` (`importPlan.checkpointId` on its manifest entry) is resolved and re-verified
-// through the checkpoint plan store, its provider selected by family + source shape + operation
-// through the registry's imported-model authority, and rendered through the shared cached-generator
-// seam. Backend-neutral: the same file serves MLX and Candle.
-include!("image_jobs/checkpoint_plan.rs");
+mod krea_multiphase;
 #[cfg(native_lane)]
-include!("image_jobs/sdxl_imported.rs");
+mod mage_finetuned;
 #[cfg(native_lane)]
-// Fine-tuned Mage-Flow base checkpoint routing (sc-15036, epic 14034 F6): the `transformer/`-shaped
-// artifact a FULL base fine-tune writes, paired at load with the installed base's shared text
-// encoder + VAE and rendered through the `load_finetuned` entrypoint that skips the pinned-
-// checkpoint identity guard a fine-tune necessarily fails. The shared request path uses native MLX
-// on macOS and the native Candle Mage engine on CUDA hosts.
-include!("image_jobs/mage_finetuned.rs");
+mod sdxl_imported;
 #[cfg(target_os = "macos")]
-// SenseNova edit routing.
-include!("image_jobs/sensenova.rs");
+mod sensenova;
 // Bernini still-image (t2i/i2i) routing. Included on macOS (the MLX `generate_bernini_image_stream`)
 // AND the candle lane (sc-10996: `generate_candle_bernini_image_stream` + the shared task/raw-settings/
 // generate-one helpers); each item inside is cfg-gated to its backend, so the neither build pulls in
 // nothing. (Unlike the other macOS-only routing files above, whose candle siblings live in dedicated
 // `*_candle.rs` files, Bernini keeps both lanes in one file to share the neutral still-image helpers.)
 #[cfg(native_lane)]
-include!("image_jobs/bernini.rs");
+mod bernini;
 #[cfg(target_os = "macos")]
-// SDXL advanced routing.
-include!("image_jobs/sdxl.rs");
+mod kolors;
 #[cfg(target_os = "macos")]
-// Kolors advanced conditioning (img2img + IP-Adapter-Plus reference).
-include!("image_jobs/kolors.rs");
+mod sdxl;
 // InstantID native routing — macOS (MLX) + the Windows/CUDA candle lane (sc-5491). The two engines'
 // `InstantId` APIs differ only at the load boundary (with_face dir-vs-Weights, quantize, largest_face
 // signature), cfg-split inside; the per-item generate/restore loop is backend-neutral over `gen_core`.
 #[cfg(native_lane)]
-include!("image_jobs/instantid.rs");
+mod instantid;
 // SDXL IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS keeps
 // the MLX SDXL IP path (sdxl.rs `SdxlSubMode::Ip`); there is no MLX `IpAdapterSdxl`, so this is
 // candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod sdxl_ipadapter;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use sdxl_ipadapter::{generate_candle_sdxl_ipadapter_stream, sdxl_ipadapter_available};
+use sdxl_ipadapter::sdxl_ipadapter_available;
 // SDXL img2img / inpaint / outpaint edit — the Windows/CUDA candle lane ONLY (sc-5487). macOS keeps the
 // MLX SDXL advanced path (sdxl.rs `SdxlSubMode::{Edit,Inpaint,Outpaint}`); the candle `SdxlEdit` is a
 // bespoke provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod sdxl_edit_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use sdxl_edit_candle::{generate_candle_sdxl_edit_stream, sdxl_edit_candle_available};
+use sdxl_edit_candle::sdxl_edit_candle_available;
 // FLUX.2-klein reference / img2img edit — the Windows/CUDA candle lane ONLY (sc-5487). macOS keeps the
 // MLX FLUX.2 edit path (flux2.rs `generate_flux2_edit_stream`); the candle `Flux2Edit` is a bespoke
 // provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_edit_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use flux2_edit_candle::{flux2_edit_candle_available, generate_candle_flux2_edit_stream};
+use flux2_edit_candle::flux2_edit_candle_available;
 // Qwen-Image-Edit reference / dual-latent edit — the Windows/CUDA candle lane ONLY (sc-5487). macOS keeps
 // the MLX Qwen-Image-Edit path (qwen.rs); the candle `QwenEdit` is a bespoke provider, so this is
 // candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod qwen_edit_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use qwen_edit_candle::qwen_edit_candle_available;
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) use qwen_edit_candle::resolve_qwen_edit_candle_base;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use qwen_edit_candle::{generate_candle_qwen_edit_stream, qwen_edit_candle_available};
 // Krea 2 Kontext-style dual-conditioned image-edit — the Windows/CUDA candle lane ONLY (epic 10871).
 // macOS keeps the MLX Krea edit path (krea_edit.rs, the `krea_2_edit` registry generator); the candle
 // Krea edit is a bespoke pipeline, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod krea_edit_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use krea_edit_candle::{generate_candle_krea_edit_stream, krea_edit_candle_available};
+use krea_edit_candle::krea_edit_candle_available;
 // Kolors IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS
 // keeps the MLX Kolors IP path (kolors.rs, the registry `Reference` route); the candle `IpAdapterKolors`
 // is a bespoke provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod kolors_ipadapter;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use kolors_ipadapter::{generate_candle_kolors_ipadapter_stream, kolors_ipadapter_available};
+use kolors_ipadapter::kolors_ipadapter_available;
 // FLUX XLabs IP-Adapter reference conditioning — the Windows/CUDA candle lane ONLY (sc-5872). macOS keeps
 // the MLX FLUX XLabs IP path (epic 3621, the registry `Reference` route); the candle `IpAdapterFlux` is a
 // bespoke provider, so this is candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod flux_ipadapter;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use flux_ipadapter::{flux_ipadapter_available, generate_candle_flux_ipadapter_stream};
+use flux_ipadapter::flux_ipadapter_available;
 // Shared candle conditioning-overlay admission seam (sc-16069, epic 15448): the ONE gate every candle
 // route that overlays a second network on the base (ControlNet / IP-Adapter / identity encoder) calls
 // before it allocates. Those routes are diverted by `resolve_candle_image_route` around BOTH the
@@ -3902,26 +3030,26 @@ use candle_strict_control::{run_candle_strict_control, CandleStrictControl};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod qwen_control;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use qwen_control::{generate_candle_qwen_control_stream, qwen_control_available};
+use qwen_control::qwen_control_available;
 // Kolors ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-5489). macOS keeps the MLX
 // Kolors ControlNet path; the candle `KolorsControl` is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod kolors_control;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use kolors_control::{generate_candle_kolors_control_stream, kolors_control_available};
+use kolors_control::kolors_control_available;
 // Z-Image Fun-ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-5489). macOS keeps the
 // MLX `z_image_turbo_control` registry generator; the candle `ZImageControl` is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod zimage_control;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use zimage_control::{generate_candle_zimage_control_stream, zimage_control_available};
+use zimage_control::zimage_control_available;
 // FLUX.2-dev Fun-Controlnet-Union (strict pose) — the Windows/CUDA candle lane ONLY (sc-7736, epic 6564).
 // macOS keeps the MLX `flux2_dev_control` registry generator (flux2.rs); the candle `Flux2Control` is a
 // bespoke provider (the dev VACE control branch over the Q4 dev DiT).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_control_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use flux2_control_candle::{flux2_control_candle_available, generate_candle_flux2_control_stream};
+use flux2_control_candle::flux2_control_candle_available;
 // FLUX.1-dev Shakker Union-Pro-2.0 (strict control) — the Windows/CUDA candle lane ONLY (sc-8412, epic
 // 8236). macOS keeps the MLX `flux1_dev_control` registry generator (flux1_control.rs); the candle
 // `Flux1DevControl` is a bespoke provider (the Shakker residual-emitter control branch over the dense
@@ -3929,14 +3057,14 @@ use flux2_control_candle::{flux2_control_candle_available, generate_candle_flux2
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod flux1_control_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use flux1_control_candle::{flux1_control_candle_available, generate_candle_flux1_control_stream};
+use flux1_control_candle::flux1_control_candle_available;
 // Krea 2 pose-ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-8464, epic 8459). There is
 // no MLX Krea control twin yet (8459 S5 / sc-8465); the candle `Krea2Control` loads a trained
 // control-branch overlay on the frozen dense bf16 Turbo base.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod krea_control_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use krea_control_candle::{generate_candle_krea_control_stream, krea_control_candle_available};
+use krea_control_candle::krea_control_candle_available;
 // Z-Image img2img / edit — the Windows/CUDA candle lane ONLY (sc-6595). macOS keeps the MLX
 // `z_image_turbo` registry generator's `Conditioning::Reference` img2img path; the candle `ZImageEdit`
 // is a bespoke provider.
@@ -3948,23 +3076,20 @@ use zimage_edit_candle::zimage_edit_candle_available;
 // a user's ComfyUI Z-Image weights in place via `runtime_cuda::providers::z_image::load_from_comfyui_components`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod zimage_comfyui_candle;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use zimage_comfyui_candle::generate_candle_zimage_comfyui_stream;
+
 // Qwen-Image txt2img from an in-place ComfyUI DiT (plain fp8_e4m3fn → bf16) — the Windows/CUDA candle
 // lane ONLY (sc-10670, epic 10451 Phase 2b). Sibling of the Z-Image comfyui lane; TE/VAE/tokenizer come
 // from a resident `SceneWorks/qwen-image-mlx` snapshot tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod qwen_comfyui_candle;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use qwen_comfyui_candle::generate_candle_qwen_comfyui_stream;
+
 // FLUX.2-dev txt2img from an in-place ComfyUI fp8-mixed DiT (inline-scale fp8 dequant → f32, then
 // quantized onto the GPU) — the Windows/CUDA candle lane ONLY (sc-10680, epic 10451 Phase 2e). Sibling
 // of the Qwen-Image comfyui lane; the Mistral-3 TE / VAE / tokenizer come from a resident FLUX.2-dev
 // snapshot tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_comfyui_candle;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use flux2_comfyui_candle::generate_candle_flux2_comfyui_stream;
+
 // Z-Image identity-init request gate for Image Studio "With Character" (sc-8409, epic 4406). Both
 // backends now generate through their registered `z_image_turbo` provider; this candle-only helper
 // preserves the off-Mac availability/base-resolution predicate while the generic stream owns Reference
@@ -3979,13 +3104,11 @@ use zimage_identity_candle::{zimage_identity_candle_available, zimage_identity_c
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod pulid_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use pulid_candle::{generate_candle_pulid_stream, pulid_candle_available};
-#[cfg(target_os = "macos")]
-// PuLID-FLUX native routing.
-include!("image_jobs/pulid.rs");
+use pulid_candle::pulid_candle_available;
 #[cfg(native_lane)]
-// image detail tile-ControlNet routing.
-include!("image_jobs/detail.rs");
+mod detail;
+#[cfg(target_os = "macos")]
+mod pulid;
 
 #[cfg(not(native_lane))]
 pub(crate) async fn run_image_detail_job(
@@ -4008,3 +3131,202 @@ use tier_resolver::qwen_control_tier_subdir;
 use crate::adapter_resolution::resolve_prepared_adapter_file;
 #[cfg(any(test, native_lane))]
 use crate::adapter_resolution::{lora_weight, resolve_adapter_file};
+
+// Preserve the named existing image interface and the current orchestration seams.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use adapters::candle_adapter_resident_bytes;
+#[cfg(all(
+    native_lane,
+    any(native_lane, test),
+    all(feature = "test-support", native_lane)
+))]
+use adapters::resolve_prepared_adapters;
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use adapters::{classify_adapter, classify_prepared_adapter};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use artifact_resolution::candle_weights_gap;
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use artifact_resolution::{
+    resolve_model_path_dir, resolve_weights_dir, tier_key_for_resolved_dir,
+    ZIMAGE_MLX_TURNKEY_REPO, ZIMAGE_MLX_TURNKEY_REVISION,
+};
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use artifact_resolution::{
+    resolved_mlx_artifact_provenance, resolved_mlx_artifact_tier,
+    resolved_mlx_artifact_tier_for_model,
+};
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use bernini::{
+    bernini_adapter_resident_bytes, resolve_candle_bernini_model_dir,
+    resolve_candle_bernini_tier_dir_and_quant,
+};
+
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use checkpoint_plan::{
+    checkpoint_plan_bespoke_primary_dir, checkpoint_plan_bespoke_primary_pin,
+    checkpoint_plan_checkpoint_id, request_is_checkpoint_plan_backed, CheckpointPlanBespokeDir,
+    CheckpointPlanSelection,
+};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use checkpoint_plan::{
+    checkpoint_plan_bespoke_roles, checkpoint_plan_bespoke_tree, CheckpointPlanBespokeRoles,
+    CheckpointPlanBespokeTree,
+};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use conditioning::candle_conditioned_edit_work;
+#[cfg(native_lane)]
+use conditioning::qwen_image_2_1_reference_ids;
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use conditioning::{
+    load_reference_alpha, load_reference_image, load_reference_image_with,
+    resolve_character_image_likeness_source, resolve_control_identity_source, FlattenPolicy,
+    QwenImage21Reference,
+};
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use detail::{begin_detail_cancel, run_image_detail_job};
+
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use flux2::{flux2_edit_engine_id, flux2_edit_uses_provider_memory_safety};
+
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use geometry::fit_engine_image;
+
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use instantid::{
+    ensure_face_stack_dir, ensure_scrfd_weights, INSTANTID_ARCFACE_FILE, INSTANTID_MLX_REVISION,
+    INSTANTID_SCRFD_FILE,
+};
+
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use load_policy::{
+    apply_measured_mlx_load_shape, declared_sequential_resident_alternative,
+    prepare_mlx_load_policy, release_declared_sequential_for_request,
+};
+#[cfg(native_lane)]
+use load_spec::validate_selected_decoder_request;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use load_spec::{
+    apply_declared_candle_image_load_shape, candle_artifact_path_matches,
+    candle_certified_hf_artifact_path, candle_certified_load_spec, candle_pinned_hf_artifact_path,
+    candle_shared_memory_tier,
+};
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use load_spec::{
+    attach_manifest_text_encoder, has_authored_text_encoder,
+    prepare_manifest_text_encoder_with_file_pins, ManifestTextEncoderAttachedSpec,
+};
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use memory::{
+    admit_sdxl_bespoke_memory, candle_resolved_tier_key, validate_candle_tier_memory_evidence,
+};
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use mlx::ensure_mlx_candidate_provenance;
+
+#[cfg(all(native_lane, any(target_os = "macos", test)))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use mlx::{choose_mlx_request_tier, MlxTierFit};
+#[cfg(all(native_lane, feature = "test-support"))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use moss::{
+    moss_generation_preload_for_test, moss_generation_preload_for_test_with_check,
+};
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use pid::{pid_effective_dims, pid_output_tier, PidOutputTier};
+
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use pulid::is_pulid_flux_model;
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use quantization::resolve_quant;
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use quantization::{fixed_mlx_artifact_quant, mlx_load_quant_for_resolved_artifact};
+
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use render::LaneRgbaSurface;
+#[cfg(all(
+    native_lane,
+    any(all(not(target_os = "macos"), feature = "backend-candle"), test)
+))]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use routing::imported_base_snapshot_companions;
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use routing::mlx_flux_strict_control_engine_id;
+
+#[cfg(target_os = "macos")]
+use routing::prepare_image_route;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use routing::{candle_adapter_label, is_candle_engine, prepare_candle_image_route};
+#[cfg(native_lane)]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use sampling::{
+    curated_image_menu, emit_load_event, emit_sampling_knob_unsupported, normalize_sampling_knob,
+    read_advanced_guidance_method, read_advanced_sampling_knobs,
+};
+
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+// Retain the existing crate-visible interface on every original cfg lane.
+pub(crate) use stream::mlx_weights_gap;
+#[cfg(native_lane)]
+use stream::prepare_image_route_with_progress;
+
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use artifact_resolution::resolved_artifact_provenance_tests;
+
+#[cfg(native_lane)]
+mod dispatch;

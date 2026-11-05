@@ -1,3 +1,51 @@
+use super::adapters::resolve_adapters;
+#[cfg(not(target_os = "macos"))]
+use super::admit_conditioning_paths;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::conditioning::parse_poses;
+use super::conditioning::PoseInput;
+use super::events::consume_gen_events;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::attach_required_components;
+use super::mlx_model;
+use super::quantization::resolve_quant;
+use super::quantization::tier_key_from_resolved_dir;
+use super::resolve_seed;
+use super::sampling::mlx_raw_settings;
+use super::sampling::resolve_negative_prompt;
+use super::stream::drive_gen_items;
+use super::stream::start_gen_stream;
+use super::strict_control::build_control_conditioning;
+use super::strict_control::preprocess_control_entry;
+use super::strict_control::strict_control_default_repo;
+use super::strict_control::trusted_control_weight_revision;
+#[cfg(test)]
+use super::AdapterKind;
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::Conditioning;
+use super::ControlKind;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::Progress;
+use super::Quant;
+use super::WeightsSource;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // Generic SDXL OpenPose ControlNet, shared by MLX and Candle.
 //
 // The two platform bundles both register the ordinary `sdxl` provider. A `LoadSpec` carrying one
@@ -5,17 +53,17 @@
 // `Conditioning::Control(Pose)`. The public image DTO remains singular-control: multiple library poses
 // are a batch of independent one-control requests, never an `extra_controls` composition.
 
-const SDXL_CONTROL_ENGINE_ID: &str = "sdxl";
-const SDXL_CONTROL_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
+pub(super) const SDXL_CONTROL_ENGINE_ID: &str = "sdxl";
+pub(super) const SDXL_CONTROL_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
 const SDXL_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
-const SDXL_CONTROL_ADAPTER_LABEL: &str = "sdxl_control";
+pub(super) const SDXL_CONTROL_ADAPTER_LABEL: &str = "sdxl_control";
 const SDXL_CONTROL_DEFAULT_SCALE: f32 = 1.0;
 const SDXL_CONTROL_DEFAULT_STEPS: u32 = 30;
 const SDXL_CONTROL_DEFAULT_GUIDANCE: f32 = 7.0;
 const SDXL_CONTROL_LIGHTNING_STEPS: u32 = 4;
 const SDXL_CONTROL_LIGHTNING_GUIDANCE: f32 = 1.0;
 
-const SDXL_CONTROL_MODELS: &[&str] = &[
+pub(super) const SDXL_CONTROL_MODELS: &[&str] = &[
     "sdxl",
     "realvisxl",
     "realvisxl_lightning",
@@ -51,7 +99,7 @@ fn has_material_sdxl_control_intent(advanced: &JsonObject) -> bool {
 /// A material pose carrier on one of the exact five supported models. This deliberately does not
 /// validate or weight-gate: it wins routing first, then [`validate_sdxl_control_request`] reports a
 /// typed error for conflicts/malformed/count violations and the stream reports missing weights.
-fn sdxl_control_candidate(request: &ImageRequest) -> bool {
+pub(super) fn sdxl_control_candidate(request: &ImageRequest) -> bool {
     if !is_sdxl_control_model(&request.model) {
         return false;
     }
@@ -69,8 +117,7 @@ fn validate_sdxl_control_candle_tier(request: &ImageRequest) -> WorkerResult<()>
     };
     let quant_bits_are_q4 = match request.advanced.get("mlxQuantize") {
         None | Some(Value::Null) => true,
-        Some(value) => crate::payload::quant_int(value)
-            == Some(4),
+        Some(value) => crate::payload::quant_int(value) == Some(4),
     };
     if quant_tier_is_q4 && quant_bits_are_q4 {
         return Ok(());
@@ -461,7 +508,9 @@ fn sdxl_control_admission_paths(spec: &LoadSpec) -> WorkerResult<(&Path, Vec<&Pa
     }
     overlays.extend(spec.adapters.iter().map(|adapter| adapter.path.as_path()));
     if let Some(pid) = &spec.pid {
-        overlays.push(crate::weights_source::WeightsSourceExt::path(&pid.checkpoint));
+        overlays.push(crate::weights_source::WeightsSourceExt::path(
+            &pid.checkpoint,
+        ));
         overlays.push(crate::weights_source::WeightsSourceExt::path(&pid.gemma));
     }
     if let Some(identity) = &spec.identity {
@@ -553,7 +602,7 @@ fn sdxl_control_generate_one(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn generate_sdxl_control_stream(
+pub(super) async fn generate_sdxl_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -744,8 +793,6 @@ mod sdxl_control_tests {
         ImageRequest::from_payload(value.as_object().expect("payload"))
     }
 
-
-
     fn offline_settings_at(data_dir: &Path) -> Settings {
         Settings {
             data_dir: data_dir.to_path_buf(),
@@ -835,7 +882,10 @@ mod sdxl_control_tests {
         );
         assert!(matches!(spec.weights, WeightsSource::Dir(_)));
         assert!(matches!(spec.control, Some(WeightsSource::File(_))));
-        assert!(spec.extra_controls.is_empty(), "public route is singular-control only");
+        assert!(
+            spec.extra_controls.is_empty(),
+            "public route is singular-control only"
+        );
         assert_eq!(spec.quantize, Some(Quant::Q8));
     }
 

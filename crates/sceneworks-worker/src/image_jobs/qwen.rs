@@ -1,19 +1,95 @@
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::conditioning::edit_grouping;
+use super::conditioning::load_reference_image;
+use super::conditioning::parse_poses;
+use super::conditioning::pose_entries;
+use super::conditioning::resolve_control_identity_source;
+use super::conditioning::stage_likeness;
+use super::events::consume_gen_events;
+use super::flux2::build_edit_conditioning;
+use super::flux2::fit_edit_references;
+use super::flux2::plan_edit_batch;
+use super::flux2::EditBatch;
+use super::load_policy::apply_measured_mlx_load_shape;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::attach_selected_decoder;
+#[cfg(test)]
+use super::load_spec::load_control_engine;
+use super::load_spec::load_spec;
+use super::mlx_model;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::resolve_pid_weights;
+use super::quantization::resolve_quant;
+use super::qwen_control_tier_subdir;
+use super::resolve_seed;
+use super::sampling::resolve_guidance;
+use super::sampling::resolve_negative_prompt;
+use super::sampling::resolve_steps;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_cached_gen_stream;
+use super::strict_control::build_control_conditioning;
+use super::strict_control::ensure_depth_estimator_dir;
+use super::strict_control::preprocess_control_entry;
+use super::strict_control::requested_control_kind;
+use super::strict_control::resolve_control_source;
+use super::strict_control::resolve_user_control_map;
+use super::strict_control::strict_control_default_repo;
+use super::strict_control::trusted_control_weight_revision;
+use super::strict_control::validate_control_kind;
+use super::tier_resolver;
+use super::zimage::resolve_control_scale;
+use super::AdapterKind;
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::Conditioning;
+use super::ControlKind;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::Progress;
+use super::Quant;
+use super::ResolvedModel;
+use super::WeightsSource;
+use crate::download_snapshot_into_cache;
+use crate::huggingface_repo_cache_path;
+use crate::progress_report_interval;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::DownloadProgress;
+use crate::HuggingFaceSnapshot;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 /// The engine registry id for the Qwen-Image ControlNet-Union variant. The default control repo is
 /// the `STRICT_CONTROL_ENGINES` table row for this id (resolved via `strict_control_default_repo`),
 /// not a duplicated local constant — so a table repoint keeps the resolver, error message, and
 /// download hint in lockstep. As of sc-9870 that row is the SceneWorks PACKED tier
 /// (`SceneWorks/qwen-image-2512-fun-controlnet-union`), replacing the dense alibaba-pai overlay.
-const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
+pub(super) const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
 /// The single packed control file inside each tier subdir (`q4/`, `q8/`, `bf16/`). Deterministic —
 /// the packed tier ships exactly one `model.safetensors` per subdir (sc-9870), so the sc-8350
 /// two-overlay ambiguity is naturally resolved.
-const QWEN_CONTROL_FILE: &str = "model.safetensors";
+pub(super) const QWEN_CONTROL_FILE: &str = "model.safetensors";
 
 /// True when this is the base-Qwen strict-pose tier: `qwen_image` + non-empty object
 /// `advanced.poses`, not edit mode, and base weights available. A `referenceAssetId`, if present,
 /// is ignored for parity with the Python torch `QwenImageControlNetPipeline` path; identity comes
 /// from character LoRA adapters on the base transformer.
-fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == "qwen_image"
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
@@ -27,7 +103,7 @@ fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
 /// repo/file/revision tuple; when a filename is present the tier subdir is NOT applied. `Ok(None)` when
 /// the file is absent (the download flow /
 /// on-demand fetch provisions it ahead of generation, like base weights).
-fn resolve_qwen_control_weights(
+pub(super) fn resolve_qwen_control_weights(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
@@ -41,12 +117,13 @@ fn resolve_qwen_control_weights(
             .and_then(crate::payload::trimmed_value_str)
             .map(str::to_owned)
     };
-    let repo =
-        override_field("repo").unwrap_or_else(|| strict_control_default_repo(QWEN_CONTROL_ENGINE_ID).to_owned());
-    let default_revision = (repo == strict_control_default_repo(QWEN_CONTROL_ENGINE_ID)).then(|| {
-        sceneworks_core::control_weights::default_control_revision(QWEN_CONTROL_ENGINE_ID)
-            .expect("shipped Qwen control revision")
-    });
+    let repo = override_field("repo")
+        .unwrap_or_else(|| strict_control_default_repo(QWEN_CONTROL_ENGINE_ID).to_owned());
+    let default_revision =
+        (repo == strict_control_default_repo(QWEN_CONTROL_ENGINE_ID)).then(|| {
+            sceneworks_core::control_weights::default_control_revision(QWEN_CONTROL_ENGINE_ID)
+                .expect("shipped Qwen control revision")
+        });
     let snapshot = default_revision.and_then(|revision| {
         crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, revision)
     });
@@ -71,8 +148,7 @@ fn resolve_qwen_control_weights(
             qwen_control_tier_subdir(request, snapshot.as_deref())
         ),
     };
-    let revision =
-        trusted_control_weight_revision(request, QWEN_CONTROL_ENGINE_ID, &repo, &rel)?;
+    let revision = trusted_control_weight_revision(request, QWEN_CONTROL_ENGINE_ID, &repo, &rel)?;
     let Some(snapshot) =
         crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
     else {
@@ -101,7 +177,7 @@ fn qwen_control_spec(
 }
 
 #[cfg(all(target_os = "macos", test))]
-fn qwen_control_load(
+pub(super) fn qwen_control_load(
     weights_dir: PathBuf,
     control_weights: PathBuf,
     quant: Option<Quant>,
@@ -118,7 +194,7 @@ fn qwen_control_load(
 /// the shared [`build_control_conditioning`] driver) drives the 2512-Fun control branch; prompt, true CFG,
 /// negative prompt, quant, and LoRA/LoKr mirror base Qwen.
 #[allow(clippy::too_many_arguments)]
-fn qwen_control_generate_one(
+pub(super) fn qwen_control_generate_one(
     generator: &dyn Generator,
     prompt: &str,
     negative_prompt: Option<String>,
@@ -164,7 +240,7 @@ fn qwen_control_generate_one(
     }
 }
 
-fn qwen_control_raw_settings(
+pub(super) fn qwen_control_raw_settings(
     request: &ImageRequest,
     repo: &str,
     steps: u32,
@@ -173,13 +249,22 @@ fn qwen_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    tier_resolver::control_raw_settings(request, repo, steps, control_scale, pose_count, tier_resolver::ControlBackend::Mlx(quant_bits), Some(guidance), Some(QWEN_CONTROL_ENGINE_ID))
+    tier_resolver::control_raw_settings(
+        request,
+        repo,
+        steps,
+        control_scale,
+        pose_count,
+        tier_resolver::ControlBackend::Mlx(quant_bits),
+        Some(guidance),
+        Some(QWEN_CONTROL_ENGINE_ID),
+    )
 }
 
 /// Real Qwen strict-pose generation: one image per pose, each conditioned on a full DWPose
 /// skeleton. Mirrors the Python `_generate_pose_set` path: shared seed, full body/hands/face
 /// skeleton, `advanced.controlScale`, true CFG, and character LoRA identity.
-async fn generate_qwen_control_stream(
+pub(super) async fn generate_qwen_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -264,8 +349,12 @@ async fn generate_qwen_control_stream(
     let use_pid = pid_weights.is_some();
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched).
-    let (width, height) =
-        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
     let mut spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
@@ -380,7 +469,7 @@ async fn generate_qwen_control_stream(
 /// variant. `qwen_image_edit` / `_2509` / `_2511` / `_2511_lightning` all map to the single
 /// `qwen_image_edit` engine model; the lightning id differs only in its sampler + distill
 /// LoRA (see [`qwen_edit_lightning`]), not in the engine model.
-fn qwen_edit_engine_id(model: &str) -> Option<&'static str> {
+pub(super) fn qwen_edit_engine_id(model: &str) -> Option<&'static str> {
     match model {
         "qwen_image_edit"
         | "qwen_image_edit_2509"
@@ -397,14 +486,14 @@ fn qwen_edit_engine_id(model: &str) -> Option<&'static str> {
 /// lightning variant carries both. Worker-local: the distill LoRA is fetched lazily into
 /// the HF cache on first use (`ensure_distill_lora_cached`), mirroring the Python path's
 /// `load_lora_weights` → `fuse_lora` (it is not a manifest install artifact). sc-3398.
-struct LightningDistill {
+pub(super) struct LightningDistill {
     /// The engine sampler id passed via `GenerationRequest.sampler`.
-    sampler: &'static str,
+    pub(super) sampler: &'static str,
     /// HuggingFace repo holding the distill LoRA.
-    repo: &'static str,
+    pub(super) repo: &'static str,
     /// The distill LoRA filename within the repo (the 4-step bf16 variant matches the
     /// 4-step `default_steps` of the lightning model row).
-    file: &'static str,
+    pub(super) file: &'static str,
 }
 
 /// The default Lightning distill-LoRA repo (`qwen_image_edit_2511_lightning`). A fixed default; a
@@ -415,11 +504,11 @@ const QWEN_LIGHTNING_LORA_REPO: &str = "lightx2v/Qwen-Image-Edit-2511-Lightning"
 /// Pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). `HuggingFaceSnapshot::resolve`
 /// still verifies each file's `lfs.oid` sha256 against the downloaded content. Applied ONLY to the default
 /// repo — a non-default repo keeps `main`.
-const QWEN_LIGHTNING_LORA_REVISION: &str = "d74eba145674fd7e31b949324e148e21e7118abd";
+pub(super) const QWEN_LIGHTNING_LORA_REVISION: &str = "d74eba145674fd7e31b949324e148e21e7118abd";
 
 /// The Lightning distill config for a SceneWorks model id, or `None` for every
 /// production variant. Only `qwen_image_edit_2511_lightning` is a distilled variant today.
-fn qwen_edit_lightning(model: &str) -> Option<LightningDistill> {
+pub(super) fn qwen_edit_lightning(model: &str) -> Option<LightningDistill> {
     match model {
         "qwen_image_edit_2511_lightning" => Some(LightningDistill {
             sampler: "lightning",
@@ -511,9 +600,14 @@ async fn ensure_distill_lora_cached(
 
 /// Ordered reference asset ids for a Qwen edit: plural `referenceAssetIds`, the singular
 /// character-flow `referenceAssetId`, or the Image-Edit `sourceAssetId` (edit_image mode).
-fn qwen_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+pub(super) fn qwen_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
     if !request.reference_asset_ids.is_empty() {
-        return request.reference_asset_ids.iter().take(5).cloned().collect();
+        return request
+            .reference_asset_ids
+            .iter()
+            .take(5)
+            .cloned()
+            .collect();
     }
     if let Some(id) = request
         .reference_asset_id
@@ -538,7 +632,7 @@ fn qwen_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
 
 /// True when this is a Qwen edit job (a qwen edit-capable model + ≥1 reference) whose
 /// weights resolve — routed to the `qwen_image_edit` engine model rather than txt2img.
-fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     qwen_edit_engine_id(&request.model).is_some()
         && !qwen_edit_reference_ids(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
@@ -550,7 +644,7 @@ fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
 /// 1.0) else the family default (4.0). The Character-Studio reference path clamps to
 /// [1, 10] (Python `_reference_true_cfg_scale`); `edit_image` floors at 1.0 (the engine
 /// needs CFG > 1 to engage).
-fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &ResolvedModel) -> f32 {
+pub(super) fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &ResolvedModel) -> f32 {
     let raw = request
         .advanced
         .get("trueCfgScale")
@@ -601,7 +695,7 @@ fn qwen_edit_raw_settings(
 /// `sampler` selects the engine recipe — `Some("lightning")` runs the few-step distilled
 /// path (CFG-off single forward), `None` the production multi-step true-CFG path (sc-3398).
 #[allow(clippy::too_many_arguments)]
-fn qwen_edit_generate_one(
+pub(super) fn qwen_edit_generate_one(
     generator: &dyn Generator,
     prompt: &str,
     negative_prompt: Option<String>,
@@ -655,7 +749,7 @@ fn qwen_edit_generate_one(
 /// shared grouping ([`edit_grouping`]) and [`consume_gen_events`]; differs in true-CFG
 /// guidance (`trueCfgScale`) + the negative prompt, the `[reference, skeleton]` pose order
 /// (reference first drives the VL identity prompt), and the body-only pose skeleton.
-async fn generate_qwen_edit_stream(
+pub(super) async fn generate_qwen_edit_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -714,8 +808,12 @@ async fn generate_qwen_edit_stream(
     // fit to THAT base — reference and latent stay in lockstep. `use_pid`/`spec.pid` stay paired below.
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
-    let (width, height) =
-        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
 
     // sc-3030 / sc-8253 fit_image: pre-fit every reference (the Image-Edit source AND the
     // Character-Studio character reference) to the (effective) output W×H (crop / pad / outpaint→pad)
@@ -743,7 +841,14 @@ async fn generate_qwen_edit_stream(
     } = plan_edit_batch(
         request,
         &grouping,
-        qwen_edit_raw_settings(request, &repo, steps, quant_bits, guidance, references.len()),
+        qwen_edit_raw_settings(
+            request,
+            &repo,
+            steps,
+            quant_bits,
+            guidance,
+            references.len(),
+        ),
     );
     let total = seeds.len();
 
@@ -773,7 +878,8 @@ async fn generate_qwen_edit_stream(
         "character_image face-stack staging failed; likeness scores omitted",
     )
     .await;
-    let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
+    let likeness_source =
+        (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
     // `width`/`height`, `pid_weights`, and `use_pid` were resolved above (ahead of the source pre-fit)
@@ -945,7 +1051,10 @@ mod qwen_control_tier_tests {
         seed_tier(root, "bf16");
 
         // No selection → q8 default (epic 10721 / sc-10726), clamped to installed (q8 present).
-        assert_eq!(qwen_control_tier_subdir(&request(json!({})), Some(root)), "q8");
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({})), Some(root)),
+            "q8"
+        );
         // Explicit picks are returned verbatim.
         assert_eq!(
             qwen_control_tier_subdir(&request(json!({ "mlxQuantize": 4 })), Some(root)),
@@ -976,7 +1085,10 @@ mod qwen_control_tier_tests {
         seed_tier(root, "q4");
 
         // Default clamps down to the only installed tier — no q8 fetch forced.
-        assert_eq!(qwen_control_tier_subdir(&request(json!({})), Some(root)), "q4");
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({})), Some(root)),
+            "q4"
+        );
         // Clean-tier ranking prefers bf16 over q4 when both are present but q8 is not.
         seed_tier(root, "bf16");
         assert_eq!(

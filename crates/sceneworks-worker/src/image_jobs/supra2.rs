@@ -191,7 +191,7 @@ mod tests {
             &["config.json", "diffusion_pytorch_model.safetensors"],
         );
         let bundle = data.path().join("models/mlx/supra2_img");
-        let spec = super::super::attach_required_components(
+        let spec = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(bundle.clone())),
             "supra2_img",
             &crate::test_env::shipped_catalog_entry("supra2_img"),
@@ -216,7 +216,7 @@ mod tests {
             &["config.json", "model.safetensors", "tokenizer.json"],
         );
         let attach = |data: &Path| {
-            super::super::attach_required_components(
+            crate::image_jobs::load_spec::attach_required_components(
                 LoadSpec::new(WeightsSource::Dir(data.join("bundle"))),
                 "supra2_img",
                 &crate::test_env::shipped_catalog_entry("supra2_img"),
@@ -467,7 +467,7 @@ mod tests {
                     None,
                 );
                 let mut asset_writes = Vec::new();
-                let outcome = super::super::super::generate_stream(
+                let outcome = crate::image_jobs::mlx::generate_stream(
                     &api,
                     &settings,
                     &job,
@@ -540,7 +540,7 @@ mod tests {
             let plan =
                 super::super::super::ImagePlan::with_count(&request, request.image_count(), None);
             let mut asset_writes = Vec::new();
-            let outcome = super::super::super::generate_stream(
+            let outcome = crate::image_jobs::mlx::generate_stream(
                 &api,
                 &settings,
                 &job,
@@ -1872,7 +1872,7 @@ mod tests {
             request: &ImageRequest,
             canceled: bool,
             seen: Arc<Mutex<Vec<Seen>>>,
-            tx: tokio::sync::mpsc::Sender<lane::GenEvent>,
+            tx: tokio::sync::mpsc::Sender<lane::stream::GenEvent>,
         ) -> crate::error::WorkerResult<()> {
             let model = model();
             let batch = lane::lane_controls::resolve_native_prompt_batch(
@@ -1887,17 +1887,17 @@ mod tests {
                 seen,
             };
             let seed = lane::resolve_seed(request, 0);
-            let steps = lane::resolve_steps(request, &model);
-            let guidance = lane::resolve_guidance(request, &model);
+            let steps = lane::sampling::resolve_steps(request, &model);
+            let guidance = lane::sampling::resolve_guidance(request, &model);
             let enhance = lane::PromptEnhance::from_advanced(&request.model, &request.advanced)?;
             let cancel = CancelFlag::new();
-            lane::drive_native_prompt_batch(
+            lane::stream::drive_native_prompt_batch(
                 tx,
                 seed,
                 batch.images() as usize,
                 |preview, on_progress| {
                     let warnings = std::cell::RefCell::new(Vec::new());
-                    let images = lane::render_on_surface(
+                    let images = lane::render::render_on_surface(
                         &probe,
                         "",
                         request.width,
@@ -1953,16 +1953,16 @@ mod tests {
                 "seed": 40, "count": 3, "advanced": { "steps": 12, "guidanceScale": 4.5 }
             }));
             let plan = lane::ImagePlan::with_count(&request, request.image_count(), None);
-            let steps = lane::resolve_steps(&request, &model());
-            let raw_settings = lane::mlx_raw_settings(
+            let steps = lane::sampling::resolve_steps(&request, &model());
+            let raw_settings = lane::sampling::mlx_raw_settings(
                 &request,
                 "SupraLabs/Supra2-IMG",
                 steps,
                 None,
-                lane::resolve_guidance(&request, &model()),
+                lane::sampling::resolve_guidance(&request, &model()),
             );
             let seen = Arc::new(Mutex::new(Vec::new()));
-            let (tx, rx) = tokio::sync::mpsc::channel::<lane::GenEvent>(64);
+            let (tx, rx) = tokio::sync::mpsc::channel::<lane::stream::GenEvent>(64);
             let producer_request = request.clone();
             let producer_seen = Arc::clone(&seen);
             let blocking = crate::load_progress::spawn_blocking(move || {
@@ -1976,7 +1976,7 @@ mod tests {
                 serde_json::from_value(crate::tests::job_snapshot_json("job-supra2", false))
                     .unwrap();
             let mut asset_writes = Vec::new();
-            lane::consume_gen_events(
+            lane::events::consume_gen_events(
                 &api,
                 &settings,
                 &job,
@@ -2075,7 +2075,7 @@ mod tests {
             assert_eq!(gen_core_checkpoint::supra2::image_seed(40, 1), 41);
             let mut seeds = Vec::new();
             while let Ok(event) = rx.try_recv() {
-                if let lane::GenEvent::Image { seed, .. } = event {
+                if let lane::stream::GenEvent::Image { seed, .. } = event {
                     seeds.push(seed);
                 }
             }
@@ -2103,7 +2103,7 @@ mod tests {
             );
             let mut published = Vec::new();
             while let Ok(event) = rx.try_recv() {
-                if let lane::GenEvent::Image { index, seed, .. } = event {
+                if let lane::stream::GenEvent::Image { index, seed, .. } = event {
                     published.push((index, seed));
                 }
             }
@@ -2128,7 +2128,7 @@ mod tests {
             assert_eq!(seen.lock().unwrap().len(), 1);
             while let Ok(event) = rx.try_recv() {
                 assert!(
-                    !matches!(event, lane::GenEvent::Image { .. }),
+                    !matches!(event, lane::stream::GenEvent::Image { .. }),
                     "a canceled batch publishes no image"
                 );
             }
@@ -2143,7 +2143,7 @@ mod tests {
             )
             .expect("supra2_img declares limits.hardMaxSteps");
             let request = request(json!({ "seed": 1, "advanced": { "steps": ceiling } }));
-            assert_eq!(lane::resolve_steps(&request, &model()), ceiling);
+            assert_eq!(lane::sampling::resolve_steps(&request, &model()), ceiling);
             let seen = Arc::new(Mutex::new(Vec::new()));
             let (tx, _rx) = tokio::sync::mpsc::channel(64);
             produce(&request, false, Arc::clone(&seen), tx).expect("renders");
@@ -2186,7 +2186,7 @@ mod tests {
                     model["id"]
                 );
             }
-            assert_eq!(lane::max_requested_steps(50), 80);
+            assert_eq!(lane::sampling::max_requested_steps(50), 80);
         }
 
         // -----------------------------------------------------------------------------------
@@ -2404,7 +2404,7 @@ mod tests {
                 };
                 let mut asset_writes = Vec::new();
                 #[cfg(target_os = "macos")]
-                let arm = lane::generate_stream_using(
+                let arm = lane::mlx::generate_stream_using(
                     &api,
                     &settings,
                     &job,
@@ -2473,7 +2473,13 @@ mod tests {
             let request = request(json!({
                 "advanced": { "guidanceScale": 1.0, "unconditional": "stored", "backend": "x" }
             }));
-            let raw = lane::mlx_raw_settings(&request, "SupraLabs/Supra2-IMG", 50, None, Some(1.0));
+            let raw = lane::sampling::mlx_raw_settings(
+                &request,
+                "SupraLabs/Supra2-IMG",
+                50,
+                None,
+                Some(1.0),
+            );
             assert_eq!(raw[sceneworks_core::supra2::UNCONDITIONAL_KEY], "none");
             assert_ne!(raw[sceneworks_core::supra2::BACKEND_KEY], "x");
         }

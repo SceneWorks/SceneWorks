@@ -1,9 +1,47 @@
+use super::artifact_resolution::is_sensenova_model;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::conditioning::edit_grouping;
+use super::conditioning::load_reference_image;
+use super::conditioning::stage_likeness;
+use super::conditioning::EditGrouping;
+use super::events::consume_gen_events;
+use super::flux2::build_edit_conditioning;
+use super::flux2::fit_edit_references;
+use super::flux2::plan_edit_batch;
+use super::flux2::EditBatch;
+use super::load_spec::load_spec;
+use super::mlx_model;
+use super::quantization::resolve_quant;
+use super::qwen::qwen_edit_reference_ids;
+use super::sampling::resolve_guidance;
+use super::sampling::resolve_steps;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_cached_gen_stream;
+use super::CancelFlag;
+use super::Conditioning;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::Progress;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 /// True when this is a SenseNova it2i job: a SenseNova model + ≥1 reference (the character
 /// `referenceAssetId`, or the Image-Edit `sourceAssetId` in `edit_image` mode) whose weights
 /// resolve. Plain T2I (no reference) is NOT routed here — it rides the base `mlx_available` path.
 /// Reuses [`qwen_edit_reference_ids`] (the generic `ref = referenceAssetId or sourceAssetId-if-edit`
 /// rule, not Qwen-specific).
-fn sensenova_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn sensenova_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_sensenova_model(&request.model)
         && !qwen_edit_reference_ids(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
@@ -12,7 +50,7 @@ fn sensenova_edit_available(request: &ImageRequest, settings: &Settings) -> bool
 /// Snap a dimension to SenseNova's 32-pixel cell (the engine rejects off-cell sizes), clamped to
 /// the descriptor's [256, 2048] range. SenseNova's trained buckets are already 32-aligned; this
 /// guards a hand-set advanced width/height.
-fn sensenova_dim(value: u32) -> u32 {
+pub(super) fn sensenova_dim(value: u32) -> u32 {
     let snapped = value.div_ceil(32) * 32;
     snapped.clamp(256, 2048)
 }
@@ -21,7 +59,7 @@ fn sensenova_dim(value: u32) -> u32 {
 /// `advanced.imageGuidanceScale` else the per-mode default — 1.5 for Character Studio
 /// (`character_image`, pulls harder toward the reference subject, sc-2015) / 1.0 for instruction
 /// edit (the upstream it2i default). Floored at 1.0. Mirrors the Python `_image_guidance_scale`.
-fn resolve_sensenova_img_cfg(request: &ImageRequest) -> f32 {
+pub(super) fn resolve_sensenova_img_cfg(request: &ImageRequest) -> f32 {
     let default = if request.mode == "character_image" {
         1.5
     } else {
@@ -44,7 +82,7 @@ fn resolve_sensenova_img_cfg(request: &ImageRequest) -> f32 {
 /// The SenseNova flow-match timestep shift (`scheduler_shift` → engine `timestep_shift`):
 /// `advanced.schedulerShift` (or the legacy `timestepShift`) else 3.0; a non-positive value falls
 /// back to 3.0. The only sampling knob SenseNova exposes (mirrors the Python adapter).
-fn resolve_sensenova_timestep_shift(request: &ImageRequest) -> f32 {
+pub(super) fn resolve_sensenova_timestep_shift(request: &ImageRequest) -> f32 {
     let raw = request
         .advanced
         .get("schedulerShift")
@@ -100,7 +138,7 @@ fn sensenova_edit_raw_settings(
 /// `guidance` carries the text CFG, `true_cfg` the image guidance; `scheduler_shift` the
 /// flow-match timestep shift. No negative prompt.
 #[allow(clippy::too_many_arguments)]
-fn sensenova_edit_generate_one(
+pub(super) fn sensenova_edit_generate_one(
     generator: &dyn Generator,
     prompt: &str,
     width: u32,
@@ -151,7 +189,7 @@ fn sensenova_edit_generate_one(
 /// [`generate_qwen_edit_stream`]'s blocking-thread + streamed-events shape; differs in the dual
 /// CFG (`guidance` text + `true_cfg` image), no negative prompt, no pose tier (SenseNova has no
 /// ControlNet), and no Lightning fetch (the `_fast` distill LoRA is merged inside the engine load).
-async fn generate_sensenova_edit_stream(
+pub(super) async fn generate_sensenova_edit_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -248,7 +286,8 @@ async fn generate_sensenova_edit_stream(
         "character_image face-stack staging failed; likeness scores omitted",
     )
     .await;
-    let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
+    let likeness_source =
+        (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
     // No user adapters by design (sc-6038): SenseNova-U1 is an 8B MoT autoregressive model with no

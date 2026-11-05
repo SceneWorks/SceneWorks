@@ -343,6 +343,47 @@ fn architecture_documentation_matrix_covers_every_known_job_type() {
 
 #[test]
 fn real_image_job_modules_import_the_json_macro_they_invoke() {
+    fn json_usage(source: &str) -> (bool, bool) {
+        use syn::visit::Visit;
+        #[derive(Default)]
+        struct JsonUsage {
+            unqualified: bool,
+            imported: bool,
+        }
+        impl<'ast> Visit<'ast> for JsonUsage {
+            fn visit_macro(&mut self, node: &'ast syn::Macro) {
+                self.unqualified |= node.path.is_ident("json");
+                syn::visit::visit_macro(self, node);
+            }
+            fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+                fn names_json(tree: &syn::UseTree) -> bool {
+                    match tree {
+                        syn::UseTree::Name(name) => name.ident == "json",
+                        syn::UseTree::Rename(name) => name.ident == "json" && name.rename == "json",
+                        syn::UseTree::Group(group) => group.items.iter().any(names_json),
+                        _ => false,
+                    }
+                }
+                if let syn::UseTree::Path(path) = &node.tree {
+                    self.imported |= path.ident == "serde_json" && names_json(&path.tree);
+                }
+                syn::visit::visit_item_use(self, node);
+            }
+        }
+        let syntax = syn::parse_file(source).expect("image module source must parse");
+        let mut usage = JsonUsage::default();
+        usage.visit_file(&syntax);
+        (usage.unqualified, usage.imported)
+    }
+    assert_eq!(
+        json_usage("fn fixture() { serde_json::json!({}); }"),
+        (false, false)
+    );
+    assert_eq!(json_usage("fn fixture() { json!({}); }"), (true, false));
+    assert_eq!(
+        json_usage("use serde_json::{json, Value}; fn fixture() { json!({}); }"),
+        (true, true)
+    );
     let image_jobs = include_str!("image_jobs.rs");
     let module_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/image_jobs");
 
@@ -357,16 +398,10 @@ fn real_image_job_modules_import_the_json_macro_they_invoke() {
         }
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        let code = code_without_comments_or_literals(&source);
-        if !code.contains("json!") {
+        let (invokes_json, imports_json) = json_usage(&source);
+        if !invokes_json {
             continue;
         }
-        let imports_json = code.split(';').any(|statement| {
-            statement.trim_start().starts_with("use serde_json")
-                && statement
-                    .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                    .any(|word| word == "json")
-        });
         assert!(
             imports_json,
             "{} invokes json! but does not explicitly import serde_json::json",
