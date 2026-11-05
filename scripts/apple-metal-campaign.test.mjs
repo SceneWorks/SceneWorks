@@ -1,7 +1,7 @@
 // CPU source/metadata fixtures only. No weights, Cargo build, GPU probe or production lock.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, execFile } from "node:child_process";
+import { execFileSync, execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, access, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -132,6 +132,31 @@ test("source metadata transactions are cache-local and release after failure", a
   await assert.rejects(withSourceMetadata(cache, async () => { throw new Error("fixture failure"); }), /fixture failure/);
   await withSourceMetadata(cache, async () => { events.push("recovered"); });
   assert.equal(events.at(-1), "recovered");
+});
+test("terminated metadata owners release their process-bound lock without cache repair", async (t) => {
+  const directory = await temporary(t), cache = path.join(directory, "objects");
+  await mkdir(cache); git(cache, "init", "--quiet");
+  const owner = spawn(process.execPath, ["--input-type=module", "-e", `
+    import { withSourceMetadata } from ${JSON.stringify(new URL("./ci/memory-catalog/source-worktree.mjs", import.meta.url).href)};
+    await withSourceMetadata(process.argv[1], async () => {
+      console.log("entered");
+      await new Promise(() => { setInterval(() => {}, 1000); });
+    });
+  `, cache], { stdio: ["ignore", "pipe", "pipe"] });
+  const exited = new Promise((resolve, reject) => { owner.once("error", reject); owner.once("close", resolve); });
+  try {
+    await Promise.race([
+      new Promise((resolve) => owner.stdout.once("data", resolve)),
+      exited.then(() => { throw new Error("fixture owner exited before acquiring metadata lock"); }),
+    ]);
+    owner.kill("SIGKILL");
+    await exited;
+    await withSourceMetadata(cache, async () => { await writeFile(path.join(directory, "recovered"), "yes"); });
+    assert.equal(await readFile(path.join(directory, "recovered"), "utf8"), "yes");
+    // Reopen the same persistent inode rather than deleting a potentially live successor's lock.
+    const common = git(cache, "rev-parse", "--path-format=absolute", "--git-common-dir");
+    await access(path.join(common, "sceneworks-source-metadata.kernel-lock"));
+  } finally { if (owner.exitCode === null && owner.signalCode === null) { owner.kill("SIGKILL"); await exited; } }
 });
 async function nativeFixture(t, prebuilt = false, profile = "release", consumer) {
   const artifactName = consumer === "app" ? "sceneworks-rust-api" : ["iris", "supra2"].includes(consumer) ? "sceneworks_worker" : profile === "release" ? "memory-mlx-adapter" : "dump-engine-capabilities";
