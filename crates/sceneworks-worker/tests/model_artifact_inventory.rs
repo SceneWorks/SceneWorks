@@ -281,7 +281,11 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
-        source_files: &["apps/rust-api/src/models.rs"],
+        source_files: &[
+            "apps/rust-api/src/models/catalog.rs",
+            "apps/rust-api/src/models/delete.rs",
+            "apps/rust-api/src/models/install_state.rs",
+        ],
         categories: &[
             Category::Primary,
             Category::OptionalComponent,
