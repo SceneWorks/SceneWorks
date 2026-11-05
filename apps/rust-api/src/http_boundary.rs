@@ -517,7 +517,7 @@ mod tests {
     }
     #[tokio::test]
     async fn stalled_real_multipart_route_cleans_staging_before_json_408() {
-        use crate::tests::support::{request, test_settings};
+        use crate::tests::support::test_settings;
         let temp = tempfile::tempdir().unwrap();
         let app = crate::create_app(test_settings(&temp)).unwrap();
         let (_, project) =
