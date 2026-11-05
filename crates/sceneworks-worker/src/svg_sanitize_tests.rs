@@ -1584,4 +1584,3 @@ async fn renders_a_bounded_png_preview_from_the_canonical_svg() {
         "preview rendered the red rectangle"
     );
 }
-
