@@ -953,32 +953,7 @@ pub(super) fn minimax_h3_clip_input_has_audio(stderr: &str) -> bool {
 }
 
 #[cfg(native_lane)]
-#[derive(Default)]
-struct MinimaxH3InputStreams {
-    input: bool,
-    finished: bool,
-    audio: bool,
-}
-
-#[cfg(native_lane)]
-impl MinimaxH3InputStreams {
-    fn read_line(&mut self, line: &str) {
-        if self.finished {
-            return;
-        }
-        if !self.input {
-            if !line.trim_start().starts_with("Input #") {
-                return;
-            }
-            self.input = true;
-        }
-        if line.trim_start().starts_with("Output #") {
-            self.finished = true;
-            return;
-        }
-        self.audio |= line.contains("Stream #") && line.contains(": Audio:");
-    }
-}
+use crate::media_jobs::FfmpegInputStreams as MinimaxH3InputStreams;
 
 /// Refuse a decoded reference clip whose SHAPE the engine cannot condition on — from the frames
 /// alone, before a single weight is read.
