@@ -98,13 +98,7 @@ async fn project_and_asset_routes_persist_contract_state() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (status, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "My Project" }),
-    )
-    .await;
+    let (status, created) = crate::tests::support::create_project(app.clone(), &"My Project").await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(created["id"]
         .as_str()
@@ -265,13 +259,8 @@ async fn project_and_asset_routes_persist_contract_state() {
 async fn timeline_routes_persist_and_create_worker_jobs() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created_project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Timeline Project" }),
-    )
-    .await;
+    let (_, created_project) =
+        crate::tests::support::create_project(app.clone(), &"Timeline Project").await;
     let project_id = created_project["id"]
         .as_str()
         .expect("project id")
@@ -394,13 +383,7 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
 async fn timeline_audio_bus_and_item_fields_round_trip_at_non_default_values() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Bus Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Bus Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (status, mut timeline) = request(
         app.clone(),
@@ -493,13 +476,8 @@ async fn timeline_audio_bus_and_item_fields_round_trip_at_non_default_values() {
 async fn timeline_routes_reject_invalid_payloads() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created_project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Invalid Timeline Project" }),
-    )
-    .await;
+    let (_, created_project) =
+        crate::tests::support::create_project(app.clone(), &"Invalid Timeline Project").await;
     let project_id = created_project["id"]
         .as_str()
         .expect("project id")
@@ -594,13 +572,7 @@ async fn character_studio_routes_manage_references_loras_and_test_jobs() {
     )
     .expect("user models writes");
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Characters" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Characters").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
 
@@ -780,13 +752,7 @@ async fn move_asset_to_character_uses_the_shaped_json_error_contract() {
 async fn timeline_revision_conflicts_are_typed_and_exports_freeze_the_saved_revision() {
     let temp = tempfile::tempdir().unwrap();
     let app = create_app(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"Concurrent film"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Concurrent film").await;
     let project_id = project["id"].as_str().unwrap();
     let (_, cut) = request(
         app.clone(),

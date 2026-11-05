@@ -586,6 +586,13 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         CacheRole::Parameterized,
     ),
     ("rust-api", "lib.rs", "{subdir}", CacheRole::Parameterized),
+    // Shared multipart staging forwards the same upload/scratch subdir choices from its callers.
+    (
+        "rust-api",
+        "uploads.rs",
+        "{subdir}",
+        CacheRole::Parameterized,
+    ),
     (
         "rust-api",
         "startup.rs",
@@ -648,6 +655,9 @@ const PARAMETERIZED_CACHE_HELPERS: &[(&str, usize)] = &[
     ("resolve_import_source_path", 3),
     ("write_upload_field_to_dir", 2),
     ("write_upload_field_to_dir_bounded", 2),
+    // Shared API staging and its ordered-image wrapper retain the subdir at argument index 2.
+    ("stage_upload", 2),
+    ("stage_image_sources", 2),
     ("sweep_stale_uploads", 1),
     ("sweep_stale_uploads_cancellable", 1),
     ("sweep_stale_uploads_retaining", 1),

@@ -95,6 +95,7 @@ winapi-util = "0.1"
 sha2 = { workspace = true, features = ["asm"] }
 
 [target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
 libc = "0.2"
 # Descriptor-relative filesystem operations keep resolved-cache staging publication and cleanup
 # confined even when a managed path is concurrently replaced.

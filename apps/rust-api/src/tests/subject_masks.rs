@@ -31,13 +31,8 @@ async fn masked_dataset_fixture(
 
 /// [`masked_dataset_fixture`] on an existing app: (project id, dataset id, item ids, hashes).
 async fn masked_dataset_in(app: &axum::Router) -> (String, String, Vec<String>, Vec<String>) {
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Subject mask project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Subject mask project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let mut items = Vec::new();
     for index in 0..3u8 {

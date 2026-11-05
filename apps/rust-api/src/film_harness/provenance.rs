@@ -101,9 +101,7 @@ pub fn read_run_record(run_dir: &Path) -> Result<RunRecord, HarnessError> {
     })
 }
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    sceneworks_core::hashing::sha256_bytes(bytes)
-}
+pub(crate) use sceneworks_core::hashing::sha256_bytes as sha256_hex;
 
 /// The key one attempt of one shot dispatches under. Stable across restarts because every part of
 /// it is: the run id is in the record, the shot id is in the plan, and attempt numbers never repeat
