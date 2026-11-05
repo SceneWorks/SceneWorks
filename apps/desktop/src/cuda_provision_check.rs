@@ -454,9 +454,29 @@ mod tests {
             1
         );
         let all_so = temp.path().join("all-so");
+        // Locked zip9 enclosed_name normalizes an initial archive root. The original
+        // provisioners flatten the resulting basename beneath dest; it is not an escape.
         assert_eq!(
             extract_libraries(&wheel, &all_so, LibraryFilter::SharedObjects(None)).unwrap(),
-            4
+            5
+        );
+        let names: std::collections::BTreeSet<_> = fs::read_dir(&all_so)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from([
+                "absolute.so".to_owned(),
+                "libort.so".to_owned(),
+                "libort.so.1".to_owned(),
+                "libother.so.2".to_owned(),
+                "libort.software".to_owned(),
+            ])
+        );
+        assert_eq!(
+            fs::read(all_so.join("absolute.so")).unwrap(),
+            b"/absolute.so"
         );
         let so = temp.path().join("sonames");
         assert_eq!(
