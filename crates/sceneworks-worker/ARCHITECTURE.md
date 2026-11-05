@@ -51,8 +51,12 @@ Routing is by **capability advertisement**, not by queue or static config:
    retired from every surface, a job outside the native lanes is not silently
    downgraded — it is refused (`no-torch-fallback`, sc-5968) and stays queued
    until a worker that can serve it registers.
-4. CPU-utility kinds (`NON_GPU_JOB_TYPES`: `model_download`, `model_import`,
-   `model_convert`, `lora_import`) never route to GPU workers.
+4. CPU-utility kinds never route to GPU workers. The list below is pinned against
+   `sceneworks_core::jobs_store::NON_GPU_JOB_TYPES` by the documentation drift test.
+
+   <!-- non-gpu-job-types:start -->
+   `model_download`, `model_import`, `model_convert`, `lora_import`, `lora_download`, `dataset_parquet_import`
+   <!-- non-gpu-job-types:end -->
 5. Route decisions are logged (`RouteDecision`:
    `deferred_to_mlx | claimed_by_mlx | claimed_by_candle | claimed_by_gpu | explicit_gpu`).
 

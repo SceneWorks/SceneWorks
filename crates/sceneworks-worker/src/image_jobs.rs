@@ -2637,8 +2637,8 @@ fn job_prefix_kv_cache_records(asset_writes: &[Value]) -> Vec<Value> {
 /// accumulated facts via the store-side merge, so nothing a later Image-event post or a terminal
 /// post needs is lost.
 ///
-/// Gated like its only callers (the `include!`d `base.rs` step arm, reached on macOS and the
-/// candle lane) so the default lane never dead-code warns.
+/// Gated with its native image-job callers on macOS and the Candle lane so the default lane
+/// never dead-code warns.
 #[cfg(native_lane)]
 fn slim_step_result(plan: &ImagePlan) -> JsonObject {
     json!({
@@ -2753,9 +2753,8 @@ pub(crate) fn backend_label(gpu_id: &str) -> &str {
 /// until completion. Best-effort: a failed status update here is non-fatal because the
 /// post-run terminal write is what ultimately frees the worker.
 //
-// Gated to where `consume_gen_events` (its only caller) and the `CancelFlag` import live — the
-// `include!`d `base.rs` block — so it isn't compiled (referencing the cfg-gated `CancelFlag`) on
-// non-macOS / non-candle builds.
+// Gated with `consume_gen_events` in `image_jobs/events.rs` and the `CancelFlag` import so it
+// isn't compiled on non-macOS / non-Candle builds.
 #[cfg(native_lane)]
 pub(crate) async fn begin_image_cancel(
     api: &ApiClient,
