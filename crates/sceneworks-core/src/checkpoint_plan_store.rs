@@ -1349,14 +1349,7 @@ impl CheckpointPlanStore {
                 });
             }
         }
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|error| io_error(&path, error))?;
-        FileLock::exclusive(file).map_err(|error| io_error(&path, error))
+        FileLock::open_exclusive(&path).map_err(|error| io_error(&path, error))
     }
 
     /// Hold verified source ownership through provider use, including dense sources that need no
@@ -1398,12 +1391,7 @@ impl CheckpointPlanStore {
                 });
             }
         }
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
+        let file = crate::file_lock::open_regular_lock_file(&path)
             .map_err(|error| io_error(&path, error))?;
         Ok((path, file))
     }

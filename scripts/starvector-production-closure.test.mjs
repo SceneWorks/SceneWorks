@@ -11,6 +11,7 @@ import {
   closureSha256,
   PRODUCTION_CLOSURE_PATHS,
   MODEL_JOB_SPLIT_PATHS,
+  WORKER_SPLIT_PATHS,
   stableJson,
   validateProductionClosureShape,
 } from "./starvector-production-closure.mjs";
@@ -71,12 +72,20 @@ test("packaged production closure retains integrity independently of source curr
   // Preserve the recorded provenance; source currency is advisory. Controlled
   // fixtures above and below verify that source drift changes the closure.
   validateProductionClosureShape(closure);
-  // Historical closure membership/digests predate helper, model-job, sanitizer and prompt-refine extractions.
+  // Historical closure membership/digests predate helper and production-owner extractions.
   // Future captures include the new dependencies; the recorded candidate stays immutable.
-  const addedDependencies = ["scripts/lib/canonical-json.mjs", "scripts/lib/exec-file-with-fds.mjs", "crates/sceneworks-worker/src/svg_sanitize.rs", "crates/sceneworks-worker/src/prompt_refine_parse.rs", "crates/sceneworks-worker/src/prompt_refine_finalize.rs"];
+  const addedDependencies = [
+    "scripts/lib/canonical-json.mjs",
+    "scripts/lib/exec-file-with-fds.mjs",
+    "crates/sceneworks-core/src/file_lock.rs",
+    "crates/sceneworks-worker/src/svg_sanitize.rs",
+    "crates/sceneworks-worker/src/prompt_refine_parse.rs",
+    "crates/sceneworks-worker/src/prompt_refine_finalize.rs",
+  ];
   for (const dependency of addedDependencies) assert.ok(PRODUCTION_CLOSURE_PATHS.includes(dependency));
   const recordedPaths = PRODUCTION_CLOSURE_PATHS.filter(sourcePath =>
-    !addedDependencies.includes(sourcePath) && !MODEL_JOB_SPLIT_PATHS.includes(sourcePath));
+    !addedDependencies.includes(sourcePath) && !MODEL_JOB_SPLIT_PATHS.includes(sourcePath)
+      && !WORKER_SPLIT_PATHS.includes(sourcePath));
   assert.deepEqual(closure.entries.map(({ path }) => path).sort(), [...recordedPaths].sort());
 });
 
@@ -112,4 +121,15 @@ test("current production closure covers every extracted model-job implementation
     .filter((sourcePath) => !sourcePath.endsWith("/tests.rs"));
   assert.deepEqual([...MODEL_JOB_SPLIT_PATHS].sort(), extracted.sort());
   for (const sourcePath of extracted) assert.ok(PRODUCTION_CLOSURE_PATHS.includes(sourcePath));
+});
+
+
+test("current production closure covers extracted worker owners and the shared lock helper", async () => {
+  const source = await readFile("crates/sceneworks-worker/src/lib.rs", "utf8");
+  const extracted = [...source.matchAll(/^mod (utility_dispatch|worker_loop);$/gm)]
+    .map(([, owner]) => `crates/sceneworks-worker/src/${owner}.rs`);
+  assert.equal(extracted.length, 2, "both production owner declarations remain discoverable");
+  assert.deepEqual([...WORKER_SPLIT_PATHS].sort(), [...extracted].sort());
+  const required = [...extracted, "crates/sceneworks-core/src/file_lock.rs"];
+  assert.deepEqual(required.filter(sourcePath => !PRODUCTION_CLOSURE_PATHS.includes(sourcePath)), []);
 });

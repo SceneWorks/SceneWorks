@@ -3535,6 +3535,7 @@ pub(crate) fn candle_gate_evidence_revision(engine_id: &str) -> Option<&'static 
 mod gate_policy_tests;
 
 /// Only explicit family contracts or production route rules authorize optimized gate semantics.
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn has_gate_policy(backend: MemoryRouteBackend, provider: &str) -> bool {
     // This explicitly injected contract is the unit selector's provider, never a production id.
     #[cfg(test)]

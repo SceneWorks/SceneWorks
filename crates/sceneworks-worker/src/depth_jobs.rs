@@ -286,11 +286,6 @@ where
             return Err(error);
         }
     };
-    if let Err(error) = outputs.publish() {
-        outputs.discard();
-        return Err(error);
-    }
-
     let fact = depth_asset_fact(DepthFactInputs {
         outputs: &outputs,
         request: &request,
@@ -300,8 +295,12 @@ where
         trained_export_path: request
             .trained_model()
             .map(|_| data_relative_path(&settings.data_dir, &export.dir)),
-    })?;
+    });
     let result = depth_job_result(&outputs, &metadata, request.trained_model(), fact);
+    if let Err(error) = outputs.publish() {
+        outputs.discard();
+        return Err(error);
+    }
     // The API persists the asset only when it accepts this completion; if it refuses, the
     // published files would be orphans, so remove them before reporting the failure.
     if let Err(error) = update_job(
@@ -689,7 +688,7 @@ fn resolution_json(resolution: DepthResolutionRequest) -> Value {
 }
 
 /// The `assetWrites` fact the API persists as the depth asset's sidecar.
-fn depth_asset_fact(inputs: DepthFactInputs<'_>) -> WorkerResult<Value> {
+fn depth_asset_fact(inputs: DepthFactInputs<'_>) -> Value {
     let DepthFactInputs {
         outputs,
         request,
@@ -725,7 +724,7 @@ fn depth_asset_fact(inputs: DepthFactInputs<'_>) -> WorkerResult<Value> {
         lineage["weightsSubdir"] = Value::Null;
         lineage["exportPath"] = json!(trained_export_path);
     }
-    Ok(fact)
+    fact
 }
 
 /// The data-relative path of a trained depth export (`models/finetunes/<id>/<export>`), or the
