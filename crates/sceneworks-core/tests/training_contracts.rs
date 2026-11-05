@@ -623,7 +623,7 @@ fn regen_target_registry_fixture() {
     }
     let pretty = serde_json::to_string_pretty(&builtin_training_targets())
         .expect("builtin registry serializes");
-    fs::write(fixture_path("target-registry.json"), pretty + "\n").expect("write fixture");
+    fs::write(fixture_path("training/target-registry.json"), pretty + "\n").expect("write fixture");
 }
 
 #[test]
@@ -635,7 +635,7 @@ fn regen_preset_registry_fixture() {
     let pretty =
         serde_json::to_string_pretty(&sceneworks_core::training::builtin_training_presets())
             .expect("builtin preset registry serializes");
-    fs::write(fixture_path("preset-registry.json"), pretty + "\n").expect("write fixture");
+    fs::write(fixture_path("training/preset-registry.json"), pretty + "\n").expect("write fixture");
 }
 
 #[test]

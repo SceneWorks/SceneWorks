@@ -9,7 +9,7 @@ mod common;
 use common::{tree_snapshot, write_krea_native_file};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
