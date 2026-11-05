@@ -3976,7 +3976,7 @@
       //
       // ⚠️ THIS BLOCK ARMS A PRE-LOAD ADMISSION REFUSAL. `candle.minMemoryGb` and
       // `candle.minMemoryGbByTier` are `x-sceneworks-contract: binding` and are read by
-      // crates/sceneworks-worker/src/vram_gate.rs (`predicted_peak_gb`). With NO `candle` block the
+      // crates/sceneworks-worker/src/vram_gate/budget.rs (`predicted_peak_gb`). With NO `candle` block the
       // fit gate is skipped ENTIRELY and a too-small card discovers it is too small by OOMing
       // mid-load; with one, the gate REFUSES the load before it starts on any card with less free
       // VRAM than the resolved floor. A refusal that names the number is the intended behaviour; a

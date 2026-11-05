@@ -1863,7 +1863,7 @@
                 "type": "integer",
                 "minimum": 1,
                 "x-sceneworks-contract": "binding",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "candle.get(\"minMemoryGb\").and_then(json_f64)" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate/budget.rs", "anchor": "candle.get(\"minMemoryGb\").and_then(json_f64)" }],
                 "description": "Minimum GPU VRAM (GB) to run this model on the candle/CUDA lane — the measured overall-peak of the DEFAULT (lightest, typically q4) hosted tier, plus headroom. This gates the default tier only, matching the established MLX default-tier-gating convention; heavier hosted tiers (q8 / bf16) can exceed this value, and their per-tier measured ceilings live in vramGbByTier. Retires the epic 7982 SD3.5 'minMemoryGb under measured peak' follow-up: this is a real measured CUDA number, not the inherited unified-memory mlx value."
               },
               "minMemoryGbByTier": {
@@ -1872,7 +1872,7 @@
                 "additionalProperties": { "type": "integer", "minimum": 1 },
                 "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
                 "x-sceneworks-contract": "binding",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "tier_floor_gb(candle, tier_key)" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate/budget.rs", "anchor": "tier_floor_gb(candle, tier_key)" }],
                 "description": "Per-tier form of candle.minMemoryGb, for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar — an ALREADY-PADDED floor that predicted_peak_gb returns as-is, with NO HEADROOM_GB added. That is the whole reason this key is not vramGbByTier: that ladder is a raw measured/estimated PEAK, the gate pads it, and a row there is an evidence claim the sibling `measured` flag classifies. This key makes no evidence claim, so a DERIVED floor can live here honestly while vramGbByTier stays empty. Resolution order in predicted_peak_gb: vramGbByTier[tier] + headroom, else minMemoryGbByTier[tier], else minMemoryGb. A tier with no row therefore lands on the scalar, which must stay conservative for every unlisted key (including nvfp4)."
               },
               "vramGbByTier": {
@@ -1950,7 +1950,7 @@
               "turboFit": {
                 "$ref": "#/$defs/kreaTurboFit",
                 "x-sceneworks-contract": "binding",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "get(\"turboFit\")?" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate/krea.rs", "anchor": "get(\"turboFit\")?" }],
                 "description": "Resolution-aware, per-phase constrained-card fit evidence for ordinary Krea 2 Turbo. The worker selects the least-cost sufficient rung and fails closed to the established resident/sequential gate when a tier has no complete measured curves."
               },
               "measured": {
