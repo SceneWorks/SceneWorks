@@ -4556,7 +4556,7 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         .find("ImagePlan::with_count_and_adapter")
         .expect("the resolved route feeds the plan");
     let dispatch_use = run_job[route_binding..]
-        .find("let handled = match route")
+        .find("dispatch::execute_candle_image_route(")
         .expect("the same resolved route feeds dispatch");
     assert!(
         plan_use < dispatch_use,
@@ -4575,8 +4575,27 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         ),
         "the prepared candle route must supply the adapter label"
     );
+    let dispatch = include_str!("dispatch.rs");
+    let candle_dispatch = dispatch
+        .split_once("async fn execute_candle_image_route(")
+        .expect("Candle route executor")
+        .1
+        .split_once("\n}\n")
+        .expect("Candle route executor end")
+        .0;
+    assert_eq!(
+        run_job
+            .matches("dispatch::execute_candle_image_route(")
+            .count(),
+        1
+    );
+    assert!(
+        !dispatch.contains("prepare_candle_image_route(")
+            && !dispatch.contains("prepare_image_route("),
+        "executors consume the single prepared route and must not resolve its pins again"
+    );
     let pose_reject = between(
-        run_job,
+        candle_dispatch,
         "CandleImageRoute::PoseReject => {",
         "CandleImageRoute::PoseControlBaseMissing => {",
     );
@@ -4585,8 +4604,8 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         "PoseReject must terminate dispatch with a typed payload error"
     );
     let pose_reject_dispatch = run_job
-        .find("CandleImageRoute::PoseReject => {")
-        .expect("PoseReject dispatch arm");
+        .find("dispatch::execute_candle_image_route(")
+        .expect("the executor containing the terminal PoseReject branch");
     let stub_fallback = run_job
         .find("dispatch_legacy_fallback(&request.model, handled, || async {")
         .expect("model-bound guarded procedural-stub fallback");
