@@ -454,6 +454,9 @@ fn shared_helpers_preserve_slug_defaults_and_fail_closed_local_policy() {
     for peer in [
         None,
         Some("192.168.1.1:1234".parse::<SocketAddr>().unwrap()),
+        Some("[::ffff:192.168.1.1]:1234".parse().unwrap()),
+        Some("[::ffff:0.0.0.0]:1234".parse().unwrap()),
+        Some("[::]:1234".parse().unwrap()),
     ] {
         assert_eq!(
             crate::auth::local_only(peer).unwrap_err().status,
@@ -461,6 +464,18 @@ fn shared_helpers_preserve_slug_defaults_and_fail_closed_local_policy() {
         );
     }
     assert!(crate::auth::local_only(Some("[::1]:1234".parse().unwrap())).is_ok());
+    assert!(crate::auth::local_only(Some("127.0.0.1:1234".parse().unwrap())).is_ok());
+    let mapped_local = Some("[::ffff:127.0.0.1]:1234".parse().unwrap());
+    assert!(crate::auth::local_only(mapped_local).is_ok());
+    crate::auth::require_local_peer(mapped_local, || panic!("a local peer cannot be refused"))
+        .unwrap();
+    let error =
+        crate::auth::require_local_peer(Some("[::ffff:192.168.1.1]:1234".parse().unwrap()), || {
+            ApiError::bad_request("caller-owned local-path refusal")
+        })
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error.detail, "caller-owned local-path refusal");
     for value in [
         json!({}),
         json!({"gated":true}),
