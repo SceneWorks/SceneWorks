@@ -44,7 +44,7 @@ use super::InstantIdPaths;
 use super::InstantIdRequest;
 #[cfg(target_os = "macos")]
 use super::InstantIdRequest;
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 use super::Quant;
 #[cfg(not(target_os = "macos"))]
 use super::SdxlComponents;

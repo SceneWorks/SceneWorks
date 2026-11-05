@@ -24,8 +24,6 @@ use crate::Settings;
 use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
-#[cfg(test)]
-use serde_json::json;
 
 /// Sum the exact files/directories a bespoke load consumes without double-counting a
 /// file already covered by a recursively scanned directory.

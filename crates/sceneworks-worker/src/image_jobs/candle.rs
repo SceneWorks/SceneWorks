@@ -274,8 +274,6 @@ use super::WeightsSource;
 #[cfg(not(target_os = "macos"))]
 use crate::emit_event;
 #[cfg(not(target_os = "macos"))]
-use crate::gpu;
-#[cfg(not(target_os = "macos"))]
 use crate::update_job;
 #[cfg(any(
     all(not(target_os = "macos"), feature = "backend-candle"),

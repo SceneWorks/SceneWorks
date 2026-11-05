@@ -3029,20 +3029,14 @@ use candle_strict_control::{run_candle_strict_control, CandleStrictControl};
 // `QwenFunControl` is a bespoke provider (the InstantX `QwenControl` is retired on the candle lane).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod qwen_control;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use qwen_control::qwen_control_available;
 // Kolors ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-5489). macOS keeps the MLX
 // Kolors ControlNet path; the candle `KolorsControl` is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod kolors_control;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use kolors_control::kolors_control_available;
 // Z-Image Fun-ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-5489). macOS keeps the
 // MLX `z_image_turbo_control` registry generator; the candle `ZImageControl` is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod zimage_control;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use zimage_control::zimage_control_available;
 // FLUX.2-dev Fun-Controlnet-Union (strict pose) — the Windows/CUDA candle lane ONLY (sc-7736, epic 6564).
 // macOS keeps the MLX `flux2_dev_control` registry generator (flux2.rs); the candle `Flux2Control` is a
 // bespoke provider (the dev VACE control branch over the Q4 dev DiT).

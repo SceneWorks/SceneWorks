@@ -36,7 +36,6 @@ use super::ImageRequest;
 use super::QwenEdit;
 use super::QwenEditPaths;
 use super::QwenEditRequest;
-use crate::gpu;
 use crate::huggingface_snapshot_dir;
 use crate::read_safetensors_header;
 use crate::resolve_app_managed_model_dir;

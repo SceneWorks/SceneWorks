@@ -29,6 +29,7 @@ use super::sampling::resolve_guidance;
 use super::stream::drive_gen_items;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::stream::start_cached_gen_stream;
+#[cfg(target_os = "macos")]
 use super::stream::start_cached_gen_stream_with_request_state;
 use super::CancelFlag;
 #[cfg(not(target_os = "macos"))]
