@@ -1940,6 +1940,22 @@ pub(crate) async fn create_training_job(
     Path(project_id): Path<String>,
     ApiJson(payload): ApiJson<LoraTrainingRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let validated = validate_training_submission(&payload)?;
+    let prepared =
+        prepare_training_submission(state.clone(), project_id, payload, validated).await?;
+    enqueue_training_submission(state, prepared).await
+}
+struct ValidatedTrainingSubmission {
+    target: TrainingTarget,
+    is_control: bool,
+    is_base_checkpoint: bool,
+    preset_metadata: Option<TrainingPresetProvenance>,
+    output_name: String,
+}
+
+fn validate_training_submission(
+    payload: &LoraTrainingRequest,
+) -> Result<ValidatedTrainingSubmission, ApiError> {
     // Both dry-run plan validation and real execution exist (story 1417). A
     // dry-run resolves and validates the plan without producing weights; a real
     // run hands the same plan to the worker's Z-Image LoRA kernel.
@@ -2051,6 +2067,38 @@ pub(crate) async fn create_training_job(
         return Err(ApiError::bad_request("Training output name is required."));
     }
 
+    Ok(ValidatedTrainingSubmission {
+        target: target.clone(),
+        is_control,
+        is_base_checkpoint,
+        preset_metadata,
+        output_name,
+    })
+}
+
+struct PreparedTrainingSubmission {
+    job_id: String,
+    project_id: String,
+    project_name: String,
+    job_payload: JsonObject,
+    requested_gpu: String,
+    training_job_type: JobType,
+}
+
+async fn prepare_training_submission(
+    state: AppState,
+    project_id: String,
+    payload: LoraTrainingRequest,
+    validated: ValidatedTrainingSubmission,
+) -> Result<PreparedTrainingSubmission, ApiError> {
+    let ValidatedTrainingSubmission {
+        target,
+        is_control,
+        is_base_checkpoint,
+        preset_metadata,
+        output_name,
+    } = validated;
+    let target = &target;
     // Load the dataset, its absolute root, and the project name for the queue.
     let dataset_id = payload.dataset_id.clone();
     let (mut dataset, dataset_root, project_name) = project_call(state.clone(), {
@@ -2538,6 +2586,28 @@ pub(crate) async fn create_training_job(
     )
     .await?;
 
+    Ok(PreparedTrainingSubmission {
+        job_id,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+        training_job_type,
+    })
+}
+
+async fn enqueue_training_submission(
+    state: AppState,
+    prepared: PreparedTrainingSubmission,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let PreparedTrainingSubmission {
+        job_id,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+        training_job_type,
+    } = prepared;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job_with_id(
             job_id,
