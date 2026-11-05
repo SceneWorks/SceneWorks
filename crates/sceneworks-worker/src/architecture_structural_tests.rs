@@ -1964,3 +1964,96 @@ fn api_lib_does_not_gain_helper_implementations() {
         "new API helper implementations belong in an area owner, not lib.rs: {added:?}"
     );
 }
+
+fn declared_api_routes(source: &str) -> BTreeMap<String, BTreeSet<String>> {
+    #[derive(Default)]
+    struct Methods(BTreeSet<String>);
+    fn method_name(name: &str) -> bool {
+        ["get", "head", "post", "put", "patch", "delete", "options"].contains(&name)
+    }
+    impl<'ast> Visit<'ast> for Methods {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let Expr::Path(path) = call.func.as_ref() {
+                let name = path.path.segments.last().unwrap().ident.to_string();
+                if method_name(&name) {
+                    self.0.insert(name.to_ascii_uppercase());
+                }
+            }
+            visit::visit_expr_call(self, call);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            let name = call.method.to_string();
+            if method_name(&name) {
+                self.0.insert(name.to_ascii_uppercase());
+            }
+            visit::visit_expr_method_call(self, call);
+        }
+    }
+    #[derive(Default)]
+    struct Routes(BTreeMap<String, BTreeSet<String>>);
+    impl<'ast> Visit<'ast> for Routes {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "route" {
+                assert_eq!(call.args.len(), 2, "route declaration shape changed");
+                let path = match &call.args[0] {
+                    Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(path),
+                        ..
+                    }) => path.value(),
+                    Expr::Path(path) if path.path.is_ident("UI_PREFERENCES_PATH") => {
+                        "/api/v1/ui-preferences".into()
+                    }
+                    _ => panic!("route path requires an explicit contract mapping"),
+                };
+                let mut methods = Methods::default();
+                methods.visit_expr(&call.args[1]);
+                if methods.0.contains("GET") {
+                    methods.0.insert("HEAD".into());
+                }
+                assert!(
+                    !methods.0.is_empty(),
+                    "route methods require an explicit contract mapping"
+                );
+                self.0.entry(path).or_default().extend(methods.0);
+            }
+            visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut routes = Routes::default();
+    routes.visit_file(&parse(source));
+    routes.0
+}
+
+#[test]
+fn api_route_contract_covers_actual_area_builders() {
+    let root = root();
+    let mut files = vec![root.join("apps/rust-api/src/lib.rs")];
+    files.extend(rust_sources(&root.join("apps/rust-api/src/router")));
+    let mut actual: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for file in files {
+        for (path, methods) in declared_api_routes(&std::fs::read_to_string(file).unwrap()) {
+            actual.entry(path).or_default().extend(methods);
+        }
+    }
+    let table =
+        std::fs::read_to_string(root.join("apps/rust-api/src/tests/route_contract.tsv")).unwrap();
+    let mut expected: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for line in table
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+    {
+        let row: Vec<_> = line.split('\t').collect();
+        assert_eq!(row.len(), 3);
+        assert!(
+            expected
+                .entry(row[1].into())
+                .or_default()
+                .insert(row[0].into()),
+            "duplicate route contract row"
+        );
+    }
+    assert_eq!(
+        actual, expected,
+        "update the real router/authentication regression table when route declarations change"
+    );
+}

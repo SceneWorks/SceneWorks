@@ -49,6 +49,7 @@ mod projects;
 mod prompt_batches;
 mod provenance;
 mod recipe_presets;
+mod routes;
 mod security;
 mod server;
 mod startup;
