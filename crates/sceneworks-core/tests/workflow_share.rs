@@ -7,6 +7,8 @@
 //! was the only one — it was not); and [`no_value_in_a_built_envelope_is_path_shaped`] seeds the
 //! request with paths on purpose and asserts none of them reach the file.
 
+mod common;
+use common::repo_root;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
@@ -27,12 +29,6 @@ use workflow_registry::{
     AdvancedBuilder, AdvancedBuilderShape, SeamDisposition, WebBuilderRef, ADVANCED_BUILDERS,
     DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION, WORKFLOW_WRITE_SEAMS,
 };
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
 
 fn read_repo_file(relative_path: &str) -> String {
     let path = repo_root().join(relative_path);

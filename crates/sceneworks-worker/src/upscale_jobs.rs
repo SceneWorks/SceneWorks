@@ -86,21 +86,17 @@ fn upscale_blocking(
     img: RgbImage,
     cancel: CancelFlag,
 ) -> WorkerResult<(RgbImage, &'static str)> {
-    use std::collections::hash_map::Entry;
     let cell = UPSCALERS.get_or_init(|| Mutex::new(HashMap::new()));
     // Recover from a poisoned lock rather than panicking every subsequent job: if a
     // prior upscale panicked mid-run holding this lock, take the inner guard and
     // clear the possibly-corrupt cached sessions so the match below reloads a fresh
     // one for this factor (sc-4277 / F-MLXW-13).
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        guard.clear();
-        guard
-    });
-    let upscaler = match guard.entry(upscaler_cache_key(factor, &onnx_path)) {
-        Entry::Occupied(e) => e.into_mut(),
-        Entry::Vacant(e) => e.insert(Upscaler::load(&onnx_path, &mut crate::cv::ModelIoLoader)?),
-    };
+    let mut guard = crate::cache_thread::lock_resetting(cell, HashMap::clear);
+    let upscaler = crate::cache_thread::get_or_load_by_key(
+        &mut guard,
+        upscaler_cache_key(factor, &onnx_path),
+        || Upscaler::load(&onnx_path, &mut crate::cv::ModelIoLoader).map_err(Into::into),
+    )?;
     let device = upscaler.device;
     let out = upscaler.upscale(&img, factor as usize, &cancel)?;
     Ok((out, device))

@@ -5,12 +5,13 @@
 //! evicted; a pinned one is never evicted; and producing one never writes anything under the
 //! linked library.
 
-use std::collections::BTreeMap;
+mod common;
+use common::{tree_snapshot, write_krea_native_file};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use sceneworks_core::checkpoint_derivative::{
@@ -29,30 +30,6 @@ fn fixture_dir(label: &str) -> TempDir {
         .prefix(&format!("ckpt-derivative-{label}-{}-", std::process::id()))
         .tempdir()
         .unwrap()
-}
-
-/// A minimal single-file Krea 2 native DiT (the same shape `checkpoint_plan_store.rs`'s fixtures
-/// use): the `txtfusion.` marker the family detector keys on, dense bf16, deterministic bytes.
-fn write_krea_native_file(path: &Path, fill: u8) {
-    let mut header = Map::new();
-    let mut offset = 0_u64;
-    for name in [
-        "model.diffusion_model.txtfusion.projector.weight",
-        "model.diffusion_model.blocks.0.attn.wq.weight",
-        "model.diffusion_model.first.weight",
-    ] {
-        header.insert(
-            name.to_owned(),
-            json!({"dtype": "BF16", "shape": [1], "data_offsets": [offset, offset + 2]}),
-        );
-        offset += 2;
-    }
-    let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
-    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
-    bytes.extend(encoded);
-    bytes.resize(bytes.len() + offset as usize, fill);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, bytes).unwrap();
 }
 
 struct Fixture {
@@ -119,33 +96,6 @@ fn write_index(
     file.write_all(serde_json::to_string(&payload).unwrap().as_bytes())
         .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-/// Path → (len, modified) for every file under `root`, so a test can prove a whole tree is
-/// byte-for-byte and timestamp-for-timestamp untouched.
-fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, std::time::SystemTime, Vec<u8>)> {
-    let mut snapshot = BTreeMap::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(directory) = stack.pop() {
-        for entry in fs::read_dir(&directory).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).unwrap();
-            if metadata.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            snapshot.insert(
-                path.strip_prefix(root).unwrap().to_path_buf(),
-                (
-                    metadata.len(),
-                    metadata.modified().unwrap(),
-                    fs::read(&path).unwrap_or_default(),
-                ),
-            );
-        }
-    }
-    snapshot
 }
 
 fn now() -> u64 {

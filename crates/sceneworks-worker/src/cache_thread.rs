@@ -27,12 +27,72 @@
 //! and update both wrappers — do not silently flip the flag here.
 
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::oneshot;
 
 use crate::{WorkerError, WorkerResult};
+
+/// Lock a process-wide cache, discarding suspect model state after an unwinding job.
+/// The reset policy retains each cache's cardinality/container contract (a single
+/// `Option` or a factor/path map). Deliberately retain the existing sticky poison:
+/// every later acquisition resets again; this helper does not certify the backend
+/// healthy or clear its poison. The returned guard keeps the model operation locked.
+pub(crate) fn lock_resetting<T>(cache: &Mutex<T>, reset: impl FnOnce(&mut T)) -> MutexGuard<'_, T> {
+    cache.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        reset(&mut guard);
+        guard
+    })
+}
+
+/// Reuse one resident entry according to the caller's existing key policy, or load
+/// its replacement. Evaluate the fallible loader before dropping the previous
+/// entry, so a failed replacement retains it and the next request can retry.
+/// No thread-safety bounds are imposed on the resident model.
+pub(crate) fn get_or_load<T>(
+    slot: &mut Option<T>,
+    matches: impl FnOnce(&T) -> bool,
+    load: impl FnOnce() -> WorkerResult<T>,
+) -> WorkerResult<&mut T> {
+    if !slot.as_ref().is_some_and(matches) {
+        *slot = Some(load()?);
+    }
+    Ok(slot.as_mut().expect("cache entry loaded"))
+}
+
+/// Multi-resident sibling: retain every other factor/path entry on a miss or
+/// failed load, matching the upscaler's existing `HashMap::entry` contract.
+pub(crate) fn get_or_load_by_key<K: Eq + std::hash::Hash, T>(
+    entries: &mut std::collections::HashMap<K, T>,
+    key: K,
+    load: impl FnOnce() -> WorkerResult<T>,
+) -> WorkerResult<&mut T> {
+    use std::collections::hash_map::Entry;
+    Ok(match entries.entry(key) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => entry.insert(load()?),
+    })
+}
+
+/// Thread-local sibling for `!Send` models. Release the lookup borrow before
+/// building, then hold a shared borrow through use, exactly like the prior callers.
+#[cfg(any(native_lane, test))]
+pub(crate) fn get_or_load_local<T>(
+    cell: &std::cell::RefCell<Option<T>>,
+    matches: impl FnOnce(&T) -> bool,
+    load: impl FnOnce() -> WorkerResult<T>,
+) -> WorkerResult<std::cell::Ref<'_, T>> {
+    let cache_matches = cell.borrow().as_ref().is_some_and(matches);
+    if !cache_matches {
+        let value = load()?;
+        *cell.borrow_mut() = Some(value);
+    }
+    Ok(std::cell::Ref::map(cell.borrow(), |slot| {
+        slot.as_ref().expect("cache entry loaded")
+    }))
+}
 
 /// All resident model caches share one user setting and the same five-minute default.
 pub(crate) const CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
@@ -1107,6 +1167,10 @@ mod tests {
         assert_eq!(panic_message(s.as_ref()), "boom-string");
     }
 }
+
+#[cfg(test)]
+#[path = "cache_thread/process_cache_tests.rs"]
+mod process_cache_tests;
 
 #[cfg(test)]
 mod shared_idle_configuration_tests {
