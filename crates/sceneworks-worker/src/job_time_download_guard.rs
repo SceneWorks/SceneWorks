@@ -160,6 +160,8 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     ("downloads.rs", DownloadRole::Installer),
     // Dispatches `run_model_download_job` / `run_lora_download_job` from the job loop.
     ("lib.rs", DownloadRole::Installer),
+    // The same installer/render orchestration moved from lib.rs; no new fetch edge.
+    ("utility_dispatch.rs", DownloadRole::Installer),
     // The Model Manager executor: model + LoRA installs, tier fetches, conversions.
     ("model_jobs/download.rs", DownloadRole::Installer),
     ("model_jobs/convert.rs", DownloadRole::Installer),
