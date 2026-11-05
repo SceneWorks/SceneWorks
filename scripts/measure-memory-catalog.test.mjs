@@ -2263,10 +2263,15 @@ async function packagedSourceFixture() {
   await mkdir(path.join(root, path.dirname(PACKAGED_SOURCES_PATH)), { recursive: true });
   const source = await readFile(path.join(ROOT, PACKAGED_SOURCES_PATH), "utf8");
   await writeFile(path.join(root, PACKAGED_SOURCES_PATH), source);
-  // CI_IMPACT: preserve the three existing formatter checks now that memory_anchor has a child
-  // module. This copies source only; it adds no build, test cases or model execution.
-  const endpointModule = "crates/sceneworks-core/src/sdxl_cuda_memory_endpoints.rs";
-  await writeFile(path.join(root, endpointModule), await readFile(path.join(ROOT, endpointModule)));
+  // CI_IMPACT: preserve the three existing formatter checks with the actual module tree.
+  // Copy source only; this adds no builds, test cases or model execution.
+  for (const child of [
+    "crates/sceneworks-core/src/sdxl_cuda_memory_endpoints.rs",
+    "crates/sceneworks-core/src/memory_anchor/tests.rs",
+  ]) {
+    await mkdir(path.join(root, path.dirname(child)), { recursive: true });
+    await writeFile(path.join(root, child), await readFile(path.join(ROOT, child)));
+  }
   await writeFile(
     path.join(root, "rustfmt.toml"),
     await readFile(path.join(ROOT, "rustfmt.toml"), "utf8"),
