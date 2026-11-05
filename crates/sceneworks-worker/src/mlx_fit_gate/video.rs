@@ -6,6 +6,7 @@ use super::*;
 /// Provider-owned resolution runs first for video loaders that carry their tier outside
 /// `LoadSpec.quantize` (Wan TI2V-5B and Bernini). LTX then resolves its immutable `split_model.json`.
 /// An explicit assertion that disagrees with the checkpoint fails closed before selection.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn resolved_video_numeric_tier(
     engine_id: &str,
     spec: &LoadSpec,
@@ -153,6 +154,7 @@ pub(super) fn mochi_needed_gb(
 /// The pure Mochi admission decision: `Some(error)` when the predicted peak overflows the budget,
 /// `None` to admit. Missing either signal (unmeasurable weights / no budget) admits — the gate never
 /// blocks without evidence, exactly like [`fit_decision`].
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn mochi_fit_error(
     model_label: &str,
     weight_bytes: u64,
@@ -216,6 +218,7 @@ pub(super) fn mochi_too_big_error(
 ///
 /// `Ok(())` admits (including whenever there is no signal); `Err` is the actionable pre-crash
 /// rejection.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn mochi_fit_check(
     model_label: &str,
     tier_dir: &Path,
@@ -250,6 +253,7 @@ pub(crate) fn mochi_fit_check(
 /// has several other MLX callers) rather than moving to `fit_gate` with the arithmetic; the candle
 /// video gate calls it through this path, exactly as `image_jobs/base.rs` already calls
 /// `mlx_fit_gate::engine_supports_sequential` from the candle image lane (sc-12130).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn mochi_resident_bytes(tier_dir: &Path) -> u64 {
     let mut total = sum_safetensors_bytes(tier_dir);
     if let Some(parent) = tier_dir.parent() {

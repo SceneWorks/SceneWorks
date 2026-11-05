@@ -55,6 +55,7 @@ pub(super) fn decimal_gb_to_bytes(gb: f64) -> u64 {
 /// control is safe in the direction that matters: the policy is *advisory* (gen-core treats an
 /// unwired request as `Resident`, never an error), and here the staged behaviour the prediction
 /// assumes is what the provider physically does regardless.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
     crate::inference_runtime::media()
         .generators()
@@ -74,6 +75,7 @@ pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
 /// consume `OffloadPolicy::Sequential`, so treating this broader predicate as authorization to set
 /// that control would turn an accurate declaration into a no-op request.
 #[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn engine_engages_staged_residency(engine_id: &str) -> bool {
     crate::inference_runtime::media()
         .generators()
@@ -181,6 +183,7 @@ impl HeadroomAllowance {
 /// derives it (sc-18814 factored it out so the video gate cannot drift into a second derivation).
 /// The manifest-driven `fixed_artifact_tier` override is deliberately NOT applied here: a video
 /// route carries no calibration binding to resolve one from.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn spec_numeric_tier(engine_id: &str, spec: &LoadSpec) -> MemoryNumericTier {
     MemoryNumericTier {
         precision: spec.precision,
@@ -195,16 +198,19 @@ pub(crate) fn spec_numeric_tier(engine_id: &str, spec: &LoadSpec) -> MemoryNumer
 /// The activation-headroom allowance this load already charges — the same
 /// [`HeadroomAllowance`] the load-time residency gate uses (sc-18814 exposes it so the video gate
 /// reuses that number instead of inventing one).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn spec_headroom_bytes(engine_id: &str, spec: &LoadSpec) -> u64 {
     gib_to_bytes(spec_component_bytes(engine_id, spec).2.total_gb)
 }
 
 /// Read the small-Mac cap from the environment. `Some(gb)` only for a positive number.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn mlx_memory_cap_gb() -> Option<f64> {
     parse_memory_cap(std::env::var(MLX_MEMORY_CAP_ENV).ok().as_deref())
 }
 
 /// Parse the cap value: a positive, finite float (GB), else `None`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn parse_memory_cap(raw: Option<&str>) -> Option<f64> {
     let value = raw?.trim().parse::<f64>().ok()?;
     (value.is_finite() && value > 0.0).then_some(value)
@@ -212,6 +218,7 @@ pub(crate) fn parse_memory_cap(raw: Option<&str>) -> Option<f64> {
 
 /// Resolve the budget: the emulation cap overrides the real probed total (emulating a smaller Mac);
 /// otherwise the real total. `None` from both ⇒ no budget ⇒ the gate no-ops (`Unknown`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn resolve_budget(
     real_total_gb: Option<f64>,
     cap: Option<f64>,
@@ -223,6 +230,7 @@ pub(crate) fn resolve_budget(
 /// Predicted whole-model peak (GiB) = summed component weight bytes + [`HEADROOM_GB`]. `None` when
 /// `weight_bytes == 0` (nothing measured ⇒ no signal ⇒ never block).
 #[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn predicted_peak_gb(weight_bytes: u64) -> Option<f64> {
     predicted_peak_gb_with_headroom(weight_bytes, HEADROOM_GB)
 }
@@ -233,6 +241,7 @@ pub(super) fn predicted_peak_gb_with_headroom(weight_bytes: u64, headroom_gb: f6
 
 /// Decide whether the predicted peak fits the budget. Missing either input ⇒ `Unknown` (never
 /// block), exactly like the flux2 guard and the candle gate.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<MlxMemoryBudget>) -> FitDecision {
     crate::fit_gate::fit_decision(needed_gb, budget.map(|budget| budget.total_gb))
 }
@@ -245,6 +254,7 @@ pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<MlxMemoryBudge
 /// (`te_bytes == 0`) this equals the resident peak — no claimed saving, so the second-stage overflow
 /// check then rejects exactly as the resident gate would (the safe fallback).
 #[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn predicted_sequential_peak_gb(total_bytes: u64, te_bytes: u64) -> Option<f64> {
     predicted_sequential_peak_gb_with_headroom(total_bytes, te_bytes, HEADROOM_GB)
 }
@@ -269,6 +279,7 @@ pub(super) fn predicted_sequential_peak_gb_with_headroom(
 /// reactive Metal-OOM / SIGKILL. `None` (staged fits, or no budget) keeps the sequential run. Unlike
 /// the candle gate — where the sequential peak is only sometimes measured — the MLX staged peak is
 /// always derivable from the on-disk component split, so this check always applies.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn sequential_overflow_gb(
     sequential_needed_gb: Option<f64>,
     budget: Option<MlxMemoryBudget>,
@@ -524,6 +535,7 @@ pub(super) fn prepared_adapter_source_bytes_for_gate_where(
 /// historical behavior. The whole-model `total` stays the recursive [`sum_safetensors_bytes`] sum, so
 /// `rest = total − te` accounts for the DiT + VAE + anything else regardless of the footprint's own
 /// dit/vae split (and keeps the sc-11006 control-branch folding intact).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn resolve_text_encoder_bytes(footprint_te: Option<u64>, dir: &Path) -> u64 {
     footprint_te.unwrap_or_else(|| sum_text_encoder_bytes(dir))
 }
@@ -536,6 +548,7 @@ pub(crate) fn resolve_text_encoder_bytes(footprint_te: Option<u64>, dir: &Path) 
 /// recognizable text-encoder subdir — which makes the staged estimate fall back to the resident sum
 /// (no claimed saving), the safe direction. Superseded, when a provider declares a footprint, by
 /// [`resolve_text_encoder_bytes`] (sc-10894); still the fallback for providers that do not.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -560,6 +573,7 @@ pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
 /// on the generator-cache thread, which is already blocking on the weight load, so the bounded
 /// subprocess read does not require a Tokio runtime. `None` off macOS or on probe failure retains
 /// fail-open admission; failures are retried so a transient launch failure cannot disable the gate.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn probe_total_unified_memory_gib() -> Option<f64> {
     probe_total_unified_memory_bytes().map(|bytes| bytes as f64 / BYTES_PER_GIB)
 }
@@ -568,6 +582,7 @@ pub(crate) fn probe_total_unified_memory_gib() -> Option<f64> {
 /// process-wide after a successful bounded read, so the `sysctl` subprocess is shared however many
 /// callers ask. Also read by [`crate::generator_cache::apply_gpu_memory_limit`] at worker startup,
 /// which needs the byte figure rather than the GiB one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn probe_total_unified_memory_bytes() -> Option<u64> {
     crate::gpu::total_unified_memory_bytes()
 }
@@ -577,6 +592,7 @@ pub(crate) fn probe_total_unified_memory_bytes() -> Option<u64> {
 /// Sequential / Reject (sc-10839). No IO, no globals — the live [`apply_residency_policy`] resolves
 /// those and delegates here.
 #[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn decide_residency(
     total_bytes: u64,
     te_bytes: u64,
@@ -864,6 +880,7 @@ pub(super) fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) ->
 ///
 /// `engine_id` is both the [`engine_supports_sequential`] key and the human-facing model name in the
 /// rejection message.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerResult<LoadSpec> {
     if spec.prepared_file_pins().is_prepared() {
         spec.validate_prepared_file_pins().map_err(|error| {
@@ -1246,6 +1263,7 @@ pub(super) fn packed_quant_bits(root: &std::path::Path, component: &str) -> Opti
 /// capability downtier (sc-10733) can evaluate a candidate tier's fit at the base.rs seam WITHOUT
 /// building the final spec twice. Same budget + component-byte + sequential-capability inputs the live
 /// gate uses, so the seam's downtier choice and the cache's admission never disagree.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> ResidencyOutcome {
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
     let (total_bytes, te_bytes, headroom) = spec_component_bytes(engine_id, spec);
@@ -1282,6 +1300,7 @@ pub(super) fn try_decide_residency_for_spec(
 /// `tier_probe_spec` instead, because a bare `Dir` under-counts any model whose components are
 /// caller-staged from another snapshot (sc-15154).
 #[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn residency_for_dir(
     engine_id: &str,
     weights_dir: &std::path::Path,

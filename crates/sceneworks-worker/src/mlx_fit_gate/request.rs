@@ -17,6 +17,7 @@ pub(super) fn missing_reference_pricing(engine_id: &str) -> WorkerError {
     ))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn clip_window_upper_bound(prompt: &str, negative: &str) -> u32 {
     // Byte-level BPE can only merge the lowercased UTF-8 bytes. BOS/EOS leave 75 content
     // tokens per window. Count both CFG rows at their padded maximum, never sum sequential jobs.
@@ -30,6 +31,7 @@ pub(crate) fn clip_window_upper_bound(prompt: &str, negative: &str) -> u32 {
 /// Count the same untruncated CLIP tokens the loaded SDXL provider will window. The byte bound
 /// remains a conservative fallback when tokenizer assets cannot be read during preparation.
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn clip_windows_for_spec(
     engine_id: &str,
     spec: &LoadSpec,
@@ -62,6 +64,7 @@ pub(crate) fn clip_windows_for_spec(
 
 /// Frozen FLUX3 sampling.denoise always packs [unconditional, conditional], including scales
 /// 0 and 1; the distilled flow map packs one. This is NOT output/job count or decoder batch.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn flux3_conditioning_forward_batch(engine_id: &str) -> u64 {
     if engine_id == "flux3_klein_base" {
         2
@@ -78,6 +81,7 @@ pub(crate) fn flux3_conditioning_forward_batch(engine_id: &str) -> u64 {
 /// a guessed multiplier, so it does not refuse renders the live set could fit. Attention scratch
 /// and allocator reserve remain in the existing generic headroom; no weights, decoder, job count
 /// or optional PUP copies are added here.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn flux3_source_workspaces(engine_id: &str, width: u32, height: u32) -> (u64, u64) {
     if !matches!(engine_id, "flux3_klein" | "flux3_klein_base") {
         return (0, 0);
@@ -131,6 +135,7 @@ pub(super) fn flux3_cfg_workspace(
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn add_post_load_external_delta(baseline: u64, before: u64, after: u64) -> u64 {
     baseline.saturating_add(after.saturating_sub(before))
 }
@@ -347,6 +352,7 @@ pub(super) fn provider_request_inputs<'a>(
 /// default it expresses is defeasible — a rung the provider does not implement is not engaged, so a
 /// provider publishing a verified cheaper composition no longer has its unimplemented rung's knob
 /// switched on underneath it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn memory_for_selection(
     contract: &MemoryProviderContract,
     selection: MemorySelection,
@@ -1740,6 +1746,7 @@ pub(super) fn select_request_with_budget_using_bundle(
 }
 
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
     // Reclaim only allocator-cache buffers from prior geometries; live arrays (the cached weights)
     // remain committed. This makes A→B→A independent of B's freed scratch without reloading A.
@@ -1788,6 +1795,7 @@ pub(super) fn request_total_peak_bytes(plan: &MlxRequestPlan, geometry: MemoryGe
 /// already been authorized by the exact declaration or the existing load gate. This diagnostic
 /// describes the limiting load working set, not the unrelated resident activation estimate.
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn preflight_load_rejection(engine_id: &str, spec: &LoadSpec) -> Option<WorkerError> {
     if spec.offload_policy == OffloadPolicy::Sequential {
         return None;
@@ -1816,6 +1824,7 @@ pub(crate) fn preflight_load_rejection(engine_id: &str, spec: &LoadSpec) -> Opti
 /// Evaluate a fully prepared candidate without constructing a generator or allocating tensors.
 /// The registry contract is queried against the same spec handed to the cache on selection.
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn preflight_request(
     spec: &LoadSpec,
     plan: &MlxRequestPlan,
@@ -1895,6 +1904,7 @@ pub(super) fn preflight_request_with_contract(
 
 /// Evaluate one real MLX request after cache lookup and immediately before generation.
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn evaluate_request(
     generator: &dyn gen_core::Generator,
     plan: &MlxRequestPlan,
@@ -1928,6 +1938,7 @@ pub(crate) fn evaluate_request(
 /// Loaded FLUX.3 reference request: price against the same resolved spec used for this cache lookup.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn evaluate_request_with_reference_spec(
     generator: &dyn gen_core::Generator,
     plan: &MlxRequestPlan,
