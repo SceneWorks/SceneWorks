@@ -1,4 +1,6 @@
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
+import { useSamplerControls } from "../hooks/useSamplerControls.js";
+import { preferredOption, preferredResolution, formatResolutionLabel } from "../studioDefaults.js";
 import { ImageAdvancedPanel } from "./imageStudio/ImageAdvancedPanel.jsx";
 import { ImagePromptComposer } from "./imageStudio/ImagePromptComposer.jsx";
 import { ImageGenerationSettings } from "./imageStudio/ImageGenerationSettings.jsx";
@@ -151,7 +153,7 @@ import { IRIS_RESTORE_DEFAULTS, irisRestoreControls, restorePlanBodyForRenders }
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { styleHintForId, styleTextForId } from "../data/styleCatalog.js";
-import { guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint, samplerDefaultFromModel, samplerOptionsFromModel, schedulerDefaultFromModel, schedulerOptionsFromModel, schedulerShiftDefaultFromModel } from "../samplerOptions.js";
+import { guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint, schedulerShiftDefaultFromModel } from "../samplerOptions.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
@@ -194,24 +196,6 @@ const BATCH_ACTIVE_JOB_LIMIT = MAX_LISTED_JOBS;
 // Yield after this many preflight prompts so the run state commits and Stop can interrupt
 // a clean (no-overage) stream before we ever reach its Cartesian suffix.
 const BATCH_PREFLIGHT_YIELD_INTERVAL = BATCH_RENDER_CAP;
-
-function preferredOption(defaultValue, options) {
-  return options.includes(defaultValue) ? defaultValue : options[0] ?? "default";
-}
-
-function preferredResolution(model, options) {
-  const modelDefault = model?.defaults?.resolution;
-  return options.includes(modelDefault)
-    ? modelDefault
-    : options.includes("1024x1024")
-      ? "1024x1024"
-      : options[0];
-}
-
-function formatResolutionLabel(value) {
-  const [width, height] = String(value).split("x");
-  return height ? `${width} × ${height}` : value;
-}
 
 // Fold any mode the tabs no longer expose (a legacy `style_variations` snapshot,
 // an unknown value) back to text_to_image so a restored studio never lands on a
@@ -1463,20 +1447,13 @@ export function ImageStudio() {
   // override on the Windows/Linux candle build (e.g. Lens exposes the curated menu
   // only on candle; SDXL only on MLX). The advanced panel hides the dropdowns when
   // the menu has fewer than 2 options (epic 1753 §7.4).
-  const samplerOptions = useMemo(
-    () => samplerOptionsFromModel(selectedModel, activeBackend),
-    [selectedModel, activeBackend],
-  );
-  const schedulerOptions = useMemo(
-    () => schedulerOptionsFromModel(selectedModel, activeBackend),
-    [selectedModel, activeBackend],
-  );
+  const { samplerOptions, schedulerOptions, samplerDefault, schedulerDefault, showSchedulerPicker } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler, emptyValue: "default" });
+
   const guidanceMethodOptions = useMemo(
     () => guidanceMethodOptionsFromModel(selectedModel, activeBackend),
     [selectedModel, activeBackend],
   );
-  const showSamplerPicker = samplerOptions.length > 1;
-  const showSchedulerPicker = schedulerOptions.length > 1;
+
   const showGuidanceMethodPicker = guidanceMethodOptions.length > 1;
   // Which generation axes the selected engine actually has, declared in the manifest `image`
   // sub-block (sc-15299) — the image-lane sibling of the `video` block sc-8445 added for Krea
@@ -1582,17 +1559,17 @@ export function ImageStudio() {
     if (mossEdit && isMossImage(previousModel)) return;
     setMossImage(mossDefaults());
     setMossDmdSteps(8);
-    setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
-    setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
+    setSampler(samplerDefault);
+    setScheduler(schedulerDefault);
     setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
     setCfgInterval("");
     setCaptionOverflow("default");
     setGuidanceMethod(
-      preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
+      preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions, [], { empty: "default" }),
     );
     setStepsOverride("");
     setGuidanceOverride("");
-  }, [model, resolutionOptions, samplerOptions, schedulerOptions, guidanceMethodOptions, selectedModel, mossEdit, setMossImage, setMossDmdSteps]);
+  }, [model, resolutionOptions, samplerOptions, schedulerOptions, samplerDefault, schedulerDefault, guidanceMethodOptions, selectedModel, mossEdit, setMossImage, setMossDmdSteps]);
   useMossImageTransition({
     model,
     mossEditTransition,
@@ -1616,30 +1593,6 @@ export function ImageStudio() {
   setNegativePrompt
   });
 
-  // Snap the sampler / scheduler back to the model's declared default when the
-  // current value is no longer in the menu (e.g. user switched to a sealed
-  // model whose only option is "default"). Mirrors the resolution-snap effect.
-  // Guard on a resolved model (sc-11962): before the model catalog loads,
-  // `samplerOptions` falls back to ["default"], so an un-guarded snap would revert a
-  // restored non-default sampler during the restart-restore window and never recover.
-  useEffect(() => {
-    if (!selectedModel) {
-      return;
-    }
-    if (samplerOptions.includes(sampler)) {
-      return;
-    }
-    setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
-  }, [samplerOptions, sampler, selectedModel]);
-  useEffect(() => {
-    if (!selectedModel) {
-      return;
-    }
-    if (schedulerOptions.includes(scheduler)) {
-      return;
-    }
-    setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
-  }, [schedulerOptions, scheduler, selectedModel]);
   // Snap the guidance method back to "cfg" when the current choice isn't honored by
   // the active backend for this model (e.g. switching off the SDXL family drops
   // CFG++) — the N3 guard at the UI layer, so an unsupported method is never sent.
@@ -1651,7 +1604,7 @@ export function ImageStudio() {
       return;
     }
     setGuidanceMethod(
-      preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
+      preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions, [], { empty: "default" }),
     );
   }, [guidanceMethodOptions, guidanceMethod, selectedModel]);
   // A sticky or replayed `true` must not survive a route change that hides the control. This keeps
@@ -3316,9 +3269,6 @@ export function ImageStudio() {
             presetScope={presetScope}
             setPresetScope={setPresetScope}
 
-
-
-
           />
 
           {/* sc-13131: the EXACT composed prompt (Subject:/Style:, preserved sibling directives,
@@ -3430,11 +3380,11 @@ export function ImageStudio() {
             mossDmd={mossDmd}
             mossImage={mossImage}
             setMossField={setMossField}
-            showSamplerPicker={showSamplerPicker}
+
             setSampler={setSampler}
             sampler={sampler}
             samplerOptions={samplerOptions}
-            showSchedulerPicker={showSchedulerPicker}
+
             setScheduler={setScheduler}
             scheduler={scheduler}
             schedulerOptions={schedulerOptions}

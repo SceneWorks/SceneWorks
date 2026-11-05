@@ -1694,6 +1694,7 @@ fn confinement_policy_has_one_core_type_and_the_shared_function_uses_it() {
     );
 }
 
+/// Product code may neither link capture tooling nor import/include/launch its entry points.
 /// Traverse the authored Rust module graph (all platform cfgs), excluding only explicit test
 /// modules; a test declaration midway through a file never hides later production items.
 #[test]

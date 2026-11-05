@@ -1,5 +1,6 @@
+import { SamplerSchedulerFields, SamplingStepsField } from "../../components/SamplerSchedulerFields.jsx";
 import React from "react";
-import { SAMPLER_LABELS, SCHEDULER_LABELS } from "../../samplerOptions.js";
+
 import { compactModeList } from "../../presetUtils.js";
 
 export function PresetAdvancedSection({
@@ -22,18 +23,18 @@ export function PresetAdvancedSection({
             value={form.negativePrompt}
           />
         </label>
-        <label className="field">
-          <span>Steps</span>
-          <input
-            disabled={!editable}
-            max="200"
-            min="1"
-            onChange={(event) => updateField("steps", event.target.value)}
-            placeholder="model default"
-            type="number"
-            value={form.steps}
-          />
-        </label>
+        <SamplingStepsField
+          value={form.steps}
+          onChange={(value) => updateField("steps", value)}
+          inputProps={{
+            disabled: !editable,
+            max: "200",
+            min: "1",
+            placeholder: "model default",
+            type: "number"
+          }}
+          variant="preset"
+        />
         <label className="field">
           <span>Guidance</span>
           <input
@@ -47,32 +48,17 @@ export function PresetAdvancedSection({
             value={form.guidanceScale}
           />
         </label>
-        {samplerMenu.length > 1 ? (
-          <label className="field">
-            <span>Sampler</span>
-            <select disabled={!editable} onChange={(event) => updateField("sampler", event.target.value)} value={form.sampler}>
-              <option value="">No default</option>
-              {samplerMenu.map((value) => (
-                <option key={value} value={value}>
-                  {SAMPLER_LABELS[value] ?? value}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        {schedulerMenu.length > 1 ? (
-          <label className="field">
-            <span>Scheduler</span>
-            <select disabled={!editable} onChange={(event) => updateField("scheduler", event.target.value)} value={form.scheduler}>
-              <option value="">No default</option>
-              {schedulerMenu.map((value) => (
-                <option key={value} value={value}>
-                  {SCHEDULER_LABELS[value] ?? value}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
+        <SamplerSchedulerFields
+          sampler={form.sampler}
+          scheduler={form.scheduler}
+          samplerOptions={samplerMenu}
+          schedulerOptions={schedulerMenu}
+          onSamplerChange={(value) => updateField("sampler", value)}
+          onSchedulerChange={(value) => updateField("scheduler", value)}
+          variant="preset"
+          disabled={!editable}
+          emptyLabel="No default"
+        />
         <label className="field">
           <span>Sort order</span>
           <input
