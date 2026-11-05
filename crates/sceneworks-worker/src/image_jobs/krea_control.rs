@@ -1,3 +1,55 @@
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::krea_model_subdir;
+use super::conditioning::parse_poses;
+use super::conditioning::pose_entries;
+use super::conditioning::resolve_control_identity_source;
+use super::conditioning::resolve_text_style_gain;
+use super::conditioning::stage_likeness;
+use super::events::consume_gen_events;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::attach_selected_decoder;
+use super::metrics::lora_label;
+use super::quantization::resolve_quant;
+use super::resolve_seed;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_cached_gen_stream;
+use super::strict_control::build_control_conditioning;
+use super::strict_control::preprocess_control_entry;
+use super::strict_control::requested_control_kind;
+use super::strict_control::resolve_control_source;
+use super::strict_control::resolve_user_control_map;
+use super::strict_control::trusted_control_weight_revision;
+use super::strict_control::validate_control_kind;
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::Conditioning;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::Progress;
+use super::Quant;
+use super::WeightsSource;
+use crate::advanced;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // macOS (Apple Silicon / MLX) Krea 2 pose-ControlNet route (sc-8465, epic 8459 S5) — the MLX twin of the
 // candle `krea_control_candle.rs` lane (sc-8464). `krea_2_turbo` + `advanced.poses` on the Mac worker
 // routes to the registry-backed `krea_2_turbo_control` engine (mlx-gen `KreaTurboControl`): the converted
@@ -23,39 +75,39 @@
 /// The engine registry id — matches the mlx-gen `KreaTurboControl` registration and the shared
 /// `STRICT_CONTROL_ENGINES` `krea_2_turbo_control` row (`supported_kinds = {Pose}`). One id, both
 /// backends; the `cfg(target_os)` picks the MLX vs candle provider.
-const KREA_CONTROL_ENGINE_ID: &str = "krea_2_turbo_control";
+pub(super) const KREA_CONTROL_ENGINE_ID: &str = "krea_2_turbo_control";
 /// Pose ControlNet conditioning-scale default (mlx-gen `krea::control::DEFAULT_CONTROL_SCALE` / candle
 /// parity). S0 usable band ~0.5–0.85 for the distilled CFG-free base; a comfortable mid.
-const KREA_CONTROL_DEFAULT_SCALE: f32 = 0.6;
+pub(super) const KREA_CONTROL_DEFAULT_SCALE: f32 = 0.6;
 /// Hard cap on the exposed `control_scale` — above ~0.85 the frozen CFG-free base over-drives to halftone
 /// (S0: graceful soft-haze, never confetti, but not a usable range). Matches the candle lane cap.
-const KREA_CONTROL_SCALE_CAP: f32 = 0.85;
+pub(super) const KREA_CONTROL_SCALE_CAP: f32 = 0.85;
 /// Denoise-steps default — the distilled Turbo schedule (8-step CFG-free).
-const KREA_CONTROL_DEFAULT_STEPS: u32 = 8;
+pub(super) const KREA_CONTROL_DEFAULT_STEPS: u32 = 8;
 /// Env override → a Krea 2 Turbo dense snapshot dir (validation / bring-your-own base). Shared with the
 /// candle lane so a single machine's env drives whichever backend it runs.
-const KREA_CONTROL_BASE_ENV: &str = "SCENEWORKS_KREA_CONTROL_BASE";
+pub(super) const KREA_CONTROL_BASE_ENV: &str = "SCENEWORKS_KREA_CONTROL_BASE";
 /// Env override → a converted MLX control-branch overlay `.safetensors` (validation / bring-your-own).
-const KREA_CONTROL_WEIGHTS_ENV: &str = "SCENEWORKS_CONTROLNET_KREA";
+pub(super) const KREA_CONTROL_WEIGHTS_ENV: &str = "SCENEWORKS_CONTROLNET_KREA";
 /// Default published Krea pose control-branch overlay repo (sc-8466) — the S0 spike (5,000-step)
 /// checkpoint. EXPERIMENTAL / not-for-production.
-const KREA_CONTROL_OVERLAY_REPO: &str = "SceneWorks/krea2-pose-controlnet-beta";
+pub(super) const KREA_CONTROL_OVERLAY_REPO: &str = "SceneWorks/krea2-pose-controlnet-beta";
 /// The overlay file within [`KREA_CONTROL_OVERLAY_REPO`] — the SAME candle `control_step5000.safetensors`
 /// the candle lane loads. The MLX branch reads it DIRECTLY (mlx-gen `RmsScale` accepts the candle
 /// `*.weight_p1` norm convention verbatim, sc-8465), so there is no separate MLX artifact to host.
-const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.safetensors";
+pub(super) const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.safetensors";
 /// Pinned revision for the default overlay repo (defense-in-depth, parity with the candle lane's
 /// `KREA_CONTROL_OVERLAY_REVISION` — a repo re-push can't swap the checkpoint under us). Registered
 /// overlays carry their own catalog-authorized immutable revision.
 #[cfg(test)]
-const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
+pub(super) const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
 /// The `SceneWorks/krea-2-turbo-mlx` turnkey (q8 default / q4 / bf16 self-contained subdirs) — the SAME
 /// base the txt2img lane loads. The pose-control lane falls back here (via the shared [`krea_model_subdir`])
 /// when the legacy dense `krea/Krea-2-Turbo` repo is absent (retired, sc-9092). Mirrors the candle lane's
 /// `KREA_CONTROL_MLX_REPO` (sc-11727).
-const KREA_CONTROL_MLX_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
-const KREA_CONTROL_BASE_REVISION: &str = "d009674080cc1bccf2b629d834c34bf5eccdb723";
-const KREA_CONTROL_OVERLAY_PIN: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
+pub(super) const KREA_CONTROL_MLX_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
+pub(super) const KREA_CONTROL_BASE_REVISION: &str = "d009674080cc1bccf2b629d834c34bf5eccdb723";
+pub(super) const KREA_CONTROL_OVERLAY_PIN: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
 
 /// The image-conditioning count one strict-pose render carries: the pose `Conditioning::Control`,
 /// and nothing else (this lane never adds an identity `Reference` — it renders from noise).
@@ -74,7 +126,7 @@ const KREA_CONTROL_REFERENCE_COUNT: u32 = 1;
 /// The per-request MLX memory declaration for one strict-pose render. Split out from the lane so the
 /// declared geometry can be graded against the conditioning the lane really builds — see
 /// [`KREA_CONTROL_REFERENCE_COUNT`].
-fn krea_control_memory_inputs(
+pub(super) fn krea_control_memory_inputs(
     width: u32,
     height: u32,
     source_mode: &str,
@@ -110,7 +162,7 @@ fn krea_control_memory_inputs(
     }
 }
 
-fn krea_control_calibration_provenance(
+pub(super) fn krea_control_calibration_provenance(
     weights_dir: &Path,
     control_weights: &Path,
     verified_default_overlay: bool,
@@ -121,9 +173,8 @@ fn krea_control_calibration_provenance(
     if tier != "q4" {
         return None;
     }
-    let base_suffix = format!(
-        "models--SceneWorks--krea-2-turbo-mlx/snapshots/{KREA_CONTROL_BASE_REVISION}/q4"
-    );
+    let base_suffix =
+        format!("models--SceneWorks--krea-2-turbo-mlx/snapshots/{KREA_CONTROL_BASE_REVISION}/q4");
     let overlay_suffix = format!(
         "models--SceneWorks--krea2-pose-controlnet-beta/snapshots/{KREA_CONTROL_OVERLAY_PIN}/{KREA_CONTROL_OVERLAY_FILE}"
     );
@@ -148,7 +199,7 @@ fn krea_control_calibration_provenance(
 }
 
 /// Model ids the MLX Krea strict-pose control route accepts (the deployed base the overlay applies on).
-fn is_krea_control_model(model: &str) -> bool {
+pub(super) fn is_krea_control_model(model: &str) -> bool {
     model == "krea_2_turbo"
 }
 
@@ -158,7 +209,7 @@ fn is_krea_control_model(model: &str) -> bool {
 /// txt2img lane). `None` ⇒ not present locally (the job is not MLX-control-runnable). The MLX twin of the
 /// candle `resolve_krea_control_base` (sc-11727): un-gates the dense-only assumption so a current user (who
 /// installs the tier, not the retired dense repo) has a base.
-fn resolve_krea_control_base(
+pub(super) fn resolve_krea_control_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
@@ -218,7 +269,7 @@ fn resolve_krea_control_base(
 /// True when this is an MLX-eligible Krea 2 strict-pose job: `krea_2_turbo` with a non-empty
 /// `advanced.poses`, not edit mode, whose dense base resolves locally. The MLX mirror of
 /// `krea_control_candle_available`; the overlay weights are NOT part of the gate (resolved on first use).
-fn krea_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn krea_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_krea_control_model(&request.model)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
@@ -226,7 +277,7 @@ fn krea_control_available(request: &ImageRequest, settings: &Settings) -> bool {
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (8).
-fn krea_control_steps(request: &ImageRequest) -> u32 {
+pub(super) fn krea_control_steps(request: &ImageRequest) -> u32 {
     resolve_advanced_or_manifest_u32(request, "steps", KREA_CONTROL_DEFAULT_STEPS, 1..=50)
 }
 
@@ -234,7 +285,9 @@ fn krea_control_steps(request: &ImageRequest) -> u32 {
 /// (a not-yet-cached registered/hosted overlay the API passed through), else the default published MLX
 /// beta overlay. Mirrors the candle `krea_control_overlay_repo_file`; the filename must be a plain
 /// component (sc-8821 / F-019).
-fn krea_control_overlay_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
+pub(super) fn krea_control_overlay_repo_file(
+    request: &ImageRequest,
+) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
@@ -257,7 +310,7 @@ fn krea_control_overlay_repo_file(request: &ImageRequest) -> WorkerResult<(Strin
 /// Extract the payload's lexical `advanced.controlWeights.path` without resolving it. Imported File
 /// routes hand this exact entry to `pin_app_managed_model_file`; canonicalizing first would erase the
 /// symlink/path-component identity the prepared token must retain (sc-18306).
-fn krea_control_payload_overlay_raw_path(request: &ImageRequest) -> Option<PathBuf> {
+pub(super) fn krea_control_payload_overlay_raw_path(request: &ImageRequest) -> Option<PathBuf> {
     request
         .advanced
         .get("controlWeights")
@@ -275,7 +328,7 @@ fn krea_control_payload_overlay_raw_path(request: &ImageRequest) -> Option<PathB
 /// disk (an arbitrary-file-read primitive). Returns `Ok(None)` when the payload carries no path, `Ok(Some)`
 /// for a confined path (whether or not it exists — the caller checks `is_file`), and the same
 /// `InvalidPayload` rejection as the sibling lanes for an out-of-root path. Mirrors the candle twin.
-fn krea_control_payload_overlay_path(
+pub(super) fn krea_control_payload_overlay_path(
     settings: &Settings,
     request: &ImageRequest,
 ) -> WorkerResult<Option<PathBuf>> {
@@ -294,7 +347,7 @@ fn krea_control_payload_overlay_path(
 /// (a studio-trained / registered LOCAL overlay the API resolved, B4/sc-10165) → an
 /// `advanced.controlWeights.{repo,filename}` hosted override / the default published MLX overlay, fetched
 /// into the app cache. The MLX twin of the candle `ensure_krea_control_weights`.
-async fn ensure_krea_control_weights(
+pub(super) async fn ensure_krea_control_weights(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -312,8 +365,7 @@ async fn ensure_krea_control_weights(
         }
     }
     let (repo, file) = krea_control_overlay_repo_file(request)?;
-    let revision =
-        trusted_control_weight_revision(request, KREA_CONTROL_ENGINE_ID, &repo, &file)?;
+    let revision = trusted_control_weight_revision(request, KREA_CONTROL_ENGINE_ID, &repo, &file)?;
     let verified_default_overlay = repo == KREA_CONTROL_OVERLAY_REPO
         && revision == KREA_CONTROL_OVERLAY_PIN
         && file == KREA_CONTROL_OVERLAY_FILE;
@@ -389,7 +441,7 @@ fn krea_control_raw_settings(
 /// sc-11720): `spec.adapters` install BEFORE the optional quantize (mlx-gen `load_control_heavy`), so the
 /// residual stacks over the possibly-already-packed base; the pose control branch is never an adapter
 /// target. CFG-free, no identity img2img-init.
-fn krea_control_spec(
+pub(super) fn krea_control_spec(
     weights_dir: PathBuf,
     control_weights: PathBuf,
     quant: Option<Quant>,
@@ -409,7 +461,7 @@ fn krea_control_spec(
 /// Generate one strict-pose image: the pre-built `conditioning` (the required pose `Control`) drives the
 /// Krea control branch on the single CFG-free Turbo forward. No guidance / negative (distilled Turbo).
 #[allow(clippy::too_many_arguments)]
-fn krea_control_generate_one(
+pub(super) fn krea_control_generate_one(
     generator: &dyn Generator,
     prompt: &str,
     width: u32,
@@ -462,7 +514,7 @@ fn krea_control_generate_one(
 /// `generate_zimage_control_stream`'s blocking-thread + streamed-events shape minus the identity
 /// img2img-init and quant (Krea control is CFG-free dense bf16, pose-only). `control_scale = 0` is
 /// byte-identical to base.
-async fn generate_krea_control_stream(
+pub(super) async fn generate_krea_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,

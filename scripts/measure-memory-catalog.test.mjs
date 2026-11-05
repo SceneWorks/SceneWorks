@@ -6063,7 +6063,7 @@ test("the runner's incident footprint and unified reserve are the Rust declarati
   // And the worker READS it rather than restating it.
   const fitGate = await readFile(path.join(ROOT, "crates/sceneworks-worker/src/fit_gate.rs"), "utf8");
   assert.match(fitGate, /LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 =\s*sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB;/);
-  const mlxFitGate = await readFile(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs"), "utf8");
+  const mlxFitGate = await rustFacadeSource(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs"));
   assert.match(mlxFitGate, /const HEADROOM_GB: f64 = sceneworks_core::memory_anchor::MLX_GENERIC_HEADROOM_GB;/);
 });
 

@@ -526,9 +526,12 @@ async fn models_catalog_reuses_every_unchanged_size_estimate_on_second_load() {
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::immediate(Some(1234));
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let first = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
     assert_eq!(first.0, StatusCode::OK);
@@ -602,9 +605,12 @@ async fn concurrent_models_catalog_loads_share_one_estimate_per_distinct_key() {
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let first = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -665,9 +671,12 @@ async fn cancelled_size_estimate_leader_wakes_follower_to_retry() {
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(2468));
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let leader = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
@@ -733,9 +742,12 @@ async fn concurrent_failed_estimate_is_shared_and_retries_after_negative_ttl_exp
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::blocked(None);
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let first = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
@@ -810,9 +822,12 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
     crate::models::test_reset_catalog_probe_concurrency();
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let request_task = tokio::spawn(request(app, "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
@@ -910,16 +925,14 @@ async fn concurrent_models_and_preset_routes_share_one_install_state_sweep() {
     crate::test_reset_catalog_build_counters();
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let size_hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
-    *state.model_size_estimate_test_hook.lock() = Some(size_hook.clone());
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Preset Coalescing Project" }),
-    )
-    .await;
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(size_hook.clone());
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Preset Coalescing Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let models_task = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
@@ -991,7 +1004,10 @@ async fn model_catalog_invalidation_refreshes_install_state() {
     single_model_manifest(&config_dir, "refresh_model", "refresh/model");
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
 
     let (status, cold) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
@@ -1022,12 +1038,15 @@ async fn invalidation_before_snapshot_publication_forces_current_generation_rebu
     single_model_manifest(&config_dir, "racing_model", "racing/model");
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
     let publish_hook = crate::models::ModelCatalogBeforePublishTestHook::blocked();
     state
-        .model_catalog_cache
-        .set_before_publish_test_hook(publish_hook.clone());
+        .test_hooks
+        .set_model_catalog_before_publish_hook(publish_hook.clone());
 
     let request_task = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), publish_hook.wait_until_reached())
@@ -1076,12 +1095,15 @@ async fn a_dropped_request_mid_build_does_not_start_a_second_sweep() {
     single_model_manifest(&config_dir, "abandoned_model", "abandoned/model");
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
     let publish_hook = crate::models::ModelCatalogBeforePublishTestHook::blocked();
     state
-        .model_catalog_cache
-        .set_before_publish_test_hook(publish_hook.clone());
+        .test_hooks
+        .set_model_catalog_before_publish_hook(publish_hook.clone());
 
     let abandoned = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), publish_hook.wait_until_reached())
@@ -1133,9 +1155,12 @@ async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     let hook = crate::models::ModelSizeEstimateTestHook::immediate(Some(1234));
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let response = request(app, "GET", "/api/v1/models", Value::Null).await;
 
@@ -1586,13 +1611,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         "builtInLoras migrated to loras"
     );
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Preset Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Preset Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, refusal) = request(
         app.clone(),
@@ -5861,7 +5880,10 @@ async fn partial_model_trash_failure_invalidates_warm_install_and_variant_state(
         .expect("failing source writes");
 
     let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
     let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK);

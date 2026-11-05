@@ -1,3 +1,4 @@
+import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -2169,11 +2170,11 @@ test("the derivation is defined per LANE, read off the Rust that declares and wi
 
 test("the shipped derivation reaches every lane through its REAL admission source (epic 22505)", async () => {
   const [derivation, admission, vram, candleStrategy, mlxFitGate] = await Promise.all([
-    readFile(new URL(`../${SOURCE_PATHS.anchorDerivation}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.anchorAdmission}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.anchorAdmissionImageVram}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.anchorAdmissionImageCandle}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.mlxFitGate}`, import.meta.url), "utf8"),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorDerivation}`, import.meta.url).pathname),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorAdmission}`, import.meta.url).pathname),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorAdmissionImageVram}`, import.meta.url).pathname),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorAdmissionImageCandle}`, import.meta.url).pathname),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.mlxFitGate}`, import.meta.url).pathname),
   ]);
   const lanes = parseAnchorDerivationLanes(derivation, {
     "video:mlx": { law: "video", sources: [admission] },
@@ -2320,7 +2321,7 @@ test("the fingerprint covers exactly the anchor and catalog sources, and the art
     routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
     routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
     engines: "crates/sceneworks-worker/src/engines.rs",
-    imageRouting: "crates/sceneworks-worker/src/image_jobs/base.rs",
+    imageRouting: "crates/sceneworks-worker/src/image_jobs/routing.rs",
     videoRouteWan: "crates/sceneworks-worker/src/video_jobs/wan.rs",
     videoRouteLtx: "crates/sceneworks-worker/src/video_jobs/ltx.rs",
     videoRouteSvd: "crates/sceneworks-worker/src/video_jobs/svd.rs",

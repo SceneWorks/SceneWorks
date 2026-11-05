@@ -78,9 +78,7 @@ async fn ensure_depth_source_is_an_image(
             "The source is already a depth map; depth is estimated from an image.",
         ));
     }
-    let is_image = (asset_type == "image" || mime.starts_with("image/"))
-        && mime != "image/svg+xml"
-        && asset_type != "vector";
+    let is_image = sceneworks_core::contracts::is_raster_image_asset(asset_type, mime);
     if !is_image {
         return Err(ApiError::bad_request(format!(
             "Depth is estimated from an image; source asset {source_asset_id} is a {}.",

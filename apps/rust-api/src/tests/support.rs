@@ -297,6 +297,28 @@ pub(crate) fn wan_video_tensor_keys() -> Vec<String> {
     keys
 }
 
+/// Create the same name-only project fixture while callers retain response/status assertions.
+pub(crate) async fn create_project<N: serde::Serialize + ?Sized>(
+    app: axum::Router,
+    name: &N,
+) -> (StatusCode, Value) {
+    create_project_with_request(app, name, request).await
+}
+
+/// Preserve explicit local-peer fixture transports used by catalog/Parquet tests.
+pub(crate) async fn create_project_with_request<N, F, Fut>(
+    app: axum::Router,
+    name: &N,
+    send: F,
+) -> (StatusCode, Value)
+where
+    N: serde::Serialize + ?Sized,
+    F: FnOnce(axum::Router, &'static str, &'static str, Value) -> Fut,
+    Fut: std::future::Future<Output = (StatusCode, Value)>,
+{
+    send(app, "POST", "/api/v1/projects", json!({ "name": name })).await
+}
+
 pub(crate) async fn request(
     app: axum::Router,
     method: &str,
@@ -1334,4 +1356,27 @@ impl Drop for TestSerializationGuard<'_> {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         drop(self.guard.take());
     }
+}
+
+#[tokio::test]
+async fn project_builder_preserves_transport_and_response() {
+    let name = String::from("quoted \"project\"\nname");
+    let expected_name = name.clone();
+    let (status, body) = create_project_with_request(
+        axum::Router::new(),
+        &name,
+        |_, method, uri, payload| async move {
+            assert_eq!(method, "POST");
+            assert_eq!(uri, "/api/v1/projects");
+            assert_eq!(payload, json!({ "name": expected_name }));
+            (
+                StatusCode::CONFLICT,
+                json!({ "detail": "transport response" }),
+            )
+        },
+    )
+    .await;
+    assert_eq!(name, "quoted \"project\"\nname");
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, json!({ "detail": "transport response" }));
 }

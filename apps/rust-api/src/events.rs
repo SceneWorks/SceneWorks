@@ -259,7 +259,11 @@ pub(crate) async fn job_events(
         revision: snapshot_revision,
     };
     #[cfg(test)]
-    let snapshot_barrier = state.sse_snapshot_before_subscribe_once.lock().take();
+    let snapshot_barrier = state
+        .test_hooks
+        .sse_snapshot_before_subscribe_once
+        .lock()
+        .take();
     #[cfg(test)]
     if let Some(barrier) = snapshot_barrier {
         barrier.wait().await;

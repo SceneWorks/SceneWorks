@@ -117,13 +117,7 @@ async fn moss_typed_enqueue_defaults_off_preserves_prompt_and_scrubs_reports() {
     let temp = tempfile::tempdir().unwrap();
     setup(&temp);
     let app = create_app(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"MOSS"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS").await;
     for advanced in [
         json!({"mossImageExecutionReport":{"forged":true}}),
         json!({"mossImage":{"acceleration":"off","uncond_skip_layers":[]}}),
@@ -146,13 +140,7 @@ async fn moss_typed_and_generic_refuse_unsupported_controls_before_job_creation(
     let temp = tempfile::tempdir().unwrap();
     setup(&temp);
     let app = create_app(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"MOSS"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS").await;
     for advanced in [
         json!({"mossImage":{"acceleration":"full_fp32"},"guidanceScale":3}),
         json!({"mossImage":{"acceleration":"unmerged_bf16"},"steps":9}),
@@ -184,13 +172,7 @@ async fn moss_both_optional_precision_modes_fail_before_enqueue_with_install_act
     let temp = tempfile::tempdir().unwrap();
     setup(&temp);
     let app = create_app(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"MOSS"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS").await;
     for mode in ["unmerged_bf16", "full_fp32"] {
         let (status,body)=request(app.clone(),"POST","/api/v1/image/jobs",json!({"projectId":project["id"],"model":"moss_image_sft","prompt":"subject","advanced":{"mossImage":{"acceleration":mode}}})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -206,13 +188,7 @@ async fn moss_duplicate_revalidates_merged_controls_and_resets_inherited_mode() 
     let temp = tempfile::tempdir().unwrap();
     setup(&temp);
     let app = create_app(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"MOSS"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS").await;
     let (status,job)=request(app.clone(),"POST","/api/v1/image/jobs",json!({"projectId":project["id"],"model":"moss_image_sft","prompt":"subject","advanced":{"mossImage":{"acceleration":"off"}}})).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
     let route = format!("/api/v1/jobs/{}/duplicate", job["id"].as_str().unwrap());
@@ -244,13 +220,7 @@ async fn moss_bare_dmd_real_enqueue_and_replay_keep_omitted_generic_controls_omi
         &json!({"repo":"lodestones/MOSS-Image-SFT-8-steps-dmd","revision":"5ff314b4c1470876b114b810146085db8a181a6e","files":["dataspace.safetensors"]}),
     );
     let app = create_app(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"MOSS"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS").await;
     for mode in ["unmerged_bf16", "full_fp32"] {
         let (status,job)=request(app.clone(),"POST","/api/v1/image/jobs",json!({"projectId":project["id"],"model":"moss_image_sft","prompt":"subject","advanced":{"mossImage":{"acceleration":mode}}})).await;
         assert_eq!(status, StatusCode::CREATED, "{job}");
@@ -298,13 +268,7 @@ async fn moss_post_preset_expansion_and_retry_use_the_same_canonical_validator()
         &json!({"repo":"lodestones/MOSS-Image-SFT-8-steps-dmd","revision":"5ff314b4c1470876b114b810146085db8a181a6e","files":["dataspace.safetensors"]}),
     );
     let app = create_app(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"MOSS presets"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS presets").await;
     for mode in ["unmerged_bf16", "full_fp32"] {
         let (status,preset)=request(app.clone(),"POST","/api/v1/recipe-presets",json!({"name":format!("Moss {mode}"),"model":"moss_image_sft","workflow":"text_to_image","defaults":{"mossImage":{"acceleration":mode}}})).await;
         assert_eq!(status, StatusCode::CREATED, "{preset}");
@@ -377,13 +341,8 @@ async fn moss_batch_prompts_are_verbatim_and_wrong_optional_revision_cannot_sati
         &json!({"repo":"lodestones/MOSS-Image-SFT-8-steps-dmd","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","files":["dataspace.safetensors"]}),
     );
     let app = create_app(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"MOSS exact source"}),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"MOSS exact source").await;
     let prompts = json!([
         "日本語 <tag>",
         "{\"summary\":{\"caption\":\"scene\"},\"items\":[]}"
@@ -412,13 +371,7 @@ async fn moss_edit_candle_enqueue_requires_exact_package_and_is_actually_claimab
         settings.candle_required = true;
         let (app, state) = create_app_with_state(settings).unwrap();
         assert_eq!(crate::generation::enqueue_backend(&state), "candle");
-        let (_, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({"name":"Candle edit"}),
-        )
-        .await;
+        let (_, project) = crate::tests::support::create_project(app.clone(), &"Candle edit").await;
         let route = format!(
             "/api/v1/projects/{}/assets",
             project["id"].as_str().unwrap()
@@ -502,13 +455,7 @@ async fn moss_edit_typed_api_defaults_receipt_scrubbing_reference_ownership_and_
     let selected = json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]});
     super::yue2_catalog::seed_snapshot(&temp, &selected);
     let app = create_app(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"Edit"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Edit").await;
     let route = format!(
         "/api/v1/projects/{}/assets",
         project["id"].as_str().unwrap()
@@ -575,13 +522,8 @@ async fn assert_moss_edit_replay_transitions(action: &str) {
         &json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]}),
     );
     let app = create_app(test_settings(&temp)).unwrap();
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"MOSS replay transitions"}),
-    )
-    .await;
+    let (status, project) =
+        crate::tests::support::create_project(app.clone(), &"MOSS replay transitions").await;
     assert_eq!(status, StatusCode::CREATED, "{project}");
     let mut png = std::io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgb8(16, 16)
@@ -784,13 +726,7 @@ async fn moss_edit_mcp_round_trip(reference_count: usize) {
     settings.trust_loopback = true;
     settings.mcp_api_url = format!("http://{addr}");
     let (app, state) = create_app_with_state(settings).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"MOSS MCP"}),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS MCP").await;
     let project_id = project["id"].as_str().unwrap();
     let mut ids = Vec::new();
     for (index, (width, height)) in [(16, 32), (48, 16), (32, 32)].into_iter().enumerate() {
@@ -979,13 +915,8 @@ async fn moss_edit_stored_payload_workflow_round_trip(count: usize) {
         &json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]}),
     );
     let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"MOSS semantic replay"}),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"MOSS semantic replay").await;
     let mut png = std::io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgb8(16, 32)
         .write_to(&mut png, image::ImageFormat::Png)
@@ -1100,13 +1031,8 @@ async fn moss_advanced_owned_npy_mcp_rest_and_portable_reacquisition_preserve_na
     settings.trust_loopback = true;
     settings.mcp_api_url = format!("http://{address}");
     let (app, state) = create_app_with_state(settings).unwrap();
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"advanced native edit"}),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"advanced native edit").await;
     let project_id = project["id"].as_str().unwrap();
     let route = format!("/api/v1/projects/{project_id}/assets");
     let mut rgb = std::io::Cursor::new(Vec::new());
@@ -1470,13 +1396,8 @@ async fn water_bottle_edit_survives_api_enqueue_and_candle_claim_with_its_refere
     let mut settings = test_settings(&temp);
     settings.candle_required = true; // Exercise Windows routing on every test host.
     let (app, state) = create_app_with_state(settings).unwrap();
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name":"Bottle edit"}),
-    )
-    .await;
+    let (status, project) =
+        crate::tests::support::create_project(app.clone(), &"Bottle edit").await;
     assert_eq!(status, StatusCode::CREATED, "{project}");
     let photo = include_bytes!("../../../../tests/fixtures/images/water-bottle.png");
     let (status, asset) = request_multipart_upload(
@@ -1604,22 +1525,12 @@ async fn moss_consumer_typed_replay_preserves_mixed_aspect_duplicate_slots_and_r
         let mut settings = test_settings(&temp);
         settings.candle_required = candle_required;
         let (app, state) = create_app_with_state(settings).unwrap();
-        let (_, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({"name":"MOSS semantic slots"}),
-        )
-        .await;
+        let (_, project) =
+            crate::tests::support::create_project(app.clone(), &"MOSS semantic slots").await;
         let project_id = project["id"].as_str().unwrap();
         let ids = moss_consumer_reference_assets(app.clone(), project_id).await;
-        let (_, foreign_project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({"name":"Other project"}),
-        )
-        .await;
+        let (_, foreign_project) =
+            crate::tests::support::create_project(app.clone(), &"Other project").await;
         let foreign =
             moss_consumer_reference_assets(app.clone(), foreign_project["id"].as_str().unwrap())
                 .await;
@@ -1752,13 +1663,8 @@ async fn moss_consumer_mcp_to_real_api_persists_ordered_slots_without_rendering(
         settings.candle_required = candle_required;
         settings.mcp_api_url = format!("http://{addr}");
         let (app, state) = create_app_with_state(settings).unwrap();
-        let (_, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({"name":"MOSS MCP slots"}),
-        )
-        .await;
+        let (_, project) =
+            crate::tests::support::create_project(app.clone(), &"MOSS MCP slots").await;
         let project_id = project["id"].as_str().unwrap();
         let ids = moss_consumer_reference_assets(app.clone(), project_id).await;
         let slots = [
@@ -1958,7 +1864,7 @@ async fn terminal_image_side_effect_failure_preserves_published_assets_until_ide
     let ids = running["result"]["assetIds"].clone();
     assert_eq!(ids, json!(["published-output"]));
     assert_eq!(assets.as_array().unwrap().len(), 1);
-    *state.progress_side_effects_fail_once.lock() = true;
+    *state.test_hooks.progress_side_effects_fail_once.lock() = true;
     let (status, failed) = request(app.clone(), "POST", &endpoint, progress("completed")).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
     let (status, pending) = request(
