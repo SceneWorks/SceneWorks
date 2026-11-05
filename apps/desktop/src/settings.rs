@@ -2300,7 +2300,7 @@ mod tests {
     #[test]
     fn the_desktop_export_ceiling_matches_the_editors_mirror_of_it() {
         let editor = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/web/src/screens/ImageEditor.jsx");
+            .join("../../apps/web/src/screens/imageEditor/export.js");
         let source = std::fs::read_to_string(&editor)
             .unwrap_or_else(|error| panic!("read {}: {error}", editor.display()));
         let declared = format!(
@@ -2309,7 +2309,7 @@ mod tests {
         );
         assert!(
             source.contains(&declared),
-            "apps/web/src/screens/ImageEditor.jsx must declare `export const {declared}` to match \
+            "apps/web/src/screens/imageEditor/export.js must declare `export const {declared}` to match \
              this crate's MAX_EXPORT_BYTES; the editor decides BEFORE the invoke whether the \
              passthrough fits, so a drift is either a hard error on a file that used to download \
              or a needless fallback to the raster"
