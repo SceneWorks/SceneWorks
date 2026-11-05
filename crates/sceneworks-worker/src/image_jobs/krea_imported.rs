@@ -58,6 +58,7 @@ use super::stream::drive_gen_items;
 use super::stream::drive_gen_items_scored;
 #[cfg(not(target_os = "macos"))]
 use super::stream::start_cached_gen_stream_after_cold_admission;
+#[cfg(target_os = "macos")]
 use super::stream::start_cached_gen_stream_with_request_state;
 #[cfg(not(target_os = "macos"))]
 use super::stream::start_gen_stream;
