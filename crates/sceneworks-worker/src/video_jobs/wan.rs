@@ -2865,6 +2865,32 @@ pub(super) async fn generate_video_using(
             input.adapters.install(&mut spec).map_err(|error| {
                 crate::classify_engine_error("Video adapter source validation failed", error)
             })?;
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            if engine_id == "minimax_h3" {
+                // Resolve the frozen source first, including adapter bindings. A metadata-only
+                // provider contract decides whether this source has an executable deferred loader;
+                // unsupported native formats retain their existing resident route.
+                let deferred = spec
+                    .clone()
+                    .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+                let supports_streaming = crate::inference_runtime::media()
+                    .memory_strategy_contract(engine_id, &deferred)
+                    .map_err(|error| {
+                        crate::classify_engine_error("H3 source memory planning failed", error)
+                    })?
+                    .is_some_and(|contract| {
+                        contract
+                            .capability(gen_core::MemoryStrategy::BoundedTransformerResidency)
+                            .is_some_and(|capability| {
+                                capability.support == gen_core::MemoryStrategySupport::Implemented
+                            })
+                    });
+                if supports_streaming {
+                    spec = deferred;
+                }
+                spec.offload_policy = OffloadPolicy::Sequential;
+            }
+
             let prepared_h3_context =
                 h3_receipt
                     .as_ref()
@@ -3078,7 +3104,24 @@ pub(super) async fn generate_video_using(
                         cancel.cancel();
                     }
                 };
-                run_loaded_video_generation(generator, input, &cancel, &mut on_progress)
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                if engine_id == "minimax_h3" {
+                    super::minimax_h3::record_cuda_proof_pool(&receipt_job_id, "before")?;
+                }
+                let result =
+                    run_loaded_video_generation(generator, input, &cancel, &mut on_progress);
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                if engine_id == "minimax_h3" {
+                    // Scope cleanup has already run, including cancellation and failed forwards.
+                    let observation =
+                        super::minimax_h3::record_cuda_proof_pool(&receipt_job_id, "after");
+                    if result.is_ok() {
+                        observation?;
+                    } else if let Err(error) = observation {
+                        tracing::error!(%error, "H3 proof-pool observation failed after generation error");
+                    }
+                }
+                result
             };
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let result = match comfyui_load {

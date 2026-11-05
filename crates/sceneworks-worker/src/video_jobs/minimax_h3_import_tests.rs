@@ -430,7 +430,7 @@ fn drive_candle_imported_minimax_h3(
     settings: &Settings,
     probe: &ArmProbe,
     request: &VideoRequest,
-    budget: Option<crate::vram_gate::VramBudget>,
+    _budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<Value> {
     let job: JobSnapshot = serde_json::from_value(json!({
         "id": "job-candle-imported-h3", "type": "video_generate", "status": "running",
@@ -457,7 +457,6 @@ fn drive_candle_imported_minimax_h3(
                 &project_path,
                 "minimax_h3",
                 "candle",
-                std::future::ready(budget),
                 probe.loader(),
             ),
         )

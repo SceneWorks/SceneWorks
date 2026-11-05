@@ -8,8 +8,6 @@ use runtime_cuda as platform_runtime;
 use runtime_macos as platform_runtime;
 #[cfg(native_lane)]
 use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict};
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use std::future::Future;
 
 /// Catalog-only optional component staging shared by both native H3 routes. Never fetches.
 #[cfg(native_lane)]
@@ -26,6 +24,28 @@ pub(super) fn resolve_veda_predictor_offline(settings: &Settings) -> Option<Weig
         "coRequisite": true, "componentId": "veda_predictor"
     }] });
     crate::model_jobs::resolve_optional_component(&manifest, "veda_predictor", settings)
+}
+
+/// Opt-in validation observes the allocator's continuous high-water counters, including errors.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn record_cuda_proof_pool(job_id: &str, stage: &str) -> WorkerResult<()> {
+    let snapshot = runtime_cuda::media::candle_core::cuda_backend::proof_pool::snapshot(0)
+        .map_err(|error| WorkerError::Engine(format!("H3 CUDA proof pool: {error}")))?;
+    if let Some(pool) = snapshot {
+        tracing::info!(
+            event = "h3_cuda_proof_pool_snapshot",
+            jobId = job_id,
+            stage,
+            logical_ordinal = pool.logical_ordinal,
+            cap_bytes = pool.cap_bytes,
+            used_bytes = pool.used_bytes,
+            used_high_bytes = pool.used_high_bytes,
+            reserved_bytes = pool.reserved_bytes,
+            reserved_high_bytes = pool.reserved_high_bytes,
+            "observed the bounded CUDA allocator"
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1710,15 +1730,13 @@ pub(super) async fn generate_candle_minimax_h3(
         project_path,
         engine_id,
         backend,
-        super::candle::candle_video_vram_budget(settings),
         crate::inference_runtime::load,
     )
     .await
 }
 
-/// [`generate_candle_minimax_h3`] with the loader and lazy admission budget supplied by the caller.
-/// Production passes the live probe future; it is polled only at the same pre-load gate below.
-/// Tests can inspect the provider request with explicit budgets, without hardware-dependent probes.
+/// [`generate_candle_minimax_h3`] with an injected loader. Both cold and warm requests use the
+/// same queued live-budget admission before tensor materialization.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_minimax_h3_using(
@@ -1729,7 +1747,6 @@ pub(super) async fn generate_candle_minimax_h3_using(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
-    vram_budget: impl Future<Output = Option<crate::vram_gate::VramBudget>> + Send,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
@@ -1770,55 +1787,9 @@ pub(super) async fn generate_candle_minimax_h3_using(
             (load, tier)
         }
     };
-    // Imported H3 handles acquire metadata/device context here, not model tensors. Their actual
-    // source constructor/working bounds and sparse geometry are admitted in the shared funnel,
-    // before any conditioner/DiT/decoder tensor materializes. A stock BF16 checkpoint's measured
-    // row (or stock patch geometry) cannot price a different quantized/pruned imported checkpoint.
-    if imported.is_none() {
-        let adapter_bytes = gen_core::adapter_stack_resident_bytes(
-            &adapters,
-            gen_core::AdapterResidencyMode::Additive,
-        )
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "MiniMax-H3 cannot determine the resident size of the requested adapter stack."
-                    .to_owned(),
-            )
-        })?;
-        // Price the cold-load envelope from the same complete parsed controls used by
-        // the queued gate and generation, including budgets and dense overrides.
-        let sparse_bound = gen_core_h3::veda::workspace::for_video_request(
-            gen_core_h3::veda::workspace::Request {
-                veda: veda.as_ref(),
-                width: request.width,
-                height: request.height,
-                frames,
-                count: 1,
-                prompt: &request.prompt,
-                conditioning: &conditioning,
-                reference_image_short_edge,
-                reference_image_resize_mode,
-            },
-            gen_core_h3::veda::workspace::Backend::Cuda,
-        )
-        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-        if let Some(bound) = sparse_bound.as_ref() {
-            crate::video_admission::admit_veda_host_workspace(
-                bound,
-                crate::yue2_admission::host_available_bytes().await,
-            )?;
-        }
-        if let Some(error) = crate::vram_gate::minimax_h3_fit_error_with_sparse(
-            &request.model_manifest_entry,
-            load.tier,
-            adapter_bytes,
-            &settings.gpu_id,
-            vram_budget.await,
-            sparse_bound.as_ref(),
-        ) {
-            return Err(error);
-        }
-    }
+    // Both stock and imported H3 provider handles contain only source metadata and a device
+    // context. The shared request selector runs before conditioning/DiT/VAE tensors materialize.
+    // The historical 124-frame catalog peak cannot price a different request or streamed plan.
     let task = minimax_h3_task(&conditioning);
     let mut raw_settings = minimax_h3_raw_settings(
         request,

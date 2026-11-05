@@ -2793,6 +2793,13 @@ pub(crate) fn admit_video_generation_with_veda(
     )
 }
 
+fn veda_device_workspace_bytes(bound: &gen_core_h3::veda::workspace::WorkspaceBound) -> u64 {
+    match bound.backend {
+        gen_core_h3::veda::workspace::Backend::Cuda => bound.device_peak_bytes(),
+        gen_core_h3::veda::workspace::Backend::Mlx => bound.unified_peak_bytes(),
+    }
+}
+
 fn admit_with_veda_bound(
     generator: &dyn gen_core::Generator,
     mut request: VideoAdmissionInputs<'_>,
@@ -2806,7 +2813,7 @@ fn admit_with_veda_bound(
     let runtime = request.runtime;
     request.headroom_bytes = request
         .headroom_bytes
-        .checked_add(bound.total_bytes)
+        .checked_add(veda_device_workspace_bytes(bound))
         .ok_or_else(|| crate::WorkerError::InvalidPayload("Veda admission size overflow".into()))?;
     let outcome = dense(generator, request);
     if outcome.refusal.is_some() {
@@ -2860,7 +2867,7 @@ pub(crate) fn admit_veda_workspace(
     let need = base
         .checked_sub(credit)
         .and_then(|n| n.checked_add(headroom_bytes))
-        .and_then(|n| n.checked_add(bound.total_bytes))
+        .and_then(|n| n.checked_add(veda_device_workspace_bytes(bound)))
         .ok_or_else(|| crate::WorkerError::InvalidPayload("Veda admission size overflow".into()))?;
     let available = runtime
         .budget
@@ -2869,7 +2876,7 @@ pub(crate) fn admit_veda_workspace(
     if available < need {
         return Err(crate::WorkerError::InvalidPayload(format!(
             "Veda {:?} plan {} needs {} bytes (dense native floor plus complete sparse/fallback workspace {}), but {} bytes are available",
-            bound.backend,bound.plan,need,bound.total_bytes,available)));
+            bound.backend,bound.plan,need,veda_device_workspace_bytes(bound),available)));
     }
     Ok(())
 }
@@ -2882,7 +2889,7 @@ pub(crate) fn veda_cold_peak_gb(
     sparse: Option<&gen_core_h3::veda::workspace::WorkspaceBound>,
 ) -> f64 {
     sparse.map_or(dense_baseline_gb, |bound| {
-        dense_baseline_gb + bound.total_bytes as f64 / (1024. * 1024. * 1024.)
+        dense_baseline_gb + veda_device_workspace_bytes(bound) as f64 / (1024. * 1024. * 1024.)
     })
 }
 
@@ -2893,20 +2900,9 @@ pub(crate) fn veda_cold_peak_gb(
 pub(crate) fn veda_host_workspace_bytes(
     bound: &gen_core_h3::veda::workspace::WorkspaceBound,
 ) -> u64 {
-    [
-        bound.predictor_host_bytes,
-        bound.predictor_load_bytes,
-        bound.layout_host_bytes,
-        bound.position_rows_bytes,
-        bound.scorer_bytes,
-        bound.selector_bytes,
-        bound.gather_bytes,
-        bound.predictor_device_bytes,
-        bound.self_test_bytes,
-    ]
-    .iter()
-    .sum()
+    bound.host_peak_bytes()
 }
+
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
 pub(crate) fn admit_veda_host_workspace(
     bound: &gen_core_h3::veda::workspace::WorkspaceBound,
