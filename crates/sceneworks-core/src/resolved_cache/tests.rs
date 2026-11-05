@@ -918,6 +918,20 @@ fn env_policy_is_exact_and_invalid_values_fail_closed() {
             (RESOLVED_CACHE_INACTIVITY_SECONDS_ENV, "60".to_owned()),
         ]
     );
+    for value in ["yes", "On", "TRUE"] {
+        assert!(
+            policy_from(&[(RESOLVED_CACHE_ENABLED_ENV, value)])
+                .unwrap()
+                .enabled
+        );
+    }
+    for value in ["no", "Off", "FALSE"] {
+        assert!(
+            !policy_from(&[(RESOLVED_CACHE_ENABLED_ENV, value)])
+                .unwrap()
+                .enabled
+        );
+    }
     for (name, value) in [
         (RESOLVED_CACHE_ENABLED_ENV, "sometimes"),
         (RESOLVED_CACHE_MAX_BYTES_ENV, "0"),

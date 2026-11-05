@@ -5,7 +5,7 @@ import { videoModelServesMode } from "../modelEligibility.js";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS } from "../constants.js";
 import { buildSimpleVideoRequest } from "./simpleJobs.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
-import { preferredDuration, preferredVideoResolution } from "./modelDefaults.js";
+import { preferredDuration, preferredVideoResolution } from "../studioDefaults.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { formatDurationSeconds } from "../videoModelLimits.js";
 import { ModelAttribution } from "../components/ModelAttribution.jsx";
