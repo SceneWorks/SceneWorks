@@ -18827,7 +18827,10 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
     // the scan protects immutable revision literals and cross-pass admission wiring.
     let source = include_str!("base.rs");
     let selector = include_str!("../candle_memory_strategy.rs");
-    let registry = include_str!("../memory_route_registry.rs");
+    let registry = concat!(
+        include_str!("../memory_route_registry.rs"),
+        include_str!("../memory_route_registry/tests.rs"),
+    );
     for required in [
         "SANA_CANDLE_DIFFUSERS_REVISION",
         "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
