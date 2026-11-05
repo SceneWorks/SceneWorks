@@ -2133,10 +2133,13 @@ impl Harness {
         // Keep the complete catalog and real routes, using their manifest size fallbacks instead
         // of repeating unrelated Hugging Face metadata requests for every fresh app/crash window.
         // The catalog tests separately exercise live estimation and its failure/cache behavior.
-        *state.model_size_estimate_disabled_override.lock() = Some(true);
+        *state
+            .test_hooks
+            .model_size_estimate_disabled_override
+            .lock() = Some(true);
         // The fixture's image-conditioned shot is only MLX-routed; judge the enqueue as a Mac on
         // every lane so the suite means the same thing on ubuntu and on the hosted macOS job.
-        *state.video_platform_override.lock() = Some("macos");
+        *state.test_hooks.video_platform_override.lock() = Some("macos");
         let script = Arc::new(Mutex::new(WorkerScript {
             behaviors: behaviors
                 .into_iter()
@@ -2203,8 +2206,11 @@ impl Harness {
         settings.mcp_api_url = format!("http://{address}");
         let (app, state) = create_app_with_state(settings).expect("app and state create");
         // Match the in-process harness: film execution does not depend on live download sizes.
-        *state.model_size_estimate_disabled_override.lock() = Some(true);
-        *state.video_platform_override.lock() = Some("macos");
+        *state
+            .test_hooks
+            .model_size_estimate_disabled_override
+            .lock() = Some(true);
+        *state.test_hooks.video_platform_override.lock() = Some("macos");
         let mut server_app = app.clone();
         if let Some(boundary) = boundary {
             server_app = server_app.layer(axum::middleware::from_fn(
@@ -2736,7 +2742,11 @@ async fn film_apps_keep_the_full_shipped_catalog_without_live_size_requests() {
         // A tripwire at the real metadata-request seam, after the disabled check. If the film
         // fixture stops opting out, the call count (and manifest-fallback sizes) make this fail.
         let metadata = crate::models::ModelSizeEstimateTestHook::immediate(Some(1));
-        *harness.state.model_size_estimate_test_hook.lock() = Some(metadata.clone());
+        *harness
+            .state
+            .test_hooks
+            .model_size_estimate_test_hook
+            .lock() = Some(metadata.clone());
         let expected = crate::models::model_catalog_snapshot(&harness.state)
             .await
             .unwrap();

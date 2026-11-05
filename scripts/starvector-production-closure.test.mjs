@@ -78,6 +78,7 @@ test("packaged production closure retains integrity independently of source curr
     "scripts/lib/canonical-json.mjs",
     "scripts/lib/exec-file-with-fds.mjs",
     "crates/sceneworks-core/src/file_lock.rs",
+    "crates/sceneworks-worker/src/svg_sanitize.rs",
   ];
   for (const dependency of addedDependencies) assert.ok(PRODUCTION_CLOSURE_PATHS.includes(dependency));
   const recordedPaths = PRODUCTION_CLOSURE_PATHS.filter(sourcePath =>
