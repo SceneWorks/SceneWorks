@@ -158,9 +158,7 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     // The primitives themselves (`ensure_cached_file`, `ensure_cached_file_verified`,
     // `ensure_hf_cached_file`, `download_snapshot_into_cache`) and their shared plumbing.
     ("downloads.rs", DownloadRole::Installer),
-    // Dispatches `run_model_download_job` / `run_lora_download_job` from the job loop.
-    ("lib.rs", DownloadRole::Installer),
-    // The same installer/render orchestration moved from lib.rs; no new fetch edge.
+    // Dispatches the same installer/render orchestration formerly in lib.rs; no new fetch edge.
     ("utility_dispatch.rs", DownloadRole::Installer),
     // The Model Manager executor: model + LoRA installs, tier fetches, conversions.
     ("model_jobs/download.rs", DownloadRole::Installer),
