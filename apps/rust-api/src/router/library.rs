@@ -33,6 +33,7 @@ pub(super) fn routes() -> Router<AppState> {
         )
         .route("/api/v1/control-overlays", get(list_control_overlays))
         .route("/api/v1/styles", get(list_styles))
+        .route("/api/v1/appearance", get(list_appearance))
         .route("/api/v1/loras", get(list_loras))
         .route(
             "/api/v1/loras/:lora_id",

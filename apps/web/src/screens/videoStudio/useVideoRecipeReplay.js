@@ -1,3 +1,4 @@
+import { emptyAppearance, normalizeAppearance } from "../../data/appearanceCatalog.js";
 import { DEFAULT_MOTION, LTX25_AUTO_DURATION_MIN_SECONDS, LTX25_AUTO_DURATION_MAX_SECONDS, amoralTextEncoderId, clampLtx25AutoDurationSeconds, clampLtx25TemporalUpsampleRounds } from "./videoTierHelpers.js";
 import { useEffect } from "react";
 import { noPresetId } from "../../presetUtils.js";
@@ -19,6 +20,7 @@ export function useVideoRecipeReplay({
   setModel,
   setRecipeModelNotice,
   setStyleId,
+  setAppearance,
   setPrompt,
   setNegativePrompt,
   setSeed,
@@ -125,8 +127,10 @@ export function useVideoRecipeReplay({
     const restoredStyleId = rawSettings.styleId ?? null;
     const hasRawStylePrompt = restoredStyleId != null && typeof rawSettings.stylePrompt === "string";
     setStyleId(hasRawStylePrompt ? restoredStyleId : null);
-    setPrompt(hasRawStylePrompt ? rawSettings.stylePrompt : String(recipe.prompt ?? ""));
-    setNegativePrompt(String(recipe.negativePrompt ?? ""));
+    const hasRawAppearance = rawSettings.appearance && typeof rawSettings.appearancePrompt === "string";
+    setAppearance?.(hasRawAppearance ? normalizeAppearance(rawSettings.appearance) : emptyAppearance());
+    setPrompt(hasRawAppearance ? rawSettings.appearancePrompt : hasRawStylePrompt ? rawSettings.stylePrompt : String(recipe.prompt ?? ""));
+    setNegativePrompt(String(hasRawAppearance ? rawSettings.appearanceNegativePrompt ?? "" : recipe.negativePrompt ?? ""));
     // Seed stays random by default, so "Use this recipe" makes a close variation; the viewer's
     // "Keep seed" resolves replaySeed to THIS clip's own seed for an exact rerun. Guard with
     // `!= null` so a legitimate seed of 0 replays instead of reading as absent.

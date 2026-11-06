@@ -968,6 +968,11 @@ fn envelope_with_paths_everywhere() -> (WorkflowShare, BTreeMap<String, String>)
         let value = seed(&mut seeded, &mut slot, &path);
         advanced.insert((*key).to_owned(), json!(value));
     }
+    for key in ["appearancePromptBatch", "promptBatch"] {
+        let path = format!("advanced.{key}[]");
+        let value = seed(&mut seeded, &mut slot, &path);
+        advanced.insert(key.to_owned(), json!([value]));
+    }
     advanced.insert("structuredPrompt".to_owned(), Value::Object(structured));
     // A control input, so `inputs[].controlMode` is a real slot rather than an absent one.
     advanced.insert("controlImage".to_owned(), json!("asset_control"));

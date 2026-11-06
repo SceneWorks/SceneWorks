@@ -761,6 +761,8 @@ impl Default for TrainingCaptionOptions {
 pub(crate) struct ImageJobRequest {
     pub(crate) project_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) appearance: Option<sceneworks_core::appearance::AppearanceSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) moss_image_advanced: Option<sceneworks_core::moss_image_advanced::EditAdvanced>,
     #[serde(default)]
     pub(crate) project_name: Option<String>,
@@ -1076,6 +1078,8 @@ pub(crate) fn default_interleave_max_images() -> u32 {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoJobRequest {
     pub(crate) project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) appearance: Option<sceneworks_core::appearance::AppearanceSelection>,
     #[serde(default)]
     pub(crate) project_name: Option<String>,
     #[serde(default = "default_video_mode")]

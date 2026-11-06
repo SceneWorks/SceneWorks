@@ -73,7 +73,7 @@ describe("the copy's field list (sc-15953)", () => {
     // `the_settings_copy_names_exactly_the_path_exempt_prose_fields` in
     // crates/sceneworks-core/tests/workflow_share_doc.rs. What is asserted HERE is only the shape
     // the UI relies on: pairs of (envelope path, human label), all non-empty.
-    expect(EMBEDDED_PROSE_FIELDS.length).toBe(6);
+    expect(EMBEDDED_PROSE_FIELDS.length).toBe(10);
     for (const entry of EMBEDDED_PROSE_FIELDS) {
       expect(entry).toHaveLength(2);
       expect(typeof entry[0]).toBe("string");

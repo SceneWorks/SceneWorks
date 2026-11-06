@@ -1,3 +1,5 @@
+import { useAppearance } from "../hooks/useAppearance.js";
+import { composeNegativePrompt } from "../data/appearanceCatalog.js";
 import { useStudioAdvancedSettings } from "../hooks/useStudioAdvancedSettings.js";
 import { useStudioPromptGuide } from "../hooks/useStudioPromptGuide.js";
 import { StudioPromptGuide } from "../components/StudioFields.jsx";
@@ -255,6 +257,8 @@ export function VideoStudio() {
 
   // Prompt guide for the selected model; fall back to the generic video guide
   // when a model declares none, so the button is always useful (sc-1817).
+  const appearance = useAppearance({ model: selectedModel, initial: saved.appearance, enabled: !selectedModel?.promptless && selectedModel?.captionStyle !== "tags", prompt });
+  const { setSelection: setAppearance } = appearance;
   const { guideOpen, openGuide, closeGuide, promptGuide } = useStudioPromptGuide(selectedModel, {
     title: "Video Prompt Guide",
     path: "/prompt-guides/generic-video.md",
@@ -604,6 +608,7 @@ export function VideoStudio() {
   setModel,
   setRecipeModelNotice,
   setStyleId,
+  setAppearance,
   setPrompt,
   setNegativePrompt,
   setSeed,
@@ -749,6 +754,7 @@ export function VideoStudio() {
   ltxVideoStg,
   ltxVideoRescale,
   styleId,
+  appearance: appearance.selection,
   textEncoderModel,
   advancedOpen,
   selectedLoraIds,
@@ -1007,10 +1013,10 @@ export function VideoStudio() {
   // sends, so the live preview and the submit compose from one string and can never drift.
   const styleAxisAvailable = !promptless && selectedModel?.captionStyle !== "tags";
   const activeStyleText = styleTextForId(styleAxisAvailable ? styleId : null);
-  const styleApplied = styleAxisAvailable && typeof activeStyleText === "string" && activeStyleText.trim() !== "";
+  const styleApplied = styleAxisAvailable && ((typeof activeStyleText === "string" && activeStyleText.trim() !== "") || appearance.active);
   const stylePromptBase = stackActive ? composedStack.prompt : prompt;
   const composedStylePrompt = styleApplied
-    ? composeStyledPrompt({ styleText: activeStyleText, userPrompt: stylePromptBase })
+    ? composeStyledPrompt({ styleText: activeStyleText, userPrompt: stylePromptBase, directives: appearance.resolved.directives })
     : null;
 
   // One summary gates Generate and carries every reason it might be dead, so the button
@@ -1132,6 +1138,9 @@ export function VideoStudio() {
   replacementModeLabels,
   styleId,
   stylePromptBase,
+  appearanceSelection: appearance.selection,
+  appearanceActive: appearance.active,
+  appearanceNegative: appearance.resolved.negative,
   replayReferenceResize,
   selectedModel,
   ltxPipeline,
@@ -1306,6 +1315,7 @@ export function VideoStudio() {
             activeProject={activeProject}
             createLoraImportJob={createLoraImportJob}
             models={models}
+            appearance={appearance}
             styleAxisAvailable={styleAxisAvailable}
             styleId={styleId}
             setStyleId={setStyleId}
@@ -1330,7 +1340,7 @@ export function VideoStudio() {
           {/* sc-13136: the EXACT composed prompt the run will send once a style is active — recomputed
               from the same base the submit uses so it can never drift. Sits under the Style axis row.
               Hidden when no style applies. */}
-          <StyledPromptPreview active={styleApplied} composedPrompt={composedStylePrompt} />
+          <StyledPromptPreview active={styleApplied} composedPrompt={composedStylePrompt} appearanceActive={appearance.active} negativePrompt={appearance.active ? supportsNegativePrompt ? composeNegativePrompt(stackActive ? composedStack.negativePrompt : negativePrompt, appearance.resolved.negative) : "" : undefined} />
 
           {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-8445). This
               panel is captioned "Prompt sent" and exists so the user sees exactly what will be

@@ -1,3 +1,5 @@
+import { useAppearance } from "../hooks/useAppearance.js";
+import { composeNegativePrompt } from "../data/appearanceCatalog.js";
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { useStudioAdvancedSettings } from "../hooks/useStudioAdvancedSettings.js";
 import { useStudioPromptGuide } from "../hooks/useStudioPromptGuide.js";
@@ -1224,6 +1226,8 @@ export function ImageStudio() {
   const tagConventionModel = selectedModel?.captionStyle === "tags";
   const styleAxisAvailable = !tagConventionModel;
   const effectiveStyleId = styleAxisAvailable ? styleId : null;
+  const appearance = useAppearance({ model: selectedModel, initial: saved.appearance, enabled: styleAxisAvailable && !structuredPromptModel && !(mossEdit && (mossImageAdvanced?.positive || mossImageAdvanced?.negative || mossImageAdvanced?.negativePrompts?.length)), prompt });
+  const { setSelection: setAppearance } = appearance;
   // sc-13366: when a style is selected, replace the generic scene/character suggestion pills with a
   // single hint pill carrying that style's tailored subject prompt (styleThumbnailPrompts.json) — a
   // strong, style-fitting starting point. Falls back to the normal suggestions with no style.
@@ -1734,7 +1738,7 @@ export function ImageStudio() {
   );
   if (mossEdit && !mossEditError) mossEditError = mossPositivePromptIssue(mossImageAdvanced, {
     prompt, prompts: mossPromptBatch,
-    effectivePrompt: composeImageJobPrompt({ promptToSend: composedStack.prompt, sendStructured: false, styleText: styleTextForId(effectiveStyleId) }).prompt,
+    effectivePrompt: composeImageJobPrompt({ promptToSend: composedStack.prompt, sendStructured: false, styleText: styleTextForId(effectiveStyleId), appearance: appearance.selection, model: selectedModel }).prompt,
   });
   const stackAddsNegative = generalStack.some((preset) => Boolean(preset?.defaults?.negativePrompt));
   const stackAddsCount = generalStack.some((preset) => Number.isFinite(Number(preset?.defaults?.count)));
@@ -1871,6 +1875,7 @@ export function ImageStudio() {
   skipAdvancedDefaultsReset,
   setModel,
   setStyleId,
+  setAppearance,
   setPrompt,
   setCaption,
   setPromptMode,
@@ -2198,6 +2203,7 @@ export function ImageStudio() {
     mossPromptBatch,
     mossDmdSteps,
     styleId,
+    appearance: appearance.selection,
     structuredCaption: caption,
     promptMode,
     magicPromptBackend,
@@ -2417,10 +2423,12 @@ export function ImageStudio() {
         promptToSend,
         sendStructured: isStructured,
         styleText: activeStyleText,
+        appearance: appearance.selection,
+        model: selectedModel,
       });
       return { composedPrompt, foldPrompt, isStructured, promptToSend };
     },
-    [activeStyleText, generalStack, resolutionOptions, selectedPreset, mossEdit, mossPromptBatch.length],
+    [activeStyleText, generalStack, resolutionOptions, selectedPreset, mossEdit, mossPromptBatch.length, appearance.selection, selectedModel],
   );
 
   const buildJobRequest = (overrides = {}) => {
@@ -2437,6 +2445,7 @@ export function ImageStudio() {
       flux3ReferenceIds: layoutReferences.map(({ id }) => id),
       // Overrides — the one legitimate single-vs-batch difference.
       promptToSend,
+      appearancePromptBatch: overrides.appearancePromptBatch?.map((text) => composeJobPrompt({ ...overrides, promptToSend: text }).promptToSend),
       submitIntent: overrides.submitIntent,
       sendStructured: isStructured,
       submitCaption: overrides.submitCaption,
@@ -2477,6 +2486,9 @@ export function ImageStudio() {
       styleText: activeStyleText,
       // sc-13132: the opaque style id travels with the recipe so replay can re-select the picker.
       styleId: effectiveStyleId,
+      appearance: appearance.selection,
+      appearanceModel: selectedModel,
+      appearanceNegativeEnabled: supportsNegativePrompt && !negativePromptCfgOff && !mossDmd,
       characterId,
       characterLookId,
       multiReference,
@@ -2577,6 +2589,7 @@ export function ImageStudio() {
   const buildBatchJobRequest = (resolvedPrompt, opts = {}) =>
     buildJobRequest({
       promptToSend: opts.promptToSend ?? resolvedPrompt,
+      appearancePromptBatch: opts.appearancePromptBatch,
       submitIntent: resolvedPrompt,
       sendStructured: opts.sendStructured ?? false,
       submitCaption: opts.submitCaption ?? caption,
@@ -2620,7 +2633,9 @@ export function ImageStudio() {
   const batchStructuredExpandBlocked =
     structuredPromptModel && (magicModelMissing || typeof magicPrompt !== "function");
   const styleSelected = typeof activeStyleText === "string" && activeStyleText.trim() !== "";
-  const stylePreviewActive = !structuredPromptModel && styleSelected;
+  const stylePreviewActive = !structuredPromptModel && (styleSelected || appearance.active);
+  const appearanceNegativePreview = supportsNegativePrompt && !negativePromptCfgOff && !mossDmd
+    ? composeNegativePrompt(generalStack.length ? composedStack.negativePrompt : negativePrompt, appearance.resolved.negative) : "";
   // sc-13224: structured JSON-caption models apply the Style axis by merging into the caption's
   // `style_description.aesthetics` (see imageJobRequest.js), so the outgoing prompt is the injected,
   // re-serialized caption. Compute it here so the budget guard measures the ACTUAL string sent (the
@@ -3252,6 +3267,7 @@ export function ImageStudio() {
             activeProject={activeProject}
             createLoraImportJob={createLoraImportJob}
             models={models}
+            appearance={appearance}
             styleAxisAvailable={styleAxisAvailable}
             styleId={styleId}
             setStyleId={setStyleId}
@@ -3278,7 +3294,7 @@ export function ImageStudio() {
               and the own-`Style:` MERGE) the run will send once a style is active — reuses
               buildJobRequest so it can never drift from the payload. Sits under the Style axis row.
               Hidden when no style applies. */}
-          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} />
+          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} appearanceActive={appearance.active} negativePrompt={appearance.active ? appearanceNegativePreview : undefined} />
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 

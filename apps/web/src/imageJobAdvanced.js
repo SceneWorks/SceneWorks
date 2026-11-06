@@ -98,6 +98,10 @@ export function buildImageJobAdvanced(state) {
     // Style Catalog recipe round-trip (sc-13132). Both are undefined unless a style is applied.
     styleId,
     styleUserPrompt,
+    appearance,
+    appearanceUserPrompt,
+    appearanceUserPromptBatch,
+    appearanceUserNegative,
     // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885). `multiPhaseActive` is the resolved gate
     // (model advertises the acceleration compat + text-to-image mode + the editor enabled); `phases`
     // is the ALREADY-SERIALIZED emit-shape list (serializePhases runs in ImageStudio, where the
@@ -112,6 +116,7 @@ export function buildImageJobAdvanced(state) {
   const dmd = moss && mossAccelerated(state.mossImage);
   const effectiveSteps = dmd ? state.mossDmdSteps ?? 8 : stepsOverride;
   return {
+    ...(appearance ? { appearance, appearancePrompt: appearanceUserPrompt ?? "", appearanceNegativePrompt: appearanceUserNegative ?? "", ...(appearanceUserPromptBatch?.length ? { appearancePromptBatch: appearanceUserPromptBatch } : {}) } : {}),
     ...(mossEdit ? {
       resolution,
       mossImage: editAdvanced.mossImage,
