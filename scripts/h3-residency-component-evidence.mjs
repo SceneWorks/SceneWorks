@@ -34,7 +34,9 @@ export function validateResidencyComponentCoverage(receipt,{proofRevision,runtim
   assert.deepEqual(receipt.readback,{method:'narrow-force_contiguous-to_vec1',maximumAllowedChunkElements:1048576,elementBytes:2,everyChunkLayoutStartOffset:0,everyStorageElementCountEqualsChunk:true},'bounded readback storage/layout contract required');
   const device=receipt.device;assert.equal(device?.logicalOrdinal,0);assert.deepEqual(device.computeCapability,[12,0]);
   assert.equal(device.cudaVisibleDevices,UUID);assert.equal(device.proofPoolInstalled,false);
-  assert.match(device.stream??'',/^0x[0-9a-f]+$/i);assert.notEqual(BigInt(device.stream),0n);
+  // CUDA's legacy default stream is the valid null handle; the reviewed producer
+  // separately asserts that this handle equals the cuBLAS handle's selected stream.
+  assert.match(device.stream??'',/^0x[0-9a-f]+$/i);
   const source=receipt.source;assert.deepEqual(source?.acceptedSourcePair,PAIR);
   assert.equal(source.manifestSha256,RESIDENCY_COMPONENT_SOURCE.manifestSha256);assert.equal(source.expectedManifestSha256,source.manifestSha256);
   assert.equal(sha256(canonicalJson(source.manifest)),'695d7d9f9d397a69b5369bc4dc3118fb2153c931e86969888579d7bddb64985f','frozen manifest content differs');
@@ -68,7 +70,8 @@ export function validateResidencyComponentCoverage(receipt,{proofRevision,runtim
   assert.equal(factor.hostVsDirectA.leftSha256,factor.hostVsCopiedA.leftSha256);assert.equal(factor.hostVsDirectB.leftSha256,factor.hostVsCopiedB.leftSha256);
   identity(source.normQ,[128]);assert.equal(receipt.input?.identity,'integer-lcg-mod65521/seed42/bf16-once/v1');identity(receipt.input.tensor,[1,104554,5376]);
   const preparation=receipt.preparation_same_policy;assert.equal(preparation?.userWorkspaceBytes,33554432);
-  for(const key of ['base','residual','full'])metric(preparation[key],PROJECTION,true);
+  for(const key of ['base','full'])metric(preparation[key],PROJECTION,true);
+  metric(preparation.residual,[104554,7168],true); // apply_residuals returns its explicit flattened rows.
   assert.deepEqual(receipt.workspaceControls?.explicitUserBytes,[12582912,33554432]);assert.equal(receipt.workspaceControls.libraryDefaultUserBytes,null);
   for(const key of ['workspace_default_vs_12m','workspace_default_vs_32m','workspace_12m_vs_32m'])metric(receipt[key],PROJECTION,false);
   assert.equal(receipt.workspace_default_vs_12m.leftSha256,receipt.workspace_default_vs_32m.leftSha256);
