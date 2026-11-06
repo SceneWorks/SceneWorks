@@ -2058,13 +2058,17 @@
                 "type": "boolean",
                 "description": "Does the engine accept a negative prompt? An engine with no steerable unconditional branch has nothing for a negative prompt to do — `resolve_negative_prompt` returns None for any model whose descriptor advertises `supports_negative_prompt: false`. ABSENT MEANS TRUE. When false, Image Studio hides its Negative prompt field, never seeds `ui.defaultNegativePrompt` into it, and sends an empty one."
               },
+              "guidanceOffValue": {
+                "type": "number",
+                "description": "The native guidance scale at which CFG is off. Defaults to 1; offset conventions such as Z-Image Turbo and Krea use 0."
+              },
               "negativePromptRequiresGuidance": {
                 "type": "boolean",
-                "description": "Is the negative prompt the classifier-free-guidance unconditional, so it only exists while CFG is on (guidance != 1.0)? True for an engine that REFUSES a non-empty negative prompt at guidance 1.0 (Iris-3B, sc-25679) rather than silently ignoring it. ABSENT MEANS FALSE. When true, Image Studio disables its Negative prompt field and sends an empty one whenever the effective guidance is 1.0, and the API (and the worker, before load) refuse a non-empty negative prompt at guidance 1.0 instead of dropping it (sc-25681)."
+                "description": "Is the negative prompt the classifier-free-guidance unconditional, so it only exists while CFG is on (guidance differs from guidanceOffValue, default 1.0)? True for an engine that REFUSES a non-empty negative prompt at guidance 1.0 (Iris-3B, sc-25679) rather than silently ignoring it. ABSENT MEANS FALSE. When true, Image Studio disables its Negative prompt field and sends an empty one whenever the effective guidance is 1.0, and the API (and the worker, before load) refuse a non-empty negative prompt at guidance 1.0 instead of dropping it (sc-25681)."
               },
               "supportsSchedulerShift": {
                 "type": "boolean",
-                "description": "Does the engine have a schedule-shift axis WITHOUT a scheduler menu (Iris-3B: one shifted linear time grid, sc-25681)? ABSENT MEANS FALSE. When true, Image Studio shows its Schedule shift control (seeded from `defaults.schedulerShift`) regardless of the scheduler picker, sends `advanced.schedulerShift`, and the API refuses a non-finite or non-positive shift."
+                "description": "Does the native provider consume a schedule-shift override? The control remains visible independently of the scheduler menu. False disables it and the API refuses an override. A blank value retains the native grid; explicit overrides must be finite and positive."
               },
               "supportsCfgInterval": {
                 "type": "boolean",
@@ -2101,7 +2105,11 @@
             "additionalProperties": false,
             "description": "Video-generation capability metadata (sc-8445, epic 8431) — the video-lane sibling of the `audio` sub-block, declaring which generation AXES a video engine actually has so Video Studio can hide a control the worker would discard rather than offering a knob that silently does nothing. Every property is OPTIONAL and, unlike `audio`, an ABSENT property means TRUE: the video population is majority guidance-taking — eight of the ten shipped video entries (the Wan family, both LTX entries, SCAIL-2, Bernini) read a CFG scale and a negative prompt and declare nothing — so absent-means-supported is the correct default for them and leaves an undeclared entry behaving exactly as it did before this block existed. The two that genuinely lack the axes declare them false: `krea_realtime_14b` (Self-Forcing distilled it out) and `svd` (its engine drives its own frame-wise CFG ramp).",
             "properties": {
-              "supportsGuidance": {
+              "supportsSchedulerShift": {
+              "type": "boolean",
+              "description": "Whether this provider consumes an explicit native schedule shift; false leaves the control visible but unavailable."
+            },
+            "supportsGuidance": {
                 "type": "boolean",
                 "description": "Does the engine have a classifier-free-guidance axis? False when the engine exposes no guidance scale at all: krea_realtime_14b's Self-Forcing distillation baked guidance out (a single batch-1 forward), and svd drives its own frame-wise CFG ramp — `generate_svd` hard-sets `guidance: None`. ABSENT MEANS TRUE. When false, Video Studio hides its Guidance control and stops emitting `advanced.guidanceScale`."
               },
@@ -2116,6 +2124,10 @@
             "additionalProperties": false,
             "description": "Audio-generation capability metadata (epic 13400, sc-13401) — a per-entry sibling of the mlx/candle backend blocks. It advertises what an audio model (Audio Studio's Speech / Music / SFX / VoiceClone tabs) supports so the studio can build its pickers and mode gates without probing the backend. Populated from the backend Capabilities (epic 12833). Chosen as a dedicated sub-block rather than limits/defaults because those are resolution-shaped and additionalProperties:false, so they would reject audio-shaped fields. Every property is OPTIONAL: a model advertises only the surfaces it actually supports (a bare Speech model may declare only voices/languages, while a full VoiceClone model adds editModes/conditioning).",
             "properties": {
+              "supportsSchedulerShift": {
+                "type": "boolean",
+                "description": "Whether the audio provider accepts a flow schedule Shift override. Absent means false; an unset override retains its own schedule default."
+              },
               "voices": {
                 "type": "array",
                 "uniqueItems": true,

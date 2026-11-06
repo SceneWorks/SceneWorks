@@ -155,7 +155,7 @@ import { IRIS_RESTORE_DEFAULTS, irisRestoreControls, restorePlanBodyForRenders }
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { styleHintForId, styleTextForId } from "../data/styleCatalog.js";
-import { guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint, schedulerShiftDefaultFromModel } from "../samplerOptions.js";
+import { guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
@@ -439,6 +439,7 @@ export function ImageStudio() {
     setScheduler,
     schedulerShift,
     setSchedulerShift,
+    schedulerShiftExplicit,
     stepsOverride,
     setStepsOverride,
     guidanceOverride,
@@ -1463,7 +1464,7 @@ export function ImageStudio() {
   // override on the Windows/Linux candle build (e.g. Lens exposes the curated menu
   // only on candle; SDXL only on MLX). The advanced panel hides the dropdowns when
   // the menu has fewer than 2 options (epic 1753 §7.4).
-  const { samplerOptions, schedulerOptions, samplerDefault, schedulerDefault, showSchedulerPicker } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler, emptyValue: "default" });
+  const { samplerOptions, schedulerOptions, samplerDefault, schedulerDefault } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler, emptyValue: "default" });
 
   const guidanceMethodOptions = useMemo(
     () => guidanceMethodOptionsFromModel(selectedModel, activeBackend),
@@ -1503,8 +1504,12 @@ export function ImageStudio() {
   // `null` = no explicit value yet (a fresh workspace, or a recipe that recorded none): the model's
   // own default, which for a shift-axis model (Iris-3B) is its checkpoint's flow shift — not the
   // historical blanket 3.0, which would be SENT for it and silently change the schedule.
-  const effectiveSchedulerShift = schedulerShift ?? schedulerShiftDefaultFromModel(selectedModel);
-  const showSchedulerShift = supportsSchedulerShift || (showSchedulerPicker && scheduler !== "default");
+  // Old drafts stored a blanket shift even when the default scheduler ignored it. Only an
+  // explicit edit, a legacy curated scheduler, or the old standalone axis makes that value apply.
+  const shiftOverrideApplies = schedulerShiftExplicit || (supportsSchedulerShift && ["iris", "moss_image"].includes(selectedModel?.family)) || Boolean(scheduler && scheduler !== "default");
+  const schedulerShiftToSend = selectedModel?.image?.supportsSchedulerShift !== false && shiftOverrideApplies ? schedulerShift ?? selectedModel?.defaults?.schedulerShift : null;
+  const effectiveSchedulerShift = schedulerShiftToSend ?? "";
+  const showSchedulerShift = true;
   const supportsCfgInterval = supportsGuidance && selectedModel?.image?.supportsCfgInterval;
   const cfgIntervalDisabled = guidanceIsOff(selectedModel, guidanceOverride);
   const { interval: resolvedCfgInterval, error: cfgIntervalError } = resolveCfgInterval({
@@ -1577,7 +1582,7 @@ export function ImageStudio() {
     setMossDmdSteps(8);
     setSampler(samplerDefault);
     setScheduler(schedulerDefault);
-    setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
+    setSchedulerShift(mossEdit ? 5 : null);
     setCfgInterval("");
     setCaptionOverflow("default");
     setGuidanceMethod(
@@ -2158,7 +2163,7 @@ export function ImageStudio() {
       steps: mossDmd ? Number(mossDmdSteps) : finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
-      schedulerShift: mossDmd ? undefined : effectiveSchedulerShift,
+      schedulerShift: mossDmd ? undefined : finiteNumberOrUndefined(schedulerShiftToSend),
       ...(resolvedCfgInterval ? { cfgInterval: resolvedCfgInterval } : {}),
       ...(outgoingCaptionOverflow !== "default" ? { captionOverflow: outgoingCaptionOverflow } : {}),
       guidanceMethod,
@@ -2245,6 +2250,7 @@ export function ImageStudio() {
     sampler,
     scheduler,
     schedulerShift,
+    schedulerShiftExplicit,
     cfgInterval,
     captionOverflow,
     guidanceMethod,
@@ -2498,7 +2504,7 @@ export function ImageStudio() {
       hiresFixCfgScale: supportsGuidance ? hiresFixCfgScale : "",
       sampler,
       scheduler,
-      schedulerShift: effectiveSchedulerShift,
+      schedulerShift: schedulerShiftToSend,
       supportsSchedulerShift,
       cfgInterval: resolvedCfgInterval,
       captionOverflow: outgoingCaptionOverflow,

@@ -832,7 +832,7 @@ fn krea_imported_control_raw_settings(
     dit: Option<&Path>,
 ) -> JsonObject {
     let mut raw = krea_imported_raw_settings(request, steps, false, adapter_count, dit);
-    raw.insert("guidanceScale".to_owned(), Value::Null);
+    raw.entry("guidanceScale".to_owned()).or_insert(Value::Null);
     raw.insert("controlScale".to_owned(), json!(control_scale));
     raw.insert("poseCount".to_owned(), json!(pose_count));
     raw.insert(
@@ -956,6 +956,7 @@ pub(super) async fn generate_krea_imported_control_stream(
         .then(|| resolve_installed_face_stack_dir(settings))
         .flatten();
 
+    let sampling = super::sampling::explicit_sampling_request(request);
     let prompt = request.prompt.clone();
     let text_style_gain = resolve_text_style_gain(request);
     let (width, height) = (request.width, request.height);
@@ -1069,6 +1070,7 @@ pub(super) async fn generate_krea_imported_control_stream(
                     height,
                     seed,
                     steps,
+                    &sampling,
                     conditioning,
                     text_style_gain,
                     preview,
@@ -1202,6 +1204,7 @@ pub(super) async fn generate_krea_imported_control_stream(
         .then(|| resolve_installed_face_stack_dir(settings))
         .flatten();
 
+    let sampling = super::sampling::explicit_sampling_request(request);
     let prompt = request.prompt.clone();
     let text_style_gain = resolve_text_style_gain(request);
     let (width, height) = (request.width, request.height);
@@ -1255,6 +1258,11 @@ pub(super) async fn generate_krea_imported_control_stream(
                 )?;
                 let control_request = runtime_cuda::providers::krea::Krea2ControlRequest {
                     prompt: prompt.clone(),
+                    guidance: sampling.guidance,
+                    negative_prompt: sampling.negative_prompt.clone(),
+                    sampler: sampling.sampler.clone(),
+                    scheduler: sampling.scheduler.clone(),
+                    scheduler_shift: sampling.scheduler_shift,
                     width,
                     height,
                     steps: steps as usize,
@@ -1439,7 +1447,11 @@ pub(super) fn krea_imported_raw_settings(
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert(
         "resolvedSampler".to_owned(),
-        Value::String(KREA_IMPORTED_SAMPLER.to_owned()),
+        Value::String(
+            super::sampling::read_advanced_sampling_knobs(&request.advanced)
+                .0
+                .unwrap_or_else(|| KREA_IMPORTED_SAMPLER.to_owned()),
+        ),
     );
     raw.insert(
         "mode".to_owned(),
@@ -1631,6 +1643,7 @@ fn krea_imported_generate_pass(
     height: u32,
     seed: i64,
     steps: u32,
+    sampling: &GenerationRequest,
     conditioning: Vec<Conditioning>,
     text_style_gain: Option<f32>,
     memory: Option<gen_core::GenerationMemory>,
@@ -1646,7 +1659,14 @@ fn krea_imported_generate_pass(
         count: 1,
         seed: Some(seed as u64),
         steps: Some(steps),
-        sampler: Some(KREA_IMPORTED_SAMPLER.to_owned()),
+        sampler: sampling
+            .sampler
+            .clone()
+            .or_else(|| Some(KREA_IMPORTED_SAMPLER.to_owned())),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
+        guidance: sampling.guidance,
+        negative_prompt: sampling.negative_prompt.clone(),
         conditioning,
         text_style_gain,
         memory,
@@ -1687,6 +1707,7 @@ fn krea_imported_generate_multiphase(
     height: u32,
     seed: i64,
     phases: Vec<gen_core::GenerationPhase>,
+    sampling: &GenerationRequest,
     text_style_gain: Option<f32>,
     memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
     preview: gen_core::PreviewSink,
@@ -1701,6 +1722,10 @@ fn krea_imported_generate_multiphase(
         count: 1,
         seed: Some(seed as u64),
         phases: Some(phases),
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
+        guidance: sampling.guidance,
         text_style_gain,
         memory: memory_evaluation.map(|evaluation| evaluation.memory),
         preview,
@@ -1741,6 +1766,7 @@ fn krea_imported_generate_one(
     height: u32,
     seed: i64,
     steps: u32,
+    sampling: &GenerationRequest,
     conditioning: &[Conditioning],
     text_style_gain: Option<f32>,
     hires_fix: Option<HiresFixPlan>,
@@ -1757,6 +1783,7 @@ fn krea_imported_generate_one(
             height,
             seed,
             steps,
+            sampling,
             conditioning.to_vec(),
             text_style_gain,
             memory_evaluation.map(|evaluation| evaluation.memory),
@@ -1798,6 +1825,7 @@ fn krea_imported_generate_one(
         height,
         seed,
         steps,
+        sampling,
         conditioning.to_vec(),
         text_style_gain,
         memory_evaluation.map(|evaluation| evaluation.memory),
@@ -1845,6 +1873,7 @@ fn krea_imported_generate_one(
         hires.height,
         seed,
         hires.steps,
+        sampling,
         final_conditioning,
         text_style_gain,
         memory_evaluation.map(|evaluation| evaluation.memory),
@@ -1876,6 +1905,7 @@ pub(super) fn drive_krea_imported_mlx_items<E>(
     width: u32,
     height: u32,
     steps: u32,
+    sampling: GenerationRequest,
     conditioning: Vec<Conditioning>,
     negative_prompt: Option<String>,
     phases: Option<Vec<gen_core::GenerationPhase>>,
@@ -1929,6 +1959,7 @@ where
                     height,
                     seed,
                     phases,
+                    &sampling,
                     text_style_gain,
                     Some(&memory_evaluation),
                     preview,
@@ -1943,6 +1974,7 @@ where
                     height,
                     seed,
                     steps,
+                    &sampling,
                     &conditioning,
                     text_style_gain,
                     hires_fix,
@@ -2134,6 +2166,7 @@ pub(super) async fn generate_krea_imported_stream(
     let memory_inputs =
         krea_imported_memory_inputs(request, &conditioning, hires_fix, adapter_count);
 
+    let sampling = super::sampling::explicit_sampling_request(request);
     #[cfg(target_os = "macos")]
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
@@ -2160,6 +2193,7 @@ pub(super) async fn generate_krea_imported_stream(
                 width,
                 height,
                 steps,
+                sampling.clone(),
                 conditioning,
                 negative_prompt,
                 phases,
@@ -2205,6 +2239,7 @@ pub(super) async fn generate_krea_imported_stream(
                             height,
                             seed,
                             phases,
+                            &sampling,
                             text_style_gain,
                             None,
                             preview,
@@ -2219,6 +2254,7 @@ pub(super) async fn generate_krea_imported_stream(
                             height,
                             seed,
                             steps,
+                            &sampling,
                             &conditioning,
                             text_style_gain,
                             hires_fix,

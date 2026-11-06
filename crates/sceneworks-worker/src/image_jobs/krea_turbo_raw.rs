@@ -145,7 +145,7 @@ fn krea_turbo_on_raw_raw_settings(
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     // CFG off: the turbo regime is a single conditional forward, so no guidance scale is forwarded.
-    raw.insert("guidanceScale".to_owned(), Value::Null);
+    raw.entry("guidanceScale".to_owned()).or_insert(Value::Null);
     raw.insert(
         "mlxQuantize".to_owned(),
         quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
@@ -172,6 +172,7 @@ fn krea_turbo_on_raw_generate_one(
     seed: i64,
     steps: u32,
     text_style_gain: Option<f32>,
+    sampling: &GenerationRequest,
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
@@ -179,14 +180,17 @@ fn krea_turbo_on_raw_generate_one(
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         // CFG off — no negative branch (the distilled regime baked guidance into the weights).
-        negative_prompt: None,
+        negative_prompt: sampling.negative_prompt.clone(),
         width,
         height,
         count: 1,
         seed: Some(seed as u64),
         steps: Some(steps),
         // CFG off — the turbo generator is single-forward; a guidance scale would be rejected.
-        guidance: None,
+        guidance: sampling.guidance,
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         text_style_gain,
         preview,
         cancel: cancel.clone(),
@@ -291,6 +295,23 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = spec.with_offload_policy(offload_policy);
 
+    let (sampler, scheduler, scheduler_shift) =
+        super::sampling::read_advanced_sampling_knobs(&request.advanced);
+    let guidance = sceneworks_core::image_sampling_controls::effective_guidance(
+        &request.advanced,
+        &JsonObject::new(),
+    )
+    .map(|value| value as f32);
+    let sampling = GenerationRequest {
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance,
+        negative_prompt: (guidance.unwrap_or(0.0) != 0.0
+            && !request.negative_prompt.trim().is_empty())
+        .then(|| request.negative_prompt.clone()),
+        ..Default::default()
+    };
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -313,6 +334,7 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
                         seed,
                         steps,
                         text_style_gain,
+                        &sampling,
                         preview,
                         &cancel,
                         on_progress,

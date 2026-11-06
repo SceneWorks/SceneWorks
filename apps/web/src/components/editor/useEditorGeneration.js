@@ -1,5 +1,5 @@
 import { useSamplerControls } from "../../hooks/useSamplerControls.js";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { qualityChoices } from "../../jobTypes.js";
 
 import {
@@ -64,7 +64,12 @@ export function useEditorGeneration({ context }) {
   const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
   const [sampler, setSampler] = useState(saved.sampler ?? "default");
   const [scheduler, setScheduler] = useState(saved.scheduler ?? "default");
-  const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? 3.0);
+  const [rawSchedulerShift, setRawSchedulerShift] = useState(saved.schedulerShift ?? "");
+  const [schedulerShiftExplicit, setSchedulerShiftExplicit] = useState(saved.schedulerShiftExplicit === true);
+  const setSchedulerShift = useCallback((value) => {
+    setRawSchedulerShift(value);
+    setSchedulerShiftExplicit(value !== "" && value != null);
+  }, []);
   const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
   const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
   const [quantTier, setQuantTier] = useState(saved.quantTier ?? EDITOR_DEFAULT_TIER);
@@ -109,6 +114,9 @@ export function useEditorGeneration({ context }) {
   const resolutionOptions = selectedModel?.limits?.resolutions ?? RESOLUTION_FALLBACK;
   const fpsOptions = selectedModel?.limits?.fps ?? FPS_FALLBACK;
   const durationOptions = selectedModel?.limits?.durations ?? DURATION_FALLBACK;
+  const schedulerShift = selectedModel?.video?.supportsSchedulerShift !== false
+    && (schedulerShiftExplicit || (scheduler && scheduler !== "default"))
+    ? rawSchedulerShift : "";
   const { samplerOptions, schedulerOptions, showSamplerPicker, showSchedulerPicker } = useSamplerControls(selectedModel, null, { sampler, scheduler, setSampler, setScheduler, setSchedulerShift, reconcile: "model-invalid" });
 
   const tierPickerOpts = useMemo(
@@ -231,7 +239,7 @@ export function useEditorGeneration({ context }) {
         motion,
         sampler,
         scheduler,
-        schedulerShift: Number(schedulerShift),
+        ...(schedulerShift !== "" && schedulerShift != null ? { schedulerShift: Number(schedulerShift) } : {}),
         ...(stepsOverride !== "" ? { steps: Number(stepsOverride) } : {}),
         ...(supportsGuidance && guidanceOverride !== "" ? { guidanceScale: Number(guidanceOverride) } : {}),
       },
@@ -256,7 +264,8 @@ export function useEditorGeneration({ context }) {
       negativePrompt: supportsNegativePrompt ? negativePrompt : "",
       sampler,
       scheduler,
-      schedulerShift,
+      schedulerShift: rawSchedulerShift,
+      schedulerShiftExplicit,
       steps: stepsOverride,
       guidanceScale: supportsGuidance ? guidanceOverride : "",
       quantTier,
@@ -289,7 +298,7 @@ export function useEditorGeneration({ context }) {
       ...(mlxQuantize !== null ? { mlxQuantize } : {}),
       ...(sampler && sampler !== "default" ? { sampler } : {}),
       ...(scheduler && scheduler !== "default" ? { scheduler } : {}),
-      ...(scheduler && scheduler !== "default" && Number.isFinite(Number(schedulerShift))
+      ...(schedulerShift !== "" && schedulerShift != null && Number.isFinite(Number(schedulerShift))
         ? { schedulerShift: Number(schedulerShift) }
         : {}),
       ...(showLightning ? { lightning } : {}),
@@ -297,7 +306,6 @@ export function useEditorGeneration({ context }) {
         ? { steps: Number(stepsOverride) }
         : {}),
       ...(supportsGuidance &&
-      !lightningActive &&
       guidanceOverride !== "" &&
       Number.isFinite(Number(guidanceOverride))
         ? { guidanceScale: Number(guidanceOverride) }

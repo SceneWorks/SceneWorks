@@ -73,9 +73,8 @@ fn declares(model_manifest_entry: &JsonObject, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `image.supportsSchedulerShift`: the model has a schedule-shift axis WITHOUT a scheduler menu
-/// (Iris-3B's FlowDPM-Solver++ has one schedule, the shifted linear grid). ABSENT MEANS FALSE —
-/// the scheduler-menu models keep their historical shift-with-a-named-scheduler behaviour.
+/// Whether the provider supports an independent native schedule Shift override.
+/// Missing declarations retain compatibility with imported sampling menus.
 pub fn supports_scheduler_shift(model_manifest_entry: &JsonObject) -> bool {
     declares(model_manifest_entry, "supportsSchedulerShift")
 }
@@ -173,7 +172,7 @@ pub fn requested_scheduler_shift(advanced: &JsonObject) -> Result<Option<f32>, S
         .as_f64()
         .or_else(|| value.as_str()?.trim().parse().ok())
         .ok_or_else(|| format!("advanced.{SCHEDULER_SHIFT_KEY} must be a number, got {value}"))?;
-    if !(shift.is_finite() && shift > 0.0) {
+    if !(shift.is_finite() && shift > 0.0 && (shift as f32).is_finite()) {
         return Err(format!(
             "advanced.{SCHEDULER_SHIFT_KEY} {shift} must be a finite value > 0"
         ));
@@ -201,8 +200,14 @@ pub fn effective_guidance(advanced: &JsonObject, model_manifest_entry: &JsonObje
 
 /// Does classifier-free guidance run at this guidance? Exactly 1.0 is CFG off (the engines'
 /// `uses_cfg` test).
-fn cfg_off(guidance: Option<f64>) -> bool {
-    guidance == Some(1.0)
+fn cfg_off(guidance: Option<f64>, entry: &JsonObject) -> bool {
+    guidance
+        == Some(
+            image_block(entry)
+                .and_then(|image| image.get("guidanceOffValue"))
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0),
+        )
 }
 
 /// The enqueue-time refusal for the sampling controls above, or `None` when the request is
@@ -248,16 +253,24 @@ pub fn image_sampling_control_error(
             });
         }
     }
-    if supports_scheduler_shift(model_manifest_entry) {
-        if let Err(message) = requested_scheduler_shift(advanced) {
-            return Some(format!("{model}: {message}"));
+    match requested_scheduler_shift(advanced) {
+        Err(message) => return Some(format!("{model}: {message}")),
+        Ok(Some(_))
+            if image_block(model_manifest_entry)
+                .and_then(|image| image.get("supportsSchedulerShift"))
+                .and_then(Value::as_bool)
+                == Some(false) =>
+        {
+            return Some(format!("{model} has no native schedule shift"));
         }
+        _ => {}
     }
     let guidance = effective_guidance(advanced, model_manifest_entry);
-    if cfg_off(guidance) {
+    if cfg_off(guidance, model_manifest_entry) {
+        let off = guidance.expect("CFG-off guidance is present");
         if interval.is_some() {
             return Some(format!(
-                "{model}: a guidance interval has no effect at guidance 1.0 (classifier-free \
+                "{model}: a guidance interval has no effect at guidance {off:.1} (classifier-free \
                  guidance is off); raise guidance or drop advanced.{CFG_INTERVAL_KEY}"
             ));
         }
@@ -265,7 +278,7 @@ pub fn image_sampling_control_error(
             && !negative_prompt.trim().is_empty()
         {
             return Some(format!(
-                "{model}: the negative prompt has no effect at guidance 1.0 (classifier-free \
+                "{model}: the negative prompt has no effect at guidance {off:.1} (classifier-free \
                  guidance is off); raise guidance or clear the negative prompt"
             ));
         }

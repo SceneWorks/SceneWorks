@@ -642,7 +642,7 @@ pub(super) fn minimax_h3_sampling(
     };
     Ok((
         advanced_opt_u32(request, "steps").or(Some(recipe.steps)),
-        Some(recipe.video_shift),
+        advanced_opt_f32(request, "schedulerShift").or(Some(recipe.video_shift)),
         Some(recipe),
     ))
 }

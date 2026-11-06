@@ -126,7 +126,7 @@ const DISCARD_CONFIRM = {
 
 // The `defaults` keys this editor renders. Everything else a preset carries —
 // upscale*, ipAdapterScale, controlnetScale, guidanceMethod, trueCfgScale, viewAngle,
-// schedulerShift, precision, quantization, motion, the studios' literal `prompt`, … —
+// precision, quantization, motion, the studios' literal `prompt`, … —
 // passes through untouched on save. PATCH replaces `defaults` wholesale (manifest.rs
 // `merge_object` is a top-level key replace), so rebuilding it from the form alone
 // silently destroys everything the studios' Save-as-Preset wrote (sc-10548).
@@ -135,6 +135,7 @@ const EDITOR_OWNED_DEFAULTS = [
   "count",
   "steps",
   "guidanceScale",
+  "schedulerShift",
   "duration",
   "fps",
   "quality",
@@ -231,6 +232,7 @@ function formFromPreset(preset, fallbackModel) {
     negativePrompt: defaults.negativePrompt ?? "",
     steps: numberFieldValue(defaults.steps),
     guidanceScale: numberFieldValue(defaults.guidanceScale),
+    schedulerShift: numberFieldValue(defaults.schedulerShift),
     sampler: defaults.sampler ?? "",
     scheduler: defaults.scheduler ?? "",
     promptPrefix: preset?.prompt?.prefix ?? "",
@@ -274,7 +276,8 @@ export function defaultValueErrors(form, isVideo, options) {
   };
   checkNumber(form.count, "Variations", { min: 1, max: 8, integer: true });
   checkNumber(form.steps, "Steps", { min: 1, max: 200, integer: true });
-  checkNumber(form.guidanceScale, "Guidance", { min: 0, max: 60 });
+  if (form.guidanceScale !== "" && !Number.isFinite(Number(form.guidanceScale))) errors.push("Guidance must be finite.");
+  if (form.schedulerShift != null && form.schedulerShift !== "" && (!Number.isFinite(Number(form.schedulerShift)) || Number(form.schedulerShift) <= 0)) errors.push("Schedule shift must be finite and greater than 0.");
   // A distilled model renders at exactly one step count (sc-19502). The generic 1..200 range above
   // does not know that, so without this a preset could be SAVED with `steps: 30` for LTX-2.3 and
   // then 400 on every job it drove — a stored default guaranteed to fail, which is the same
@@ -559,6 +562,7 @@ export function PresetManagerScreen() {
     };
     numberInto("steps", form.steps);
     numberInto("guidanceScale", form.guidanceScale);
+    numberInto("schedulerShift", form.schedulerShift);
     if (segment.type === "video") {
       numberInto("duration", form.duration);
       numberInto("fps", form.fps);

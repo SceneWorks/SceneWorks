@@ -196,6 +196,7 @@ pub(super) fn qwen_control_load(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn qwen_control_generate_one(
     generator: &dyn Generator,
+    sampling: &GenerationRequest,
     prompt: &str,
     negative_prompt: Option<String>,
     width: u32,
@@ -222,6 +223,9 @@ pub(super) fn qwen_control_generate_one(
         conditioning,
         preview,
         cancel: cancel.clone(),
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
     };
     let output = generator.generate(&request, on_progress).map_err(|error| {
@@ -274,6 +278,7 @@ pub(super) async fn generate_qwen_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling = super::sampling::explicit_sampling_request(request);
     let qwen = mlx_model("qwen_image")
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen model row missing".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
@@ -403,6 +408,7 @@ pub(super) async fn generate_qwen_control_stream(
                     build_control_conditioning(control, control_kind.clone(), control_scale, None);
                 let (out_w, out_h, pixels) = qwen_control_generate_one(
                     generator,
+                    &sampling,
                     &prompt,
                     negative_prompt.clone(),
                     width,
@@ -638,16 +644,12 @@ pub(super) fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
-/// Resolve the Qwen edit true-CFG guidance. The engine's `guidance` IS the true CFG
-/// (diffusers `true_cfg_scale`), so this reads `advanced.trueCfgScale` (NOT
-/// `guidanceScale`, the inert embedded-guidance knob that the Python edit path pins at
-/// 1.0) else the family default (4.0). The Character-Studio reference path clamps to
-/// [1, 10] (Python `_reference_true_cfg_scale`); `edit_image` floors at 1.0 (the engine
-/// needs CFG > 1 to engage).
+/// Advanced guidance overrides the prompt-strength default; legacy aliases remain supported.
 pub(super) fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &ResolvedModel) -> f32 {
-    let raw = request
+    request
         .advanced
-        .get("trueCfgScale")
+        .get("guidanceScale")
+        .or_else(|| request.advanced.get("trueCfgScale"))
         .or_else(|| request.advanced.get("imageGuidanceScale"))
         .and_then(|value| {
             value
@@ -655,12 +657,7 @@ pub(super) fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &Resolve
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .map(|value| value as f32)
-        .unwrap_or(model.default_guidance());
-    if request.mode == "character_image" {
-        raw.clamp(1.0, 10.0)
-    } else {
-        raw.max(1.0)
-    }
+        .unwrap_or(model.default_guidance())
 }
 
 /// Flat telemetry for a Qwen edit generation (parity with `flux2_edit_raw_settings`).
@@ -697,6 +694,7 @@ fn qwen_edit_raw_settings(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn qwen_edit_generate_one(
     generator: &dyn Generator,
+    sampling: &GenerationRequest,
     prompt: &str,
     negative_prompt: Option<String>,
     width: u32,
@@ -720,11 +718,16 @@ pub(super) fn qwen_edit_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance: Some(guidance),
-        sampler: sampler.map(str::to_owned),
         use_pid,
         conditioning,
         preview,
         cancel: cancel.clone(),
+        sampler: sampling
+            .sampler
+            .clone()
+            .or_else(|| sampler.map(str::to_owned)),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
     };
     let output = generator
@@ -759,6 +762,7 @@ pub(super) async fn generate_qwen_edit_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling = super::sampling::explicit_sampling_request(request);
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let engine_id = qwen_edit_engine_id(&request.model)
@@ -949,6 +953,7 @@ pub(super) async fn generate_qwen_edit_stream(
                     };
                     let (out_w, out_h, pixels) = qwen_edit_generate_one(
                         generator,
+                        &sampling,
                         &prompt,
                         negative_prompt.clone(),
                         width,

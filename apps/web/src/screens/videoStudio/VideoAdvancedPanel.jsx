@@ -85,7 +85,6 @@ export function VideoAdvancedPanel({
   schedulerOptions,
   setSampler,
   setScheduler,
-  showSchedulerPicker,
   setSchedulerShift,
   schedulerShift,
   stepsChoice,
@@ -379,8 +378,7 @@ export function VideoAdvancedPanel({
                     Video STG
                     <input
                       min="0"
-                      max="10"
-                      onChange={(event) => setLtxVideoStg(event.target.value)}
+                        onChange={(event) => setLtxVideoStg(event.target.value)}
                       placeholder="0.0"
                       step="0.1"
                       type="number"
@@ -484,19 +482,21 @@ export function VideoAdvancedPanel({
                 onSamplerChange={setSampler}
                 onSchedulerChange={setScheduler}
               />
-              {showSchedulerPicker && scheduler !== "default" ? (
+
                 <label>
                   Schedule shift
                   <input
-                    max="10"
-                    min="0.1"
-                    onChange={(event) => setSchedulerShift(Number(event.target.value))}
-                    step="0.1"
+                    disabled={selectedModel?.video?.supportsSchedulerShift === false}
+                    title={selectedModel?.video?.supportsSchedulerShift === false ? "This model has no native flow schedule shift." : undefined}
+                    min="0"
+                    onChange={(event) => setSchedulerShift(event.target.value)}
+                    step="any"
+                    placeholder={selectedModel?.defaults?.schedulerShift == null ? "Model default" : String(selectedModel.defaults.schedulerShift)}
                     type="number"
-                    value={schedulerShift}
+                    value={schedulerShift ?? ""}
                   />
                 </label>
-              ) : null}
+
               <SamplingStepsField
                 value={(stepsChoice && !ltx25Dev) ? lightningActive || stepsOffMenu ? "" : stepsOverride : lightningActive || stepsPinned ? "" : stepsOverride}
                 onChange={(value) => setStepsOverride(value)}
@@ -541,18 +541,14 @@ export function VideoAdvancedPanel({
                 <label>
                   Guidance
                   <input
-                    min="0"
-                    max="30"
-                    disabled={lightningActive}
                     onChange={(event) => setGuidanceOverride(event.target.value)}
-                    placeholder={lightningActive ? "off (Lightning)" : (() => {
+                    placeholder={lightningActive ? "1 (Lightning default)" : (() => {
                       const value = guidanceDefaultFromModel(selectedModel);
                       return value == null ? "" : String(value);
                     })()}
-                    step="0.1"
-                    title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set guidance." : undefined}
+                    step="any"
                     type="number"
-                    value={lightningActive ? "" : guidanceOverride}
+                    value={guidanceOverride}
                   />
                 </label>
               ) : null}

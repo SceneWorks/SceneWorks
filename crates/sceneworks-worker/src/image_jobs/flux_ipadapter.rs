@@ -324,6 +324,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
     let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
     let likeness_source_ref = reference_id.to_owned();
 
+    let sampling = super::sampling::explicit_sampling_request(request);
     let steps = flux_ipadapter_steps(request);
     let guidance = flux_ipadapter_guidance(request);
     let ip_scale = advanced::f32_clamped(
@@ -488,6 +489,9 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                         width,
                         height,
                         steps: steps as usize,
+                        sampler: sampling.sampler.clone(),
+                        scheduler: sampling.scheduler.clone(),
+                        scheduler_shift: sampling.scheduler_shift,
                         guidance,
                         ip_adapter_scale: ip_scale,
                         seed: seed as u64,

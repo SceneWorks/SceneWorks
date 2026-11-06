@@ -1106,6 +1106,29 @@ describe("AudioStudio Sound FX generation (sc-13409)", () => {
     expect(rememberLocalGenerationJob).toHaveBeenCalledWith("audio", job);
   });
 
+  it("carries native SFX Shift and negatives, and omits a cleared Shift", async () => {
+    const moss = { ...MOSS, defaults: { guidanceScale: 4, schedulerShift: 5 },
+      audio: { ...MOSS.audio, supportsGuidance: true, supportsNegativePrompt: true, supportsSchedulerShift: true } };
+    const createAudioJob = vi.fn(async () => ({ id: "experimental-sfx" }));
+    await render(baseContext({ createAudioJob, models: [moss], audioModels: [moss] }));
+    await click(modeTab(container, "Sound FX"));
+    await setTextarea(container.querySelector(".prompt-input"), "rain");
+    await click(container.querySelector(".advanced-section-toggle"));
+    const shift = advancedFieldByLabel(container, "Schedule shift").querySelector("input");
+    expect(shift.placeholder).toBe("5");
+    expect(shift.getAttribute("max")).toBeNull();
+    await setNumber(shift, "18.375");
+    await setNumber(advancedFieldByLabel(container, "Guidance").querySelector("input"), "1.5");
+    await setTextarea(advancedFieldByLabel(container, "Negative prompt").querySelector("textarea"), "voices");
+    await submitForm();
+    expect(createAudioJob.mock.calls.at(-1)[0]).toMatchObject({ schedulerShift: 18.375, guidance: 1.5, negativePrompt: "voices" });
+    await setNumber(shift, "");
+    await setNumber(advancedFieldByLabel(container, "Guidance").querySelector("input"), "1");
+    await submitForm();
+    expect(createAudioJob.mock.calls.at(-1)[0].schedulerShift).toBeUndefined();
+    expect(createAudioJob.mock.calls.at(-1)[0].negativePrompt).toBeUndefined();
+  });
+
   it("omits guidance/steps when cleared so the model falls back to its own sampler default", async () => {
     const createAudioJob = vi.fn(async () => ({ id: "sfx-job-default" }));
     await render(baseContext({ createAudioJob, rememberLocalGenerationJob: vi.fn() }));

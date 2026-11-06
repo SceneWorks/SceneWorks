@@ -403,7 +403,7 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     // (sceneworks_id, supports_guidance, supports_negative_prompt) — the exact pre-sc-3723
     // values that used to live on each MlxModel row.
     let expected: &[(&str, bool, bool)] = &[
-        ("z_image_turbo", false, false),
+        ("z_image_turbo", true, true),
         // Base (non-distilled) Z-Image (sc-8320): the undistilled foundation model is full real CFG —
         // supports_guidance=true + supports_negative_prompt=true (vs Turbo's CFG-free distill).
         ("z_image", true, true),
@@ -414,7 +414,7 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // (supports_guidance=false), no negative prompt. Requires the mlx-gen pin to include the
         // `ideogram_4_turbo` engine (PR #489) for this row to resolve through the registry.
         ("ideogram_4_turbo", false, false),
-        ("z_image_edit", false, false),
+        ("z_image_edit", true, true),
         ("flux_schnell", false, false),
         ("flux_dev", true, false),
         ("qwen_image", true, true),
@@ -486,13 +486,13 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // Boogu-Image-0.1 (epic 6387 / sc-6399): Base + Edit are true-CFG (supports_guidance=true)
         // with no user negative prompt (the CFG-negative is a fixed empty/drop instruction). Turbo is
         // the DMD few-step, CFG-free distill (supports_guidance=false). None take a negative prompt.
-        ("boogu_image", true, false),
-        ("boogu_image_turbo", false, false),
-        ("boogu_image_edit", true, false),
+        ("boogu_image", true, true),
+        ("boogu_image_turbo", true, true),
+        ("boogu_image_edit", true, true),
         // Krea 2 Turbo (epic 7565 / sc-7572): TDM-distilled few-step, CFG-free
         // (supports_guidance=false) with no user negative prompt (supports_negative_prompt=false) — the
         // z_image_turbo / boogu_image_turbo distilled-turbo pattern.
-        ("krea_2_turbo", false, false),
+        ("krea_2_turbo", true, true),
         // Krea 2 Raw (epic 9992): the UNDISTILLED base run with TRUE CFG — supports_guidance=true +
         // supports_negative_prompt=true (unlike the CFG-free distilled Turbo). The Boogu-base pattern,
         // but Raw ALSO accepts a user negative prompt (the reference `sample()` takes `negative_prompts`).
@@ -503,7 +503,7 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // SD3.5 Large Turbo (epic 7841 / sc-7871): the ADD-distilled few-step, CFG-off sibling — the
         // `sd3_5_large_turbo` descriptor drops guidance + negative prompt (supports_guidance=false,
         // supports_negative_prompt=false), the distilled-turbo pattern.
-        ("sd3_5_large_turbo", false, false),
+        ("sd3_5_large_turbo", true, true),
         // SD3.5 Medium (epic 7841 / sc-7869 M3, wired sc-7871, corrected sc-15440): standard CFG —
         // supports_guidance=true + supports_negative_prompt=true, but supports_true_cfg=false.
         ("sd3_5_medium", true, true),
@@ -522,15 +522,15 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // merged CFG-free few-step student (`uses_cfg() == false`), so its descriptor drops both flags.
         ("anima_base", true, true),
         ("anima_aesthetic", true, true),
-        ("anima_turbo", false, false),
+        ("anima_turbo", true, true),
         // Mage-Flow Base/RL and Edit-Base/Edit retain classifier-free guidance and negative
         // conditioning; the distilled generation/edit Turbo recipes are CFG-free.
         ("mage_flow_base", true, true),
         ("mage_flow", true, true),
-        ("mage_flow_turbo", false, false),
+        ("mage_flow_turbo", true, true),
         ("mage_flow_edit_base", true, true),
         ("mage_flow_edit", true, true),
-        ("mage_flow_edit_turbo", false, false),
+        ("mage_flow_edit_turbo", true, true),
         // Iris-3B (sc-25679): CFG against a negative prompt (default ""), cfg_scale = guidance.
         ("iris_3b", true, true),
         // FLUX 3 Image Klein, distilled (sc-26234): a flow map — no CFG, no negative prompt.

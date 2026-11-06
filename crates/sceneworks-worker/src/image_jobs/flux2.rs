@@ -601,6 +601,7 @@ fn flux2_edit_memory_run_context<'a>(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn flux2_edit_generate_one(
     generator: &dyn Generator,
+    sampling: &GenerationRequest,
     use_provider_memory_safety: bool,
     use_pid: bool,
     memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
@@ -650,6 +651,9 @@ pub(super) fn flux2_edit_generate_one(
         memory: selected_memory,
         preview,
         cancel: cancel.clone(),
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
     };
     enhance.apply(&mut request, prompt_enhancement);
@@ -739,6 +743,7 @@ pub(super) async fn generate_flux2_edit_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling = super::sampling::explicit_sampling_request(request);
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let engine_id = flux2_edit_engine_id(&request.model)
@@ -1073,6 +1078,7 @@ pub(super) async fn generate_flux2_edit_stream(
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     let (out_w, out_h, pixels) = flux2_edit_generate_one(
                         generator,
+                        &sampling,
                         use_provider_memory_safety,
                         use_pid,
                         Some(&memory_evaluation),
@@ -1262,6 +1268,7 @@ pub(super) fn flux2_control_scale(request: &ImageRequest) -> f32 {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn flux2_control_generate_one_scoped(
     generator: &dyn Generator,
+    sampling: &GenerationRequest,
     memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
     prompt: &str,
     width: u32,
@@ -1286,6 +1293,9 @@ pub(super) fn flux2_control_generate_one_scoped(
         memory: memory_evaluation.map(|evaluation| evaluation.memory),
         preview,
         cancel: cancel.clone(),
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
     };
     // sc-20799: this lane used to call `generator.generate` directly — no request scope, no
@@ -1400,6 +1410,7 @@ pub(super) async fn generate_flux2_dev_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling = super::sampling::explicit_sampling_request(request);
     // sc-20799: this lane wires no PiD decode path at all, so `advanced.usePid` was discarded here
     // with no diagnostic. Refuse it before any weights are fetched.
     refuse_pid_on_flux2_dev_route("FLUX.2-dev strict-control", request)?;
@@ -1637,6 +1648,7 @@ pub(super) async fn generate_flux2_dev_control_stream(
                     .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                 let (out_w, out_h, pixels) = flux2_control_generate_one_scoped(
                     generator,
+                    &sampling,
                     Some(&memory_evaluation),
                     &prompt,
                     width,

@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
 import {
   samplerDefaultFromModel, samplerOptionsFromModel,
-  schedulerDefaultFromModel, schedulerOptionsFromModel, schedulerShiftDefaultFromModel,
+  schedulerDefaultFromModel, schedulerOptionsFromModel,
   stepsDefaultFromModel, stepsMenuFromModel,
 } from "../samplerOptions.js";
 import { preferredOption } from "../studioDefaults.js";
@@ -31,7 +31,7 @@ export function useSamplerControls(model, backend, {
     }
     if (reconcile === "model-reset" || !schedulerOptions.includes(scheduler)) {
       setScheduler(schedulerDefaultFromModel(model));
-      setSchedulerShift?.(schedulerShiftDefaultFromModel(model));
+      setSchedulerShift?.("");
     }
   // These two policies deliberately use the committed model-change snapshot,
   // preserving the owners' reset semantics rather than resetting on each edit.

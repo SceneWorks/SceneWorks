@@ -3422,6 +3422,38 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
     expect(payload.advanced.guidanceScale).toBe(6.5);
   });
 
+  it("lets Turbo users enable negatives and shift independently of a default-only scheduler", async () => {
+    const turbo = { ...GUIDED, id: "mage_flow_turbo", family: "mage-flow",
+      image: { supportsGuidance: true, supportsNegativePrompt: true, negativePromptRequiresGuidance: true, supportsSchedulerShift: true },
+      defaults: { ...GUIDED.defaults, guidanceScale: 1, schedulerShift: 6 },
+      limits: { ...GUIDED.limits, samplers: ["default"], schedulers: ["default"] } };
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({ model: turbo.id, schedulerShift: 3 }));
+    const createImageJob = vi.fn(async () => ({ id: "turbo-job" }));
+    await render(baseContext({ imageModels: [turbo], createImageJob }));
+    await openAdvanced();
+    expect(labelStartingWith("Sampler")?.querySelector("select")).toBeTruthy();
+    expect(labelStartingWith("Scheduler")?.querySelector("select")).toBeTruthy();
+    const negative = labelStartingWith("Negative prompt").querySelector("textarea");
+    expect(negative.disabled).toBe(true);
+    await generate();
+    expect(createImageJob.mock.calls[0][0].advanced.schedulerShift).toBeUndefined();
+    await act(async () => setInput(field(container, "Guidance"), "1.5"));
+    expect(negative.disabled).toBe(false);
+    await setTextarea(negative, "blurry");
+    const shift = field(container, "Schedule shift");
+    expect(shift.getAttribute("max")).toBeNull();
+    await act(async () => setInput(shift, "18.375"));
+    await generate();
+    const payload = createImageJob.mock.calls.at(-1)[0];
+    expect(payload.advanced.guidanceScale).toBe(1.5);
+    expect(payload.negativePrompt).toBe("blurry");
+    expect(payload.advanced.schedulerShift).toBe(18.375);
+    expect(payload.advanced.scheduler).toBeUndefined();
+    await act(async () => setInput(shift, ""));
+    await generate();
+    expect(createImageJob.mock.calls.at(-1)[0].advanced.schedulerShift).toBeUndefined();
+  });
+
   it("hides both controls for a CFG-free engine and sends neither, even from a replayed recipe", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(

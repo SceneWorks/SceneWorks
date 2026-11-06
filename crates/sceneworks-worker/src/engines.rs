@@ -723,11 +723,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 3.5,
         adapter_label: "mlx_sd3",
     },
-    // SD3.5 Large Turbo (epic 7841 / sc-7871) — the ADD-distilled few-step, CFG-free sibling: same 8B
-    // MMDiT + triple TE + 16-ch VAE backbone + snapshot layout, distilled checkpoint. 4 steps; guidance
-    // is INERT (the `sd3_5_large_turbo` descriptor advertises supports_guidance=false, so
-    // `resolve_guidance` returns None and never forwards a value — the pipeline's `denoise_cfg` skips the
-    // uncond forward at guidance 1.0). No negative prompt. The z_image_turbo / boogu / krea turbo pattern.
+    // Turbo keeps its single-forward default at CFG 1; Advanced can request experimental CFG.
     ModelRow {
         sceneworks_id: "sd3_5_large_turbo",
         engine_id: "sd3_5_large_turbo",
@@ -735,7 +731,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         // standard_tier_subdir. Re-host of the gated Stability source.
         default_repo: "SceneWorks/sd3.5-large-turbo-mlx",
         default_steps: 4,
-        default_guidance: 0.0,
+        default_guidance: 1.0,
         adapter_label: "mlx_sd3",
     },
     // SD3.5 Medium (epic 7841 / sc-7869 M3, wired in sc-7871) — the MMDiT-X variant: 2.5B, 24 joint

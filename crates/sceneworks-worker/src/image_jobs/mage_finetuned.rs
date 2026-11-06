@@ -536,6 +536,7 @@ pub(super) async fn generate_mage_finetuned_stream(
         reference_resources: None,
     };
 
+    let sampling = super::sampling::explicit_sampling_request(request);
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         descriptor.id,
@@ -590,6 +591,9 @@ pub(super) async fn generate_mage_finetuned_stream(
                         preview,
                         &cancel,
                     );
+                    request.sampler = sampling.sampler.clone();
+                    request.scheduler = sampling.scheduler.clone();
+                    request.scheduler_shift = sampling.scheduler_shift;
                     #[cfg(target_os = "macos")]
                     {
                         request.memory = Some(memory_evaluation.memory);

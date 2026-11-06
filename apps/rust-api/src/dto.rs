@@ -1261,6 +1261,9 @@ pub(crate) struct AudioJobRequest {
     /// range is the real gate the generator's `validate` applies (sc-13409).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) guidance: Option<f32>,
+    /// Optional native flow schedule shift; omitted preserves the model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) scheduler_shift: Option<f32>,
     /// Solver step count for diffusion-audio models (Sound FX / MOSS-SoundEffect + Music / ACE-Step).
     /// Rides the top-level [`gen_core::GenerationRequest::steps`]. `None` ⇒ the model's default (MOSS:
     /// 100; ACE-Step turbo: 8). Bounded to a blanket sane ceiling here; the model's advertised step

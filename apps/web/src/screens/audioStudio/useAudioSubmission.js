@@ -19,6 +19,7 @@ export function useAudioSubmission({
   script,
   voice,
   guidance,
+  schedulerShift,
   steps,
   songModel,
   songPrompt,
@@ -43,6 +44,8 @@ export function useAudioSubmission({
   bpm,
   musicalKey,
   lyrics,
+  showSchedulerShift,
+  negativePromptCfgOff,
   musicSupportsGuidance,
   musicSupportsNegative,
   negativePrompt,
@@ -102,6 +105,9 @@ export function useAudioSubmission({
         targetDurationSecs: clampedDuration,
         seed: seed === "" ? null : Number(seed),
       };
+      if (showSchedulerShift && schedulerShift !== "" && schedulerShift != null) {
+        payload.schedulerShift = Number(schedulerShift);
+      }
       if (mode === "speech") {
         if (showMultiSpeaker) {
           // Multi-speaker Speech (MOSS-TTSD, sc-13676): submit the segmented dialogue as
@@ -121,6 +127,7 @@ export function useAudioSubmission({
         // (CFG 4.0 / 100 steps); the shared gen-core floor range-checks any value we do send. No
         // `voice` is sent — MOSS advertises no voice surface and the floor rejects one.
         payload.guidance = guidance === "" ? undefined : Number(guidance);
+        payload.negativePrompt = negativePromptCfgOff ? undefined : negativePrompt.trim() || undefined;
         payload.steps = steps === "" ? undefined : Number(steps);
       } else if (songModel) {
         // YuE lyrics-to-song (sc-19385 → the sc-19384 job surface). The genre tags ARE the prompt
@@ -169,7 +176,7 @@ export function useAudioSubmission({
           payload.guidance = guidance === "" ? undefined : Number(guidance);
         }
         if (musicSupportsNegative) {
-          payload.negativePrompt = negativePrompt.trim() || undefined;
+          payload.negativePrompt = negativePromptCfgOff ? undefined : negativePrompt.trim() || undefined;
         }
         // Extend/edit SOURCE band → Conditioning::AudioEdit. Only when the user has both picked a source
         // track AND chosen an edit mode the model advertises; otherwise this is plain text-to-music.

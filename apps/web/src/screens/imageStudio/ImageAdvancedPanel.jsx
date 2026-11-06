@@ -198,17 +198,18 @@ export function ImageAdvancedPanel({
                 schedulerOptions={schedulerOptions}
                 onSamplerChange={setSampler}
                 onSchedulerChange={setScheduler}
-                hidden={mossDmd}
+                disabled={mossDmd}
               />
               {showSchedulerShift ? (
                 <label>
                   Schedule shift
                   <input
-                    disabled={mossDmd}
-                    max={moss ? undefined : "10"}
-                    min={moss ? "0" : "0.1"}
-                    onChange={(event) => setSchedulerShift(Number(event.target.value))}
-                    step={moss ? "any" : "0.1"}
+                    disabled={mossDmd || selectedModel?.image?.supportsSchedulerShift === false}
+                    title={selectedModel?.image?.supportsSchedulerShift === false ? "This model has no native flow schedule shift." : undefined}
+                    min="0"
+                    onChange={(event) => setSchedulerShift(event.target.value)}
+                    step="any"
+                    placeholder={selectedModel?.defaults?.schedulerShift == null ? "Model default" : String(selectedModel.defaults.schedulerShift)}
                     type="number"
                     value={effectiveSchedulerShift}
                   />
@@ -229,14 +230,12 @@ export function ImageAdvancedPanel({
                   Guidance
                   <input
                     disabled={mossDmd}
-                    min="0"
-                    max={moss ? undefined : "30"}
                     onChange={(event) => setGuidanceOverride(event.target.value)}
                     placeholder={(() => {
                       const value = guidanceDefaultFromModel(selectedModel);
                       return value == null ? "" : String(value);
                     })()}
-                    step={moss ? "any" : "0.1"}
+                    step="any"
                     type="number"
                     value={guidanceOverride}
                   />
@@ -662,7 +661,7 @@ export function ImageAdvancedPanel({
                   />
                   {negativePromptCfgOff ? (
                     <span className="field-hint">
-                      The negative prompt only applies with guidance above 1.0 for this model.
+                      The negative prompt applies when CFG is enabled for this model.
                     </span>
                   ) : null}
                 </label>

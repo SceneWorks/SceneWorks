@@ -606,7 +606,8 @@ fn qwen_edit_candle_steps(request: &ImageRequest) -> u32 {
 fn qwen_edit_candle_guidance(request: &ImageRequest) -> f32 {
     if let Some(value) = request
         .advanced
-        .get("trueCfgScale")
+        .get("guidanceScale")
+        .or_else(|| request.advanced.get("trueCfgScale"))
         .or_else(|| request.advanced.get("imageGuidanceScale"))
         .and_then(|value| {
             value
@@ -614,7 +615,7 @@ fn qwen_edit_candle_guidance(request: &ImageRequest) -> f32 {
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
     {
-        return (value as f32).clamp(1.0, 10.0);
+        return value as f32;
     }
     resolve_advanced_or_manifest_f32(
         request,
@@ -789,14 +790,10 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     let references = load_qwen_edit_references(request, project_path, settings)?;
 
     let lightning = is_qwen_edit_lightning(&request.model);
+    let sampling = super::sampling::explicit_sampling_request(request);
     let steps = qwen_edit_candle_steps(request);
-    // Lightning is CFG-distilled → run CFG-off (guidance 1.0); the provider forces a single forward when
-    // `lightning` is set, so guidance is recorded for telemetry only there.
-    let guidance = if lightning {
-        1.0
-    } else {
-        qwen_edit_candle_guidance(request)
-    };
+    // The Lightning default is CFG-off; explicit Advanced guidance remains editable.
+    let guidance = qwen_edit_candle_guidance(request);
     let repo = qwen_edit_candle_repo(request);
     // The lightx2v distill LoRA, lazily fetched into the HF cache — `QwenEdit` folds it into the MMDiT at
     // load (sc-6220). Empty for the production (multi-step true-CFG) variants.
@@ -1133,6 +1130,9 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         width,
                         height,
                         steps: steps as usize,
+                        sampler: sampling.sampler.clone(),
+                        scheduler: sampling.scheduler.clone(),
+                        scheduler_shift: sampling.scheduler_shift,
                         guidance,
                         seed: seed as u64,
                         lightning,
