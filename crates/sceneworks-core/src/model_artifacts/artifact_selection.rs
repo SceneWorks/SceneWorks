@@ -787,13 +787,14 @@ pub fn receipt_requirements_for_model(
 ) -> Vec<ExternalArtifactRequirement> {
     let model_id = model.get("id").and_then(Value::as_str);
     let mut requirements = Vec::new();
-    let downloads = model
+    let downloads: Vec<_> = model
         .get("downloads")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|download| is_supported_model_download(download));
-    for download in downloads {
+        .filter(|download| is_supported_model_download(download))
+        .collect();
+    for download in &downloads {
         if is_co_requisite_download(download)
             && download.get("required").and_then(Value::as_str) == Some("soft")
         {
@@ -815,10 +816,40 @@ pub fn receipt_requirements_for_model(
             .to_owned();
         let declared_files = string_array_field(download, "files");
         for receipt in receipt_file_sets(&managed, repo, receipt_model_id) {
+            // Component installs share the primary's model/repository/variant receipt key.
+            // If a receipt fits a sibling component instead of this primary row, let the exact
+            // primary declaration supply its files. Shared LICENSE/README files do not prove
+            // that the transformer was recorded. Preserve stale primary receipts otherwise.
+            let sibling_component_receipt = !is_co_requisite_download(download)
+                && !declared_files.is_empty()
+                && !receipt
+                    .files
+                    .iter()
+                    .all(|file| allow_pattern_matches(file, &declared_files))
+                && downloads.iter().any(|sibling| {
+                    if !is_co_requisite_download(sibling)
+                        || sibling.get("repo").and_then(Value::as_str) != Some(repo)
+                        || sibling
+                            .get("variant")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or("default")
+                            != variant
+                    {
+                        return false;
+                    }
+                    let files = string_array_field(sibling, "files");
+                    !files.is_empty()
+                        && receipt
+                            .files
+                            .iter()
+                            .all(|file| allow_pattern_matches(file, &files))
+                });
             // A receipt belongs to this row only when its recorded variant matches, or — for
             // legacy variant-less receipts — when its files fall inside this row's declared
             // patterns. Sibling-tier receipts never leak into the selected closure.
-            if receipt
+            if sibling_component_receipt || receipt
                 .variant
                 .as_deref()
                 .is_some_and(|receipt_variant| receipt_variant != variant)
