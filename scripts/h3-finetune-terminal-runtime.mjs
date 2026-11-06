@@ -346,7 +346,8 @@ export function privateEnvironment(runDir,runtime,token) {
       else throw new Error(`unsupported explicit CUDA validation control ${key}`);
       env[key]=value;
     }
-    env.RUST_LOG='info,sceneworks=debug,candle_gen_minimax_h3=debug';
+    // Retain source-owned block-transfer receipts for the bounded-residency proof.
+    env.RUST_LOG='info,sceneworks=debug,candle_gen_minimax_h3=trace';
   }
   return env;
 }
