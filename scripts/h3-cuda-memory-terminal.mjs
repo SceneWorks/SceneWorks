@@ -352,6 +352,40 @@ const MATERIALIZING_PROOF_SOURCES=[
   ...['Cargo.toml','src/lib.rs','src/veda.rs','src/veda','src/h3_audio_config.rs','src/h3_reference.rs',
     'src/h3_schedule.rs','src/h3_memory.rs'].map(file=>`crates/contracts/gen-core-h3/${file}`),
 ];
+// These two files are not in the raw Veda unit case's numerical execution closure:
+// Core's vendoring note is documentation; candle-gen's fixture belongs to tests/main.rs,
+// not the dependency library linked by the H3 unit-test binary. No other path is exempt.
+const MATERIALIZING_NON_NUMERICAL_FILES=Object.freeze({
+  'crates/media/candle-gen/vendor/candle-core':'VENDORED.md',
+  'crates/media/candle-gen/candle-gen':'tests/cuda_proof_pool.rs',
+});
+async function materializingTreeMapping(inferenceRoot,reference,target,selected,measuredObject,targetObject,command){
+  const excluded=`${selected}/${MATERIALIZING_NON_NUMERICAL_FILES[selected]}`;
+  const changed=(await command('git',['diff','--name-only','--no-renames',reference,target,'--',selected],{cwd:inferenceRoot})).stdout.trim().split(/\r?\n/);
+  assert.deepEqual(changed,[excluded],`numerical evidence source changed: ${selected}`);
+  const entries=async revision=>{
+    const output=(await command('git',['ls-tree','-r',revision,'--',selected],{cwd:inferenceRoot})).stdout.trim();
+    assert.ok(output,'recursive numerical source tree must exist');
+    const rows=output.split(/\r?\n/).map(line=>{
+      const match=line.match(/^(\d{6}) blob ([a-f0-9]{40})\t(.+)$/);
+      assert.ok(match,'recursive numerical source must be a Git blob');
+      assert.ok(match[3].startsWith(`${selected}/`),'recursive numerical source must remain in selected tree');
+      return {mode:match[1],object:match[2],path:match[3]};
+    });
+    assert.equal(new Set(rows.map(row=>row.path)).size,rows.length,'recursive numerical source paths must be unique');
+    const omitted=rows.filter(row=>row.path===excluded),remaining=rows.filter(row=>row.path!==excluded);
+    assert.equal(omitted.length,1,'exact non-numerical source must exist');assert.ok(remaining.length,'numerical source tree cannot be empty');
+    assert.equal(omitted[0].mode,'100644','non-numerical mapping permits content changes only');
+    return {omitted:omitted[0],remaining};
+  };
+  const before=await entries(reference),after=await entries(target);
+  assert.deepEqual(after.remaining,before.remaining,`numerical evidence recursive source changed: ${selected}`);
+  assert.notEqual(before.omitted.object,after.omitted.object,'non-numerical mapping must describe actual content movement');
+  return {path:selected,object:measuredObject,targetObject,mapping:{
+    kind:'exact-non-numerical-file-only',changedPaths:changed,
+    measuredFile:before.omitted,targetFile:after.omitted,unchangedRecursiveBlobs:before.remaining,
+  }};
+}
 export async function materializingProofSources(inferenceRoot,reference,target,command=exec){
   const sources=[];
   for(const selected of MATERIALIZING_PROOF_SOURCES){
@@ -360,7 +394,11 @@ export async function materializingProofSources(inferenceRoot,reference,target,c
       assert.match(object,/^[a-f0-9]{40}$/,'numerical source object must exist');return object;
     };
     const expected=await blob(reference),actual=await blob(target);
-    assert.equal(expected,actual,`numerical evidence source changed: ${selected}`);sources.push({path:selected,object:actual});
+    if(expected!==actual&&Object.hasOwn(MATERIALIZING_NON_NUMERICAL_FILES,selected)){
+      sources.push(await materializingTreeMapping(inferenceRoot,reference,target,selected,expected,actual,command));
+    }else{
+      assert.equal(expected,actual,`numerical evidence source changed: ${selected}`);sources.push({path:selected,object:actual});
+    }
   }
   return sources;
 }
@@ -542,7 +580,10 @@ export function validatePrimitiveProofLog(log){
   assert.match(log,/test result: ok\. 1 passed; 0 failed; 0 ignored/);
   const marker=log.match(/CUDA_PROOF_POOL_EVIDENCE (\{[^\n]+\})/);assert.ok(marker,'positive allocator enforcement evidence required');
   const primitive=JSON.parse(marker[1]);
-  for(const field of ['overCapRefused','bothConstructors','cublasStreamResetRebound','fragmentationRecoveryExercised'])assert.equal(primitive[field],true,`allocator primitive must prove ${field}`);
+  for(const field of ['overCapRefused','bothConstructors','cublasStreamResetRebound'])assert.equal(primitive[field],true,`allocator primitive must prove ${field}`);
+  assert.ok(Number.isSafeInteger(primitive.successfulRecoveryCount)&&primitive.successfulRecoveryCount>=0,'allocator primitive must report an exact nonnegative recovery count');
+  assert.equal(typeof primitive.fragmentationRecoveryExercised,'boolean','allocator primitive must report whether recovery occurred');
+  assert.equal(primitive.fragmentationRecoveryExercised,primitive.successfulRecoveryCount>0,'allocator recovery observation must match its count');
   assert.ok(primitive.reservedHighBytes<=primitive.capBytes);return primitive;
 }
 

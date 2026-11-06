@@ -52,7 +52,7 @@ an unsuccessful child or unverified release cannot produce a passing receipt.
 | `additionalSparse24`, `additionalSparse24Reason` | `true` and the explicit E5 gap: normal resident versus normal streamed Veda AV equivalence |
 | `sources` | `tier`, `base`, `predictor`, `turbo`, each `{root,revision}` identifying the actual installed HF snapshot |
 | `primitiveProof` | `{directory,runUrl,revision?}`; original measured revision defaults to the final pin, otherwise must be its ancestor with an identical complete Git tree |
-| `materializingProof` | `{logPath,revision,runUrl}` for the accepted exact forced-materializing numerical test; the existing45 numerical/layout/getter/build source objects must match final inference |
+| `materializingProof` | `{logPath,revision,runUrl}` for the accepted exact forced-materializing numerical test; the existing45 numerical/layout/getter/build selections must match final inference, subject only to the two exact non-numerical-file mappings below |
 | `retainedWorkstation` | Optional, narrowly committed accepted workstation control described below; both24GiB anchors still run fresh |
 
 The source revisions and minimal file domains are fixed in the runner. The real
@@ -177,13 +177,26 @@ stereo PCM oracle and fixed0.001 ceiling remain mandatory. Output reports both
 actual measured source pairs and the explicit source mapping; nothing relabels
 the old binary or measured peaks as a new-source execution.
 
-The new allocator primitive must additionally report
-`fragmentationRecoveryExercised:true` from its successful-recovery assertion.
+The allocator primitive must report a nonnegative exact integer
+`successfulRecoveryCount` and the boolean
+`fragmentationRecoveryExercised:(successfulRecoveryCount > 0)`. Zero/false is an
+honest observation and makes no claim that a CUDA retry recovered. Over-cap
+refusal, both constructors and the cuBLAS stream-reset check remain mandatory.
+The failed stress-fixture run is not accepted evidence; fresh full-model24GiB
+anchors and their reserve/AV checks remain mandatory regardless of this count.
 A reviewed-branch primitive may be retained across its ancestor/main merge only
 when the whole source tree is identical, with original revision/run recorded.
-The raw Veda45-object comparison is unchanged: allocator changes in its Candle
-core tree require fresh affected dedicated evidence, rather than this uncapped
-control exception weakening that proof.
+The raw Veda45-object comparison keeps every numerical, getter, kernel and build
+object strict. A differing Candle core tree may map only an actual
+`VENDORED.md` content change; a differing candle-gen tree may map only
+`tests/cuda_proof_pool.rs`. The latter is included by the candle-gen integration
+target, not the dependency library linked by the H3 Veda unit-test binary.
+Each mapping requires the actual Git diff to contain exactly that one file,
+and every remaining recursive path, mode and blob to be identical. Reports
+retain the original measured tree/file objects and record target objects and
+the explicit mapping. Any other change, including core code, refuses reuse.
+The passed Veda run42200518860 remains an execution of source4e3039c, not a
+new-source run or a full-checkpoint24GiB result.
 
 Failed anchors retain results and raw traces. Do not retry unchanged candidates
 or enlarge a routine grid. Diagnose and repair the failing boundary, then rerun

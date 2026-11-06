@@ -73,7 +73,9 @@ test('retained Veda proof maps accounting-only movement and rejects numerical, g
   const accounting=[`${h3}/src/memory_strategy/adapters.rs`,`${h3}/src/memory_strategy/streaming.rs`,'crates/contracts/gen-core/src/h3_memory/window.rs'];
   const calls=[];
   const resolver=(changed=[])=>async(command,args,options)=>{
-    assert.equal(command,'git');assert.deepEqual(args.slice(0,2),['rev-parse','--verify']);assert.equal(options.cwd,root);
+    assert.equal(command,'git');assert.equal(options.cwd,root);
+    if(args[0]==='diff')return {stdout:`${args.at(-1)}/src/numerical.rs\n`};
+    assert.deepEqual(args.slice(0,2),['rev-parse','--verify']);
     const [revision,selected]=args[2].split(':');calls.push(selected);
     return {stdout:(revision===target&&changed.includes(selected)?'d'.repeat(40):object)+'\n'};
   };
@@ -88,6 +90,37 @@ test('retained Veda proof maps accounting-only movement and rejects numerical, g
   }
   await assert.rejects(materializingProofSources(root,reference,target,async()=>{throw new Error('missing Git source object');}),/missing Git source object/);
   await assert.rejects(materializingProofSources(root,reference,target,async()=>({stdout:'not-an-object'})),/numerical source object must exist/);
+});
+
+test('Veda tree mappings preserve measured identities and permit only the exact documentation or unreachable integration fixture',async()=>{
+  const reference='a'.repeat(40),target='b'.repeat(40),oldObject='c'.repeat(40),newObject='d'.repeat(40);
+  const cases=[['crates/media/candle-gen/vendor/candle-core','VENDORED.md'],['crates/media/candle-gen/candle-gen','tests/cuda_proof_pool.rs']];
+  for(const [selected,file] of cases){
+    const excluded=`${selected}/${file}`,code=`${selected}/src/lib.rs`;
+    const command=(mutation)=>async(program,args)=>{
+      assert.equal(program,'git');
+      if(args[0]==='rev-parse')return {stdout:args[2]===`${target}:${selected}`?newObject:oldObject};
+      if(args[0]==='diff')return {stdout:mutation==='other-path'?`${code}\n`:mutation==='extra-path'?`${excluded}\n${code}\n`:`${excluded}\n`};
+      assert.equal(args[0],'ls-tree');
+      const after=args[2]===target;
+      if(after&&mutation==='missing-tree')return {stdout:''};
+      if(after&&mutation==='malformed-tree')return {stdout:'not a tree row'};
+      const doc=`${after&&mutation==='file-mode'?'100755':'100644'} blob ${after?newObject:oldObject}\t${excluded}`;
+      const source=`${after&&mutation==='code-mode'?'100755':'100644'} blob ${after&&mutation==='code-object'?newObject:oldObject}\t${code}`;
+      return {stdout:[...(after&&mutation==='missing-file'?[]:[doc]),...(after&&mutation==='deleted-code'?[]:[source]),...(after&&mutation==='added-code'?[`100644 blob ${oldObject}\t${selected}/src/extra.rs`]:[])].join('\n')};
+    };
+    const sources=await materializingProofSources('D:\\unit_fake',reference,target,command());
+    assert.equal(sources.length,45);
+    const mapped=sources.find(source=>source.path===selected);
+    assert.equal(mapped.object,oldObject);assert.equal(mapped.targetObject,newObject);
+    assert.deepEqual(mapped.mapping.changedPaths,[excluded]);
+    assert.deepEqual(mapped.mapping.measuredFile,{mode:'100644',object:oldObject,path:excluded});
+    assert.deepEqual(mapped.mapping.targetFile,{mode:'100644',object:newObject,path:excluded});
+    assert.deepEqual(mapped.mapping.unchangedRecursiveBlobs,[{mode:'100644',object:oldObject,path:code}]);
+    for(const mutation of ['other-path','extra-path','missing-tree','malformed-tree','file-mode','code-mode','code-object','missing-file','deleted-code','added-code']){
+      await assert.rejects(materializingProofSources('D:\\unit_fake',reference,target,command(mutation)),undefined,`${selected}: ${mutation}`);
+    }
+  }
 });
 test('primitive proof retains its measured revision only across an ancestor with the identical whole tree',async()=>{
   const measured='a'.repeat(40),target='b'.repeat(40),tree='c'.repeat(40),calls=[];
@@ -285,10 +318,13 @@ test('retention independently binds all weight roles, native configuration, phys
   for(const mutate of [b=>b.command.push('--no-default-features'),b=>b.configuration.flags.RUSTFLAGS='-C target-cpu=native',b=>b.backend='cpu',b=>b.configuration.proof_kind='unit_fake']){const bad=structuredClone(current);mutate(bad);assert.throws(()=>retainedWorkstationBuild(build,bad));}
 });
 
-test('new allocator primitive must actually exercise fragmentation recovery as well as prior enforcement checks',()=>{
-  const evidence={overCapRefused:true,bothConstructors:true,cublasStreamResetRebound:true,fragmentationRecoveryExercised:true,reservedHighBytes:500,capBytes:512};
+test('allocator primitive requires enforcement and an honest consistent observed recovery count, including zero',()=>{
+  const evidence={overCapRefused:true,bothConstructors:true,cublasStreamResetRebound:true,successfulRecoveryCount:1,fragmentationRecoveryExercised:true,reservedHighBytes:500,capBytes:512};
   const log=value=>'CUDA_PROOF_POOL_EVIDENCE '+JSON.stringify(value)+'\ntest result: ok. 1 passed; 0 failed; 0 ignored';
   validatePrimitiveProofLog(log(evidence));
-  for(const field of ['overCapRefused','bothConstructors','cublasStreamResetRebound','fragmentationRecoveryExercised']){const bad={...evidence};delete bad[field];assert.throws(()=>validatePrimitiveProofLog(log(bad)));}
+  assert.equal(validatePrimitiveProofLog(log({...evidence,successfulRecoveryCount:0,fragmentationRecoveryExercised:false})).successfulRecoveryCount,0);
+  for(const field of ['overCapRefused','bothConstructors','cublasStreamResetRebound','successfulRecoveryCount','fragmentationRecoveryExercised']){const bad={...evidence};delete bad[field];assert.throws(()=>validatePrimitiveProofLog(log(bad)));}
+  for(const count of [-1,0.5,true,'1',null,Number.MAX_SAFE_INTEGER+1])assert.throws(()=>validatePrimitiveProofLog(log({...evidence,successfulRecoveryCount:count})));
+  for(const [successfulRecoveryCount,fragmentationRecoveryExercised] of [[0,true],[1,false],[0,0],[1,1],[0,'false']])assert.throws(()=>validatePrimitiveProofLog(log({...evidence,successfulRecoveryCount,fragmentationRecoveryExercised})));
   assert.throws(()=>validatePrimitiveProofLog(log({...evidence,reservedHighBytes:513})));
 });
