@@ -97,25 +97,38 @@ export function validateAnchorDevice(job,physicalGpuIndex){
 
 export function validatePlan(p){
   campaignCudaSelection(p);
+  assert.ok(p.mode===undefined||p.mode==='matched-resident-control','unknown terminal mode');
+  const matched=p.mode==='matched-resident-control';
   assert.equal(p.version,1);assert.equal(p.stationary_pair_authorized,true);
   sha40(p.sceneworks);sha40(p.inference);sha64(p.requestSha256);
   assert.ok(['cuda-windows','cuda-windows-2'].includes(p.expectedRunner));
   absolute(p.requestPath);absolute(p.licenseAcknowledgmentsPath);
   assert.ok(Number.isInteger(p.seed)&&p.seed>=0&&p.seed<=0xffffffff,'explicit chosen seed required');
   bytes(p.poolBytes,'poolBytes');bytes(p.externalReserveBytes,'externalReserveBytes');
-  assert.equal(p.poolBytes+p.externalReserveBytes,24*GIB,'24 GiB includes the non-pool reserve');
+  assert.equal(p.poolBytes+p.externalReserveBytes,(matched?95:24)*GIB,'declared envelope includes the non-pool reserve');
   assert.ok(p.externalReserveBytes>=2*GIB,'explicit context/library/foreign reserve at least2GiB required');
   bytes(p.hostBudgetBytes,'hostBudgetBytes');bytes(p.workstationDeviceBytes,'workstationDeviceBytes');
   assert.ok(p.workstationDeviceBytes<=96*GIB,'reported workstation envelope cannot be enlarged');
   assert.ok(Number.isInteger(p.timeoutSeconds)&&p.timeoutSeconds>=60&&p.timeoutSeconds<=7200);
-  assert.equal(p.additionalSparse24,true,'normal sparse24GiB anchor is required for resident/window Veda equivalence');
-  assert.ok(typeof p.additionalSparse24Reason==='string'&&p.additionalSparse24Reason.trim(),'focused additional sparse render requires the concrete evidence gap');
+  if(matched){
+    assert.equal(p.matchedResidentControlAuthorized,true,'one explicit conditional control authorization required');
+    assert.equal(p.physicalGpuIndex,0);assert.equal(p.seed,42);
+    assert.equal(p.inference,'2ff0353820e370d004305ae99a035ab38b93de30');
+    assert.equal(p.requestSha256,'b5b5ba095203fab1eddb9ba1793162959328e16ee34a0ca6e19d44e2325bce23');
+    assert.equal(path.win32.resolve(p.licenseAcknowledgmentsPath),path.win32.resolve('D:/Codex/work/sw-f329-acceptance-42243645213-1/services/workstation-veda/config/license-acknowledgments.json'),'control must reuse the original frozen acknowledgment');
+    assert.equal(p.poolBytes,92*GIB);assert.equal(p.externalReserveBytes,3*GIB);assert.equal(p.workstationDeviceBytes,95*GIB);
+    for(const key of ['retainedWorkstation','additionalSparse24','additionalSparse24Reason','primitiveProof','materializingProof','binaryPath','prebuilt','runtimeSourcePair','runtimeSceneworksRoot'])assert.equal(p[key],undefined,'single control has fixed original runtime/build and cannot claim campaign proofs');
+  }else{
+    assert.equal(p.additionalSparse24,true,'normal sparse24GiB anchor is required for resident/window Veda equivalence');
+    assert.ok(typeof p.additionalSparse24Reason==='string'&&p.additionalSparse24Reason.trim(),'focused additional sparse render requires the concrete evidence gap');
+  }
   assert.deepEqual(Object.keys(p.sources).sort(),Object.keys(SOURCES).sort());
   for(const [role,spec] of Object.entries(SOURCES)){
     const source=p.sources[role];absolute(source.root);sha40(source.revision);
     assert.ok((spec.revisions??[spec.revision]).includes(source.revision),`${role}: wrong immutable snapshot`);
     assert.ok(source.root.replaceAll('\\','/').endsWith(`/models--${spec.repo.replaceAll('/','--')}/snapshots/${source.revision}`),'source root must identify its exact HF snapshot');
   }
+  if(matched)return p;
   absolute(p.primitiveProof.directory);assert.match(p.primitiveProof.runUrl,/^https:\/\/github\.com\/SceneWorks\/inference\/actions\/runs\/\d+$/);
   if(p.primitiveProof.revision!==undefined)sha40(p.primitiveProof.revision);
   if(p.retainedWorkstation!==undefined){
@@ -148,7 +161,8 @@ export function anchorRequest(original,seed,physicalGpuIndex=1){
 
 function parseEvents(raw){const out=[];for(const line of raw.split('\n'))try{const value=JSON.parse(line);out.push(value.fields??value);}catch{}return out;}
 function numeric(value,name){assert.ok(Number.isSafeInteger(value)&&value>=0,`${name}: actual integer observation required`);return value;}
-export function validatePoolEvidence(events,{jobId,poolBytes,externalReserveBytes,metrics}){
+export function validatePoolEvidence(events,{jobId,poolBytes,externalReserveBytes,metrics,totalEnvelopeBytes=24*GIB}){
+  assert.equal(totalEnvelopeBytes,poolBytes+externalReserveBytes,'pool and reserve must fill the declared envelope');
   const snapshots=events.filter(e=>e.event==='h3_cuda_proof_pool_snapshot'&&String(e.jobId??e.job_id)===jobId);
   assert.ok(snapshots.length,'actual worker capped-pool observations required');
   for(const s of snapshots){
@@ -167,11 +181,11 @@ export function validatePoolEvidence(events,{jobId,poolBytes,externalReserveByte
   });
   assert.ok(outside.length,'actual paired whole-device/current-pool observations required for outside-pool attribution');
   assert.ok(metrics.samples?.length>=2,'whole-device/RSS observations required');
-  for(const sample of metrics.samples){assert.ok(numeric(sample.host,'sampled host bytes')>0&&numeric(sample.device,'sampled device bytes')>0,'missing observations are not zero');assert.ok(sample.device<=poolBytes+externalReserveBytes,'whole device exceeded24GiB');}
+  for(const sample of metrics.samples){assert.ok(numeric(sample.host,'sampled host bytes')>0&&numeric(sample.device,'sampled device bytes')>0,'missing observations are not zero');assert.ok(sample.device<=totalEnvelopeBytes,'whole device exceeded declared envelope');}
   // Continuous pool high-water plus the entire explicitly reserved outside-pool allowance.
   const reservedHighBytes=Math.max(...snapshots.map(s=>s.reserved_high_bytes));
-  assert.ok(reservedHighBytes+externalReserveBytes<=24*GIB);
-  return {reservedHighBytes,externalReserveBytes,observedOutsidePoolPeakBytes:Math.max(...outside),totalEnvelopeBytes:24*GIB,scope:'driver-continuous pool; separately reserved context/library/foreign allocations; sampled outside-pool/whole-device/RSS blind spots retained'};
+  assert.ok(reservedHighBytes+externalReserveBytes<=totalEnvelopeBytes);
+  return {reservedHighBytes,externalReserveBytes,observedOutsidePoolPeakBytes:Math.max(...outside),totalEnvelopeBytes,scope:'driver-continuous pool; separately reserved context/library/foreign allocations; sampled outside-pool/whole-device/RSS blind spots retained'};
 }
 
 export function validateMaterializingProofLog(log){
@@ -326,7 +340,7 @@ async function walk(root,prefix=''){
     else out.push(relative);
   }return out.sort();
 }
-async function stageModels(p,output){
+export async function stageModels(p,output){
   const hub=path.join(output,'staged','hub'),files=[];await mkdir(hub,{recursive:true});
   for(const [role,spec] of Object.entries(SOURCES)){
     const source=p.sources[role],repoRoot=path.join(hub,`models--${spec.repo.replaceAll('/','--')}`),snapshot=path.join(repoRoot,'snapshots',source.revision);
@@ -351,7 +365,7 @@ async function stageModels(p,output){
 
 // Reuse process/build/request ownership. Stock sources are bound once above instead of going
 // through the imported-checkpoint campaign's separate25case authority and staging inventory.
-class StockService extends OwnedService {
+export class StockService extends OwnedService {
   async assertOwner(){
     const owner=await json(this.ownerPath);assert.equal(owner.token,this.owner);assert.equal(owner.pid,process.pid);
     const current=await stat(this.binary);assert.equal(current.size,this.binaryStamp.size);assert.equal(current.mtimeMs,this.binaryStamp.mtimeMs,'owned binary changed');
@@ -836,7 +850,11 @@ export async function run(p,swRoot,inferenceRoot,output){
   await sourcePair({...p,output},swRoot,inferenceRoot);await save(path.join(output,'result.json'),{feature:'SW-F329',passed:true,equivalence,sourcePair:{sceneworks:p.sceneworks,inference:p.inference},anchors:results.map(result=>({id:result.id,jobId:result.job.id,passed:result.passed,sourcePair:result.sourcePair,retained:result.id==='workstation-veda'?retained?.retention:undefined,envelope:result.envelope})),proofs});
 }
 
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  try{const [mode,swRoot,inferenceRoot,output]=process.argv.slice(2),p=JSON.parse(process.env.SW_F329_PLAN??'null');validatePlan(p);if(mode==='check')console.log('SW-F329 plan shape and explicit limits checked; no model executed');else if(mode==='device')console.log(JSON.stringify(campaignCudaSelection(p)));else{assert.equal(mode,'run');await run(p,path.resolve(swRoot),path.resolve(inferenceRoot),path.resolve(output));}}
-  catch(error){console.error(error.stack);process.exitCode=1;}
+async function main(){
+  const [mode,swRoot,inferenceRoot,output]=process.argv.slice(2),p=JSON.parse(process.env.SW_F329_PLAN??'null');validatePlan(p);
+  if(mode==='check')console.log('SW-F329 plan shape and explicit limits checked; no model executed');
+  else if(mode==='device')console.log(JSON.stringify(campaignCudaSelection(p)));
+  else{assert.equal(mode,'run');if(p.mode==='matched-resident-control'){const {runMatchedResidentControl}=await import('./h3-matched-resident-control.mjs');await runMatchedResidentControl(p,path.resolve(swRoot),path.resolve(inferenceRoot),path.resolve(output));}else await run(p,path.resolve(swRoot),path.resolve(inferenceRoot),path.resolve(output));}
 }
+// Complete this module's evaluation before the optional module imports StockService.
+if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(error=>{console.error(error.stack);process.exitCode=1;});

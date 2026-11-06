@@ -19,10 +19,10 @@ jobs:
     concurrency:
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
-    timeout-minutes: ${{ fromJSON(inputs.plan).additionalSparse24 == true && 600 || 360 }}
+    timeout-minutes: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' && 180 || fromJSON(inputs.plan).additionalSparse24 == true && 600 || 360 }}
     env:
       SW_F329_PLAN: ${{ inputs.plan }}
-      H3_TERMINAL_AUTHORIZED_PAIR: ${{ format('{0}:{1}', fromJSON(inputs.plan).sceneworks, fromJSON(inputs.plan).inference) }}
+      H3_TERMINAL_AUTHORIZED_PAIR: ${{ format('{0}:{1}', fromJSON(inputs.plan).mode == 'matched-resident-control' && 'c8815c7cd46feba2f82562a315d1a44a6c88a9e8' || fromJSON(inputs.plan).sceneworks, fromJSON(inputs.plan).inference) }}
       CARGO_BUILD_JOBS: '4'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CUDA_COMPUTE_CAP: '120'
@@ -41,6 +41,13 @@ jobs:
           path: inference
           fetch-depth: 128
           persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        if: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' }}
+        with:
+          ref: c8815c7cd46feba2f82562a315d1a44a6c88a9e8
+          path: runtime-sceneworks
+          fetch-depth: 1
+          persist-credentials: false
       - name: Require final source pair and private Windows output roots before setup
         shell: powershell
         run: |
@@ -54,7 +61,8 @@ jobs:
           if ((git -C sceneworks rev-parse HEAD) -ne $p.sceneworks -or (git -C inference rev-parse HEAD) -ne $p.inference) { throw 'checkout source mismatch' }
           git -C inference fetch --no-tags origin main
           if ($LASTEXITCODE -ne 0) { throw 'cannot verify inference main' }
-          $root = "D:\Codex\work\sw-f329-acceptance-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $scope = if ($p.mode -eq 'matched-resident-control') { 'matched-resident-control' } else { 'acceptance' }
+          $root = "D:\Codex\work\sw-f329-$scope-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $root) { throw 'refusing to overwrite prior acceptance output' }
           $tempRoot = "$root-temp"
           New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
@@ -72,8 +80,12 @@ jobs:
           if errorlevel 1 exit /b %ERRORLEVEL%
           node --test scripts\h3-cuda-memory-terminal.test.mjs
           if errorlevel 1 exit /b %ERRORLEVEL%
+          node --check scripts\h3-matched-resident-control.mjs
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          node --test scripts\h3-matched-resident-control.test.mjs
+          if errorlevel 1 exit /b %ERRORLEVEL%
           python scripts\h3-cuda-memory-lease.test.py
-      - name: Build and execute the three stationary-pair anchors
+      - name: Execute the selected stationary campaign or explicit matched Resident control
         working-directory: sceneworks
         shell: cmd
         run: |
@@ -88,7 +100,7 @@ jobs:
         if: always() && env.SW_F329_OUTPUT != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: sw-f329-cuda-memory-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sw-f329-${{ fromJSON(inputs.plan).mode == 'matched-resident-control' && 'matched-resident-control' || 'cuda-memory-acceptance' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.SW_F329_OUTPUT }}/*.json
             ${{ env.SW_F329_OUTPUT }}-lease/*.json
@@ -103,4 +115,7 @@ jobs:
             ${{ env.SW_F329_OUTPUT }}/24gib-veda-sparse/*.json
             ${{ env.SW_F329_OUTPUT }}/24gib-veda-sparse/*.log
             ${{ env.SW_F329_OUTPUT }}/24gib-veda-sparse/*.mp4
+            ${{ env.SW_F329_OUTPUT }}/matched-resident-control/*.json
+            ${{ env.SW_F329_OUTPUT }}/matched-resident-control/*.log
+            ${{ env.SW_F329_OUTPUT }}/matched-resident-control/*.mp4
           if-no-files-found: error

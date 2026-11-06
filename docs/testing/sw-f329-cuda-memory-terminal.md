@@ -303,3 +303,43 @@ maximum2hour request windows plus native build and CPU media comparison use
 the existing10hour bound selected by `additionalSparse24:true`.
 No automatic CI or per-pin measurement cost is added. Artifacts exclude model
 payloads, app databases, build caches, and access tokens.
+
+## Conditional matched Resident control
+
+The existing manual memory workflow also accepts the explicit
+`mode: "matched-resident-control"`. This is one conditional diagnostic after the
+component results are assessed. It is not a campaign rerun, a 24 GiB fit proof,
+feature acceptance, or a new final-pixel tolerance. Its output and artifact scope
+is `matched-resident-control`; the original failed aggregate remains unchanged.
+
+This mode requires `matchedResidentControlAuthorized: true`, physical GPU0 with
+its full canonical UUID, seed 42, the original request digest, inference M4
+`2ff0353820e370d004305ae99a035ab38b93de30`, admission 95 GiB,
+pool 92 GiB and outside reserve 3 GiB. Omit campaign-only fields
+`additionalSparse24`, `additionalSparse24Reason`, `retainedWorkstation`,
+`primitiveProof` and `materializingProof`. Other common source, request, runner,
+timeout and host-budget fields retain their existing validation. The license
+path names the original frozen acknowledgment under the prior service's config.
+The workflow is still manual, uses the same UUID lease/owned Windows Job and
+observations, and runs no model in ordinary CI. The one-control lease deadline
+is the requested render timeout plus 30 minutes, within the 180 minute workflow.
+
+The driver reuses only the immutable retained executable
+SHA256`a5e83b704d67b999b1919d7308654d42dc9e1bc2de66347c67b0f07242f9b621`
+and original build receipt
+SHA256`8ac02a48dd1e1c5c1b523dd45684c6704658402808b357804ef46ca7758a3343`.
+There is no general prebuilt API, Cargo invocation, old run-ID/cache-key reuse or
+write to that target. A separate exact CGPU checkout supplies runtime registry
+and configuration; new source records distinguish controllerSourcePair from
+the original CGPU/M4 runtimeSourcePair. The original frozen license acknowledgment
+and complete staged-source collection are independently bound. Current loaded
+CUDA/MSVC DLL versions and hashes are recorded; historical loaded-DLL hashes
+were not recorded and are not inferred from the executable hash.
+
+Success of this diagnostic's execution requires actual normal Veda, Resident,
+windowNone, zero streamed-block transfers, complete native video/audio/content,
+92+3 bounds and owned cleanup. Admission labels alone cannot force Resident.
+Complete AV comparisons to both prior GPU0 anchors are observations without a
+new equality threshold. The existing physical-GPU lease must additionally
+verify post-execution idle state. Component or source findings should be
+resolved before deciding to run this conditional control.

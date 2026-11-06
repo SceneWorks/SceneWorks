@@ -197,7 +197,7 @@ test('manual wrapper keeps CUDA memory acceptance separate from ordinary CI and 
   assert.ok(workflow.indexOf('h3-cuda-memory-terminal.mjs device')<workflow.indexOf('nvidia-smi -i'));
   assert.match(workflow,/\$uuid -cne \$selection\.physicalGpuUuid/);
   assert.match(workflow,/SCENEWORKS_GPU_ID=\$\(\$selection\.physicalGpuIndex\)/);
-  assert.ok(workflow.indexOf('Check script entry point')<workflow.indexOf('Build and execute the three'));
+  assert.ok(workflow.indexOf('Check script entry point')<workflow.indexOf('Execute the selected stationary'));
   assert.match(workflow,/python scripts\\h3-cuda-memory-lease\.test\.py/);
   assert.match(workflow,/python scripts\\h3-cuda-memory-lease\.py "%GITHUB_WORKSPACE%\\sceneworks" "%GITHUB_WORKSPACE%\\inference" "%SW_F329_OUTPUT%"/);
   assert.doesNotMatch(workflow,/node scripts\\h3-cuda-memory-terminal\.mjs run/);

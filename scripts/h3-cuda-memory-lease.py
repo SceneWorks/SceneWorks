@@ -20,6 +20,10 @@ GPU_UUIDS = ("GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0", "GPU-e4b79931-7be6-f216
 
 def validated_plan(env):
     plan = json.loads(env["SW_F329_PLAN"])
+    mode = plan.get("mode")
+    if mode not in (None, "matched-resident-control"):
+        raise ValueError("unknown terminal mode")
+    matched = mode == "matched-resident-control"
     index = plan.get("physicalGpuIndex", 1)
     if type(index) is not int or index not in (0, 1):
         raise ValueError("physicalGpuIndex must be the exact integer 0 or 1")
@@ -29,7 +33,7 @@ def validated_plan(env):
     if index == 0 and "retainedWorkstation" in plan:
         raise ValueError("GPU0 requires all three anchors fresh; retained GPU1 control refused")
     if (plan.get("stationary_pair_authorized") is not True
-            or plan.get("additionalSparse24") is not True
+            or (not matched and plan.get("additionalSparse24") is not True)
             or env.get("GITHUB_ACTIONS") != "true"
             or env.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
             or env.get("RUNNER_NAME") != plan.get("expectedRunner")
@@ -46,7 +50,16 @@ def validated_plan(env):
     for key in ["poolBytes", "externalReserveBytes"]:
         if type(plan.get(key)) is not int or plan[key] <= 0:
             raise ValueError("positive integer pool and reserve required")
-    if plan["poolBytes"] + plan["externalReserveBytes"] != 24 * 1024**3 or plan["externalReserveBytes"] < 2 * 1024**3:
+    if matched:
+        if (index != 0 or plan.get("matchedResidentControlAuthorized") is not True
+                or plan.get("inference") != "2ff0353820e370d004305ae99a035ab38b93de30"
+                or type(plan.get("timeoutSeconds")) is not int
+                or not 60 <= plan["timeoutSeconds"] <= 7200
+                or plan["poolBytes"] != 92 * 1024**3
+                or plan["externalReserveBytes"] != 3 * 1024**3
+                or "additionalSparse24" in plan):
+            raise ValueError("single matched Resident control requires exact GPU0/M4/92+3 policy")
+    elif plan["poolBytes"] + plan["externalReserveBytes"] != 24 * 1024**3 or plan["externalReserveBytes"] < 2 * 1024**3:
         raise ValueError("plan pool and external reserve must preserve the 24GiB envelope")
     return plan
 
@@ -77,26 +90,28 @@ class ReapedJob:
 def supervise(sw_root, inference_root, output, env, *, claim, execute, job_type, clock=time.monotonic):
     plan = validated_plan(env)
     index = plan.get("physicalGpuIndex", 1)
-    deadline = clock() + CAMPAIGN_SECONDS
+    seconds = plan['timeoutSeconds'] + 1800 if plan.get('mode') else CAMPAIGN_SECONDS
+    deadline = clock() + seconds
     lease_output = Path(str(output) + "-lease")
     lease_output.mkdir()  # Never overwrite a prior run's evidence.
     policy = SimpleNamespace(cuda_device_uuid=env["CUDA_VISIBLE_DEVICES"],
-                             deadline_seconds=CAMPAIGN_SECONDS, poll_millis=500,
+                             deadline_seconds=seconds, poll_millis=500,
                              child_gpu_cap_bytes=plan["poolBytes"],
                              gpu_free_reserve_bytes=plan["externalReserveBytes"])
     receipt = {"passed": False, "physicalGpuIndex": index, "physicalGpuUuid": policy.cuda_device_uuid,
+               "scope": plan.get("mode", "three-anchor campaign"),
                "sourcePair": {key: plan[key] for key in ["sceneworks", "inference"]},
-               "deadlineSeconds": CAMPAIGN_SECONDS, "cleanupReserveSeconds": CLEANUP_SECONDS,
+               "deadlineSeconds": seconds, "cleanupReserveSeconds": CLEANUP_SECONDS,
                "minimumClaimFreeBytes": policy.child_gpu_cap_bytes + policy.gpu_free_reserve_bytes,
-               "minimumClaimScope": "capped pair minimum; workstation provider admission remains authoritative"}
+               "minimumClaimScope": "matched Resident95 control" if plan.get("mode") else "capped pair minimum; workstation provider admission remains authoritative"}
     try:
-        print(f"Waiting for existing physical GPU{index} UUID lease; original deadline {CAMPAIGN_SECONDS}s", flush=True)
+        print(f"Waiting for existing physical GPU{index} UUID lease; original deadline {seconds}s", flush=True)
         with claim("candle-cuda", policy, lease_output, env,
                    constraints={"required_cuda_physical_index": index,
                                 "required_cuda_device_uuid": policy.cuda_device_uuid},
                    original_deadline_monotonic=deadline) as record:
             receipt["claim"] = record
-            print(f"Claimed physical GPU{index}; starting owned three-anchor campaign", flush=True)
+            print(f"Claimed physical GPU{index}; starting owned {plan.get('mode', 'three-anchor campaign')}", flush=True)
             result = execute("campaign", ["node", str(sw_root / "scripts" / "h3-cuda-memory-terminal.mjs"),
                                          "run", str(sw_root), str(inference_root), str(output)],
                              lease_output, deadline - CLEANUP_SECONDS, lambda: ReapedJob(job_type))

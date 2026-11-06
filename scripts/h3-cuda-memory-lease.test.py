@@ -36,8 +36,10 @@ class LaunchTests(unittest.TestCase):
         def claim(backend, policy, directory, env, **options):
             self.assertEqual(backend, "candle-cuda")
             self.assertEqual(options["constraints"], {"required_cuda_physical_index": index, "required_cuda_device_uuid": env["CUDA_VISIBLE_DEVICES"]})
-            self.assertEqual(options["original_deadline_monotonic"], 100 + lease.CAMPAIGN_SECONDS)
-            self.assertEqual(policy.child_gpu_cap_bytes, 21 * GIB)
+            current_plan = json.loads(env['SW_F329_PLAN'])
+            seconds = current_plan['timeoutSeconds'] + 1800 if current_plan.get('mode') else lease.CAMPAIGN_SECONDS
+            self.assertEqual(options["original_deadline_monotonic"], 100 + seconds)
+            self.assertEqual(policy.child_gpu_cap_bytes, json.loads(env['SW_F329_PLAN'])['poolBytes'])
             self.assertEqual(policy.gpu_free_reserve_bytes, 3 * GIB)
             self.assertEqual(policy.poll_millis, 500)
             if wait:
@@ -51,7 +53,9 @@ class LaunchTests(unittest.TestCase):
                 events.append("release-check")
                 record["post_execution_verified"] = release
         def execute(name, argv, directory, deadline, job_type):
-            self.assertEqual(deadline, 100 + lease.CAMPAIGN_SECONDS - lease.CLEANUP_SECONDS)
+            current_plan = json.loads(env['SW_F329_PLAN'])
+            seconds = current_plan['timeoutSeconds'] + 1800 if current_plan.get('mode') else lease.CAMPAIGN_SECONDS
+            self.assertEqual(deadline, 100 + seconds - lease.CLEANUP_SECONDS)
             self.assertEqual(argv, ["node", str(Path("SW") / "scripts" / "h3-cuda-memory-terminal.mjs"), "run", "SW", "ENGINE", str(output)])
             self.assertEqual(events[-1], "claim")
             job = job_type()
@@ -147,6 +151,28 @@ class LaunchTests(unittest.TestCase):
             env.update(SCENEWORKS_GPU_ID="0", CUDA_VISIBLE_DEVICES=lease.GPU_UUIDS[0])
             env["SW_F329_PLAN"] = json.dumps({**json.loads(env["SW_F329_PLAN"]), **valid})
             with self.subTest(change=change), self.assertRaises(ValueError): lease.validated_plan({**env, **change})
+
+    def test_single_matched_control_uses_exact_92_plus_3_claim_and_same_owned_cleanup(self):
+        env = environment()
+        plan = json.loads(env['SW_F329_PLAN'])
+        plan.pop('additionalSparse24')
+        plan.update(mode='matched-resident-control', matchedResidentControlAuthorized=True,
+                    timeoutSeconds=7200,
+                    inference='2ff0353820e370d004305ae99a035ab38b93de30',
+                    physicalGpuIndex=0, physicalGpuUuid=lease.GPU_UUIDS[0],
+                    poolBytes=92 * GIB, externalReserveBytes=3 * GIB)
+        env.update(SCENEWORKS_GPU_ID='0', CUDA_VISIBLE_DEVICES=lease.GPU_UUIDS[0])
+        env['SW_F329_PLAN'] = json.dumps(plan)
+        with tempfile.TemporaryDirectory() as temp:
+            receipt, events = self.campaign(Path(temp) / 'out', env=env)
+            self.assertEqual(receipt['minimumClaimFreeBytes'], 95 * GIB)
+            self.assertEqual(receipt['scope'], 'matched-resident-control')
+            self.assertEqual(events[-3:], ['reap-owned', 'close-job', 'release-check'])
+        for change in [{'poolBytes': 21 * GIB}, {'externalReserveBytes': 2 * GIB},
+                       {'mode': 'unknown'}, {'matchedResidentControlAuthorized': False},
+                       {'inference': 'b' * 40}, {'additionalSparse24': True}]:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                lease.validated_plan({**env, 'SW_F329_PLAN': json.dumps({**plan, **change})})
 
 
 if __name__ == "__main__":
