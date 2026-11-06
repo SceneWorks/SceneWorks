@@ -368,12 +368,10 @@ jobs:
       # Ampere->Blackwell (mirrors the Windows lane / build-sidecar.mjs default).
       CUDA_COMPUTE_CAP: "80"
       CARGO_NET_OFFLINE: "true"
-    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
-    # default (sc-10420, sc-13603). workflow_dispatch-only full candle/CUDA
-    # release build (CUDA toolkit install + nvcc + web build); sized generously
-    # off the ~25 min observed run since it runs rarely and its rust-cache is
-    # usually cold.
-    timeout-minutes: 90
+    # Run 42176127687 had no cache and reached 90 minutes while two nvcc/cicc
+    # processes were still compiling FlashAttention during Clippy. Allow the
+    # full cold compile plus release/link/web work, retaining a bounded deadline.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -383,14 +381,6 @@ jobs:
         with:
           toolchain: "1.98.0"
           components: clippy
-      # DELIBERATELY NOT `save-if: main` — same reasoning as desktop-linux.yml: this lane is
-      # `workflow_dispatch:` only, never runs on `main`, and contributed no entry to the 2026-08-15
-      # cache inventory. Do not re-symmetrise it with the PR lanes.
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
-      - name: Fetch the pinned inference release
-        env:
-          CARGO_NET_OFFLINE: "false"
-        run: cargo fetch --locked
       # Install the CUDA 12.9 Toolkit (nvcc + cudart/cublas/curand/nvrtc dev libs)
       # the candle `cuda` feature links against. Sets CUDA_PATH for the build.
       # `--toolkit` skips the (GPU-less runner) driver install — we only compile.
@@ -404,6 +394,24 @@ jobs:
           cuda: "12.9.1"
           method: "network"
           linux-local-args: '["--toolkit"]'
+      # cudaforge 0.1.5 omits header/compiler hashes: isolate its persistent
+      # output by the full immutable source pin and actual compiler/arch inputs.
+      # Setup creates the directory before build.rs canonicalizes it. Clippy and
+      # release keep identical -O3 CUDA objects; no CUDA flags/kernels change.
+      - name: Select persistent FlashAttention build directory
+        run: node scripts/select-linux-flash-cache.mjs
+      # DELIBERATELY NOT `save-if: main` — this manual-only lane needs to save.
+      # Both extra-directory and failure-retention inputs are supported by this
+      # exact action pin. An interrupted CUDA compilation may still be cold.
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+        with:
+          cache-directories: ${{ env.CANDLE_FLASH_ATTN_BUILD_DIR }}
+          env-vars: CANDLE_FLASH_ATTN_BUILD_DIR NVCC NVCC_CCBIN
+          cache-on-failure: true
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
       # The candle-gen single-rev invariant the default skew gate is blind to: with
       # `--features backend-candle` the optional candle-gen providers are pulled, so
       # a candle-gen pin that resolves a different gen-core rev would split contract
