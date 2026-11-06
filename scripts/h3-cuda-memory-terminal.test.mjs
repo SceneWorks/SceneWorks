@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { anchorRequest, validatePlan, validatePoolEvidence, validateMaterializingProofLog, materializingProofSources, primitiveProofSource, validatePrimitiveProofLog, retainedWorkstationSources, validateRetainedWorkstationRecord, retainedWorkstationWeights, retainedWorkstationHardware, retainedWorkstationBuild, RETAINED_WORKSTATION, validateVedaParityPair, rawNumericDifference, compareDecodedMedia, compareVedaAnchors, VEDA_EQUIVALENCE } from './h3-cuda-memory-terminal.mjs';
 import { privateEnvironment } from './h3-finetune-terminal-runtime.mjs';
+import { validateBoundedQkResidentSources } from './h3-cuda-memory-terminal.mjs';
 
 const GIB=1024**3;
 function plan(){return {version:1,stationary_pair_authorized:true,sceneworks:'a'.repeat(40),inference:'b'.repeat(40),requestSha256:'c'.repeat(64),requestPath:'D:\\fixture.json',licenseAcknowledgmentsPath:'D:\\licenses.json',expectedRunner:'cuda-windows-2',seed:42,poolBytes:22*GIB,externalReserveBytes:2*GIB,hostBudgetBytes:64*GIB,workstationDeviceBytes:95*GIB,timeoutSeconds:7200,additionalSparse24:true,additionalSparse24Reason:'E5 compares normal Veda resident and streamed outputs',sources:Object.fromEntries([
@@ -242,25 +243,70 @@ function retainedRecord(){
   record.content={frames:345,spatialStd:{min:0.12,floor:0.07}};record.observations={hostPeakBytes:30*GIB,devicePeakBytes:42*GIB};return record;
 }
 
-function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,ciOutsideChange=false,manualOutsideChange=false,
+// Source text only: deliberately small route/ownership fixtures, never compiled or executed.
+function boundedQkSourceFixture(){
+  const qkv='{\nlet q = rms_weighted(x, weight, eps)?;\nlet k = q.clone();\nlet v = k.clone();\n(q, k, v)\n}';
+  const layers=`impl DitAttention {\nfn forward_veda() {\nlet (q, k, v) = ${qkv};\nfinish(q,k,v);\n}\n}`;
+  const nextLayers=layers.replace(`= ${qkv}`,`= if rope.is_some() && x.device().is_cuda() && crate::block_stream::current().is_some() {\nprecondition_projected_qk();\n} else ${qkv}`)+`
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct QkPreconditionReport {
+pub norm_chunks: usize, pub rotary_chunks: usize, pub maximum_chunk_elements: usize,
+}
+pub(super) fn precondition_projected_qk() {}
+fn map_qk_token_chunks() {}`;
+  const model='fn forward() {\nlet video = project_video();\nlet audio = project_audio();\nlet x = scatter(&video,&audio);\nbody(x);\n}';
+  const nextModel=model.replace('body(x);','if self.stream_window.is_some() && self.device.is_cuda() {\ndrop(video);\ndrop(audio);\n}\nbody(x);');
+  const operation='let attention = self.qk_norm_peak(rows, inner)?.max(self.rotary_peak(rows, inner)?).max(materialized); Ok(attention)';
+  const denoise='work = work.max(self.cuda_working.ok_or_else(invalid)?.operation_peak_with_adapter(rows.packed,task.adapter.as_ref().map_or(0,|a|{a.forward_working_bytes_for(backend,rows,RowDomain::Packed)}),)?,); Ok(work)';
+  const veda='let facts = self.cuda_working.ok_or_else(invalid)?; let dense = self.denoise_peak_bytes(task,backend,rows,window)?; let attention = dense.max(facts.bytes); Ok(attention)';
+  const window=`struct Facts { bytes: u64 }\nimpl Facts {\nfn operation_peak() { self.operation_peak_with_adapter(rows,0) }\nfn operation_peak_with_adapter(self, rows: u64, adapter_work: u64) -> Result<u64> {${operation}}\nfn denoise_peak_bytes() {${denoise}}\nfn denoise_with_veda_bytes() {${veda}}\n}`;
+  const operationFor='let precondition = if windowed {self.windowed_qk_precondition_peak(rows,inner)?} else {self.qk_norm_peak(rows,inner)?.max(self.rotary_peak(rows,inner)?)}; '+operation.replace('self.qk_norm_peak(rows, inner)?.max(self.rotary_peak(rows, inner)?)','precondition');
+  const nextWindow=window.replace(`{${operation}}`,'{self.operation_peak_for(rows,adapter_work,false)}').replace(`{${denoise}}`,'{self.denoise_peak_bytes_impl(task,backend,rows,window,false)}').replace(`{${veda}}`,'{let facts = self.cuda_working.ok_or_else(invalid)?; let dense = self.denoise_peak_bytes(task,backend,rows,window)?; self.compose_veda_peak(task,backend,rows,window,veda,facts,dense)}')+`
+pub const CUDA_QK_PRECONDITION_ELEMENTS: u64 = crate::veda::workspace::CUDA_DENSE_SCORE_ELEMENTS;
+fn qk_precondition_token_block() {}
+fn windowed_qk_precondition_peak() {}
+#[cfg(test)]
+fn windowed_operation_peak_with_adapter() {}
+fn operation_peak_for(self, rows: u64, adapter_work: u64, windowed: bool) -> Result<u64> {${operationFor}}
+fn bounded_cuda_denoise_with_veda_bytes() {}
+#[allow(clippy::too_many_arguments)]
+fn compose_veda_peak() {let attention = dense.max(facts.bytes); Ok(attention)}
+fn bounded_cuda_denoise_peak_bytes() {}
+fn denoise_peak_bytes_impl() {${denoise.replace('.operation_peak_with_adapter(','.operation_peak_for(').replace('RowDomain::Packed)}),)?,);','RowDomain::Packed)}),bounded_qk,)?);')}}`;
+  const args='task,self.backend,Self::task_rows(task,rows),window as usize,';
+  const legacy='let dense = self.with_adapter_denoise(task,rows,profile.denoise_peak_bytes(task,self.backend,rows,window)?,); Ok(peak.max(dense.max(profile.denoise_with_veda_bytes(task,self.backend,rows,window,veda,)?)))';
+  const selected='let (dense,with_veda) = if selected_window.is_some() {(profile.bounded_cuda_denoise_peak_bytes(task,self.backend,rows,window,)?,profile.bounded_cuda_denoise_with_veda_bytes(task,self.backend,rows,window,veda,)?,)} else {(profile.denoise_peak_bytes(task,self.backend,rows,window)?,profile.denoise_with_veda_bytes(task,self.backend,rows,window,veda,)?,)}; let dense = self.with_adapter_denoise(task,rows,dense); Ok(peak.max(dense.max(with_veda)))';
+  const pricing=`fn pricing() { profile.denoise_peak_bytes(${args})?; ${legacy} }`;
+  const nextPricing=pricing.replace(`profile.denoise_peak_bytes(${args})?`,`if matches!(self.backend,NativeBackend::Candle {..}) {profile.bounded_cuda_denoise_peak_bytes(${args})?} else {profile.denoise_peak_bytes(${args})?}`).replace(legacy,'let selected_window = window; '+selected);
+  return {before:[layers,model,window,pricing],after:[nextLayers,nextModel,nextWindow,nextPricing]};
+}
+
+function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,ciOutsideChange=false,manualOutsideChange=false,boundedQk=false,
   manualArtifactPattern='${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**/*.json'}={}){
   const target={sceneworks:'c'.repeat(40),inference:'d'.repeat(40)},before='a'.repeat(40),after='b'.repeat(40);
   const enginePath='crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs';
   const metadata='config/inference-provider-closures.json',workflow='.github/workflows/server-candle-linux.yml';
   const ci=['scripts/select-linux-flash-cache.mjs','scripts/server-candle-linux-workflow.test.mjs',workflow];
+  const boundedPaths=['crates/media/candle-gen/candle-gen-minimax-h3/src/dit/layers.rs','crates/media/candle-gen/candle-gen-minimax-h3/src/dit/model.rs','crates/contracts/gen-core/src/h3_memory/window.rs','crates/contracts/gen-core-h3/src/h3_memory.rs'];
+  const boundedSources=boundedQkSourceFixture();
   const audit={kind:'sw-f329-uncapped-workstation-source-equivalence-v1',originalSourcePair:structuredClone(RETAINED_WORKSTATION.sourcePair),targetSourcePair:target,
     uncappedAllocatorPreserved:true,reviewUrl:'https://github.com/SceneWorks/inference/pull/9999',
     engineChanges:[{path:enginePath,before,after}],consumerPinMetadata:[{path:metadata,before,after}],
     consumerCiChanges:ci.map(file=>({path:file,before:file===workflow?before:null,after}))};
+  if(boundedQk){
+    audit.engineChanges.push(...boundedPaths.map(file=>({path:file,before,after})));
+    for(const field of ['boundedQkResidentPreserved','boundedQkRefinerPreserved','boundedQkResidentPricingPreserved'])audit[field]=true;
+  }
   const command=async(program,args,{cwd})=>{
     assert.equal(program,'git');
     if(args[0]==='merge-base')return {stdout:''};
-    if(args[0]==='diff')return {stdout:(cwd==='engine'?[enginePath,...engineExtra]:['Cargo.toml','Cargo.lock',metadata,'scripts/h3-cuda-memory-terminal.mjs','.github/workflows/h3-cuda-memory-terminal.yml',...ci,...consumerExtra]).join('\n')};
+    if(args[0]==='diff')return {stdout:(cwd==='engine'?[enginePath,...(boundedQk?boundedPaths:[]),...engineExtra]:['Cargo.toml','Cargo.lock',metadata,'scripts/h3-cuda-memory-terminal.mjs','.github/workflows/h3-cuda-memory-terminal.yml',...ci,...consumerExtra]).join('\n')};
     if(args[0]==='ls-tree'){
       const file=args.at(-1),old=args[1]===RETAINED_WORKSTATION.sourcePair.inference||args[1]===RETAINED_WORKSTATION.sourcePair.sceneworks;
       return {stdout:old&&ci.includes(file)&&file!==workflow?'':`100644 blob ${old?before:after}\t${file}`};
     }
     assert.equal(args[0],'show');const [revision,file]=args[1].split(':');
+    if(cwd==='engine'&&boundedPaths.includes(file))return {stdout:boundedSources[revision===RETAINED_WORKSTATION.sourcePair.inference?'before':'after'][boundedPaths.indexOf(file)]};
     const old=revision===RETAINED_WORKSTATION.sourcePair.sceneworks;
     if(file===workflow)return {stdout:`name: fixture\njobs:\n  build-candle:\n    steps: ${old?'old':'new'}\n  other-job:\n    unchanged: ${!old&&ciOutsideChange?'false':'true'}\n`};
     if(file==='.github/workflows/h3-cuda-memory-terminal.yml')return {stdout:`path: sceneworks\n          fetch-depth: ${old?'1':'128'}\nCUDA_COMPUTE_CAP: ${!old&&manualOutsideChange?'80':'120'}\n            \${{ env.SW_F329_OUTPUT }}/workstation-veda/*.json\n${!old&&manualArtifactPattern!==null?'            '+manualArtifactPattern+'\n':''}          if-no-files-found: error\n`};
@@ -293,6 +339,52 @@ test('retention source review allows only exact reviewed cap, pin and standard-b
   for(const mutate of mutations){const bad=structuredClone(fixture.audit);mutate(bad);await assert.rejects(fixture.verify(bad));}
   for(const options of [{engineExtra:['crates/kernels/candle-quant-kernels/src/veda_int8.cu']},
     {consumerExtra:['crates/sceneworks-worker/src/video_jobs/wan.rs']},{graphDrift:true},{ciOutsideChange:true},{manualOutsideChange:true}])await assert.rejects(sourceReviewFixture(options).verify());
+});
+
+test('bounded Q/K retention mechanically preserves Resident/refiner math, ownership and legacy pricing',()=>{
+  const fixture=boundedQkSourceFixture();
+  assert.equal(validateBoundedQkResidentSources(fixture.before,fixture.after).paths.length,4);
+  const mutations=[
+    [0,'rms_weighted(x, weight, eps)','different_norm(x, weight, eps)'],
+    [0,'rope.is_some() && x.device().is_cuda()','x.device().is_cuda()'],
+    [0,'crate::block_stream::current().is_some()','true'],
+    [0,'finish(q,k,v);','precondition_projected_qk(q,k,v);'],
+    [0,'Clone, Copy, Debug, Default','Clone, Debug, Default'],
+    [1,'if self.stream_window.is_some() && self.device.is_cuda()','if self.device.is_cuda()'],
+    [1,'body(x);','body(changed(x));'],
+    [2,'self.operation_peak_for(rows,adapter_work,false)','self.operation_peak_for(rows,adapter_work,true)'],
+    [2,'self.denoise_peak_bytes_impl(task,backend,rows,window,false)','self.denoise_peak_bytes_impl(task,backend,rows,window,true)'],
+    [2,'self.operation_peak_with_adapter(rows,0)','self.operation_peak_with_adapter(rows,1)'],
+    [2,'rows: u64, adapter_work: u64','adapter_work: u64, rows: u64'],
+    [2,'struct Facts { bytes: u64 }','struct Facts { bytes: u32 }'],
+    [2,'crate::veda::workspace::CUDA_DENSE_SCORE_ELEMENTS;','u64::MAX;'],
+    [2,'dense.max(facts.bytes)','dense.min(facts.bytes)'],
+    [3,'selected_window.is_some()','true'],
+    [3,'profile.denoise_peak_bytes(task,self.backend,rows,window)?','profile.bounded_cuda_denoise_peak_bytes(task,self.backend,rows,window)?'],
+  ];
+  for(const [index,from,to] of mutations){
+    const after=[...fixture.after];assert.ok(after[index].includes(from));after[index]=after[index].replace(from,to);
+    assert.throws(()=>validateBoundedQkResidentSources(fixture.before,after),undefined,`${index}: ${from}`);
+  }
+  for(const index of [0,1,2,3]){
+    const after=[...fixture.after];after[index]+='\nfn unreviewed_production_change() {}';
+    assert.throws(()=>validateBoundedQkResidentSources(fixture.before,after));
+  }
+  const testOnly=[...fixture.after];testOnly[1]+='\n#[cfg(test)]\nmod proof { fn extra_control() {} }';
+  validateBoundedQkResidentSources(fixture.before,testOnly);
+});
+
+test('bounded Q/K source audit requires all exact reviewed objects and every explicit Resident scope assertion',async()=>{
+  const fixture=sourceReviewFixture({boundedQk:true}),checked=await fixture.verify();assert.equal(checked.boundedQk.paths.length,4);
+  for(const field of ['boundedQkResidentPreserved','boundedQkRefinerPreserved','boundedQkResidentPricingPreserved']){
+    for(const value of [undefined,false,'true']){
+      const bad=structuredClone(fixture.audit);if(value===undefined)delete bad[field];else bad[field]=value;
+      await assert.rejects(fixture.verify(bad),/explicit reviewed/);
+    }
+  }
+  for(const mutate of [a=>a.engineChanges.pop(),a=>a.engineChanges[1].before='e'.repeat(40),a=>a.engineChanges[1].after='e'.repeat(40),a=>a.engineChanges.push({path:'crates/media/candle-gen/candle-gen-minimax-h3/src/nn.rs',before:'a'.repeat(40),after:'b'.repeat(40)})]){
+    const bad=structuredClone(fixture.audit);mutate(bad);await assert.rejects(fixture.verify(bad));
+  }
 });
 
 test('manual retention mapping requires the exact nested original-receipt artifact pattern and refuses broader workflow changes',async()=>{

@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { fileSha256 } from './lib/file-sha256.mjs';
+import { rustCodeMask, withoutRustTestModules } from './lib/rust-source-slices.mjs';
+import { rustFunctionSlices } from './lib/rust-facade-source.mjs';
 import { OwnedService, ProcessObservations, processSample, assertQueuedMatchesSubmitted, bindCompletedMedia, hardware } from './h3-finetune-terminal-runtime.mjs';
 import { runScenario } from './h3-finetune-terminal-api.mjs';
 import { authorized, sourcePair, verifyRenderedContent, decodedDelta, decodeAV, validateAVAgainstRequest } from './h3-finetune-terminal.mjs';
@@ -37,6 +39,12 @@ export const RETAINED_WORKSTATION=Object.freeze({
     'request.json':'3d1f60aa44a8dfb85541353374f6e8cc75e009ddd6757b423ac2ea8694a87c71',
   }),
 });
+const RETAINED_BOUNDED_QK_PATHS=[
+  'crates/media/candle-gen/candle-gen-minimax-h3/src/dit/layers.rs',
+  'crates/media/candle-gen/candle-gen-minimax-h3/src/dit/model.rs',
+  'crates/contracts/gen-core/src/h3_memory/window.rs',
+  'crates/contracts/gen-core-h3/src/h3_memory.rs',
+];
 const RETAINED_ENGINE_PATHS=[
   'crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs',
   'crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs',
@@ -46,6 +54,7 @@ const RETAINED_ENGINE_PATHS=[
   'crates/media/candle-gen/candle-gen/tests/cuda_proof_pool.rs',
   'scripts/ci/cuda_memory_envelope_proof.py','scripts/tests/test_cuda_memory_envelope_proof.py',
   'scripts/ci/safe_controls.json','scripts/check_model_inference_policy.py','scripts/tests/test_test_suites.py',
+  ...RETAINED_BOUNDED_QK_PATHS,
 ];
 const RETAINED_PIN_METADATA=[
   'config/anchor-loader-closures.json','config/inference-provider-closures.json','config/inference-third-party-source.json',
@@ -403,6 +412,95 @@ export async function materializingProofSources(inferenceRoot,reference,target,c
   return sources;
 }
 
+// A fixed source comparison for this one repair, not an interpreter or caller-supplied exemption.
+// Existing Rust slicing masks literal/comment braces and removes only authored cfg(test) modules.
+const residentProduction=source=>withoutRustTestModules(source).replace(/^[ \t]+/gm,'');
+const residentLines=source=>source.split(/\r?\n/).map(line=>line.trim()).filter(line=>line&&!line.startsWith('//')).join('\n');
+const residentTokens=source=>residentLines(source).replace(/\s/g,'');
+function residentReplace(source,needle,replacement){
+  assert.equal(source.split(needle).length,2,'one exact reviewed source expression required');return source.replace(needle,replacement);
+}
+function residentBraceEnd(source,opening){
+  const code=rustCodeMask(source);assert.equal(code[opening],'{');let depth=1,end=opening+1;
+  while(end<code.length&&depth){if(code[end]==='{')depth++;if(code[end]==='}')depth--;end++;}
+  assert.equal(depth,0,'reviewed source block must close');return end;
+}
+function residentFunction(source,name){
+  const found=rustFunctionSlices(source).filter(fn=>fn.name===name);assert.equal(found.length,1,`one reviewed ${name} required`);
+  const fn=found[0],opening=rustCodeMask(fn.source).indexOf('{');return {...fn,signature:fn.source.slice(0,opening),body:fn.source.slice(opening+1,-1)};
+}
+export function validateBoundedQkResidentSources(before,after){
+  const old=before.map(residentProduction),next=after.map(residentProduction);assert.equal(old.length,4);assert.equal(next.length,4);
+  let layers=next[0];
+  for(const name of ['precondition_projected_qk','map_qk_token_chunks']){
+    const fn=residentFunction(layers,name);layers=layers.slice(0,fn.start)+layers.slice(fn.end);
+  }
+  const report='#[derive(Clone, Copy, Debug, Default)]\npub(super) struct QkPreconditionReport {';
+  const reportAt=layers.indexOf(report);assert.ok(reportAt>=0,'exact non-Drop Q/K report required');
+  const reportEnd=residentBraceEnd(layers,reportAt+report.length-1);
+  assert.equal(residentTokens(layers.slice(reportAt,reportEnd)),residentTokens(report+'pub norm_chunks: usize, pub rotary_chunks: usize, pub maximum_chunk_elements: usize,}'));
+  layers=layers.slice(0,reportAt)+layers.slice(reportEnd);
+  const marker='let (q, k, v) =';assert.equal(old[0].split(marker).length,2);assert.equal(layers.split(marker).length,2);
+  const originalAt=old[0].indexOf(marker),originalOpen=old[0].indexOf('{',originalAt),originalEnd=residentBraceEnd(old[0],originalOpen);
+  const at=layers.indexOf(marker),opening=layers.indexOf('{',at),end=residentBraceEnd(layers,opening);
+  assert.equal(residentTokens(layers.slice(at+marker.length,opening)),'ifrope.is_some()&&x.device().is_cuda()&&crate::block_stream::current().is_some()','bounded helper must exclude Resident and refiner');
+  const elseOpen=layers.indexOf('{',end);assert.equal(layers.slice(end,elseOpen).trim(),'else');const elseEnd=residentBraceEnd(layers,elseOpen);
+  assert.equal(residentLines(layers.slice(elseOpen,elseEnd)),residentLines(old[0].slice(originalOpen,originalEnd)),'Resident/refiner QKV math changed');
+  layers=layers.slice(0,at)+old[0].slice(originalAt,originalEnd)+layers.slice(elseEnd);
+  assert.equal(residentLines(layers),residentLines(old[0]),'code outside the guarded Q/K repair changed');
+
+  const release='if self.stream_window.is_some() && self.device.is_cuda() {';
+  assert.equal(next[1].split(release).length,2,'one explicit streamed CUDA projection release required');
+  const releaseAt=next[1].indexOf(release),releaseEnd=residentBraceEnd(next[1],releaseAt+release.length-1);
+  assert.equal(residentTokens(next[1].slice(releaseAt+release.length,releaseEnd-1)),'drop(video);drop(audio);');
+  assert.equal(residentLines(next[1].slice(0,releaseAt)+next[1].slice(releaseEnd)),residentLines(old[1]),'Resident model/lifetimes changed outside the streamed release');
+
+  const originalFns=rustFunctionSlices(old[2]),targetFns=rustFunctionSlices(next[2]);
+  const added=['qk_precondition_token_block','windowed_qk_precondition_peak','windowed_operation_peak_with_adapter','operation_peak_for','bounded_cuda_denoise_with_veda_bytes','compose_veda_peak','bounded_cuda_denoise_peak_bytes','denoise_peak_bytes_impl'];
+  assert.deepEqual(targetFns.filter(fn=>!originalFns.some(oldFn=>oldFn.name===fn.name)).map(fn=>fn.name).sort(),[...added].sort(),'unexpected allocation helper');
+  const body=(source,name)=>residentTokens(residentFunction(source,name).body);
+  const signature=(source,name)=>residentTokens(residentFunction(source,name).signature);
+  for(const name of ['operation_peak_with_adapter','denoise_peak_bytes','denoise_with_veda_bytes'])assert.equal(signature(next[2],name),signature(old[2],name),`legacy ${name} parameter binding changed`);
+  assert.equal(body(next[2],'operation_peak_with_adapter'),'self.operation_peak_for(rows,adapter_work,false)','legacy working bound must select the unchanged arm');
+  assert.equal(signature(next[2],'operation_peak_for'),residentReplace(signature(old[2],'operation_peak_with_adapter'),'adapter_work:u64)','adapter_work:u64,windowed:bool)').replace('operation_peak_with_adapter','operation_peak_for'),'delegated operation parameter binding changed');
+  let operation=body(next[2],'operation_peak_for');
+  operation=residentReplace(operation,'letprecondition=ifwindowed{self.windowed_qk_precondition_peak(rows,inner)?}else{self.qk_norm_peak(rows,inner)?.max(self.rotary_peak(rows,inner)?)};','');
+  operation=residentReplace(operation,'precondition.max(materialized)','self.qk_norm_peak(rows,inner)?.max(self.rotary_peak(rows,inner)?).max(materialized)');
+  assert.equal(operation,body(old[2],'operation_peak_with_adapter'),'legacy operation arithmetic changed');
+  assert.equal(body(next[2],'denoise_peak_bytes'),'self.denoise_peak_bytes_impl(task,backend,rows,window,false)','legacy denoise must select the unchanged arm');
+  let denoise=body(old[2],'denoise_peak_bytes');
+  denoise=residentReplace(denoise,'.operation_peak_with_adapter(','.operation_peak_for(');
+  denoise=residentReplace(denoise,'RowDomain::Packed)}),)?','RowDomain::Packed)}),bounded_qk,)?');
+  denoise=residentReplace(denoise,'bounded_qk,)?,);','bounded_qk,)?);');
+  assert.equal(body(next[2],'denoise_peak_bytes_impl'),denoise,'legacy denoise composition changed');
+  const composeCall='self.compose_veda_peak(task,backend,rows,window,veda,facts,dense)';
+  assert.equal(residentReplace(body(next[2],'denoise_with_veda_bytes'),composeCall,body(next[2],'compose_veda_peak')),body(old[2],'denoise_with_veda_bytes'),'legacy Veda composition changed');
+  for(const fn of originalFns){
+    if(!['operation_peak_with_adapter','denoise_peak_bytes','denoise_with_veda_bytes'].includes(fn.name))assert.equal(residentTokens(residentFunction(next[2],fn.name).source),residentTokens(fn.source),`legacy ${fn.name} changed`);
+  }
+  const globals=(source,functions)=>{for(const fn of [...functions].reverse()){
+    const testOnly='#[cfg(test)]\n';let start=fn.start;
+    if(fn.name==='windowed_operation_peak_with_adapter'&&source.slice(0,start).endsWith(testOnly))start-=testOnly.length;
+    source=source.slice(0,start)+source.slice(fn.end);
+  }return residentTokens(source);};
+  let targetGlobals=globals(next[2],targetFns);
+  targetGlobals=residentReplace(targetGlobals,'pubconstCUDA_QK_PRECONDITION_ELEMENTS:u64=crate::veda::workspace::CUDA_DENSE_SCORE_ELEMENTS;','');
+  targetGlobals=residentReplace(targetGlobals,'#[allow(clippy::too_many_arguments)]','');
+  assert.equal(targetGlobals,globals(old[2],originalFns),'allocation types/constants outside bounded helpers changed');
+
+  // These exact substitutions leave the None/full/Resident calls and all other pricing code
+  // byte-token-equivalent; selected Some(window) CUDA is the only new caller.
+  let pricing=residentTokens(next[3]);
+  const args='task,self.backend,Self::task_rows(task,rows),windowasusize,';
+  pricing=residentReplace(pricing,`ifmatches!(self.backend,NativeBackend::Candle{..}){profile.bounded_cuda_denoise_peak_bytes(${args})?}else{profile.denoise_peak_bytes(${args})?}`,`profile.denoise_peak_bytes(${args})?`);
+  pricing=residentReplace(pricing,'letselected_window=window;','');
+  const selected='let(dense,with_veda)=ifselected_window.is_some(){(profile.bounded_cuda_denoise_peak_bytes(task,self.backend,rows,window,)?,profile.bounded_cuda_denoise_with_veda_bytes(task,self.backend,rows,window,veda,)?,)}else{(profile.denoise_peak_bytes(task,self.backend,rows,window)?,profile.denoise_with_veda_bytes(task,self.backend,rows,window,veda,)?,)};letdense=self.with_adapter_denoise(task,rows,dense);Ok(peak.max(dense.max(with_veda)))';
+  const legacy='letdense=self.with_adapter_denoise(task,rows,profile.denoise_peak_bytes(task,self.backend,rows,window)?,);Ok(peak.max(dense.max(profile.denoise_with_veda_bytes(task,self.backend,rows,window,veda,)?)))';
+  pricing=residentReplace(pricing,selected,legacy);
+  assert.equal(pricing,residentTokens(old[3]),'Resident/None/MLX pricing or selected-window guard changed');
+  return {scope:'mechanically unchanged Resident/refiner QKV and model; unchanged legacy/None pricing; bounded helpers only on selected CUDA windows',paths:[...RETAINED_BOUNDED_QK_PATHS]};
+}
+
 export async function retainedWorkstationSources(swRoot,inferenceRoot,target,audit,command=exec){
   const originalSourcePair=RETAINED_WORKSTATION.sourcePair;
   sha40(target.sceneworks);sha40(target.inference);
@@ -429,7 +527,14 @@ export async function retainedWorkstationSources(swRoot,inferenceRoot,target,aud
   const engineFrom=originalSourcePair.inference,engineTo=target.inference;
   await git(inferenceRoot,['merge-base','--is-ancestor',engineFrom,engineTo]);
   const enginePaths=await audited(inferenceRoot,engineFrom,engineTo,audit.engineChanges,RETAINED_ENGINE_PATHS);
-  assert.deepEqual((await changed(inferenceRoot,engineFrom,engineTo)).sort(),[...enginePaths].sort(),'engine changes extend beyond reviewed capped allocator/primitive sources');
+  assert.deepEqual((await changed(inferenceRoot,engineFrom,engineTo)).sort(),[...enginePaths].sort(),'engine changes extend beyond reviewed allocator/streamed-QK sources');
+  let boundedQk;
+  if(RETAINED_BOUNDED_QK_PATHS.some(file=>enginePaths.has(file))){
+    assert.ok(RETAINED_BOUNDED_QK_PATHS.every(file=>enginePaths.has(file)),'complete reviewed bounded Q/K repair required');
+    for(const field of ['boundedQkResidentPreserved','boundedQkRefinerPreserved','boundedQkResidentPricingPreserved'])assert.equal(audit[field],true,`explicit reviewed ${field} required`);
+    const source=async revision=>Promise.all(RETAINED_BOUNDED_QK_PATHS.map(file=>git(inferenceRoot,['show',`${revision}:${file}`])));
+    boundedQk=validateBoundedQkResidentSources(await source(engineFrom),await source(engineTo));
+  }
   const swFrom=originalSourcePair.sceneworks,swTo=target.sceneworks;
   await git(swRoot,['merge-base','--is-ancestor',swFrom,swTo]);
   const metadataPaths=await audited(swRoot,swFrom,swTo,audit.consumerPinMetadata,RETAINED_PIN_METADATA);
@@ -463,7 +568,7 @@ export async function retainedWorkstationSources(swRoot,inferenceRoot,target,aud
   assert.ok([...metadataPaths].every(file=>consumerChanges.some(row=>row.path===file)),'unused metadata exemption');
   assert.ok([...ciPaths].every(file=>consumerChanges.some(row=>row.path===file)),'unused CI exemption');
   return {kind:audit.kind,originalSourcePair,targetSourcePair:target,uncappedAllocatorPreserved:true,engineChanges:audit.engineChanges,consumerChanges,
-    reviewUrl:audit.reviewUrl,scope:'only this original uncapped control; reviewed cap-only engine change, exact remaining application/operator/kernel/build sources',
+    reviewUrl:audit.reviewUrl,boundedQk,scope:'only this original uncapped control; reviewed capped allocator and mechanically guarded streamed-only Q/K repair, exact remaining application/operator/kernel/build sources',
     [RETAINED_EQUIVALENCE]:true};
 }
 

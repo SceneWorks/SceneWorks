@@ -141,8 +141,11 @@ allocator repair and bind a D:-only source audit with this shape:
 {
   "kind": "sw-f329-uncapped-workstation-source-equivalence-v1",
   "originalSourcePair": {"sceneworks": "<original66b5 SHA>", "inference": "<original M2 SHA>"},
-  "targetSourcePair": {"sceneworks": "<final consumer SHA>", "inference": "<accepted M3 main SHA>"},
+  "targetSourcePair": {"sceneworks": "<final consumer SHA>", "inference": "<accepted final inference-main SHA>"},
   "uncappedAllocatorPreserved": true,
+  "boundedQkResidentPreserved": true,
+  "boundedQkRefinerPreserved": true,
+  "boundedQkResidentPricingPreserved": true,
   "reviewUrl": "https://github.com/SceneWorks/inference/pull/<reviewed repair>",
   "engineChanges": [{"path": "<code-owned permitted path>", "before": "<original Git object or null for new file>", "after": "<reviewed target Git object>"}],
   "consumerPinMetadata": [{"path": "<code-owned generated pin metadata path>", "before": "<original Git object>", "after": "<reviewed target Git object>"}],
@@ -155,12 +158,31 @@ uncapped early-return allocations and accepting the final source. The controller
 rechecks ancestry, actual objects and the complete engine changed-path set before
 reuse and again before the final success receipt. Its permitted paths are owned
 by code: capped allocator/recovery, their primitive/pure tests and registration,
+the four explicit streamed-Q/K operator/planner files,
 documentation, generated consumer pin metadata, and the reviewed standard Linux
 cache CI helper. There are no caller-supplied path exemptions. The CI workflow
 must remain byte-identical outside `build-candle`. All other application/operator/
 kernel/build source stays exact; manifests/lock may change only by substituting
 the accepted inference SHA. The audit's semantic assertion is bound to those exact
 reviewed objects; it is not inferred merely from filenames or a new commit id.
+
+When the four Q/K repair files change, all three `boundedQk*Preserved` review
+assertions are mandatory. The controller also reads the original/target sources:
+it checks the unchanged Resident/refiner QKV arm and surrounding operators, the
+exact CUDA/Both-window guard, projection release only in a CUDA streamed model,
+unchanged legacy allocation arithmetic and full/None pricing, and bounded calls
+only in the explicit selected-window branches. The original request-policy file
+is outside the permitted diff. Unknown paths, changed guards, modified Resident
+math/pricing and incomplete/incorrect object bindings refuse reuse.
+
+These assertions establish only original95 source applicability. They do not
+assert that the new branch passed parity. Before dispatch, the coordinator must
+accept the fresh registered DiT `cuda0_materialized` receipt and its entire late
+BODY/device/numerical/chunk/tail/cancellation controls at the reviewed source.
+The primitive whole-tree and raw Veda45-source guards stay strict; changed source
+must satisfy them with fresh affected evidence. Both full24GiB anchors and native
+AV equivalence remain mandatory. Preserve the historical audit/parameters and
+write a new source-bound audit for the repaired final pair.
 
 The accepted record must still match the original seed42, request/queued recipe,
 q4/Turbo8/Veda controls, Resident execution, all345frames/audio/content, successful
