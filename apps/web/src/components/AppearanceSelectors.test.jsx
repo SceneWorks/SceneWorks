@@ -16,6 +16,14 @@ async function render(model) {
   await act(async () => root.render(<Harness model={model} />));
 }
 async function click(selector) { await act(async () => container.querySelector(selector).click()); }
+async function clickButton(text) { await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === text).click()); }
+async function searchFor(value) {
+  const input = container.querySelector('input[type="search"]');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
 describe("Appearance selector interactions", () => {
   it("keeps Enter inside search and activates recipe inputs without submitting the generation form", async () => {
     root = null;
@@ -64,6 +72,7 @@ describe("Appearance selector interactions", () => {
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(container.querySelector('button[aria-label="Looks"]'));
     await click('button[aria-label="Looks"]');
+    await clickButton("General looks");
     const muted = [...container.querySelectorAll('.appearance-option')].find((label) => label.textContent.includes("Cool muted"));
     await act(async () => muted.querySelector("input").click());
     expect(JSON.parse(container.querySelector("output").textContent).looks).toHaveLength(2);
@@ -73,5 +82,44 @@ describe("Appearance selector interactions", () => {
     await render({ id: "anima", captionStyle: "tags" });
     expect(container.querySelector('button[aria-label="Looks"]')).toBeNull();
     expect(JSON.parse(container.querySelector("output").textContent).looks).toEqual([]);
+  });
+  it("browses Lighting groups like Style and searches across groups without repeated category subtitles", async () => {
+    root = null;
+    await render({ id: "krea_2_turbo" });
+    await click('button[aria-label="Lighting"]');
+    expect(container.querySelectorAll('.appearance-option')).toHaveLength(0);
+    expect([...container.querySelectorAll('.style-picker-group-nav')].map((button) => button.textContent)).toEqual([
+      "Outdoor daylight", "Outdoor night", "Indoor daylight", "Indoor night",
+    ]);
+    await clickButton("Outdoor daylight");
+    expect(document.activeElement).toBe(container.querySelector('.style-picker-back'));
+    expect(container.querySelectorAll('.appearance-option')).toHaveLength(6);
+    expect([...container.querySelectorAll('.appearance-option')].every((row) => !row.textContent.includes("Outdoor daylight"))).toBe(true);
+    await clickButton("Groups");
+    expect(document.activeElement).toBe(container.querySelector('input[type="search"]'));
+    expect(container.querySelectorAll('.style-picker-group-nav')).toHaveLength(4);
+    await searchFor("police");
+    expect(container.querySelectorAll('.appearance-option')).toHaveLength(1);
+    expect(container.querySelector('.appearance-option strong').textContent).toBe("Police lights");
+    await click('.appearance-option input');
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Lighting"]').textContent).toContain("Police lights");
+    await click('button[aria-label="Camera"]');
+    expect(container.querySelectorAll('.style-picker-group-nav')).toHaveLength(0);
+    expect(container.querySelector('.appearance-option').textContent).not.toContain("Cameras");
+  });
+  it("combines Looks across group lists without closing the picker", async () => {
+    root = null;
+    await render({ id: "moss_image_base" });
+    await click('button[aria-label="Looks"]');
+    await clickButton("General looks");
+    await click('.appearance-option input');
+    await clickButton("Groups");
+    await clickButton("Broken film");
+    await click('.appearance-option input');
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(JSON.parse(container.querySelector("output").textContent).looks).toEqual(["look-warm-golden", "look-light-leaks"]);
+    await clickButton("Done");
+    expect(container.querySelector('button[aria-label="Looks"]').textContent).toContain("2 selected");
   });
 });

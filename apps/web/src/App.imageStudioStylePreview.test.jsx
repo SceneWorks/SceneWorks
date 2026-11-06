@@ -321,6 +321,11 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     await typePrompt("Subject: a fox\nCamera: 50mm\nAction: running");
     async function recipe(label, name) {
       await act(async () => container.querySelector(`button[aria-label="${label}"]`).click());
+      const search = container.querySelector('input[type="search"]');
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(search, name);
+        search.dispatchEvent(new Event("input", { bubbles: true }));
+      });
       const option = [...container.querySelectorAll(".appearance-option")].find((item) => item.querySelector("strong")?.textContent === name);
       expect(option).toBeTruthy();
       await act(async () => option.querySelector("input").click());
