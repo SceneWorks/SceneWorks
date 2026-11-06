@@ -6,7 +6,7 @@ import { canonicalJson } from './lib/canonical-json.mjs';
 import { sha256 } from './lib/file-sha256.mjs';
 
 export const RESIDENCY_COMPONENT_SOURCE=Object.freeze({
-  proof:'4986a685c256e1966b97f9538e754a46e4246d47',
+  proof:'c5df0dc4aa5b264bca7690af0a2f4c26c9aae3a9',
   runtime:'2ff0353820e370d004305ae99a035ab38b93de30',
   consumer:'c8815c7cd46feba2f82562a315d1a44a6c88a9e8',
   manifestSha256:'9df0a1203b8a20d87b81888cb4edeaa34537f50c558aba239a79af5b3c443b01',
@@ -31,6 +31,7 @@ export function validateResidencyComponentCoverage(receipt,{proofRevision,runtim
   assert.deepEqual(runtimeSourcePair,PAIR,'unrecognized runtime source pair');
   assert.equal(receipt?.kind,'h3-residency-component/v1');assert.equal(receipt.schemaVersion,1);assert.equal(receipt.accepted,true);
   assert.equal(receipt.completedLearnedProjectionCalls,6);assert.equal(receipt.completedResidualOnlyScopes,2);
+  assert.deepEqual(receipt.readback,{method:'narrow-force_contiguous-to_vec1',maximumAllowedChunkElements:1048576,elementBytes:2,everyChunkLayoutStartOffset:0,everyStorageElementCountEqualsChunk:true},'bounded readback storage/layout contract required');
   const device=receipt.device;assert.equal(device?.logicalOrdinal,0);assert.deepEqual(device.computeCapability,[12,0]);
   assert.equal(device.cudaVisibleDevices,UUID);assert.equal(device.proofPoolInstalled,false);
   assert.match(device.stream??'',/^0x[0-9a-f]+$/i);assert.notEqual(BigInt(device.stream),0n);
@@ -87,8 +88,8 @@ export function validateResidencyComponentCoverage(receipt,{proofRevision,runtim
 }
 
 const DELTA=[
-  ':100644 100644 edd41ea657b38a12f65360e91daf989defde97b8 f2c834715278eee0a87ee7e4ff263ecb963b5e65 M\tcrates/media/candle-gen/candle-gen-minimax-h3/src/dit/layers.rs',
-  ':000000 100644 0000000000000000000000000000000000000000 11544ba01c6526e937641b38925bb045df77b9ff A\tcrates/media/candle-gen/candle-gen-minimax-h3/src/dit/layers/residency_component.rs',
+  ':100644 100644 edd41ea657b38a12f65360e91daf989defde97b8 bde0f9cea2fdc90ed4dc58f35fd427d6ad959189 M\tcrates/media/candle-gen/candle-gen-minimax-h3/src/dit/layers.rs',
+  ':000000 100644 0000000000000000000000000000000000000000 f4d3b99d82d687405506b048ab75c41561803f43 A\tcrates/media/candle-gen/candle-gen-minimax-h3/src/dit/layers/residency_component.rs',
   ':100644 100644 89dc364c24bc3da9c0b086ac3ac70ecdd53511ea 17b5ca7d8dd09c3e2c72707f6f823e72dbd79045 M\tcrates/media/candle-gen/candle-gen/src/quant/adapt.rs',
   ':000000 100644 0000000000000000000000000000000000000000 c0c0b2ec92e3bf59d086f83b9a4520628d6aef5d A\tdocs/testing/h3-residency-component.md',
   ':100644 100644 218cfd06259b2008a1fa7f4292df52f8289d39fa e3f47600c77cfd034fb8413f248176e31c7d4de9 M\tscripts/ci/model-inference-proofs.json',
@@ -96,11 +97,18 @@ const DELTA=[
 export async function residencyComponentSourceApplicability(inferenceRoot,{proofRevision,runtimeRevision},command=promisify(execFile)){
   assert.equal(proofRevision,RESIDENCY_COMPONENT_SOURCE.proof,'unrecognized component proof source');assert.equal(runtimeRevision,RESIDENCY_COMPONENT_SOURCE.runtime,'unrecognized runtime source');
   const git=async args=>(await command('git',['-C',inferenceRoot,...args])).stdout.trim();
-  assert.equal(await git(['rev-list','--parents','-n','1',proofRevision]),`${proofRevision} ${runtimeRevision}`,'exact direct parent required');
-  assert.equal(await git(['rev-parse',runtimeRevision+'^{tree}']),'75d392586953d990cf346c7b82f69f7ef246b133');
-  assert.equal(await git(['rev-parse',proofRevision+'^{tree}']),'effe9c1152f534b6f746713de59083e6c17a5035');
-  assert.equal(await git(['diff-tree','--no-commit-id','-r','--raw','--no-abbrev',proofRevision]),DELTA,'only the exact reviewed five-file diagnostic delta may map');
-  return {kind:'h3-residency-component-runtime-applicability/v1',proofRevision,runtimeRevision,directParent:true,
-    reviewedExactDeltaSha256:sha256(DELTA),productionScope:'Exact reviewed objects: layers.rs adds only test+cuda+proof child declaration; adapt.rs adds only proof-gated frozen-factor observation. Existing production functions/math unchanged.',
+  const ancestry=[
+    [proofRevision,'a43054848a1d6f915471dc8625a56e4406243887'],
+    ['255322bd1f430696fb1a21d81653a58bf1ac129a','d793f71c69ec07eba061fb0b2b4b975f18dd9e38'],
+    ['4986a685c256e1966b97f9538e754a46e4246d47','effe9c1152f534b6f746713de59083e6c17a5035'],
+    [runtimeRevision,'75d392586953d990cf346c7b82f69f7ef246b133'],
+  ];
+  for(const [index,[revision,tree]] of ancestry.entries()){
+    assert.equal(await git(['rev-parse',revision+'^{tree}']),tree,'exact reviewed ancestry tree required');
+    if(index<ancestry.length-1)assert.equal(await git(['rev-list','--parents','-n','1',revision]),`${revision} ${ancestry[index+1][0]}`,'exact reviewed three-commit ancestry required');
+  }
+  assert.equal(await git(['diff-tree','--no-commit-id','-r','--raw','--no-abbrev',runtimeRevision,proofRevision]),DELTA,'only the exact reviewed five-file diagnostic delta may map');
+  return {kind:'h3-residency-component-runtime-applicability/v1',proofRevision,runtimeRevision,directParent:false,reviewedAncestry:ancestry.map(([revision])=>revision),
+    reviewedExactDeltaSha256:sha256(DELTA),productionScope:'Exact reviewed objects: layers.rs adds only the equivalent proof-gated CUDA test child declaration; adapt.rs adds only proof-gated frozen-factor observation. Existing production functions/math unchanged.',
     exclusions:['whole-tree equivalence','primitive whole-tree proof reuse','rawVeda45 proof reuse','full-campaign acceptance']};
 }
