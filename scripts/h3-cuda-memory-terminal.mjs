@@ -7,7 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
-import { fileSha256 } from './lib/file-sha256.mjs';
+import { fileSha256, sha256 } from './lib/file-sha256.mjs';
+import { parse as parseProvenanceCandidates, populationSha256 as provenancePopulationSha256 } from './scan-inference-provenance.mjs';
 import { rustCodeMask, withoutRustTestModules } from './lib/rust-source-slices.mjs';
 import { rustFunctionSlices } from './lib/rust-facade-source.mjs';
 import { OwnedService, ProcessObservations, processSample, assertQueuedMatchesSubmitted, bindCompletedMedia, hardware } from './h3-finetune-terminal-runtime.mjs';
@@ -58,6 +59,7 @@ const RETAINED_ENGINE_PATHS=[
 ];
 const RETAINED_PIN_METADATA=[
   'config/anchor-loader-closures.json','config/inference-provider-closures.json','config/inference-third-party-source.json',
+  'config/inference-provenance-candidates.tsv',
 ];
 const RETAINED_CONTROLLER_PATHS=[
   'scripts/h3-cuda-memory-terminal.mjs','scripts/h3-cuda-memory-terminal.test.mjs',
@@ -504,6 +506,31 @@ export function validateBoundedQkResidentSources(before,after){
   return {scope:'mechanically unchanged Resident/refiner QKV and model; unchanged legacy/None pricing; bounded helpers only on selected CUDA windows',paths:[...RETAINED_BOUNDED_QK_PATHS]};
 }
 
+export function validateRetainedWindowProvenance({beforeTsv,afterTsv,beforeAudit,afterAudit,engineFrom,engineTo,beforeBlob,afterBlob}){
+  const windowPath='crates/contracts/gen-core/src/h3_memory/window.rs';
+  sha40(engineFrom);sha40(engineTo);
+  sha40(beforeBlob);sha40(afterBlob);assert.notEqual(beforeBlob,afterBlob,'window provenance must describe an actual blob change');
+  const before=parseProvenanceCandidates(beforeTsv),after=parseProvenanceCandidates(afterTsv);
+  const matches=before.filter(row=>row.path===windowPath);assert.equal(matches.length,1,'one original window provenance row required');
+  const row=matches[0];assert.equal(row.blob,beforeBlob,'original provenance blob must match original engine');
+  assert.equal(row.markerSha256,'66a666f0a533b9e30fc274055f28f6237445ef4d4978e4c30b948ea5ce4d6620');
+  assert.equal(row.area,'architecture:crates/contracts/gen-core');
+  const oldLine=[windowPath,beforeBlob,row.markerSha256,row.area].join('\t');
+  const newLine=[windowPath,afterBlob,row.markerSha256,row.area].join('\t');
+  assert.equal(afterTsv,residentReplace(beforeTsv,oldLine,newLine),'only the reviewed window blob provenance cell may change');
+  // Same payload projection as check-license-coverage's auditCanonicalDigest. Hash bytes
+  // belong to the existing owner; importing/running that CLI would perform unrelated checks.
+  const digest=record=>sha256(JSON.stringify(Object.fromEntries(['artifacts','prospectiveDisclosures','provenanceScan','portedSourceAreas','crateCoverage','crateDispositions','includeSites'].map(key=>[key,record[key]]))));
+  assert.equal(beforeAudit.inferenceRevision,engineFrom);assert.equal(beforeAudit.provenanceScan.revision,engineFrom);assert.equal(beforeAudit.crateCoverage.revision,engineFrom);
+  assert.equal(beforeAudit.provenanceScan.matchedFiles,before.length);
+  assert.equal(beforeAudit.provenanceScan.populationSha256,provenancePopulationSha256(before),'original population must be derived from its exact table');
+  assert.equal(beforeAudit.auditDigest,digest(beforeAudit),'original audit digest must be derived from its payload');
+  const expected=structuredClone(beforeAudit);expected.inferenceRevision=engineTo;expected.provenanceScan.revision=engineTo;expected.crateCoverage.revision=engineTo;
+  expected.provenanceScan.populationSha256=provenancePopulationSha256(after);expected.auditDigest=digest(expected);
+  assert.deepEqual(afterAudit,expected,'provenance JSON may only restamp the pin and derived population/audit digests');
+  return {path:'config/inference-provenance-candidates.tsv',windowPath,beforeBlob,afterBlob,markerSha256:row.markerSha256,classification:row.area,matchedFiles:after.length,populationSha256:expected.provenanceScan.populationSha256,auditDigest:expected.auditDigest};
+}
+
 export async function retainedWorkstationSources(swRoot,inferenceRoot,target,audit,command=exec){
   const originalSourcePair=RETAINED_WORKSTATION.sourcePair;
   sha40(target.sceneworks);sha40(target.inference);
@@ -541,12 +568,18 @@ export async function retainedWorkstationSources(swRoot,inferenceRoot,target,aud
   const swFrom=originalSourcePair.sceneworks,swTo=target.sceneworks;
   await git(swRoot,['merge-base','--is-ancestor',swFrom,swTo]);
   const metadataPaths=await audited(swRoot,swFrom,swTo,audit.consumerPinMetadata,RETAINED_PIN_METADATA);
+  if(boundedQk)for(const file of ['config/inference-provenance-candidates.tsv','config/inference-third-party-source.json'])assert.ok(metadataPaths.has(file),'bounded Q/K repair requires both exact generated provenance object bindings');
   const ciPaths=await audited(swRoot,swFrom,swTo,audit.consumerCiChanges??[],RETAINED_CI_PATHS);
-  const consumerChanges=[];
+  const consumerChanges=[];let generatedProvenance;
   for(const file of await changed(swRoot,swFrom,swTo)){
     if(file==='Cargo.lock'||file==='Cargo.toml'||/^crates\/[^/]+\/Cargo\.toml$/.test(file)){
       const before=await git(swRoot,['show',`${swFrom}:${file}`]),after=await git(swRoot,['show',`${swTo}:${file}`]);
       assert.equal(before.replaceAll(engineFrom,engineTo),after,'retained control cannot cross a dependency/configuration change');
+    }else if(file==='config/inference-provenance-candidates.tsv'){
+      assert.ok(boundedQk&&metadataPaths.has(file),'provenance movement requires the reviewed bounded Q/K repair and exact object audit');
+      const records=await Promise.all(['config/inference-provenance-candidates.tsv','config/inference-third-party-source.json'].flatMap(selected=>[swFrom,swTo].map(revision=>git(swRoot,['show',`${revision}:${selected}`]))));
+      const windowPath=RETAINED_BOUNDED_QK_PATHS[2];
+      generatedProvenance=validateRetainedWindowProvenance({beforeTsv:records[0],afterTsv:records[1],beforeAudit:JSON.parse(records[2]),afterAudit:JSON.parse(records[3]),engineFrom,engineTo,beforeBlob:await object(inferenceRoot,engineFrom,windowPath),afterBlob:await object(inferenceRoot,engineTo,windowPath)});
     }else if(file==='.github/workflows/h3-cuda-memory-terminal.yml'){
       const before=await git(swRoot,['show',`${swFrom}:${file}`]),after=await git(swRoot,['show',`${swTo}:${file}`]);
       const shallow='path: sceneworks\n          fetch-depth: 1';assert.equal(before.split(shallow).length,2);
@@ -571,7 +604,7 @@ export async function retainedWorkstationSources(swRoot,inferenceRoot,target,aud
   assert.ok([...metadataPaths].every(file=>consumerChanges.some(row=>row.path===file)),'unused metadata exemption');
   assert.ok([...ciPaths].every(file=>consumerChanges.some(row=>row.path===file)),'unused CI exemption');
   return {kind:audit.kind,originalSourcePair,targetSourcePair:target,uncappedAllocatorPreserved:true,engineChanges:audit.engineChanges,consumerChanges,
-    reviewUrl:audit.reviewUrl,boundedQk,scope:'only this original uncapped control; reviewed capped allocator and mechanically guarded streamed-only Q/K repair, exact remaining application/operator/kernel/build sources',
+    reviewUrl:audit.reviewUrl,boundedQk,generatedProvenance,scope:'only this original uncapped control; reviewed capped allocator and mechanically guarded streamed-only Q/K repair, exact remaining application/operator/kernel/build sources',
     [RETAINED_EQUIVALENCE]:true};
 }
 

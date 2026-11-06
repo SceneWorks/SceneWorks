@@ -166,6 +166,14 @@ kernel/build source stays exact; manifests/lock may change only by substituting
 the accepted inference SHA. The audit's semantic assertion is bound to those exact
 reviewed objects; it is not inferred merely from filenames or a new commit id.
 
+The M4 generated provenance change is limited to the window planner's blob cell
+in `config/inference-provenance-candidates.tsv`, matching the actual original and
+target engine Git blobs. Its marker hash/classification and every other row stay
+exact. The third-party audit may then update only pin labels and the population/
+audit digests derived from that exact table/payload; counts, classifications and
+all other fields remain identical. Both generated files need reviewed object
+bindings. This is not a general TSV/JSON exemption or a new provenance scan.
+
 When the four Q/K repair files change, all three `boundedQk*Preserved` review
 assertions are mandatory. The controller also reads the original/target sources:
 it checks the unchanged Resident/refiner QKV arm and surrounding operators, the

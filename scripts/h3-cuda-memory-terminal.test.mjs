@@ -7,7 +7,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { anchorRequest, validatePlan, validatePoolEvidence, validateMaterializingProofLog, materializingProofSources, primitiveProofSource, validatePrimitiveProofLog, retainedWorkstationSources, validateRetainedWorkstationRecord, retainedWorkstationWeights, retainedWorkstationHardware, retainedWorkstationBuild, RETAINED_WORKSTATION, validateVedaParityPair, rawNumericDifference, compareDecodedMedia, compareVedaAnchors, VEDA_EQUIVALENCE } from './h3-cuda-memory-terminal.mjs';
 import { privateEnvironment } from './h3-finetune-terminal-runtime.mjs';
-import { validateBoundedQkResidentSources } from './h3-cuda-memory-terminal.mjs';
+import { validateBoundedQkResidentSources, validateRetainedWindowProvenance } from './h3-cuda-memory-terminal.mjs';
+import { sha256 } from './lib/file-sha256.mjs';
+import { parse as parseProvenanceCandidates, populationSha256 } from './scan-inference-provenance.mjs';
 
 const GIB=1024**3;
 function plan(){return {version:1,stationary_pair_authorized:true,sceneworks:'a'.repeat(40),inference:'b'.repeat(40),requestSha256:'c'.repeat(64),requestPath:'D:\\fixture.json',licenseAcknowledgmentsPath:'D:\\licenses.json',expectedRunner:'cuda-windows-2',seed:42,poolBytes:22*GIB,externalReserveBytes:2*GIB,hostBudgetBytes:64*GIB,workstationDeviceBytes:95*GIB,timeoutSeconds:7200,additionalSparse24:true,additionalSparse24Reason:'E5 compares normal Veda resident and streamed outputs',sources:Object.fromEntries([
@@ -281,7 +283,19 @@ fn denoise_peak_bytes_impl() {${denoise.replace('.operation_peak_with_adapter(',
   return {before:[layers,model,window,pricing],after:[nextLayers,nextModel,nextWindow,nextPricing]};
 }
 
-function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,ciOutsideChange=false,manualOutsideChange=false,boundedQk=false,
+function provenanceSourceFixture(){
+  const beforeBlob='a'.repeat(40),afterBlob='b'.repeat(40),engineFrom=RETAINED_WORKSTATION.sourcePair.inference,engineTo='d'.repeat(40);
+  const windowPath='crates/contracts/gen-core/src/h3_memory/window.rs';
+  const beforeTsv=`# path\tgit_blob_sha1\tnormalized_marker_sha256\tsource_area\n${windowPath}\t${beforeBlob}\t66a666f0a533b9e30fc274055f28f6237445ef4d4978e4c30b948ea5ce4d6620\tarchitecture:crates/contracts/gen-core\nother/source.rs\t${'e'.repeat(40)}\t${'f'.repeat(64)}\tarchitecture:other`;
+  const afterTsv=beforeTsv.replace(beforeBlob,afterBlob);
+  const beforeAudit={inferenceRevision:engineFrom,artifacts:[],prospectiveDisclosures:[],provenanceScan:{revision:engineFrom,matchedFiles:2,populationSha256:populationSha256(parseProvenanceCandidates(beforeTsv))},portedSourceAreas:[{id:'unchanged-classification'}],crateCoverage:{revision:engineFrom,cratePrefixes:139},crateDispositions:[],includeSites:[]};
+  const digest=record=>sha256(JSON.stringify(Object.fromEntries(['artifacts','prospectiveDisclosures','provenanceScan','portedSourceAreas','crateCoverage','crateDispositions','includeSites'].map(key=>[key,record[key]]))));
+  beforeAudit.auditDigest=digest(beforeAudit);
+  const afterAudit=structuredClone(beforeAudit);afterAudit.inferenceRevision=engineTo;afterAudit.provenanceScan.revision=engineTo;afterAudit.crateCoverage.revision=engineTo;afterAudit.provenanceScan.populationSha256=populationSha256(parseProvenanceCandidates(afterTsv));afterAudit.auditDigest=digest(afterAudit);
+  return {beforeTsv,afterTsv,beforeAudit,afterAudit,engineFrom,engineTo,beforeBlob,afterBlob};
+}
+
+function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,ciOutsideChange=false,manualOutsideChange=false,boundedQk=false,provenance=boundedQk,
   manualArtifactPattern='${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**/*.json'}={}){
   const target={sceneworks:'c'.repeat(40),inference:'d'.repeat(40)},before='a'.repeat(40),after='b'.repeat(40);
   const enginePath='crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs';
@@ -289,6 +303,7 @@ function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,c
   const ci=['scripts/select-linux-flash-cache.mjs','scripts/server-candle-linux-workflow.test.mjs',workflow];
   const boundedPaths=['crates/media/candle-gen/candle-gen-minimax-h3/src/dit/layers.rs','crates/media/candle-gen/candle-gen-minimax-h3/src/dit/model.rs','crates/contracts/gen-core/src/h3_memory/window.rs','crates/contracts/gen-core-h3/src/h3_memory.rs'];
   const boundedSources=boundedQkSourceFixture();
+  const provenanceSources=provenanceSourceFixture(),provenancePaths=['config/inference-provenance-candidates.tsv','config/inference-third-party-source.json'];
   const audit={kind:'sw-f329-uncapped-workstation-source-equivalence-v1',originalSourcePair:structuredClone(RETAINED_WORKSTATION.sourcePair),targetSourcePair:target,
     uncappedAllocatorPreserved:true,reviewUrl:'https://github.com/SceneWorks/inference/pull/9999',
     engineChanges:[{path:enginePath,before,after}],consumerPinMetadata:[{path:metadata,before,after}],
@@ -297,10 +312,11 @@ function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,c
     audit.engineChanges.push(...boundedPaths.map(file=>({path:file,before,after})));
     for(const field of ['boundedQkResidentPreserved','boundedQkRefinerPreserved','boundedQkResidentPricingPreserved'])audit[field]=true;
   }
+  if(provenance)audit.consumerPinMetadata.push(...provenancePaths.map(file=>({path:file,before,after})));
   const command=async(program,args,{cwd})=>{
     assert.equal(program,'git');
     if(args[0]==='merge-base')return {stdout:''};
-    if(args[0]==='diff')return {stdout:(cwd==='engine'?[enginePath,...(boundedQk?boundedPaths:[]),...engineExtra]:['Cargo.toml','Cargo.lock',metadata,'scripts/h3-cuda-memory-terminal.mjs','.github/workflows/h3-cuda-memory-terminal.yml',...ci,...consumerExtra]).join('\n')};
+    if(args[0]==='diff')return {stdout:(cwd==='engine'?[enginePath,...(boundedQk?boundedPaths:[]),...engineExtra]:['Cargo.toml','Cargo.lock',metadata,...(provenance?provenancePaths:[]),'scripts/h3-cuda-memory-terminal.mjs','.github/workflows/h3-cuda-memory-terminal.yml',...ci,...consumerExtra]).join('\n')};
     if(args[0]==='ls-tree'){
       const file=args.at(-1),old=args[1]===RETAINED_WORKSTATION.sourcePair.inference||args[1]===RETAINED_WORKSTATION.sourcePair.sceneworks;
       return {stdout:old&&ci.includes(file)&&file!==workflow?'':`100644 blob ${old?before:after}\t${file}`};
@@ -308,6 +324,8 @@ function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,c
     assert.equal(args[0],'show');const [revision,file]=args[1].split(':');
     if(cwd==='engine'&&boundedPaths.includes(file))return {stdout:boundedSources[revision===RETAINED_WORKSTATION.sourcePair.inference?'before':'after'][boundedPaths.indexOf(file)]};
     const old=revision===RETAINED_WORKSTATION.sourcePair.sceneworks;
+    if(provenance&&file===provenancePaths[0])return {stdout:provenanceSources[old?'beforeTsv':'afterTsv']};
+    if(provenance&&file===provenancePaths[1])return {stdout:JSON.stringify(provenanceSources[old?'beforeAudit':'afterAudit'])};
     if(file===workflow)return {stdout:`name: fixture\njobs:\n  build-candle:\n    steps: ${old?'old':'new'}\n  other-job:\n    unchanged: ${!old&&ciOutsideChange?'false':'true'}\n`};
     if(file==='.github/workflows/h3-cuda-memory-terminal.yml')return {stdout:`path: sceneworks\n          fetch-depth: ${old?'1':'128'}\nCUDA_COMPUTE_CAP: ${!old&&manualOutsideChange?'80':'120'}\n            \${{ env.SW_F329_OUTPUT }}/workstation-veda/*.json\n${!old&&manualArtifactPattern!==null?'            '+manualArtifactPattern+'\n':''}          if-no-files-found: error\n`};
     return {stdout:`inference = "${old?RETAINED_WORKSTATION.sourcePair.inference:target.inference}"${!old&&graphDrift?'\nother = "changed"':''}`};
@@ -403,6 +421,40 @@ test('selected-window FFN/norm allowances keep exact legacy false arms and canno
     const after=[...fixture.after];assert.ok(after[2].includes(from));after[2]=after[2].replace(from,to);
     assert.throws(()=>validateBoundedQkResidentSources(fixture.before,after),undefined,from);
   }
+});
+
+test('generated provenance permits only the actual window blob cell and its exact derived pin/population/audit restamp',()=>{
+  const fixture=provenanceSourceFixture(),verified=validateRetainedWindowProvenance(fixture);
+  assert.equal(verified.afterBlob,fixture.afterBlob);assert.equal(verified.matchedFiles,2);
+  assert.equal(verified.populationSha256,fixture.afterAudit.provenanceScan.populationSha256);
+  for(const mutate of [
+    f=>f.afterTsv=f.afterTsv.replace('architecture:crates/contracts/gen-core','architecture:changed'),
+    f=>f.afterTsv=f.afterTsv.replace('66a666f0','76a666f0'),
+    f=>f.beforeTsv=f.beforeTsv.replace('66a666f0','76a666f0'),
+    f=>f.afterTsv=f.afterTsv.replace('e'.repeat(40),'c'.repeat(40)),
+    f=>f.afterTsv=f.afterTsv.replace(f.afterBlob,'c'.repeat(40)),
+    f=>f.beforeBlob='c'.repeat(40),
+    f=>f.afterBlob='c'.repeat(40),
+    f=>f.afterTsv+='\n'+f.afterTsv.split('\n')[1],
+    f=>f.afterAudit.provenanceScan.populationSha256='0'.repeat(64),
+    f=>f.afterAudit.auditDigest='0'.repeat(64),
+    f=>f.beforeAudit.auditDigest='0'.repeat(64),
+    f=>f.afterAudit.provenanceScan.matchedFiles++,
+    f=>f.afterAudit.crateCoverage.cratePrefixes++,
+    f=>f.afterAudit.portedSourceAreas[0].id='different-classification',
+    f=>f.afterAudit.inferenceRevision='c'.repeat(40),
+    f=>f.afterAudit.provenanceScan.revision='c'.repeat(40),
+  ]){const bad=structuredClone(fixture);mutate(bad);assert.throws(()=>validateRetainedWindowProvenance(bad));}
+});
+
+test('complete source audit binds the generated provenance objects and the reviewed bounded engine path',async()=>{
+  const fixture=sourceReviewFixture({boundedQk:true,provenance:true}),verified=await fixture.verify();
+  assert.equal(verified.generatedProvenance.windowPath,'crates/contracts/gen-core/src/h3_memory/window.rs');
+  for(const mutate of [a=>a.consumerPinMetadata.pop(),a=>a.consumerPinMetadata[1].after='c'.repeat(40),a=>a.consumerPinMetadata[1].path='config/unreviewed.tsv']){
+    const bad=structuredClone(fixture.audit);mutate(bad);await assert.rejects(fixture.verify(bad));
+  }
+  await assert.rejects(sourceReviewFixture({provenance:true}).verify(),/reviewed bounded Q\/K repair/);
+  await assert.rejects(sourceReviewFixture({boundedQk:true,provenance:false}).verify(),/both exact generated provenance object bindings/);
 });
 
 test('manual retention mapping requires the exact nested original-receipt artifact pattern and refuses broader workflow changes',async()=>{
