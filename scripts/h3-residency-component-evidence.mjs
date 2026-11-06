@@ -6,7 +6,8 @@ import { canonicalJson } from './lib/canonical-json.mjs';
 import { sha256 } from './lib/file-sha256.mjs';
 
 export const RESIDENCY_COMPONENT_SOURCE=Object.freeze({
-  proof:'c5df0dc4aa5b264bca7690af0a2f4c26c9aae3a9',
+  proof:'28329ef9ec9d58e34ea3fb65d7d40d8068aa2f52',
+  originalProof:'c5df0dc4aa5b264bca7690af0a2f4c26c9aae3a9',
   runtime:'2ff0353820e370d004305ae99a035ab38b93de30',
   consumer:'c8815c7cd46feba2f82562a315d1a44a6c88a9e8',
   manifestSha256:'9df0a1203b8a20d87b81888cb4edeaa34537f50c558aba239a79af5b3c443b01',
@@ -27,7 +28,7 @@ function metric(value,shape,exact){
 }
 
 export function validateResidencyComponentCoverage(receipt,{proofRevision,runtimeSourcePair=PAIR}={}){
-  assert.equal(proofRevision,RESIDENCY_COMPONENT_SOURCE.proof,'unrecognized component proof source');
+  assert.ok([RESIDENCY_COMPONENT_SOURCE.proof,RESIDENCY_COMPONENT_SOURCE.originalProof].includes(proofRevision),'unrecognized component proof source');
   assert.deepEqual(runtimeSourcePair,PAIR,'unrecognized runtime source pair');
   assert.equal(receipt?.kind,'h3-residency-component/v1');assert.equal(receipt.schemaVersion,1);assert.equal(receipt.accepted,true);
   assert.equal(receipt.completedLearnedProjectionCalls,6);assert.equal(receipt.completedResidualOnlyScopes,2);
@@ -97,10 +98,35 @@ const DELTA=[
   ':000000 100644 0000000000000000000000000000000000000000 c0c0b2ec92e3bf59d086f83b9a4520628d6aef5d A\tdocs/testing/h3-residency-component.md',
   ':100644 100644 218cfd06259b2008a1fa7f4292df52f8289d39fa e3f47600c77cfd034fb8413f248176e31c7d4de9 M\tscripts/ci/model-inference-proofs.json',
 ].join('\n');
+const C4_DELTA=[
+  ":100644 100644 edd41ea657b38a12f65360e91daf989defde97b8 bde0f9cea2fdc90ed4dc58f35fd427d6ad959189 M\tcrates/media/candle-gen/candle-gen-minimax-h3/src/dit/layers.rs",
+  ":000000 100644 0000000000000000000000000000000000000000 48628b73276f2c2e12c4f68c233c9e3c7057095b A\tcrates/media/candle-gen/candle-gen-minimax-h3/src/dit/layers/residency_component.rs",
+  ":100644 100644 bf2c0aacd9c9eb95617d10ec2fb10879be31ea7b a6ec606da6e01c053c5dae13229afa7ab7554fb7 M\tcrates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
+  ":100644 100644 0eea330eafd8e0918a84f3d5aaa21187e1aebc88 4fb1d2271828fa75a034d6f87bfa0c60a3edb8eb M\tcrates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/streaming.rs",
+  ":100644 100644 806ee2846983b1e04e05942186c72aee4b69a8bc ef21e7b3fb1068923fbdba86c7371698e9607e37 M\tcrates/media/candle-gen/candle-gen-minimax-h3/src/text_encoder/encoder.rs",
+  ":000000 100644 0000000000000000000000000000000000000000 8ad0a3ce4bc742ef78a7b19765beada96ce2ae4b A\tcrates/media/candle-gen/candle-gen-minimax-h3/src/text_encoder/encoder/residency_te.rs",
+  ":100644 100644 89dc364c24bc3da9c0b086ac3ac70ecdd53511ea 17b5ca7d8dd09c3e2c72707f6f823e72dbd79045 M\tcrates/media/candle-gen/candle-gen/src/quant/adapt.rs",
+  ":000000 100644 0000000000000000000000000000000000000000 c0c0b2ec92e3bf59d086f83b9a4520628d6aef5d A\tdocs/testing/h3-residency-component.md",
+  ":100644 100644 218cfd06259b2008a1fa7f4292df52f8289d39fa cff32b27587b6de5a7a0b117cec13dbc9ee2cc0f M\tscripts/ci/model-inference-proofs.json",
+  ":100644 100644 ec8f5ea5bfa4fa278fe57fa48ce09973dac1e63e e30cc49c26210ed2739dc47163873dbcca376eee M\tscripts/ci/model-input-readers.json",
+  ":000000 100644 0000000000000000000000000000000000000000 a2062a28261c7eda6c7d86c1595a7ceceb1558b2 A\tscripts/tests/fixtures/h3-residency-c3-input-events.json",
+  ":100644 100644 c4de1c356bc1ce82047675a8599c67a6e4a91ebd d932ee3a34a5c979eae3787c7493498bd0cf47cc M\tscripts/tests/test_h3_ordinary_execution_policy.py",
+  ":000000 100644 0000000000000000000000000000000000000000 b7463733ae188d699293f17fd352ba4a17aad3e1 A\tscripts/tests/test_h3_residency_input_protocol.py",
+].join('\n');
 export async function residencyComponentSourceApplicability(inferenceRoot,{proofRevision,runtimeRevision},command=promisify(execFile)){
-  assert.equal(proofRevision,RESIDENCY_COMPONENT_SOURCE.proof,'unrecognized component proof source');assert.equal(runtimeRevision,RESIDENCY_COMPONENT_SOURCE.runtime,'unrecognized runtime source');
+  assert.ok([RESIDENCY_COMPONENT_SOURCE.proof,RESIDENCY_COMPONENT_SOURCE.originalProof].includes(proofRevision),'unrecognized component proof source');assert.equal(runtimeRevision,RESIDENCY_COMPONENT_SOURCE.runtime,'unrecognized runtime source');
   const git=async args=>(await command('git',['-C',inferenceRoot,...args])).stdout.trim();
-  const ancestry=[
+  const current=proofRevision===RESIDENCY_COMPONENT_SOURCE.proof;
+  const ancestry=current?[
+    ["28329ef9ec9d58e34ea3fb65d7d40d8068aa2f52","77670bdf615c0991dfccff91e489d5f2c81bc53b"],
+    ["b5dd53b0f120a800a900462ff13ab03465fba336","ea9949db2f6b8c698bc2eefb5ab9d6ae193861ea"],
+    ["a61c3e3473c886109dcfb40cc1a585ab867d08a3","bff1e5515e45fca9e8f3bf66fd92831a7dc6b0f7"],
+    ["e765d81b37c7d4ae7fde2a1884e9eb16f57c5196","94426adfb21cdf5da1ca4fab4cf28cefb2608a64"],
+    ["c5df0dc4aa5b264bca7690af0a2f4c26c9aae3a9","a43054848a1d6f915471dc8625a56e4406243887"],
+    ["255322bd1f430696fb1a21d81653a58bf1ac129a","d793f71c69ec07eba061fb0b2b4b975f18dd9e38"],
+    ["4986a685c256e1966b97f9538e754a46e4246d47","effe9c1152f534b6f746713de59083e6c17a5035"],
+    ["2ff0353820e370d004305ae99a035ab38b93de30","75d392586953d990cf346c7b82f69f7ef246b133"],
+  ]:[
     [proofRevision,'a43054848a1d6f915471dc8625a56e4406243887'],
     ['255322bd1f430696fb1a21d81653a58bf1ac129a','d793f71c69ec07eba061fb0b2b4b975f18dd9e38'],
     ['4986a685c256e1966b97f9538e754a46e4246d47','effe9c1152f534b6f746713de59083e6c17a5035'],
@@ -108,10 +134,11 @@ export async function residencyComponentSourceApplicability(inferenceRoot,{proof
   ];
   for(const [index,[revision,tree]] of ancestry.entries()){
     assert.equal(await git(['rev-parse',revision+'^{tree}']),tree,'exact reviewed ancestry tree required');
-    if(index<ancestry.length-1)assert.equal(await git(['rev-list','--parents','-n','1',revision]),`${revision} ${ancestry[index+1][0]}`,'exact reviewed three-commit ancestry required');
+    if(index<ancestry.length-1)assert.equal(await git(['rev-list','--parents','-n','1',revision]),`${revision} ${ancestry[index+1][0]}`,'exact reviewed source ancestry required');
   }
-  assert.equal(await git(['diff-tree','--no-commit-id','-r','--raw','--no-abbrev',runtimeRevision,proofRevision]),DELTA,'only the exact reviewed five-file diagnostic delta may map');
+  const delta=current?C4_DELTA:DELTA;
+  assert.equal(await git(['diff-tree','--no-commit-id','-r','--raw','--no-abbrev',runtimeRevision,proofRevision]),delta,'only the exact reviewed diagnostic object delta may map');
   return {kind:'h3-residency-component-runtime-applicability/v1',proofRevision,runtimeRevision,directParent:false,reviewedAncestry:ancestry.map(([revision])=>revision),
-    reviewedExactDeltaSha256:sha256(DELTA),productionScope:'Exact reviewed objects: layers.rs adds only the equivalent proof-gated CUDA test child declaration; adapt.rs adds only proof-gated frozen-factor observation. Existing production functions/math unchanged.',
+    reviewedExactDeltaSha256:sha256(delta),productionScope:current?'Exact reviewed13-file C4 delta: proof-gated test modules/inventory shims/getter and content-protocol observations/metadata. Existing production functions/math unchanged.':'Exact reviewed five-file C3 delta: proof-gated test child and frozen-factor getter; production math unchanged.',
     exclusions:['whole-tree equivalence','primitive whole-tree proof reuse','rawVeda45 proof reuse','full-campaign acceptance']};
 }
