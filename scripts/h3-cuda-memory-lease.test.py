@@ -19,11 +19,14 @@ def environment():
                                       "inference": "b" * 40, "poolBytes": 21 * GIB,
                                       "externalReserveBytes": 3 * GIB}),
             "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": "a" * 40,
-            "RUNNER_NAME": "cuda-windows-2", "SCENEWORKS_GPU_ID": "1", "CUDA_VISIBLE_DEVICES": UUID}
+            "RUNNER_NAME": "cuda-windows-2", "SCENEWORKS_GPU_ID": "1", "CUDA_VISIBLE_DEVICES": UUID,
+            "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
 
 
 class LaunchTests(unittest.TestCase):
-    def campaign(self, output, *, status=0, timeout=False, release=True, wait=False, exception=None):
+    def campaign(self, output, *, status=0, timeout=False, release=True, wait=False, exception=None, env=None):
+        env = environment() if env is None else env
+        index = json.loads(env["SW_F329_PLAN"]).get("physicalGpuIndex", 1)
         events = []
         class Job:
             def assign_and_resume(self, child): events.append("resume-owned")
@@ -32,7 +35,7 @@ class LaunchTests(unittest.TestCase):
         @contextmanager
         def claim(backend, policy, directory, env, **options):
             self.assertEqual(backend, "candle-cuda")
-            self.assertEqual(options["constraints"], {"required_cuda_physical_index": 1, "required_cuda_device_uuid": UUID})
+            self.assertEqual(options["constraints"], {"required_cuda_physical_index": index, "required_cuda_device_uuid": env["CUDA_VISIBLE_DEVICES"]})
             self.assertEqual(options["original_deadline_monotonic"], 100 + lease.CAMPAIGN_SECONDS)
             self.assertEqual(policy.child_gpu_cap_bytes, 21 * GIB)
             self.assertEqual(policy.gpu_free_reserve_bytes, 3 * GIB)
@@ -59,7 +62,7 @@ class LaunchTests(unittest.TestCase):
                 return {"returncode": None if timeout else status, "timeout": timeout}
             finally: job.close()
         try:
-            return lease.supervise(Path("SW"), Path("ENGINE"), output, environment(), claim=claim,
+            return lease.supervise(Path("SW"), Path("ENGINE"), output, env, claim=claim,
                                    execute=execute, job_type=Job, clock=lambda: 100), events
         finally:
             self.assertEqual(events[-3:], ["reap-owned", "close-job", "release-check"])
@@ -115,6 +118,35 @@ class LaunchTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unverified"): job.close()
         self.assertFalse(job.reaped)
         self.assertEqual(events, ["closed"])
+
+    def test_explicit_zero_owns_exact_uuid_and_preserves_budgets_and_cleanup(self):
+        env = environment()
+        env.update(SCENEWORKS_GPU_ID="0", CUDA_VISIBLE_DEVICES=lease.GPU_UUIDS[0])
+        env["SW_F329_PLAN"] = json.dumps({**json.loads(env["SW_F329_PLAN"]),
+                                        "physicalGpuIndex": 0, "physicalGpuUuid": lease.GPU_UUIDS[0]})
+        with tempfile.TemporaryDirectory() as temp:
+            receipt, events = self.campaign(Path(temp) / "out", env=env)
+            self.assertEqual(receipt["physicalGpuIndex"], 0)
+            self.assertEqual(receipt["physicalGpuUuid"], lease.GPU_UUIDS[0])
+            self.assertEqual(receipt["minimumClaimFreeBytes"], 24 * GIB)
+            self.assertEqual(events[-3:], ["reap-owned", "close-job", "release-check"])
+
+    def test_selection_type_uuid_visibility_and_retained_control_refuse_before_claim(self):
+        valid = {"physicalGpuIndex": 0, "physicalGpuUuid": lease.GPU_UUIDS[0]}
+        mutations = [{"physicalGpuIndex": x} for x in [-1, 2, True, False, 0.0, "0", None]]
+        mutations += [{"physicalGpuUuid": x} for x in [None, "0", UUID, lease.GPU_UUIDS[1]]]
+        mutations += [{"retainedWorkstation": {}}, {"physicalGpuIndex": 1}]
+        for change in mutations:
+            env = environment()
+            env.update(SCENEWORKS_GPU_ID="0", CUDA_VISIBLE_DEVICES=lease.GPU_UUIDS[0])
+            env["SW_F329_PLAN"] = json.dumps({**json.loads(env["SW_F329_PLAN"]), **valid, **change})
+            with self.subTest(change=change), self.assertRaises(ValueError): lease.validated_plan(env)
+        for change in [{"CUDA_VISIBLE_DEVICES": lease.GPU_UUIDS[1]}, {"SCENEWORKS_GPU_ID": "1"},
+                       {"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}]:
+            env = environment()
+            env.update(SCENEWORKS_GPU_ID="0", CUDA_VISIBLE_DEVICES=lease.GPU_UUIDS[0])
+            env["SW_F329_PLAN"] = json.dumps({**json.loads(env["SW_F329_PLAN"]), **valid})
+            with self.subTest(change=change), self.assertRaises(ValueError): lease.validated_plan({**env, **change})
 
 
 if __name__ == "__main__":

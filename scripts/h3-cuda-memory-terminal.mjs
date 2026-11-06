@@ -11,7 +11,8 @@ import { fileSha256, sha256 } from './lib/file-sha256.mjs';
 import { parse as parseProvenanceCandidates, populationSha256 as provenancePopulationSha256 } from './scan-inference-provenance.mjs';
 import { rustCodeMask, withoutRustTestModules } from './lib/rust-source-slices.mjs';
 import { rustFunctionSlices } from './lib/rust-facade-source.mjs';
-import { OwnedService, ProcessObservations, processSample, assertQueuedMatchesSubmitted, bindCompletedMedia, hardware } from './h3-finetune-terminal-runtime.mjs';
+import { OwnedService, ProcessObservations, processSample, assertQueuedMatchesSubmitted, bindCompletedMedia, hardware, validateCudaRuntimeDevice } from './h3-finetune-terminal-runtime.mjs';
+import { manualCudaSelection } from './ci/h3-import-native-proof.mjs';
 import { runScenario } from './h3-finetune-terminal-api.mjs';
 import { authorized, sourcePair, verifyRenderedContent, decodedDelta, decodeAV, validateAVAgainstRequest } from './h3-finetune-terminal.mjs';
 
@@ -73,8 +74,29 @@ const sha40=value=>assert.match(value??'',/^[a-f0-9]{40}$/,'exact source revisio
 const sha64=value=>assert.match(value??'',/^[a-f0-9]{64}$/,'exact input content commitment required');
 const bytes=(value,name)=>assert.ok(Number.isSafeInteger(value)&&value>0,`${name}: positive integer bytes required`);
 const absolute=value=>assert.ok(typeof value==='string'&&path.win32.isAbsolute(value),'absolute Windows path required');
+const CAMPAIGN_GPU_UUIDS=Object.freeze(['GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0','GPU-e4b79931-7be6-f216-460a-f5405cfafffe']);
+export function campaignCudaSelection(p){
+  const selected=manualCudaSelection(p),uuid=CAMPAIGN_GPU_UUIDS[selected.physicalGpuIndex];
+  if(p.physicalGpuUuid!==undefined||selected.physicalGpuIndex===0)assert.equal(p.physicalGpuUuid,uuid,'campaign requires its canonical selected physical GPU UUID');
+  if(selected.physicalGpuIndex===0)assert.equal(p.retainedWorkstation,undefined,'GPU0 requires a fresh workstation control; retained GPU1 evidence cannot be reused');
+  return {physicalGpuIndex:selected.physicalGpuIndex,physicalGpuUuid:uuid};
+}
+export function campaignCudaEnvironment(p,env){
+  const selected=campaignCudaSelection(p);assert.equal(env.SCENEWORKS_GPU_ID,String(selected.physicalGpuIndex),'worker GPU differs from selected physical index');
+  assert.equal(env.CUDA_DEVICE_ORDER,'PCI_BUS_ID');assert.equal(env.CUDA_VISIBLE_DEVICES,selected.physicalGpuUuid,'campaign requires its exact selected UUID mask');return selected;
+}
+export function anchorRuntime(p,capped,forceDense){
+  const selected=campaignCudaSelection(p);
+  return {port:0,gpuId:String(selected.physicalGpuIndex),deviceId:selected.physicalGpuUuid,...selected,cudaProofFeatures:['sceneworks-rust-api/h3-memory-proof'],memoryCap:capped?{kind:'cuda-vram-gb',value:24}:undefined,cudaProofEnvironment:capped?{SCENEWORKS_CUDA_PROOF_POOL_BYTES:String(p.poolBytes),...(forceDense?{SCENEWORKS_H3_VEDA_FORCE_DENSE:'1'}:{})}:{}};
+}
+export function validateAnchorDevice(job,physicalGpuIndex){
+  manualCudaSelection({physicalGpuIndex,physicalGpuUuid:CAMPAIGN_GPU_UUIDS[physicalGpuIndex]});
+  assert.equal(String(job.requestedGpu),String(physicalGpuIndex),'anchor request differs from selected physical GPU');
+  assert.equal(String(job.assignedGpu),String(physicalGpuIndex),'completed anchor assigned GPU differs from selected physical GPU');
+}
 
 export function validatePlan(p){
+  campaignCudaSelection(p);
   assert.equal(p.version,1);assert.equal(p.stationary_pair_authorized,true);
   sha40(p.sceneworks);sha40(p.inference);sha64(p.requestSha256);
   assert.ok(['cuda-windows','cuda-windows-2'].includes(p.expectedRunner));
@@ -107,7 +129,8 @@ export function validatePlan(p){
   return p;
 }
 
-export function anchorRequest(original,seed){
+export function anchorRequest(original,seed,physicalGpuIndex=1){
+  manualCudaSelection({physicalGpuIndex,physicalGpuUuid:CAMPAIGN_GPU_UUIDS[physicalGpuIndex]});
   assert.equal(original.model,'minimax_h3');assert.equal(original.mode,'text_to_video');
   assert.equal(original.width,1344);assert.equal(original.height,768);assert.equal(original.fps,24);assert.equal(original.duration,14.375);
   assert.equal(original.quality,'balanced');assert.equal(original.fitMode,'crop');
@@ -120,7 +143,7 @@ export function anchorRequest(original,seed){
   assert.ok(advanced.steps===undefined||advanced.steps===8,'original Turbo8step recipe cannot change');
   assert.ok(advanced.mlxQuantize===undefined||advanced.mlxQuantize===4,'original q4 tier cannot change');
   advanced.mlxQuantize=4; // make the original catalog-default q4 selection explicit
-  return {model:original.model,mode:original.mode,prompt:original.prompt,negativePrompt:original.negativePrompt??'',width:1344,height:768,fps:24,duration:14.375,quality:original.quality,fitMode:original.fitMode,seed,loras:[{id:loras[0].id,weight:loras[0].weight}],advanced,requestedGpu:'1'};
+  return {model:original.model,mode:original.mode,prompt:original.prompt,negativePrompt:original.negativePrompt??'',width:1344,height:768,fps:24,duration:14.375,quality:original.quality,fitMode:original.fitMode,seed,loras:[{id:loras[0].id,weight:loras[0].weight}],advanced,requestedGpu:String(physicalGpuIndex)};
 }
 
 function parseEvents(raw){const out=[];for(const line of raw.split('\n'))try{const value=JSON.parse(line);out.push(value.fields??value);}catch{}return out;}
@@ -319,7 +342,8 @@ class StockService extends OwnedService {
     const current=await stat(this.binary);assert.equal(current.size,this.binaryStamp.size);assert.equal(current.mtimeMs,this.binaryStamp.mtimeMs,'owned binary changed');
   }
   async initialize(){
-    authorized(this.p,this.c);await sourcePair(this.p,this.swRoot,this.inferenceRoot);await hardware('cuda',this.c.runtime.deviceId);
+    validateCudaRuntimeDevice(this.c.runtime);
+    authorized(this.p,this.c);await sourcePair(this.p,this.swRoot,this.inferenceRoot);await hardware('cuda',this.c.runtime.deviceId,this.c.runtime);
     await this.refuseLeftoverOwnedProcesses();
     this.runDir=path.join(this.p.output,'services',this.c.id);await mkdir(this.runDir,{recursive:true});this.owner=randomUUID();
     for(const folder of ['config','data','data/cache','data/models','hf/hub','cache'])await mkdir(path.join(this.runDir,folder),{recursive:true});
@@ -750,12 +774,14 @@ async function retainedProofs(p,inferenceRoot){
 
 export async function run(p,swRoot,inferenceRoot,output){
   validatePlan(p);assert.equal(process.platform,'win32');assert.equal(process.env.GITHUB_ACTIONS,'true');assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch');assert.equal(process.env.RUNNER_NAME,p.expectedRunner);assert.equal(process.env.GITHUB_SHA,p.sceneworks);
+  const selected=campaignCudaEnvironment(p,process.env);
   assert.ok(path.resolve(output).toLowerCase().startsWith('d:\\codex\\work\\'),'all generated output belongs onD');
   await mkdir(output);await sourcePair({...p,output},swRoot,inferenceRoot);assert.equal(await fileSha256(p.requestPath),p.requestSha256,'original request changed');
-  const original=await json(p.requestPath),request=anchorRequest(original,p.seed);await save(path.join(output,'request.json'),{original,chosenSeed:p.seed,originalSeed:original.seed,request});
+  const original=await json(p.requestPath),request=anchorRequest(original,p.seed,selected.physicalGpuIndex);await save(path.join(output,'request.json'),{original,chosenSeed:p.seed,originalSeed:original.seed,request});
+  await save(path.join(output,'device-selection.json'),{...selected,logicalCudaOrdinal:0,focusedProofScope:'Existing B9 GPU1 component/source proofs keep their original run/device identities; they are not new product-device measurements. All product anchors use the selected physical device.'});
   const proofs=await retainedProofs(p,inferenceRoot);await save(path.join(output,'focused-proofs.json'),proofs);
   const retained=p.retainedWorkstation?await retainWorkstation(p,swRoot,inferenceRoot,output,request):undefined;
-  const inventory=await hardware('cuda',process.env.CUDA_VISIBLE_DEVICES);await save(path.join(output,'hardware.json'),inventory);
+  const inventory=await hardware('cuda',selected.physicalGpuUuid,selected);await save(path.join(output,'hardware.json'),inventory);
   if(retained)retainedWorkstationHardware(retained.hardware,inventory);
   const staged=await stageModels(p,output),results=[];
   if(retained)retainedWorkstationWeights(retained.weights,staged,p.sources);
@@ -763,7 +789,7 @@ export async function run(p,swRoot,inferenceRoot,output){
   for(const [id,capped,forceDense] of anchors){
     if(id==='workstation-veda'&&retained){results.push(retained.record);continue;}
     const dir=path.join(output,id);await mkdir(dir);const parameters={...p,output};
-    const c={id,backend:'cuda',timeoutSeconds:p.timeoutSeconds,loadHostBudgetBytes:p.hostBudgetBytes,loadDeviceBudgetBytes:capped?24*GIB:p.workstationDeviceBytes,declaredSourceBindings:[{family:'h3',model:{modelId:'minimax_h3',baseModel:'minimax_h3'}}],runtime:{port:0,gpuId:'1',deviceId:process.env.CUDA_VISIBLE_DEVICES,cudaProofFeatures:['sceneworks-rust-api/h3-memory-proof'],memoryCap:capped?{kind:'cuda-vram-gb',value:24}:undefined,cudaProofEnvironment:capped?{SCENEWORKS_CUDA_PROOF_POOL_BYTES:String(p.poolBytes),...(forceDense?{SCENEWORKS_H3_VEDA_FORCE_DENSE:'1'}:{})}:{}}};
+    const c={id,backend:'cuda',timeoutSeconds:p.timeoutSeconds,loadHostBudgetBytes:p.hostBudgetBytes,loadDeviceBudgetBytes:capped?24*GIB:p.workstationDeviceBytes,declaredSourceBindings:[{family:'h3',model:{modelId:'minimax_h3',baseModel:'minimax_h3'}}],runtime:anchorRuntime(p,capped,forceDense)};
     const service=new StockService(parameters,c,swRoot,inferenceRoot,dir,{hardDeadlineMs:Date.now()+(p.timeoutSeconds+900)*1000});service.staged=staged;
     let observer,currentStage='before-submit',record={id,sourcePair:{sceneworks:p.sceneworks,inference:p.inference},settings:request,startedAt:new Date().toISOString(),passed:false};
     try{
@@ -771,7 +797,7 @@ export async function run(p,swRoot,inferenceRoot,output){
       observer=new ProcessObservations(service,{intervalMs:250,sample:async s=>({...await processSample(s),stage:currentStage})}).start();
       const transcript=[],scenario={caseId:id,baseUrl:'http://127.0.0.1:0',timeoutSeconds:p.timeoutSeconds,steps:[{id:'project',method:'POST',path:'/api/v1/projects',body:{name:`SW-F329 ${id}`},expectedStatus:201},{id:'submit',method:'POST',path:'/api/v1/video/jobs',body:{...request,projectId:{$capture:'project/id'}},expectedStatus:201},{id:'complete',waitJob:{$capture:'submit/id'},assert:[{pointer:'/status',equals:'completed'}]}]};
       const executed=await runScenario(scenario,{baseUrl:()=>service.baseUrl,fetchImpl:(...args)=>service.fetch(...args),beforeStep:({step,captures})=>service.checkStep(step,captures),onRecord:async row=>{transcript.push(row);if(row.result?.stage)currentStage=row.result.stage;if(row.method==='POST'&&row.route==='/api/v1/video/jobs'&&row.result?.id)service.jobs.add(row.result.id);await writeFile(path.join(dir,'api-transcript.json'),JSON.stringify(transcript,null,2)+'\n');}});
-      const job=executed.captures.complete;record.job=job;assertQueuedMatchesSubmitted({...request,projectId:executed.captures.project.id},job);
+      const job=executed.captures.complete;record.job=job;assertQueuedMatchesSubmitted({...request,projectId:executed.captures.project.id},job);validateAnchorDevice(job,selected.physicalGpuIndex);
       const metric=await service.request('GET',`/api/v1/jobs/${job.id}/metrics`);record.generationMetrics=metric;
       const veda=metric.vedaExecution??metric.veda_execution;assert.ok(veda,'actual Veda execution report required');
       if(forceDense){assert.equal(veda.sparseCalls??veda.sparse_calls,0);assert.match(veda.fallbackReason??veda.fallback_reason??'',/forced for validation/);}else assert.ok((veda.sparseCalls??veda.sparse_calls)>0,'normal Veda anchor must actually execute sparse attention');
@@ -796,6 +822,6 @@ export async function run(p,swRoot,inferenceRoot,output){
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  try{const [mode,swRoot,inferenceRoot,output]=process.argv.slice(2),p=JSON.parse(process.env.SW_F329_PLAN??'null');validatePlan(p);if(mode==='check')console.log('SW-F329 plan shape and explicit limits checked; no model executed');else{assert.equal(mode,'run');await run(p,path.resolve(swRoot),path.resolve(inferenceRoot),path.resolve(output));}}
+  try{const [mode,swRoot,inferenceRoot,output]=process.argv.slice(2),p=JSON.parse(process.env.SW_F329_PLAN??'null');validatePlan(p);if(mode==='check')console.log('SW-F329 plan shape and explicit limits checked; no model executed');else if(mode==='device')console.log(JSON.stringify(campaignCudaSelection(p)));else{assert.equal(mode,'run');await run(p,path.resolve(swRoot),path.resolve(inferenceRoot),path.resolve(output));}}
   catch(error){console.error(error.stack);process.exitCode=1;}
 }

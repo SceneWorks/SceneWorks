@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { CASE_SHUTDOWN_BOUND_FILE, hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, verifyRenderedContent, compareControlMedia, isSourceCancelCase, allowedInputRoots, verifiedStagingRoot, authorized, executionCases } from './h3-finetune-terminal.mjs';
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
-import { cudaDeviceEvidence, MANUAL_CUDA_PHYSICAL_GPU } from './ci/h3-import-native-proof.mjs';
+import { cudaDeviceEvidence, manualCudaSelection } from './ci/h3-import-native-proof.mjs';
 import { privateRunRoot } from './h3-finetune-terminal-stage.mjs';
 import { OS_ASSIGNED_PORT, isServicePort, boundApiPort, portHolder, formatPortHolder, isBindFailure, liveOwnedProcesses, campaignRunRoots, formatLeftovers, legacyWeightsRunParents, legacyWeightsRunRoots } from './lib/h3-owned-processes.mjs';
 export { OS_ASSIGNED_PORT, boundApiPort };
@@ -192,10 +192,18 @@ export async function hardware(backend, deviceId, deps={}) {
     const gpu = JSON.parse((await execute('system_profiler',['SPDisplaysDataType','-json'])).stdout).SPDisplaysDataType;
     assert.ok(gpu?.length); return {device:gpu[0].sppci_model ?? gpu[0]._name,driver:`Apple Metal driver bundled with macOS ${(await execute('sw_vers',['-productVersion'])).stdout.trim()}`};
   }
+  const selection=manualCudaSelection(deps);
   const inventory=(await execute('nvidia-smi',['--query-gpu=index,uuid,pci.bus_id,name,driver_version','--format=csv,noheader'])).stdout;
-  const cuda=cudaDeviceEvidence(deps.env??process.env,inventory),row=cuda.selectedPhysicalDevice;
-  assert.equal(row.uuid,deviceId,'requested CUDA UUID must be the actual PCI-ordered manual physical device 1');
+  const cuda=cudaDeviceEvidence(deps.env??process.env,inventory,deps),row=cuda.selectedPhysicalDevice;
+  assert.equal(row.uuid,deviceId,`requested CUDA UUID must be the actual PCI-ordered manual physical device ${selection.physicalGpuIndex}`);
   return {device:row.uuid+' '+row.name,driver:row.driverVersion,cuda};
+}
+
+export function validateCudaRuntimeDevice(runtime){
+  const selection=manualCudaSelection(runtime);
+  assert.equal(String(runtime.gpuId),String(selection.physicalGpuIndex),'manual campaign GPU must match its explicit physical selection (default1)');
+  if(selection.physicalGpuUuid!==undefined)assert.equal(runtime.deviceId,selection.physicalGpuUuid,'runtime UUID differs from explicit physical selection');
+  return selection;
 }
 
 // A native test already performs the numerical comparison. Do not invent another flat-vector gate.
@@ -369,8 +377,8 @@ export class OwnedService {
     assert.ok(this.c.inputs.some(i=>i.path===r?.scenario && i.role==='scenario'),'bind the actual request/action scenario as an input');
     assert.ok(r && isServicePort(r.port) && r.gpuId,'owned service port (0 = OS-assigned) and device required');
     if(!this.fake && this.c.backend==='cuda') {
-      assert.equal(String(r.gpuId),MANUAL_CUDA_PHYSICAL_GPU,'manual campaign runs on physical GPU 1 (GPU 0 is the owner display GPU)');
-      await hardware('cuda',r.deviceId); // Confirm UUID/PCI mapping before any build, listener or model load.
+      validateCudaRuntimeDevice(r);
+      await hardware('cuda',r.deviceId,{physicalGpuIndex:r.physicalGpuIndex,physicalGpuUuid:r.physicalGpuUuid}); // Before build/listener/model.
     }
     await this.refuseLeftoverOwnedProcesses();
     const services=path.join(this.p.output,'services');await mkdir(services,{recursive:true});

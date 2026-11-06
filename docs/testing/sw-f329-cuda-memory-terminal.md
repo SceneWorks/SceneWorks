@@ -11,7 +11,7 @@ dispatch choices and input keys. The request defaults to no authorization; the
 plan must explicitly set `stationary_pair_authorized:true`.
 
 The workflow checks the exact pair and script startup before native setup, binds
-physical GPU1 by UUID, uses the existing real-weight concurrency group, builds
+the selected physical GPU by UUID (default GPU1), uses the existing real-weight concurrency group, builds
 the shipped release profile, and creates separate owned API/worker epochs. All
 generated state, staged payloads, builds, logs, and media live on D:. Existing
 exported lifecycle, request/poll, host/device observation, media decode and
@@ -42,6 +42,7 @@ an unsuccessful child or unverified release cannot produce a passing receipt.
 | `stationary_pair_authorized` | `true` only after the final pair is stationary |
 | `sceneworks`, `inference` | Exact40hex candidate and accepted inference-main commit |
 | `expectedRunner` | One live `cuda-windows` or `cuda-windows-2` listener |
+| `physicalGpuIndex`, `physicalGpuUuid` | Optional exact numeric index `0` or `1`, default `1`. Selecting `0` requires UUID `GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0`; an explicit GPU1 UUID must be `GPU-e4b79931-7be6-f216-460a-f5405cfafffe`. The workflow, lease, request, service and inventory must agree. |
 | `requestPath`, `requestSha256` | Absolute path and actual SHA256 of the recovered original request |
 | `licenseAcknowledgmentsPath` | Existing base-model acknowledgment JSON; no fabricated consent |
 | `seed` | Explicit u32, recorded alongside the original null seed |
@@ -54,6 +55,18 @@ an unsuccessful child or unverified release cannot produce a passing receipt.
 | `primitiveProof` | `{directory,runUrl,revision?}`; original measured revision defaults to the final pin, otherwise must be its ancestor with an identical complete Git tree |
 | `materializingProof` | `{logPath,revision,runUrl}` for the accepted exact forced-materializing numerical test; the existing45 numerical/layout/getter/build selections must match final inference, subject only to the two exact non-numerical-file mappings below |
 | `retainedWorkstation` | Optional, narrowly committed accepted workstation control described below; both24GiB anchors still run fresh |
+
+GPU0 selection refuses `retainedWorkstation`: all three product anchors run fresh
+on GPU0, and the full video/audio oracle compares that fresh workstation output
+with the fresh normal24GiB output on the same card. `device-selection.json`
+records physical index/UUID and logical CUDA ordinal0 under its single-UUID mask.
+The accepted B9 DiT, raw Veda and512MiB primitive receipts remain their original
+GPU1 component/source evidence (B9 and M4 have identical whole trees). They are
+not relabeled as GPU0 measurements; the new full-model anchors establish the
+actual GPU0 cap enforcement, fit and AV parity. GPU selection changes neither
+the21GiB pool plus3GiB outside reserve nor the384GiB host,95GiB workstation,
+7200second deadlines, original request/seed42, or0.001 AV RMS limit. Other H3
+manual callers retain their GPU1 default.
 
 The source revisions and minimal file domains are fixed in the runner. The real
 q4 tier is `SceneWorks/minimax-h3-mlx@137ce668…`, Veda predictor `9a1fd3a4…`,

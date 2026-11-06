@@ -15,7 +15,7 @@ jobs:
   anchors:
     if: ${{ github.event_name == 'workflow_dispatch' && fromJSON(inputs.plan).stationary_pair_authorized == true }}
     runs-on: ${{ fromJSON(format('["self-hosted","Windows","X64","cuda","real-weights","{0}"]', fromJSON(inputs.plan).expectedRunner)) }}
-    # Existing physical GPU1 lane; never cancel a prior owned inference run.
+    # Preserve the existing serialized lane for either explicitly selected GPU.
     concurrency:
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
@@ -46,6 +46,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $p = $env:SW_F329_PLAN | ConvertFrom-Json
+          $selectionJson = node sceneworks/scripts/h3-cuda-memory-terminal.mjs device
+          if ($LASTEXITCODE -ne 0) { throw 'invalid explicit physical GPU selection' }
+          $selection = $selectionJson | ConvertFrom-Json
           if ($env:GITHUB_SHA -ne $p.sceneworks) { throw 'dispatch source differs from frozen SceneWorks candidate' }
           if ($env:RUNNER_NAME -ne $p.expectedRunner) { throw 'unexpected real-weights listener' }
           if ((git -C sceneworks rev-parse HEAD) -ne $p.sceneworks -or (git -C inference rev-parse HEAD) -ne $p.inference) { throw 'checkout source mismatch' }
@@ -55,10 +58,10 @@ jobs:
           if (Test-Path -LiteralPath $root) { throw 'refusing to overwrite prior acceptance output' }
           $tempRoot = "$root-temp"
           New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
-          $uuid = (nvidia-smi -i 1 --query-gpu=uuid --format=csv,noheader,nounits).Trim()
-          if ($LASTEXITCODE -ne 0 -or $uuid -notmatch '^GPU-[0-9a-fA-F-]{36}$') { throw 'physical GPU1 unavailable' }
+          $uuid = (nvidia-smi -i $selection.physicalGpuIndex --query-gpu=uuid --format=csv,noheader,nounits).Trim()
+          if ($LASTEXITCODE -ne 0 -or $uuid -cne $selection.physicalGpuUuid) { throw 'selected physical GPU UUID unavailable' }
           $encoding = [System.Text.UTF8Encoding]::new($false)
-          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "SW_F329_OUTPUT=$root`nTEMP=$tempRoot`nTMP=$tempRoot`nCUDA_VISIBLE_DEVICES=$uuid`nCUDA_DEVICE_ORDER=PCI_BUS_ID`nSCENEWORKS_GPU_ID=1`n", $encoding)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "SW_F329_OUTPUT=$root`nTEMP=$tempRoot`nTMP=$tempRoot`nCUDA_VISIBLE_DEVICES=$uuid`nCUDA_DEVICE_ORDER=PCI_BUS_ID`nSCENEWORKS_GPU_ID=$($selection.physicalGpuIndex)`n", $encoding)
       - name: Check script entry point and pure refusal contracts before native/model setup
         working-directory: sceneworks
         shell: cmd

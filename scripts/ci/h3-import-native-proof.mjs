@@ -57,26 +57,34 @@ export function observeMetalCase(name, receipt, save, observe = metalMemoryObser
   return observation;
 }
 
-// Physical GPU 0 is the owner's display/work GPU; the self-hosted CUDA runners own physical GPU 1.
-// Manual H3 proofs therefore pin the PCI-bus-ordered physical device 1 (CUDA ordinal 0 inside the
+// Existing manual H3 callers default to PCI-bus-ordered physical device 1 (CUDA ordinal 0 inside the
 // process, because CUDA_VISIBLE_DEVICES narrows visibility to that one card). SCENEWORKS_GPU_ID is
 // the worker's physical (nvidia-smi, PCI-ordered) index, so it must name the same card.
 // Visibility may use that physical ordinal or its full observed UUID; never a UUID prefix.
 export const MANUAL_CUDA_PHYSICAL_GPU = "1";
 
-function requireManualCudaVisibility(env) {
-  const visible = env.CUDA_VISIBLE_DEVICES;
-  if (env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID" || !(visible === MANUAL_CUDA_PHYSICAL_GPU
-      || /^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(visible ?? ""))) {
-    throw new Error(`manual CUDA proof requires PCI_BUS_ID ordering and visible physical device ${MANUAL_CUDA_PHYSICAL_GPU}`);
-  }
-  if (env.SCENEWORKS_GPU_ID !== undefined && env.SCENEWORKS_GPU_ID !== "" && env.SCENEWORKS_GPU_ID !== MANUAL_CUDA_PHYSICAL_GPU) {
-    throw new Error(`manual CUDA proof requires SCENEWORKS_GPU_ID ${MANUAL_CUDA_PHYSICAL_GPU} to match the visible physical device`);
-  }
+export function manualCudaSelection({physicalGpuIndex,physicalGpuUuid}={}) {
+  const index=physicalGpuIndex===undefined?Number(MANUAL_CUDA_PHYSICAL_GPU):physicalGpuIndex;
+  if(typeof index!=="number"||!Number.isInteger(index)||![0,1].includes(index))throw new Error("manual CUDA physicalGpuIndex must be the exact integer0 or1");
+  if((index===0||physicalGpuUuid!==undefined)&&!/^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(physicalGpuUuid??""))throw new Error("explicit physical GPU0 requires its complete CUDA UUID");
+  return {physicalGpuIndex:index,physicalGpuUuid};
 }
 
-export function cudaDeviceEvidence(env, csv) {
-  requireManualCudaVisibility(env);
+function requireManualCudaVisibility(env,options={}) {
+  const selection=manualCudaSelection(options),physical=String(selection.physicalGpuIndex);
+  const visible = env.CUDA_VISIBLE_DEVICES;
+  if (env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID" || !(visible === physical
+      || /^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(visible ?? ""))) {
+    throw new Error(`manual CUDA proof requires PCI_BUS_ID ordering and visible physical device ${physical}`);
+  }
+  if ((options.physicalGpuIndex!==undefined&&env.SCENEWORKS_GPU_ID!==physical)||(env.SCENEWORKS_GPU_ID !== undefined && env.SCENEWORKS_GPU_ID !== "" && env.SCENEWORKS_GPU_ID !== physical)) {
+    throw new Error(`manual CUDA proof requires SCENEWORKS_GPU_ID ${physical} to match the visible physical device`);
+  }
+  if(selection.physicalGpuUuid!==undefined&&visible!==selection.physicalGpuUuid)throw new Error("manual CUDA proof requires the explicitly selected UUID mask; no ordinal fallback");
+}
+
+export function cudaDeviceEvidence(env, csv,options={}) {
+  requireManualCudaVisibility(env,options);
   const devices = csv.trim().split(/\r?\n/).filter(Boolean).map(line => {
     const [index, uuid, pciBusId, name, driverVersion] = line.split(",").map(value => value.trim());
     const bus = /^([0-9a-f]+):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])$/i.exec(pciBusId ?? "");
@@ -93,10 +101,11 @@ export function cudaDeviceEvidence(env, csv) {
   for (const identity of [d => d.nvmlIndex, d => d.uuid.toLowerCase(), d => d.busOrder.join(":")]) {
     if (new Set(devices.map(identity)).size !== devices.length) throw new Error("ambiguous physical CUDA device identities in nvidia-smi evidence");
   }
-  const physical = Number(MANUAL_CUDA_PHYSICAL_GPU);
+  const physical = manualCudaSelection(options).physicalGpuIndex;
   if (devices.length <= physical) throw new Error(`missing physical CUDA device ${physical} identity`);
   const { busOrder: _order, ...selectedPhysicalDevice } = devices[physical];
-  if (env.CUDA_VISIBLE_DEVICES !== MANUAL_CUDA_PHYSICAL_GPU && env.CUDA_VISIBLE_DEVICES !== selectedPhysicalDevice.uuid) {
+  if(options.physicalGpuIndex!==undefined&&selectedPhysicalDevice.nvmlIndex!==physical)throw new Error("explicit CUDA physical index differs from PCI-ordered NVML identity");
+  if (env.CUDA_VISIBLE_DEVICES !== String(physical) && env.CUDA_VISIBLE_DEVICES !== selectedPhysicalDevice.uuid) {
     throw new Error(`manual CUDA proof UUID must identify PCI-ordered physical device ${physical}`);
   }
   return { cudaDeviceOrder: env.CUDA_DEVICE_ORDER, cudaVisibleDevices: env.CUDA_VISIBLE_DEVICES,

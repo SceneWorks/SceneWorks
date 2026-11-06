@@ -10,8 +10,11 @@ import { privateEnvironment } from './h3-finetune-terminal-runtime.mjs';
 import { validateBoundedQkResidentSources, validateRetainedWindowProvenance } from './h3-cuda-memory-terminal.mjs';
 import { sha256 } from './lib/file-sha256.mjs';
 import { parse as parseProvenanceCandidates, populationSha256 } from './scan-inference-provenance.mjs';
+import { campaignCudaSelection,campaignCudaEnvironment,anchorRuntime,validateAnchorDevice } from './h3-cuda-memory-terminal.mjs';
+import { validateCudaRuntimeDevice,hardware } from './h3-finetune-terminal-runtime.mjs';
 
 const GIB=1024**3;
+const GPU0='GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0',GPU1='GPU-e4b79931-7be6-f216-460a-f5405cfafffe';
 function plan(){return {version:1,stationary_pair_authorized:true,sceneworks:'a'.repeat(40),inference:'b'.repeat(40),requestSha256:'c'.repeat(64),requestPath:'D:\\fixture.json',licenseAcknowledgmentsPath:'D:\\licenses.json',expectedRunner:'cuda-windows-2',seed:42,poolBytes:22*GIB,externalReserveBytes:2*GIB,hostBudgetBytes:64*GIB,workstationDeviceBytes:95*GIB,timeoutSeconds:7200,additionalSparse24:true,additionalSparse24Reason:'E5 compares normal Veda resident and streamed outputs',sources:Object.fromEntries([
   ['tier','SceneWorks--minimax-h3-mlx','137ce668c55a20bc0935fd1cf2a3de8448abb7f4'],
   ['base','MiniMaxAI--MiniMax-H3','6818f6c32d12b210915e44ad56a4228c2608f160'],
@@ -22,6 +25,52 @@ function original(){return {model:'minimax_h3',mode:'text_to_video',prompt:'Fixt
 test('exact original geometry, Turbo8step and Veda controls survive all anchors',()=>{
   const source=original(),request=anchorRequest(source,42);assert.equal(request.seed,42);assert.equal(source.seed,null);assert.equal(request.advanced.mlxQuantize,4);assert.equal(request.advanced.steps,undefined);assert.equal(request.loras[0].id,'minimax_h3_turbo_8step');assert.deepEqual(request.advanced.veda,source.advanced.veda);assert.equal(request.requestedGpu,'1');
   for(const change of [{width:768},{duration:5.17},{quality:'fast'},{loras:[]}])assert.throws(()=>anchorRequest({...source,...change},42));
+});
+test('explicit GPU0 preserves typed zero through all fresh anchor requests and owned runtime configuration',()=>{
+  const p={...plan(),physicalGpuIndex:0,physicalGpuUuid:GPU0,poolBytes:21*GIB,externalReserveBytes:3*GIB,hostBudgetBytes:384*GIB};
+  assert.equal(validatePlan(p),p);assert.deepEqual(campaignCudaSelection(plan()),{physicalGpuIndex:1,physicalGpuUuid:GPU1});
+  const request=anchorRequest(original(),42,0),legacy=anchorRequest(original(),42);
+  assert.deepEqual({...request,requestedGpu:'1'},legacy);assert.equal(request.requestedGpu,'0');
+  validateAnchorDevice({requestedGpu:'0',assignedGpu:'0'},0);
+  for(const job of [{requestedGpu:'1',assignedGpu:'0'},{requestedGpu:'0',assignedGpu:'1'},{requestedGpu:'0'}])assert.throws(()=>validateAnchorDevice(job,0));
+  for(const [capped,dense] of [[false,false],[true,true],[true,false]]){
+    const runtime=anchorRuntime(p,capped,dense);assert.equal(runtime.gpuId,'0');assert.equal(runtime.deviceId,GPU0);
+    assert.deepEqual(validateCudaRuntimeDevice(runtime),{physicalGpuIndex:0,physicalGpuUuid:GPU0});
+    assert.equal(privateEnvironment('D:\\unit_fake', {...runtime,backend:'cuda'},'unit_fake_token').SCENEWORKS_GPU_ID,'0');
+    assert.deepEqual(runtime.memoryCap,capped?{kind:'cuda-vram-gb',value:24}:undefined);
+    assert.equal(runtime.cudaProofEnvironment.SCENEWORKS_CUDA_PROOF_POOL_BYTES,capped?String(21*GIB):undefined);
+    assert.equal(runtime.cudaProofEnvironment.SCENEWORKS_H3_VEDA_FORCE_DENSE,dense?'1':undefined);
+  }
+  for(const physicalGpuIndex of [-1,2,true,false,0.5,'0',null])assert.throws(()=>validatePlan({...p,physicalGpuIndex}));
+  for(const physicalGpuUuid of [undefined,null,'0',GPU1])assert.throws(()=>validatePlan({...p,physicalGpuUuid}));
+  assert.throws(()=>validatePlan({...p,retainedWorkstation:{}}),/fresh workstation/);
+  assert.throws(()=>validateCudaRuntimeDevice({...anchorRuntime(p,false,false),gpuId:'1'}));
+  assert.throws(()=>validateCudaRuntimeDevice({...anchorRuntime(p,false,false),deviceId:GPU1}));
+  assert.deepEqual(validateCudaRuntimeDevice({gpuId:'1'}),{physicalGpuIndex:1,physicalGpuUuid:undefined});
+});
+test('explicit GPU0 environment and hardware bind UUID, PCI order and NVML index without ordinal fallback',async()=>{
+  const p={physicalGpuIndex:0,physicalGpuUuid:GPU0},env={SCENEWORKS_GPU_ID:'0',CUDA_VISIBLE_DEVICES:GPU0,CUDA_DEVICE_ORDER:'PCI_BUS_ID'};
+  assert.deepEqual(campaignCudaEnvironment(p,env),p);
+  const csv=`0, ${GPU0}, 00000000:01:00.0, unit_fake_zero, unit_fake_driver\n1, ${GPU1}, 00000000:41:00.0, unit_fake_one, unit_fake_driver`;
+  const exec=async()=>({stdout:csv});
+  const result=await hardware('cuda',GPU0,{...p,env,exec});assert.equal(result.cuda.selectedPhysicalDevice.nvmlIndex,0);
+  for(const mutation of [{SCENEWORKS_GPU_ID:'1'},{CUDA_VISIBLE_DEVICES:GPU1},{CUDA_VISIBLE_DEVICES:'0'},{CUDA_DEVICE_ORDER:'FASTEST_FIRST'}]){
+    assert.throws(()=>campaignCudaEnvironment(p,{...env,...mutation}));
+    await assert.rejects(hardware('cuda',GPU0,{...p,env:{...env,...mutation},exec}));
+  }
+  await assert.rejects(hardware('cuda',GPU1,{...p,env,exec}));
+  await assert.rejects(hardware('cuda',GPU0,{...p,env,exec:async()=>({stdout:csv.replace('0,','2,')})}),/NVML identity/);
+});
+test('assembled device CLI validates default1 and explicit0 before setup without running models',()=>{
+  const script=fileURLToPath(new URL('./h3-cuda-memory-terminal.mjs',import.meta.url));
+  for(const [p,index,uuid] of [[plan(),1,GPU1],[{...plan(),physicalGpuIndex:0,physicalGpuUuid:GPU0},0,GPU0]]){
+    const result=spawnSync(process.execPath,[script,'device'],{env:{...process.env,SW_F329_PLAN:JSON.stringify(p)},encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout),{physicalGpuIndex:index,physicalGpuUuid:uuid});
+  }
+  for(const mutation of [{physicalGpuIndex:false},{physicalGpuIndex:0},{physicalGpuIndex:0,physicalGpuUuid:GPU1},{physicalGpuIndex:0,physicalGpuUuid:GPU0,retainedWorkstation:{}}]){
+    const result=spawnSync(process.execPath,[script,'device'],{env:{...process.env,SW_F329_PLAN:JSON.stringify({...plan(),...mutation})},encoding:'utf8'});
+    assert.notEqual(result.status,0);assert.equal(result.stdout,'');
+  }
 });
 test('private worker environment adds only explicitly allowed proof controls',()=>{
   const baseline=privateEnvironment('D:\\fixture',{port:0,gpuId:'1',backend:'cuda'},'fixture-token');assert.equal(baseline.SCENEWORKS_CUDA_PROOF_POOL_BYTES,undefined);assert.equal(baseline.SCENEWORKS_H3_VEDA_FORCE_DENSE,undefined);
@@ -143,7 +192,10 @@ test('manual wrapper keeps CUDA memory acceptance separate from ordinary CI and 
   assert.match(caller,/h3-cuda-memory:\n\s+if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.starvector_terminal_operation == 'h3-cuda-memory' \}\}\n\s+uses: \.\/\.github\/workflows\/h3-cuda-memory-terminal\.yml/);
   assert.match(workflow,/workflow_call:/);assert.doesNotMatch(workflow,/\n\s+(?:pull_request|push|schedule|merge_group):/);
   assert.match(workflow,/github\.event_name == 'workflow_dispatch'.*stationary_pair_authorized == true/);
-  assert.match(workflow,/group: windows-candle-gpu-real-weights/);assert.match(workflow,/nvidia-smi -i 1 --query-gpu=uuid/);
+  assert.match(workflow,/group: windows-candle-gpu-real-weights/);assert.match(workflow,/nvidia-smi -i \$selection\.physicalGpuIndex --query-gpu=uuid/);
+  assert.ok(workflow.indexOf('h3-cuda-memory-terminal.mjs device')<workflow.indexOf('nvidia-smi -i'));
+  assert.match(workflow,/\$uuid -cne \$selection\.physicalGpuUuid/);
+  assert.match(workflow,/SCENEWORKS_GPU_ID=\$\(\$selection\.physicalGpuIndex\)/);
   assert.ok(workflow.indexOf('Check script entry point')<workflow.indexOf('Build and execute the three'));
   assert.match(workflow,/python scripts\\h3-cuda-memory-lease\.test\.py/);
   assert.match(workflow,/python scripts\\h3-cuda-memory-lease\.py "%GITHUB_WORKSPACE%\\sceneworks" "%GITHUB_WORKSPACE%\\inference" "%SW_F329_OUTPUT%"/);
