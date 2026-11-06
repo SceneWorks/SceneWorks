@@ -773,7 +773,6 @@ function declaredSupportExpression(body, sourcePath) {
     }
     prefix = block.slice(0, at);
   } else return unreadable(sourcePath, "unreadable capability closure value");
-  if (fields === null) return unreadable(sourcePath, "unbalanced capability literal");
   const support = rustValues(fields).filter((field) => /^support\b/.test(field));
   if (support.length !== 1) return unreadable(sourcePath, "capability has no single support field");
   const expression = support[0].replace(/^support\s*:?\s*/, "").trim() || "support";
