@@ -11,7 +11,19 @@ const actual=JSON.parse(raw);
 // proof-residency-TE-C4/{receipt.json,00000/result.json}; these false stronger claims are deliberate.
 const runReceipt={"accepted":true,"selected":1,"completed":1,"source":{"revision":"28329ef9ec9d58e34ea3fb65d7d40d8068aa2f52","tree":"77670bdf615c0991dfccff91e489d5f2c81bc53b"},"acceptance_scope":"source-bound-case-execution","input_grade":"successful-reader-binding","required_input_content_attested":false,"checkpoint_byte_integrity_attested":false,"request_selection":"candle-gen-minimax-h3/candle_gen_minimax_h3/text_encoder::encoder::residency_te::production_prompt_resident_window_first_difference","selected_bindings":["candle-gen-minimax-h3/candle_gen_minimax_h3/text_encoder::encoder::residency_te::production_prompt_resident_window_first_difference"],"cases":[{"binding":"candle-gen-minimax-h3/candle_gen_minimax_h3/text_encoder::encoder::residency_te::production_prompt_resident_window_first_difference","accepted":true}]};
 const caseReceipt={"accepted":true,"binding":"candle-gen-minimax-h3/candle_gen_minimax_h3/text_encoder::encoder::residency_te::production_prompt_resident_window_first_difference","source_file_sha256":"5dba681a3dde8d83f6974358688da24811f3cd1e1628002342ff936ecc15a56a","actual_devices":["candle-cuda"],"body_completed":1,"successful_libtest_summaries":1,"resource_verification_pending":false,"physical_execution":{"physical_index":0,"device_uuid":"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0","post_execution_verified":true},"input_grade":"successful-reader-binding","required_input_content_attested":false,"checkpoint_byte_integrity_attested":false,"acceptance_scope":"source-bound-case-execution"};
-const options={proofRevision:SOURCE.proof,runReceipt,caseReceipt};
+// This compact test receipt contains the exact consumed fields; integration validation
+// separately supplies the complete archived receipts, which are whole-object equal.
+Object.assign(caseReceipt,{body_proof_accepted:true,parent_completed:null,terminal_model_evidence:false,verified_named_revision:false,
+ outputs:[{path:'00000/generated/residency-te.json',bytes:312698,sha256:'e389eafbc14c615092306df39441793611c46e943999614b050821e07cb0b7a3'}]});
+Object.assign(runReceipt,{terminal_model_evidence:false,verified_named_revision:false,cases:[structuredClone(caseReceipt)]});
+const options={proofRevision:SOURCE.proof,runReceipt,caseReceipt,rawArtifactBytes:raw};
+// Rehashed test-only identities: these alternate metrics are SIMULATED, never the C4 measurement.
+function simulatedOptions(value){
+ const result=structuredClone(options);result.rawArtifactBytes=Buffer.from(JSON.stringify(value));
+ result.caseReceipt.simulation='SIMULATED alternate artifact; not original C4 measurement';
+ result.caseReceipt.outputs=[{path:'00000/generated/residency-te.json',bytes:result.rawArtifactBytes.length,sha256:sha256(result.rawArtifactBytes)}];
+ result.runReceipt.cases=[structuredClone(result.caseReceipt)];return result;
+}
 const fixture=()=>structuredClone(actual);
 test('actual C4 TE raw artifact covers exact production prompt/layers/context with honest input scope',()=>{
  assert.equal(sha256(raw),'e389eafbc14c615092306df39441793611c46e943999614b050821e07cb0b7a3');
@@ -24,8 +36,10 @@ test('discarded CPU tables and default-workspace contrasts remain finite observa
  const value=fixture();
  value.same_policy.tables.discardedCpuCosVsDirectGpu.maxAbs=0.5;value.same_policy.tables.discardedCpuCosVsDirectGpu.rms=0.2;
  Object.assign(value.workspace_default_vs_32m,{leftSha256:'b'.repeat(64),exact:false,maxAbs:1,relativePeak:0.01,rms:0.1});
- const coverage=validateResidencyTextEncoderCoverage(value,options);assert.equal(coverage.observations.defaultWorkspaceContextExact,false);
- value.same_policy.tables.runtimeCos.exact=false;assert.throws(()=>validateResidencyTextEncoderCoverage(value,options),'runtime tables still require exact parity');
+ const simulated=simulatedOptions(value);assert.notEqual(simulated.caseReceipt.outputs[0].sha256,caseReceipt.outputs[0].sha256);
+ assert.match(simulated.caseReceipt.simulation,/SIMULATED/);
+ const coverage=validateResidencyTextEncoderCoverage(value,simulated);assert.equal(coverage.observations.defaultWorkspaceContextExact,false);
+ value.same_policy.tables.runtimeCos.exact=false;assert.throws(()=>validateResidencyTextEncoderCoverage(value,simulatedOptions(value)),'runtime tables still require exact parity');
 });
 test('accepted flag cannot replace every layer, runtime table, packed factor/norm, mask or final-context coverage',()=>{
  const mutations=[
@@ -47,9 +61,9 @@ test('accepted flag cannot replace every layer, runtime table, packed factor/nor
  v=>v.same_policy.layers[49].output.shape=[1,1,5120],v=>v.same_policy.context.rightSha256='b'.repeat(64),
  v=>v.workspace_default_vs_32m.rms=NaN,v=>v.workspace_default_vs_32m.referencePeak=Infinity,
  ];
- for(const [index,mutate] of mutations.entries()){const value=fixture();mutate(value);assert.throws(()=>validateResidencyTextEncoderCoverage(value,options),`mutation${index} must refuse`);}
+ for(const [index,mutate] of mutations.entries()){const value=fixture();mutate(value);assert.throws(()=>validateResidencyTextEncoderCoverage(value,simulatedOptions(value)),`mutation${index} must refuse`);}
  // Internally exact hashes still must connect embedding -> all50layers -> context.
- for(const key of ['input','output']){const value=fixture(),metric=value.same_policy.layers[1][key];metric.leftSha256=metric.rightSha256='b'.repeat(64);assert.throws(()=>validateResidencyTextEncoderCoverage(value,options));}
+ for(const key of ['input','output']){const value=fixture(),metric=value.same_policy.layers[1][key];metric.leftSha256=metric.rightSha256='b'.repeat(64);assert.throws(()=>validateResidencyTextEncoderCoverage(value,simulatedOptions(value)));}
 });
 test('existing generic execution/source/device/post-idle bindings and false global attestations stay strict',()=>{
  for(const mutation of [o=>o.proofRevision=SOURCE.originalProof,o=>o.runtimeSourcePair={sceneworks:SOURCE.consumer,inference:SOURCE.proof},
@@ -61,6 +75,37 @@ test('existing generic execution/source/device/post-idle bindings and false glob
  o=>o.caseReceipt.resource_verification_pending=true,o=>o.caseReceipt.physical_execution.physical_index=1,
  o=>o.caseReceipt.physical_execution.device_uuid='GPU-e4b79931-7be6-f216-460a-f5405cfafffe',o=>o.caseReceipt.physical_execution.post_execution_verified=false,
  o=>o.caseReceipt.input_grade='none',o=>o.caseReceipt.checkpoint_byte_integrity_attested=true]){
-  const changed=structuredClone(options);mutation(changed);assert.throws(()=>validateResidencyTextEncoderCoverage(actual,changed));
+  const changed=structuredClone(options);mutation(changed);
+  if(JSON.stringify(changed.caseReceipt)!==JSON.stringify(options.caseReceipt))changed.runReceipt.cases=[structuredClone(changed.caseReceipt)];
+  assert.throws(()=>validateResidencyTextEncoderCoverage(actual,changed));
  }
+});
+
+test('raw generated bytes bind uniquely to the complete parent/case receipt and supplied metrics',()=>{
+ for(const mutate of [
+  o=>delete o.rawArtifactBytes,o=>o.rawArtifactBytes=raw.toString(),
+  o=>o.rawArtifactBytes=Buffer.concat([raw,Buffer.from(' ')]),
+  o=>o.caseReceipt.outputs[0].sha256='f'.repeat(64),o=>o.caseReceipt.outputs[0].bytes--,
+  o=>o.caseReceipt.outputs[0].path='00001/generated/residency-te.json',
+  o=>o.caseReceipt.outputs.push(structuredClone(o.caseReceipt.outputs[0])),
+  o=>o.caseReceipt.body_proof_accepted=false,o=>o.caseReceipt.parent_completed=false,
+  o=>o.caseReceipt.parent_completed=true,
+  o=>o.runReceipt.cases[0].source_file_sha256='f'.repeat(64),o=>o.runReceipt.cases[0].unconsumedField='different',
+  o=>o.runReceipt.cases[0].outputs[0].sha256='f'.repeat(64),
+  o=>o.runReceipt.terminal_model_evidence=true,o=>o.runReceipt.verified_named_revision=true,
+  o=>o.caseReceipt.terminal_model_evidence=true,o=>o.caseReceipt.verified_named_revision=true,
+ ]){const changed=structuredClone(options);mutate(changed);assert.throws(()=>validateResidencyTextEncoderCoverage(actual,changed));}
+ // Keep parent/case equal to exercise the output checks independently of parent linkage.
+ for(const mutate of [o=>o.caseReceipt.outputs[0].sha256='f'.repeat(64),o=>o.caseReceipt.outputs[0].bytes--,
+  o=>o.caseReceipt.outputs[0].path='other',o=>o.caseReceipt.outputs.push(structuredClone(o.caseReceipt.outputs[0])),
+  o=>o.caseReceipt.body_proof_accepted=false,o=>o.caseReceipt.parent_completed=false,
+  o=>o.caseReceipt.terminal_model_evidence=true,o=>o.caseReceipt.verified_named_revision=true]){
+  const changed=structuredClone(options);mutate(changed);changed.runReceipt.cases=[structuredClone(changed.caseReceipt)];
+  assert.throws(()=>validateResidencyTextEncoderCoverage(actual,changed));
+ }
+ const changedValue=fixture();changedValue.workspace_default_vs_32m.rms=0.1;
+ assert.throws(()=>validateResidencyTextEncoderCoverage(changedValue,options),'values detached from original raw bytes refuse');
+ const invalid=structuredClone(options);invalid.rawArtifactBytes=Buffer.from('{invalid');
+ invalid.caseReceipt.outputs[0]={path:'00000/generated/residency-te.json',bytes:invalid.rawArtifactBytes.length,sha256:sha256(invalid.rawArtifactBytes)};
+ invalid.runReceipt.cases=[structuredClone(invalid.caseReceipt)];assert.throws(()=>validateResidencyTextEncoderCoverage(actual,invalid));
 });
