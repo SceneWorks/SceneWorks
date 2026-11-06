@@ -218,7 +218,13 @@ export function useImageBatchRun({
         } else {
           request = buildBatchJobRequest(cleanPrompt, { resolution });
           // Each prompt composed exactly as its own job would be; `prompt` stays prompts[0].
-          if (n > 1) request.prompts = chunk.map((item) => buildBatchJobRequest(item.prompt, { resolution }).prompt);
+          if (n > 1) {
+            const requests = chunk.map((item) => buildBatchJobRequest(item.prompt, { resolution }));
+            request.prompts = requests.map((item) => item.prompt);
+            if (request.appearance) {
+              request.advanced.appearancePromptBatch = requests.map((item) => item.advanced.appearancePrompt);
+            }
+          }
         }
         if (stopped()) break;
         const result = createImageJob.withResult

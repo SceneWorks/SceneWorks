@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { withImageStudioContext, settle } from "./main.testSupport.jsx";
 import { STYLE_GROUPS, styleHintForId, styleTextForId } from "./data/styleCatalog.js";
+import { recipeToStudioPatch } from "./screens/imageStudio/recipeToStudioPatch.js";
 
 // sc-13131 — End-to-end wiring guard for the live Style preview. Renders the real ImageStudio,
 // types a prompt, picks a style through the actual StylePicker, and asserts that the on-screen
@@ -275,6 +276,46 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
       expect(pills.length).toBeGreaterThan(1);
     });
   });
+  it.each(["z_image_turbo", "krea_2_turbo"])("keeps appearance available on %s despite inactive MOSS edit inputs", async (id) => {
+    window.localStorage.setItem("sceneworks-studio-image-project-1", JSON.stringify({
+      mossImageAdvanced: { positive: { assetId: "embedding" }, negative: { assetId: "negative" }, negativePrompts: ["edit-only"] },
+    }));
+    await renderStudio({ ...IMAGE_MODEL, id });
+    for (const label of ["Camera", "Film", "Looks", "Lighting"]) {
+      expect(container.querySelector(`button[aria-label="${label}"]`)).toBeTruthy();
+    }
+  });
+
+  it("replays a native text-to-image appearance batch from authored rows exactly once", async () => {
+    const model = { ...IMAGE_MODEL, image: { maxPromptBatchImages: 2 } };
+    const authored = ["a fox", "a cat"];
+    window.localStorage.setItem("sceneworks-studio-image-project-1", JSON.stringify({
+      count: 1, batchMode: true, batchPromptsText: authored.join("\n"), appearance: { film: "film-kodak-portra-400", looks: ["look-moody-dark"] },
+    }));
+    await renderStudio(model);
+    async function runBatch() {
+      const run = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch"));
+      await act(async () => run.click());
+      await settle();
+      return createImageJob.mock.calls.at(-1)[0];
+    }
+    const original = await runBatch();
+    expect(original.prompts).toHaveLength(2);
+    expect(original.advanced.appearancePromptBatch).toEqual(authored);
+    expect(original.prompts.every((prompt) => prompt.includes("Film:") && prompt.includes("Look:"))).toBe(true);
+    const { values } = recipeToStudioPatch({ view: "Image", recipe: {
+      model: model.id, mode: "text_to_image", prompt: original.prompt,
+      rawAdapterSettings: { ...original.advanced, promptBatch: original.prompts }, normalizedSettings: { count: original.count },
+    } }, { model: model.id, advancedDefaultsModel: model.id, mossEditActive: false, recipeMode: () => "text_to_image" });
+    expect(values.batchPromptsText).toBe(authored.join("\n"));
+    await act(async () => root.unmount());
+    window.localStorage.setItem("sceneworks-studio-image-project-1", JSON.stringify(values));
+    await renderStudio(model);
+    const replay = await runBatch();
+    expect(replay.prompts).toEqual(original.prompts);
+    expect(replay.advanced.appearancePromptBatch).toEqual(authored);
+  });
+
   it("Appearance selections preview and submit exactly once, including multiple Looks", async () => {
     await renderStudio();
     await typePrompt("Subject: a fox\nCamera: 50mm\nAction: running");

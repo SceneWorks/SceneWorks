@@ -1225,7 +1225,7 @@ export function ImageStudio() {
   const tagConventionModel = selectedModel?.captionStyle === "tags";
   const styleAxisAvailable = !tagConventionModel;
   const effectiveStyleId = styleAxisAvailable ? styleId : null;
-  const appearance = useAppearance({ model: selectedModel, initial: saved.appearance, enabled: styleAxisAvailable && !structuredPromptModel && !mossImageAdvanced?.positive && !mossImageAdvanced?.negative && !mossImageAdvanced?.negativePrompts?.length, prompt });
+  const appearance = useAppearance({ model: selectedModel, initial: saved.appearance, enabled: styleAxisAvailable && !structuredPromptModel && !(mossEdit && (mossImageAdvanced?.positive || mossImageAdvanced?.negative || mossImageAdvanced?.negativePrompts?.length)), prompt });
   const { setSelection: setAppearance } = appearance;
   // sc-13366: when a style is selected, replace the generic scene/character suggestion pills with a
   // single hint pill carrying that style's tailored subject prompt (styleThumbnailPrompts.json) — a
