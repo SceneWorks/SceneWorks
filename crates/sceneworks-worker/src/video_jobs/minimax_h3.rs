@@ -32,12 +32,23 @@ pub(super) fn record_cuda_proof_pool(job_id: &str, stage: &str) -> WorkerResult<
     let snapshot = runtime_cuda::media::candle_core::cuda_backend::proof_pool::snapshot(0)
         .map_err(|error| WorkerError::Engine(format!("H3 CUDA proof pool: {error}")))?;
     if let Some(pool) = snapshot {
+        let (free, total) =
+            runtime_cuda::media::candle_core::cuda::cudarc::driver::result::mem_get_info()
+                .map_err(|error| {
+                    WorkerError::Engine(format!("H3 CUDA device memory observation: {error}"))
+                })?;
+        let device_used_bytes = total.checked_sub(free).ok_or_else(|| {
+            WorkerError::Engine(
+                "H3 CUDA device memory observation returned free above total".into(),
+            )
+        })? as u64;
         tracing::info!(
             event = "h3_cuda_proof_pool_snapshot",
             jobId = job_id,
             stage,
             logical_ordinal = pool.logical_ordinal,
             cap_bytes = pool.cap_bytes,
+            device_used_bytes,
             used_bytes = pool.used_bytes,
             used_high_bytes = pool.used_high_bytes,
             reserved_bytes = pool.reserved_bytes,

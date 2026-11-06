@@ -3079,23 +3079,66 @@ pub(super) async fn generate_video_using(
                 };
                 admission_inputs.runtime = admission_runtime;
                 admission_inputs.headroom_bytes = admission_headroom_bytes;
-                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                if let Some(bound) = &sparse_bound {
-                    crate::video_admission::admit_veda_host_workspace(
-                        bound,
-                        host_probe_runtime.block_on(crate::yue2_admission::host_available_bytes()),
-                    )?;
-                }
-                // Sparse requests take the dense ladder's strategy, graded with the sparse
-                // workspace bound on top (sc-25777).
+                // Native CUDA composes sparse execution in its selected denoise phase; the
+                // legacy unified-memory routes retain their existing accounting.
                 let outcome = crate::video_admission::admit_video_generation_with_veda(
                     generator,
                     admission_inputs,
                     sparse_bound.as_ref(),
                     spec_headroom_bytes,
                 )?;
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                if engine_id == "minimax_h3" && outcome.refusal.is_none() {
+                    if outcome.context.is_none() {
+                        return Err(WorkerError::InvalidPayload(
+                            "H3 CUDA source allocation facts or the current GPU budget are unavailable; refusing before tensor materialization.".into()));
+                    }
+                    let host_bytes =
+                        runtime_cuda::providers::minimax_h3::memory_strategy::host_peak_bytes(
+                            &admission_spec,
+                            gen_core_h3::veda::workspace::Request {
+                                veda: input.veda.as_ref(),
+                                width: input.width,
+                                height: input.height,
+                                frames: input.frames,
+                                count: 1,
+                                prompt: &input.prompt,
+                                conditioning: &input.conditioning,
+                                reference_image_short_edge: input.reference_image_short_edge,
+                                reference_image_resize_mode: input.reference_image_resize_mode,
+                            },
+                            outcome
+                                .memory
+                                .is_some_and(|memory| memory.stream_transformer_blocks),
+                        )
+                        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+                    crate::video_admission::admit_h3_host_bytes(
+                        host_bytes,
+                        host_probe_runtime.block_on(crate::yue2_admission::host_available_bytes()),
+                    )?;
+                }
                 apply_video_admission_outcome(&mut input, outcome)?;
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                let proof_observation_error = std::cell::RefCell::new(None);
                 let mut on_progress = |progress: Progress| {
+                    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                    if engine_id == "minimax_h3" && proof_observation_error.borrow().is_none() {
+                        let stage = match &progress {
+                            Progress::Loading(_) => Some("loading"),
+                            Progress::ConditioningComplete => Some("conditioning-complete"),
+                            Progress::Step { .. } => Some("denoise-step"),
+                            Progress::Decoding => Some("decoding"),
+                            _ => None,
+                        };
+                        if let Some(stage) = stage {
+                            if let Err(error) =
+                                super::minimax_h3::record_cuda_proof_pool(&receipt_job_id, stage)
+                            {
+                                *proof_observation_error.borrow_mut() = Some(error);
+                                cancel.cancel();
+                            }
+                        }
+                    }
                     // A closed channel means the consumer loop returned early (POST failure /
                     // 409); trip the engine flag so the denoise bails instead of running unheard
                     // (sc-8804, F-003 — the swallowed-closed-channel leak).
@@ -3113,6 +3156,10 @@ pub(super) async fn generate_video_using(
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 if engine_id == "minimax_h3" {
                     // Scope cleanup has already run, including cancellation and failed forwards.
+                    if let Some(error) = proof_observation_error.into_inner() {
+                        super::minimax_h3::record_cuda_proof_pool(&receipt_job_id, "after")?;
+                        return Err(error);
+                    }
                     let observation =
                         super::minimax_h3::record_cuda_proof_pool(&receipt_job_id, "after");
                     if result.is_ok() {

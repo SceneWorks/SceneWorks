@@ -97,6 +97,8 @@ test-support = ["sceneworks-core/test-support", "dep:mlx-gen-moss-image", "dep:c
 # Native Candle inference stays opt-in because CUDA toolchain/runtime requirements do not belong in
 # the ordinary desktop build. The bundle owns the complete provider and LLM composition.
 backend-candle = ["dep:runtime-cuda", "dep:candle-gen-ltx", "dep:ort"]
+# Dedicated manual H3 memory acceptance; never enabled by ordinary builds or CI.
+h3-memory-proof = ["backend-candle", "runtime-cuda/h3-memory-proof"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-gen-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "178eb45e5ad986d2a7236c8f6b800139675baa31", default-features = false, features = ["test-support"], optional = true }

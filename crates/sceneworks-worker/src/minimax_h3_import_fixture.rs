@@ -702,6 +702,14 @@ pub fn write_shared_configs(root: &Path, encoder: &Path) {
         0x2c,
     );
     let video = platform_runtime::providers::minimax_h3::config::MiniMaxH3VaeConfig::default();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let video = platform_runtime::providers::minimax_h3::config::MiniMaxH3VaeConfig {
+        num_layers: 1,
+        num_heads: 1,
+        head_dim: 8,
+        ffn_mult: 2,
+        ..video
+    };
     put(
         root.join("vae/config.json"),
         json!({
@@ -739,6 +747,46 @@ pub fn write_shared_configs(root: &Path, encoder: &Path) {
         "num_attention_heads":8,"resblock_dilation_sizes":[[1,3,5],[1,3,5],[1,3,5]],
         "resblock_kernel_sizes":[3,7,11],"sampling_rate":32000,"latents_mean":vec![0.0;32],"latents_std":vec![1.0;32]}),
     );
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        // Every consumed TE layer has a real header entry. The source planner must not treat
+        // an unparseable/incomplete encoder as a zero-byte executable window.
+        let names = (0..64)
+            .map(|i| format!("model.language_model.layers.{i}.self_attn.q_proj.weight"))
+            .chain(["model.language_model.embed_tokens.weight".to_owned()])
+            .collect::<Vec<_>>();
+        let entries = names
+            .iter()
+            .map(|name| (name.as_str(), "F16"))
+            .collect::<Vec<_>>();
+        write_safetensors(&encoder.join("fixture.safetensors"), &entries, 0x2a);
+        let map = names
+            .iter()
+            .map(|name| (name.clone(), json!("fixture.safetensors")))
+            .collect::<Map<_, _>>();
+        put(
+            encoder.join("model.safetensors.index.json"),
+            json!({"weight_map":map}),
+        );
+        // Complete native audio readset at fixture scale. Source memory planning validates the
+        // constructor's actual operand names before the recording mock can be invoked.
+        let a = platform_runtime::providers::minimax_h3::audio_config::MiniMaxH3AudioVaeConfig::from_source_files(
+            &std::fs::read_to_string(root.join("FL2VA/audio_vae/config.json")).unwrap(),
+            &std::fs::read_to_string(root.join("FL2VA/audio_vae/config.yaml")).unwrap(),
+            &std::fs::read_to_string(root.join("FL2VA/audio_vae/metadata.json")).unwrap(),
+        ).unwrap();
+        let mut names = platform_runtime::providers::minimax_h3::audio_vae_encoder::MiniMaxH3AudioVaeEncoder::tensor_names(&a);
+        names.extend(
+            platform_runtime::providers::minimax_h3::audio_vae::MiniMaxH3AudioVae::tensor_names(&a),
+        );
+        names.sort();
+        names.dedup();
+        let entries = names
+            .iter()
+            .map(|name| (name.as_str(), "F16"))
+            .collect::<Vec<_>>();
+        write_safetensors(&root.join("audio_vae/fixture.safetensors"), &entries, 0x2c);
+    }
     put(
         root.join("tokenizer/tokenizer.json"),
         json!({"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[

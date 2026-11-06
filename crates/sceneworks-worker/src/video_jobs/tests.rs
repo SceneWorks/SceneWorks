@@ -4414,7 +4414,7 @@ impl ArmProbe {
         let audio = self.audio.clone();
         move |engine_id, spec| {
             *seen_spec.lock().unwrap() = Some(spec.clone());
-            Ok(Box::new(ProbeGenerator {
+            let probe = ProbeGenerator {
                 descriptor: gen_core::ModelDescriptor {
                     // Leaked so the descriptor's `&'static str` id reflects the engine actually
                     // asked for; the probe outlives nothing, so the leak is bounded by the test.
@@ -4431,7 +4431,22 @@ impl ArmProbe {
                 request: seen_request,
                 adapter_reports,
                 audio,
-            }))
+            };
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            if engine_id == "minimax_h3" {
+                let contract = crate::inference_runtime::media()
+                    .memory_strategy_contract(engine_id, spec)?
+                    .ok_or_else(|| {
+                        gen_core::Error::Unsupported(
+                            "H3 probe source has no memory contract".into(),
+                        )
+                    })?;
+                return Ok(Box::new(H3ContractProbe {
+                    inner: probe,
+                    contract,
+                }));
+            }
+            Ok(Box::new(probe))
         }
     }
 
@@ -4467,6 +4482,52 @@ struct ProbeGenerator {
     adapter_reports: std::sync::Arc<std::sync::Mutex<Vec<gen_core::AdapterApplyReport>>>,
     /// The soundtrack this stub emits with its frames — see [`ArmProbe::audio`].
     audio: Option<gen_core::AudioTrack>,
+}
+
+/// Source metadata and the real admission contract, with generation replaced by a recording mock.
+/// This exercises cold/queued H3 planning without allocating a device or executing a model.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+struct H3ContractProbe {
+    inner: ProbeGenerator,
+    contract: gen_core::MemoryProviderContract,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl Generator for H3ContractProbe {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        self.inner.descriptor()
+    }
+    fn validate(&self, request: &GenerationRequest) -> gen_core::Result<()> {
+        self.inner.validate(request)
+    }
+    fn memory_strategy_contract(&self) -> Option<&gen_core::MemoryProviderContract> {
+        Some(&self.contract)
+    }
+    fn memory_strategy_safety_check(
+        &self,
+        context: &gen_core::MemoryRunContext,
+    ) -> gen_core::MemorySafetyDecision {
+        gen_core::default_memory_strategy_safety_check(&self.contract, context)
+    }
+    fn begin_memory_strategy_request(
+        &self,
+        _: &gen_core::MemoryRunContext,
+    ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope>>> {
+        Ok(Some(Box::new(VideoLifecycleScope {
+            record: Default::default(),
+            configure_error: false,
+        })))
+    }
+    fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
+        self.inner.adapter_apply_reports()
+    }
+    fn generate(
+        &self,
+        request: &GenerationRequest,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        self.inner.generate(request, progress)
+    }
 }
 
 #[cfg(native_lane)]
