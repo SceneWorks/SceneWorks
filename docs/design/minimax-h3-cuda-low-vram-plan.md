@@ -2,7 +2,8 @@
 
 Date: 2026-11-05
 
-Status: Planned for implementation. CodeGraph filing is deferred.
+Status: Implementation and acceptance in progress as **SW-F329**. Production
+numerical acceptance and final consumer promotion remain open.
 
 Make MiniMax H3 render long clips on CUDA using bounded GPU residency and accurate
 request accounting. The immediate acceptance case is **1344×768, 345 frames,
@@ -75,15 +76,15 @@ historical explanation or create a new measurement-freshness requirement.
 
 ## Implementation items
 
-The item references below are local plan references, not CodeGraph keys.
+The local plan references map to the tracked CodeGraph items below.
 
-| Ref | Type | Repository | Outcome | Blocked by |
-| --- | --- | --- | --- | --- |
-| H3-1 | Story | inference | Execute H3 with bounded CUDA transformer residency | None |
-| H3-2 | Bug | inference | Account for Veda host and GPU allocations by lifetime | None |
-| H3-3 | Story | inference | Select truthful H3 CUDA memory strategies | H3-1, H3-2 |
-| H3-4 | Story | SceneWorks | Admit and run long H3 requests through the shared strategy path | H3-3 |
-| H3-5 | Task | SceneWorks | Integrate the inference pin and prove long-clip memory targets | H3-4 |
+| Ref | CodeGraph | Type | Repository | Outcome | Blocked by |
+| --- | --- | --- | --- | --- | --- |
+| H3-1 | SW-6921 | Story | inference | Execute H3 with bounded CUDA transformer residency | None |
+| H3-2 | SW-6922 | Bug | inference | Account for Veda host and GPU allocations by lifetime | None |
+| H3-3 | SW-6923 | Story | inference | Select truthful H3 CUDA memory strategies | H3-1, H3-2 |
+| H3-4 | SW-6924 | Story | SceneWorks | Admit and run long H3 requests through the shared strategy path | H3-3 |
+| H3-5 | SW-6925 | Task | SceneWorks | Integrate the inference pin and prove long-clip memory targets | H3-4 |
 
 ### H3-1 Execute H3 with bounded CUDA transformer residency
 
@@ -290,9 +291,8 @@ larger routine grid or an unverified claim of fit.
 H3-1 and H3-2 are independent implementation fronts. H3-3 joins their contracts,
 H3-4 performs the product cutover, and H3-5 closes the two-repository delivery.
 Related items may share reviewed PR batches and CI runs while retaining separate
-acceptance evidence. Refresh affected source and any overlapping tracked work
-before implementation; CodeGraph availability is not required to use these local
-item references.
+acceptance evidence. Refresh affected source and reconcile the live feature,
+items and overlapping work before implementation.
 
 Follow [FEATURE_DEVELOPMENT.md](../../FEATURE_DEVELOPMENT.md) for mirrored feature
 branches, review, inference merge ordering, final pin integration, and required
