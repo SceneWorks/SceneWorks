@@ -581,6 +581,10 @@ export function validatePrimitiveProofLog(log){
   const marker=log.match(/CUDA_PROOF_POOL_EVIDENCE (\{[^\n]+\})/);assert.ok(marker,'positive allocator enforcement evidence required');
   const primitive=JSON.parse(marker[1]);
   for(const field of ['overCapRefused','bothConstructors','cublasStreamResetRebound'])assert.equal(primitive[field],true,`allocator primitive must prove ${field}`);
+  assert.equal(primitive.logicalOrdinal,0,'allocator primitive must use the bound logical device');
+  for(const field of ['capBytes','heldBytes','usedHighBytes','reservedHighBytes'])assert.ok(Number.isSafeInteger(primitive[field])&&primitive[field]>0,`allocator primitive must report exact positive ${field}`);
+  assert.equal(primitive.capBytes,512*1024**2,'allocator primitive must use the dedicated512MiB cap');
+  assert.ok(primitive.capBytes/2<=primitive.heldBytes&&primitive.heldBytes<=primitive.usedHighBytes&&primitive.usedHighBytes<=primitive.reservedHighBytes,'allocator primitive must positively exercise the bounded pool');
   assert.ok(Number.isSafeInteger(primitive.successfulRecoveryCount)&&primitive.successfulRecoveryCount>=0,'allocator primitive must report an exact nonnegative recovery count');
   assert.equal(typeof primitive.fragmentationRecoveryExercised,'boolean','allocator primitive must report whether recovery occurred');
   assert.equal(primitive.fragmentationRecoveryExercised,primitive.successfulRecoveryCount>0,'allocator recovery observation must match its count');

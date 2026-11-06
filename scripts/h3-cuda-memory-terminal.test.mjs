@@ -319,12 +319,12 @@ test('retention independently binds all weight roles, native configuration, phys
 });
 
 test('allocator primitive requires enforcement and an honest consistent observed recovery count, including zero',()=>{
-  const evidence={overCapRefused:true,bothConstructors:true,cublasStreamResetRebound:true,successfulRecoveryCount:1,fragmentationRecoveryExercised:true,reservedHighBytes:500,capBytes:512};
+  const evidence={logicalOrdinal:0,overCapRefused:true,bothConstructors:true,cublasStreamResetRebound:true,successfulRecoveryCount:1,fragmentationRecoveryExercised:true,heldBytes:469762048,usedHighBytes:536870912,reservedHighBytes:536870912,capBytes:536870912};
   const log=value=>'CUDA_PROOF_POOL_EVIDENCE '+JSON.stringify(value)+'\ntest result: ok. 1 passed; 0 failed; 0 ignored';
   validatePrimitiveProofLog(log(evidence));
   assert.equal(validatePrimitiveProofLog(log({...evidence,successfulRecoveryCount:0,fragmentationRecoveryExercised:false})).successfulRecoveryCount,0);
   for(const field of ['overCapRefused','bothConstructors','cublasStreamResetRebound','successfulRecoveryCount','fragmentationRecoveryExercised']){const bad={...evidence};delete bad[field];assert.throws(()=>validatePrimitiveProofLog(log(bad)));}
   for(const count of [-1,0.5,true,'1',null,Number.MAX_SAFE_INTEGER+1])assert.throws(()=>validatePrimitiveProofLog(log({...evidence,successfulRecoveryCount:count})));
   for(const [successfulRecoveryCount,fragmentationRecoveryExercised] of [[0,true],[1,false],[0,0],[1,1],[0,'false']])assert.throws(()=>validatePrimitiveProofLog(log({...evidence,successfulRecoveryCount,fragmentationRecoveryExercised})));
-  assert.throws(()=>validatePrimitiveProofLog(log({...evidence,reservedHighBytes:513})));
+  for(const change of [{logicalOrdinal:1},{capBytes:512},{heldBytes:1},{heldBytes:536870913},{usedHighBytes:469762047},{reservedHighBytes:536870913},{capBytes:'536870912'},{heldBytes:true},{usedHighBytes:NaN},{reservedHighBytes:null}])assert.throws(()=>validatePrimitiveProofLog(log({...evidence,...change})));
 });
