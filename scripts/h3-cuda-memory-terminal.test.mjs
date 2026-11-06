@@ -11,6 +11,7 @@ import { validateBoundedQkResidentSources, validateRetainedWindowProvenance } fr
 import { sha256 } from './lib/file-sha256.mjs';
 import { parse as parseProvenanceCandidates, populationSha256 } from './scan-inference-provenance.mjs';
 import { campaignCudaSelection,campaignCudaEnvironment,anchorRuntime,validateAnchorDevice } from './h3-cuda-memory-terminal.mjs';
+import { collectDecodedMediaDiagnostics } from './h3-cuda-memory-terminal.mjs';
 import { validateCudaRuntimeDevice,hardware } from './h3-finetune-terminal-runtime.mjs';
 
 const GIB=1024**3;
@@ -254,14 +255,15 @@ test('full raw numerical comparison sees late frames, every channel, non-finite 
 
 test('assembled decoder uses all native frames/stereo samples and fixed existing H3 RMS ceiling, with bounded cleanup',async t=>{
   const dir=await directory(t),calls=[];
-  const makeCommand=({videoChange=false,audioChange=false,swapChannels=false,truncateVideo=false,truncateAudio=false,truncateVideoBoth=false,truncateAudioBoth=false}={})=>async(command,args)=>{
+  const makeCommand=({videoChange=false,audioChange=false,swapChannels=false,nonfiniteAudio=false,truncateVideo=false,truncateAudio=false,truncateVideoBoth=false,truncateAudioBoth=false}={})=>async(command,args)=>{
     assert.equal(command,'ffmpeg');calls.push(args);assert.ok(args.includes('-xerror'));assert.ok(args.includes('-n'));
     assert.ok(!args.includes('-vf')&&!args.includes('-ar')&&!args.includes('-ac'),'no frame sampling, resampling or mono collapse');
     const candidate=args[args.indexOf('-i')+1]==='candidate',video=args.includes('rawvideo');
     let output=video?Buffer.alloc(36,100):pcm([0.1,0.2,0.3,0.4]);
-    if(candidate&&videoChange)output[35]=255;
-    if(candidate&&audioChange)output=pcm([0.1,-0.2,0.3,-0.4]);
-    if(candidate&&swapChannels)output=pcm([0.2,0.1,0.4,0.3]);
+    if(candidate&&video&&videoChange)output[35]=255;
+    if(candidate&&!video&&audioChange)output=pcm([0.1,-0.2,0.3,-0.4]);
+    if(candidate&&!video&&swapChannels)output=pcm([0.2,0.1,0.4,0.3]);
+    if(candidate&&!video&&nonfiniteAudio)output=pcm([0.1,NaN,0.3,0.4]);
     if((video&&truncateVideoBoth)||(!video&&truncateAudioBoth))output=output.subarray(0,video?3:8);
     if(candidate&&((video&&truncateVideo)||(!video&&truncateAudio)))output=output.subarray(0,video?3:8);
     await writeFile(args.at(-1),output);return {stdout:'',stderr:''};
@@ -269,7 +271,36 @@ test('assembled decoder uses all native frames/stereo samples and fixed existing
   const options={videoElements:36,audioSamples:2,audioChannels:2,sampledDelta:async()=>0};
   const good=await compareDecodedMedia('reference','candidate',dir,{...options,command:makeCommand()});
   assert.equal(good.streams.video.elements,36);assert.equal(good.streams.audio.elements,4);assert.equal(good.streams.video.maximumRmse,0.001);
-  for(const mutation of [{videoChange:true},{audioChange:true},{swapChannels:true},{truncateVideo:true},{truncateAudio:true},{truncateVideoBoth:true},{truncateAudioBoth:true}])await assert.rejects(compareDecodedMedia('reference','candidate',dir,{...options,command:makeCommand(mutation)}));
+  const diagnostics=await collectDecodedMediaDiagnostics('reference','candidate',dir,{...options,command:makeCommand({videoChange:true,audioChange:true})});
+  assert.ok(diagnostics.streams.video.rmse>VEDA_EQUIVALENCE.video);assert.ok(diagnostics.streams.audio.rmse>VEDA_EQUIVALENCE.audio);
+  assert.equal(diagnostics.policy,undefined);assert.equal(diagnostics.streams.video.maximumRmse,undefined,'collection alone does not grade acceptance');
+  assert.deepEqual(await readdir(dir),[],'successful ungraded diagnostics remove every generated vector');
+  const beforeFailure=calls.length;
+  await assert.rejects(compareDecodedMedia('reference','candidate',dir,{...options,command:makeCommand({videoChange:true,audioChange:true})}),error=>{
+    assert.match(error.message,/video full decoded/);
+    const report=error.comparison;assert.equal(report.policy,VEDA_EQUIVALENCE);
+    assert.equal(report.streams.video.elements,36);assert.equal(report.streams.audio.elements,4);assert.equal(report.streams.audio.channels,2);
+    assert.ok(report.streams.audio.channelRmse[1]>0.5);assert.equal(report.streams.audio.sampledRmse,0);
+    assert.equal(report.streams.audio.maximumRmse,VEDA_EQUIVALENCE.audio);return true;
+  });
+  assert.equal(calls.length-beforeFailure,4,'video grading failure must follow all four native decodes');
+  assert.deepEqual(await readdir(dir),[],'video grading failure removes both complete RGB and PCM pairs');
+  for(const mutation of [{videoChange:true},{audioChange:true},{swapChannels:true},{nonfiniteAudio:true},{truncateVideo:true},{truncateAudio:true},{truncateVideoBoth:true},{truncateAudioBoth:true}]){
+    await assert.rejects(compareDecodedMedia('reference','candidate',dir,{...options,command:makeCommand(mutation)}));
+    assert.deepEqual(await readdir(dir),[],'each invalid stream or grading refusal cleans its own outputs');
+  }
+  const decode=makeCommand();
+  await assert.rejects(collectDecodedMediaDiagnostics('reference','candidate',dir,{...options,command:async(program,args)=>{
+    await decode(program,args);if(args.includes('f32le')&&args[args.indexOf('-i')+1]==='candidate')throw new Error('injected audio decode failure after output creation');
+  }}),/injected audio decode failure/);
+  assert.deepEqual(await readdir(dir),[],'partial decoder outputs are cleaned on command failure');
+  const beforeSampled=calls.length;
+  await assert.rejects(collectDecodedMediaDiagnostics('reference','candidate',dir,{...options,command:makeCommand(),sampledDelta:async()=>{
+    assert.equal(calls.length-beforeSampled,4,'both full streams precede the optional sampled witness');throw new Error('injected sampled witness failure');
+  }}),error=>{
+    assert.match(error.message,/sampled witness failure/);assert.equal(error.comparison.streams.video.elements,36);assert.equal(error.comparison.streams.audio.elements,4);return true;
+  });
+  assert.deepEqual(await readdir(dir),[],'sampled witness failure cleans all complete native outputs');
   for(const sampled of [0.01,-1,NaN,undefined])await assert.rejects(compareDecodedMedia('reference','candidate',dir,{...options,command:makeCommand(),sampledDelta:async()=>sampled}),/decodedDelta/);
   assert.ok(calls.length>0);assert.deepEqual(await readdir(dir),[],'generated raw vectors never become retained giant artifacts');
 });

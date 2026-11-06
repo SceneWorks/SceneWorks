@@ -266,10 +266,10 @@ export async function rawNumericDifference(a,b,{stream,expectedElements,channels
   return {elements,channels,rmse:Math.sqrt(squared/elements),maxAbs,channelRmse:channelSquares.map(sum=>Math.sqrt(sum/(elements/channels))),coverage:'all native-resolution frames or all native-rate interleaved audio samples'};
 }
 
-export async function compareDecodedMedia(a,b,dir,{videoElements,audioSamples,audioPadding=0,audioChannels=2,command=exec,sampledDelta=decodedDelta}={}){
+export async function collectDecodedMediaDiagnostics(a,b,dir,{videoElements,audioSamples,audioPadding=0,audioChannels=2,command=exec,sampledDelta=decodedDelta}={}){
   assert.ok(Number.isSafeInteger(videoElements)&&videoElements>0&&videoElements%3===0,'native video element count required');
   assert.ok(Number.isSafeInteger(audioSamples)&&audioSamples>0&&Number.isSafeInteger(audioPadding)&&audioPadding>=0,'native audio sample coverage required');
-  const report={policy:VEDA_EQUIVALENCE,streams:{}};const raw=[];
+  const report={streams:{}};const raw=[];
   try{
     for(const stream of ['video','audio']){
       const files=[];
@@ -281,13 +281,28 @@ export async function compareDecodedMedia(a,b,dir,{videoElements,audioSamples,au
       if(stream==='audio')for(const file of files){const count=(await stat(file)).size/(4*audioChannels);assert.ok(Number.isInteger(count)&&count>=audioSamples-audioPadding&&count<=audioSamples+audioPadding,'full decoded audio sample coverage required');}
       const full=await rawNumericDifference(...files,{stream,channels:stream==='video'?3:audioChannels,expectedElements:stream==='video'?videoElements:undefined});
       if(stream==='audio')assert.ok(full.elements/audioChannels>=audioSamples-audioPadding&&full.elements/audioChannels<=audioSamples+audioPadding,'full decoded audio sample coverage required');
-      report.streams[stream]={...full,maximumRmse:VEDA_EQUIVALENCE[stream],sampledRmse:await sampledDelta(a,b,stream)};
-      assert.ok(full.rmse<=VEDA_EQUIVALENCE[stream]&&full.channelRmse.every(v=>v<=VEDA_EQUIVALENCE[stream]),`${stream} full decoded Veda residency comparison exceeds fixed same-backend RMS ceiling`);
-      assert.ok(Number.isFinite(report.streams[stream].sampledRmse)&&report.streams[stream].sampledRmse>=0&&report.streams[stream].sampledRmse<=VEDA_EQUIVALENCE[stream],`${stream} existing decodedDelta witness exceeds same-backend RMS ceiling`);
+      report.streams[stream]=full;
     }
+    for(const stream of ['video','audio'])report.streams[stream].sampledRmse=await sampledDelta(a,b,stream);
+    for(const [stream,metric] of Object.entries(report.streams))assert.ok(Number.isFinite(metric.sampledRmse)&&metric.sampledRmse>=0,`${stream} existing decodedDelta witness requires finite nonnegative RMS`);
     return report;
   }catch(error){error.comparison=report;throw error;}
   finally{await Promise.all(raw.map(file=>rm(file,{force:true})));}
+}
+
+export async function compareDecodedMedia(a,b,dir,options={}){
+  let report={policy:VEDA_EQUIVALENCE,streams:{}};
+  try{
+    // Collect complete native RGB and stereo PCM before applying either legacy ceiling.
+    report={...report,...await collectDecodedMediaDiagnostics(a,b,dir,options)};
+    for(const stream of ['video','audio'])report.streams[stream].maximumRmse=VEDA_EQUIVALENCE[stream];
+    for(const stream of ['video','audio']){
+      const full=report.streams[stream];
+      assert.ok(full.rmse<=VEDA_EQUIVALENCE[stream]&&full.channelRmse.every(v=>v<=VEDA_EQUIVALENCE[stream]),`${stream} full decoded Veda residency comparison exceeds fixed same-backend RMS ceiling`);
+      assert.ok(full.sampledRmse<=VEDA_EQUIVALENCE[stream],`${stream} existing decodedDelta witness exceeds same-backend RMS ceiling`);
+    }
+    return report;
+  }catch(error){error.comparison={...report,...error.comparison};throw error;}
 }
 
 export async function compareVedaAnchors(records,output,{compare=compareDecodedMedia,sourceEquivalence}={}){
