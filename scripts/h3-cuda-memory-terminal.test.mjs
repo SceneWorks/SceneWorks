@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { readFile, writeFile, mkdtemp, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { anchorRequest, validatePlan, validatePoolEvidence, validateMaterializingProofLog, validateVedaParityPair, rawNumericDifference, compareDecodedMedia, compareVedaAnchors, VEDA_EQUIVALENCE } from './h3-cuda-memory-terminal.mjs';
+import { anchorRequest, validatePlan, validatePoolEvidence, validateMaterializingProofLog, materializingProofSources, validateVedaParityPair, rawNumericDifference, compareDecodedMedia, compareVedaAnchors, VEDA_EQUIVALENCE } from './h3-cuda-memory-terminal.mjs';
 import { privateEnvironment } from './h3-finetune-terminal-runtime.mjs';
 
 const GIB=1024**3;
@@ -54,6 +54,28 @@ test('dense fallback marker alone or a skipped/CPU body cannot replace actual ma
   const summary='test result: ok. 1 passed; 0 failed; 0 ignored';
   const log=[body,routes,receipts,summary].join('\n');assert.equal(validateMaterializingProofLog(log).materializedCalls,2);
   for(const invalid of [log.replace(body,''),log.replace(receipts,''),log.replace('materialized_calls: 2','materialized_calls: 0'),log.replace(summary,'test result: ok. 0 passed; 0 failed; 1 ignored')])assert.throws(()=>validateMaterializingProofLog(invalid));
+});
+test('retained Veda proof maps accounting-only movement and rejects numerical, getter and build source changes',async()=>{
+  const root='D:\\unit_fake_inference',reference='a'.repeat(40),target='b'.repeat(40),object='c'.repeat(40);
+  const h3='crates/media/candle-gen/candle-gen-minimax-h3';
+  const accounting=[`${h3}/src/memory_strategy/adapters.rs`,`${h3}/src/memory_strategy/streaming.rs`,'crates/contracts/gen-core/src/h3_memory/window.rs'];
+  const calls=[];
+  const resolver=(changed=[])=>async(command,args,options)=>{
+    assert.equal(command,'git');assert.deepEqual(args.slice(0,2),['rev-parse','--verify']);assert.equal(options.cwd,root);
+    const [revision,selected]=args[2].split(':');calls.push(selected);
+    return {stdout:(revision===target&&changed.includes(selected)?'d'.repeat(40):object)+'\n'};
+  };
+  // Accounting changes also move the old whole-H3 tree proxy, without changing the direct case.
+  const sources=await materializingProofSources(root,reference,target,resolver([...accounting,h3]));
+  assert.ok(sources.length>0);assert.ok(accounting.every(file=>!calls.includes(file)));assert.ok(!calls.includes(h3));
+  for(const changed of [`${h3}/src/veda.rs`,`${h3}/src/veda_pointer_v1.cu`,`${h3}/src/nn.rs`,`${h3}/src/memory_strategy.rs`,`${h3}/src/memory_strategy/execution.rs`,
+    'crates/media/candle-gen/candle-gen','crates/kernels/candle-quant-kernels',
+    'crates/media/candle-gen/vendor/candle-core','Cargo.toml','Cargo.lock']){
+    assert.ok(calls.includes(changed),`missing numerical source dependency: ${changed}`);
+    await assert.rejects(materializingProofSources(root,reference,target,resolver([changed])),/numerical evidence source changed/);
+  }
+  await assert.rejects(materializingProofSources(root,reference,target,async()=>{throw new Error('missing Git source object');}),/missing Git source object/);
+  await assert.rejects(materializingProofSources(root,reference,target,async()=>({stdout:'not-an-object'})),/numerical source object must exist/);
 });
 test('manual wrapper keeps CUDA memory acceptance separate from ordinary CI and runs early startup checks',async()=>{
   const caller=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8');

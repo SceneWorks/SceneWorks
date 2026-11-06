@@ -273,15 +273,45 @@ class StockService extends OwnedService {
   }
 }
 
+// The retained case constructs its own predictor, packed layout and Veda runtime. It does not
+// enter model admission or transformer materialization. Compare its numerical/layout/getter
+// dependencies, including shared backend/build inputs, rather than unrelated H3 pricing facts.
+const MATERIALIZING_PROOF_SOURCES=[
+  'Cargo.toml','Cargo.lock','rust-toolchain.toml','.cargo/config.toml',
+  ...['Cargo.toml','src/lib.rs','src/veda.rs','src/veda_pointer_v1.cu','src/nn.rs','src/denoise','src/dit/mod.rs',
+    'src/dit/config.rs','src/dit/positions.rs','src/audio_config.rs','src/reference.rs',
+    'src/memory_strategy.rs','src/memory_strategy/execution.rs'].map(file=>`crates/media/candle-gen/candle-gen-minimax-h3/${file}`),
+  'crates/llm/test-support/model_proof.rs',
+  'crates/media/candle-gen/candle-gen',
+  'crates/kernels/candle-quant-kernels',
+  'crates/media/candle-gen/vendor/candle-core',
+  'crates/media/candle-gen/vendor/candle-kernels',
+  'crates/media/candle-gen/vendor/candle-flash-attn',
+  ...['Cargo.toml','src/lib.rs','src/error.rs','src/runtime.rs','src/runtime','src/attention_budget.rs',
+    'src/veda.rs','src/veda','src/weightsmeta.rs','src/numeric.rs','src/model_input_proof.rs',
+    'src/model_input_macros.rs','src/h3_memory.rs','src/h3_reference.rs'].map(file=>`crates/contracts/gen-core/${file}`),
+  ...['Cargo.toml','src/lib.rs','src/veda.rs','src/veda','src/h3_audio_config.rs','src/h3_reference.rs',
+    'src/h3_schedule.rs','src/h3_memory.rs'].map(file=>`crates/contracts/gen-core-h3/${file}`),
+];
+export async function materializingProofSources(inferenceRoot,reference,target,command=exec){
+  const sources=[];
+  for(const selected of MATERIALIZING_PROOF_SOURCES){
+    const blob=async revision=>{
+      const object=(await command('git',['rev-parse','--verify',`${revision}:${selected}`],{cwd:inferenceRoot})).stdout.trim();
+      assert.match(object,/^[a-f0-9]{40}$/,'numerical source object must exist');return object;
+    };
+    const expected=await blob(reference),actual=await blob(target);
+    assert.equal(expected,actual,`numerical evidence source changed: ${selected}`);sources.push({path:selected,object:actual});
+  }
+  return sources;
+}
+
 async function retainedProofs(p,inferenceRoot){
   assert.equal((await readFile(path.join(p.primitiveProof.directory,'source.txt'),'utf8')).trim(),p.inference,'primitive allocator proof must name the accepted inference main commit');
   const log=await readFile(path.join(p.primitiveProof.directory,'allocator-proof.log'),'utf8');
   assert.match(log,/test result: ok\. 1 passed; 0 failed; 0 ignored/);const marker=log.match(/CUDA_PROOF_POOL_EVIDENCE (\{[^\n]+\})/);assert.ok(marker,'positive allocator enforcement evidence required');const primitive=JSON.parse(marker[1]);assert.equal(primitive.overCapRefused,true);assert.equal(primitive.bothConstructors,true);assert.equal(primitive.cublasStreamResetRebound,true);assert.ok(primitive.reservedHighBytes<=primitive.capBytes);
-  const numericLog=await readFile(p.materializingProof.logPath,'utf8'),materializing=validateMaterializingProofLog(numericLog),sources=[];
-  for(const selected of ['crates/media/candle-gen/candle-gen-minimax-h3','crates/media/candle-gen/candle-gen/src/attention.rs','crates/kernels/candle-quant-kernels/src']){
-    const blob=async revision=>(await exec('git',['rev-parse',`${revision}:${selected}`],{cwd:inferenceRoot})).stdout.trim();
-    const expected=await blob(p.materializingProof.revision),actual=await blob(p.inference);assert.equal(expected,actual,`numerical evidence source changed: ${selected}`);sources.push({path:selected,object:actual});
-  }
+  const numericLog=await readFile(p.materializingProof.logPath,'utf8'),materializing=validateMaterializingProofLog(numericLog);
+  const sources=await materializingProofSources(inferenceRoot,p.materializingProof.revision,p.inference);
   return {primitive:{...primitive,runUrl:p.primitiveProof.runUrl},materializing:{...materializing,revision:p.materializingProof.revision,sources,runUrl:p.materializingProof.runUrl,logSha256:await fileSha256(p.materializingProof.logPath)}};
 }
 
