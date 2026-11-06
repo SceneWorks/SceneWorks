@@ -76,13 +76,13 @@ class LaunchTests(unittest.TestCase):
             with self.subTest(args=args), tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "out"
                 with self.assertRaises(RuntimeError): self.campaign(output, **args)
-                self.assertFalse(json.loads(Path(str(output) + "-lease/campaign-lease.json").read_text())["passed"])
+                self.assertFalse(json.loads(Path(str(output) + "-lease/campaign-lease.json").read_text(encoding="utf-8"))["passed"])
 
     def test_interrupt_reaps_then_propagates_and_seals_failure(self):
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "out"
             with self.assertRaises(KeyboardInterrupt): self.campaign(output, exception=KeyboardInterrupt())
-            receipt = json.loads(Path(str(output) + "-lease/campaign-lease.json").read_text())
+            receipt = json.loads(Path(str(output) + "-lease/campaign-lease.json").read_text(encoding="utf-8"))
             self.assertFalse(receipt["passed"])
             self.assertIn("KeyboardInterrupt", receipt["error"])
 
