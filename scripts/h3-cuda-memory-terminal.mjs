@@ -71,17 +71,25 @@ export function anchorRequest(original,seed){
 function parseEvents(raw){const out=[];for(const line of raw.split('\n'))try{const value=JSON.parse(line);out.push(value.fields??value);}catch{}return out;}
 function numeric(value,name){assert.ok(Number.isSafeInteger(value)&&value>=0,`${name}: actual integer observation required`);return value;}
 export function validatePoolEvidence(events,{jobId,poolBytes,externalReserveBytes,metrics}){
-  const snapshots=events.filter(e=>e.event==='h3_cuda_proof_pool_snapshot'&&String(e.jobId??e.job_id)===jobId&&e.cap_bytes!==undefined);
+  const snapshots=events.filter(e=>e.event==='h3_cuda_proof_pool_snapshot'&&String(e.jobId??e.job_id)===jobId);
   assert.ok(snapshots.length,'actual worker capped-pool observations required');
-  for(const s of snapshots){assert.equal(s.logical_ordinal,0);assert.equal(s.cap_bytes,poolBytes);assert.ok(numeric(s.reserved_high_bytes,'reserved_high_bytes')<=poolBytes,'pool reservation exceeded enforced budget');assert.ok(numeric(s.used_high_bytes,'used_high_bytes')>0,'pool did not witness actual tensors');}
-  const outside=snapshots.filter(s=>s.device_used_bytes!==undefined).map(s=>{
+  for(const s of snapshots){
+    assert.equal(s.logical_ordinal,0);assert.equal(s.cap_bytes,poolBytes);
+    const reservedHigh=numeric(s.reserved_high_bytes,'reserved_high_bytes'),usedHigh=numeric(s.used_high_bytes,'used_high_bytes');
+    assert.ok(reservedHigh<=poolBytes,'pool reservation exceeded enforced budget');
+    assert.ok(usedHigh<=poolBytes,'pool usage exceeded enforced budget');
+    assert.ok(usedHigh<=reservedHigh,'pool usage exceeds its reservation high-water');
+  }
+  assert.ok(snapshots.some(s=>s.used_high_bytes>0),'pool did not witness actual tensors for this job');
+  const outside=snapshots.map(s=>{
     const whole=numeric(s.device_used_bytes,'device_used_bytes'),reserved=numeric(s.reserved_bytes,'reserved_bytes');
+    assert.ok(reserved<=s.reserved_high_bytes,'current pool reservation exceeds its recorded high-water');
     assert.ok(whole>=reserved,'outside-pool attribution is unavailable/inconsistent, never zero');
     const value=whole-reserved;assert.ok(value<=externalReserveBytes,'observed outside-pool allocations exceeded the declared reserve');return value;
   });
   assert.ok(outside.length,'actual paired whole-device/current-pool observations required for outside-pool attribution');
   assert.ok(metrics.samples?.length>=2,'whole-device/RSS observations required');
-  for(const sample of metrics.samples){assert.ok(sample.host>0&&sample.device>0,'missing observations are not zero');assert.ok(sample.device<=poolBytes+externalReserveBytes,'whole device exceeded24GiB');}
+  for(const sample of metrics.samples){assert.ok(numeric(sample.host,'sampled host bytes')>0&&numeric(sample.device,'sampled device bytes')>0,'missing observations are not zero');assert.ok(sample.device<=poolBytes+externalReserveBytes,'whole device exceeded24GiB');}
   // Continuous pool high-water plus the entire explicitly reserved outside-pool allowance.
   const reservedHighBytes=Math.max(...snapshots.map(s=>s.reserved_high_bytes));
   assert.ok(reservedHighBytes+externalReserveBytes<=24*GIB);

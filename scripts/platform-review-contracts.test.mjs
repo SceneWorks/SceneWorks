@@ -224,6 +224,26 @@ test("H3 CUDA proof preserves PCI ordering and records the actual selected physi
   assert.match(await source("scripts/ci/h3-import-native-proof.mjs"), /receipt\.cuda = cudaDeviceEvidence\(process\.env, inventory\)/);
 });
 
+test("H3 CUDA evidence accepts only the full observed UUID of PCI-ordered physical device 1", () => {
+  const low = "GPU-00000000-0000-0000-0000-000000000000", high = "GPU-11111111-1111-1111-1111-111111111111";
+  const rows = [`1, ${high}, 00000000:41:00.0, card-high, 580.1`, `0, ${low}, 00000000:01:00.0, card-low, 580.1`];
+  const env = {CUDA_DEVICE_ORDER:"PCI_BUS_ID", CUDA_VISIBLE_DEVICES:high, SCENEWORKS_GPU_ID:"1"};
+  for (const csv of [rows.join("\n"), [...rows].reverse().join("\n")]) {
+    const selected = cudaDeviceEvidence(env,csv);
+    assert.equal(selected.cudaVisibleDevices,high); assert.equal(selected.selectedPhysicalDevice.uuid,high);
+    assert.equal(cudaDeviceEvidence({...env,CUDA_VISIBLE_DEVICES:"1"},csv).selectedPhysicalDevice.uuid,high);
+    for (const visible of [low,"GPU-22222222-2222-2222-2222-222222222222",`${high},${low}`,"1,0","0","01","",undefined,high.slice(0,12),`${high}suffix`,`${high} `,high.replace("GPU-","gpu-"),high.replace(/1$/,"g")]) {
+      assert.throws(()=>cudaDeviceEvidence({...env,CUDA_VISIBLE_DEVICES:visible},csv));
+    }
+    for (const change of [{CUDA_DEVICE_ORDER:"FASTEST_FIRST"},{SCENEWORKS_GPU_ID:"0"},{SCENEWORKS_GPU_ID:high}]) assert.throws(()=>cudaDeviceEvidence({...env,...change},csv));
+  }
+  // NVML-index1 is NOT enough: visibility must still match the second PCI-sorted card.
+  const swapped = rows.map(row=>row.startsWith("1,")?row.replace(/^1,/,"0,"):row.replace(/^0,/,"1,")).join("\n");
+  assert.equal(cudaDeviceEvidence(env,swapped).selectedPhysicalDevice.nvmlIndex,0);
+  assert.throws(()=>cudaDeviceEvidence({...env,CUDA_VISIBLE_DEVICES:low},swapped));
+  for (const csv of [rows[0], `${rows.join("\n")}\n${rows[0]}`, rows.join("\n").replace(low,high), rows.join("\n").replace("01:00.0","41:00.0"), rows.join("\n").replace("41:00.0","invalid")]) assert.throws(()=>cudaDeviceEvidence(env,csv));
+});
+
 test("H3 dispatch queues are unique per run and leave old StarVector and ordinary keys unchanged", async () => {
   const workflow = await source(".github/workflows/server-candle-linux.yml");
   const root = workflow.slice(workflow.indexOf("\nconcurrency:"), workflow.indexOf("\njobs:"));

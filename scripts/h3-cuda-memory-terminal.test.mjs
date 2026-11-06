@@ -32,6 +32,18 @@ test('logical admission override, missing pool observations and over-envelope sa
   assert.throws(()=>validatePoolEvidence([],options));assert.throws(()=>validatePoolEvidence([{...event,reserved_high_bytes:23*GIB}],options));assert.throws(()=>validatePoolEvidence([event],{...options,metrics:{samples:[{host:30*GIB,device:25*GIB},{host:30*GIB,device:22*GIB}]}}));assert.throws(()=>validatePoolEvidence([event],{...options,jobId:'other-job'}));
   assert.throws(()=>validatePoolEvidence([{...event,device_used_bytes:23*GIB}],options));assert.throws(()=>validatePoolEvidence([{...event,device_used_bytes:undefined}],options));
 });
+test('capped job may start at zero but must witness positive usage within its own bounded snapshots',()=>{
+  const options={jobId:'owned_job',poolBytes:22*GIB,externalReserveBytes:2*GIB,metrics:{samples:[{host:30*GIB,device:GIB},{host:31*GIB,device:21*GIB}]}};
+  const zero={event:'h3_cuda_proof_pool_snapshot',job_id:'owned_job',logical_ordinal:0,cap_bytes:22*GIB,used_high_bytes:0,reserved_high_bytes:0,reserved_bytes:0,device_used_bytes:GIB};
+  const positive={...zero,used_high_bytes:19*GIB,reserved_high_bytes:20*GIB,reserved_bytes:20*GIB,device_used_bytes:21*GIB};
+  assert.equal(validatePoolEvidence([zero,positive],options).reservedHighBytes,20*GIB);
+  assert.throws(()=>validatePoolEvidence([zero,{...zero}],options),/actual tensors for this job/);
+  assert.throws(()=>validatePoolEvidence([zero,{...positive,job_id:'other_job'}],options),/actual tensors for this job/);
+  for(const bad of [{reserved_high_bytes:23*GIB},{used_high_bytes:23*GIB},{used_high_bytes:NaN},{used_high_bytes:Infinity},{used_high_bytes:undefined},{cap_bytes:undefined},{device_used_bytes:undefined},{reserved_bytes:21*GIB},{device_used_bytes:23*GIB}]){
+    for(const rows of [[{...zero,...bad},positive],[zero,{...positive,...bad}]])assert.throws(()=>validatePoolEvidence(rows,options));
+  }
+  for(const field of ['host','device'])for(const invalid of [undefined,0,NaN,Infinity])assert.throws(()=>validatePoolEvidence([zero,positive],{...options,metrics:{samples:[{host:GIB,device:GIB},{host:GIB,device:GIB,[field]:invalid}]}}));
+});
 test('plan refuses unenforced admission-only proof, enlarged24GiB envelope and missing frozen authorization',()=>{
   validatePlan(plan());
   assert.throws(()=>validatePlan({version:1,stationary_pair_authorized:false}));

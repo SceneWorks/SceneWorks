@@ -462,6 +462,18 @@ test('CUDA receipt binds PCI-ordered physical device 1 rather than NVML index 1 
   await assert.rejects(hardware('cuda','GPU-unit_fake-low',{env,exec}),/manual physical device 1/);
   for(const bad of [{...env,CUDA_VISIBLE_DEVICES:'0'},{...env,CUDA_DEVICE_ORDER:'FASTEST_FIRST'},{...env,SCENEWORKS_GPU_ID:'0'}])await assert.rejects(hardware('cuda','GPU-unit_fake-high',{env:bad,exec}),/manual CUDA proof/);
 });
+test('assembled CUDA hardware accepts exact GPU1 UUID visibility and rejects mismatched request or inventory',async()=>{
+  const low='GPU-00000000-0000-0000-0000-000000000000',high='GPU-11111111-1111-1111-1111-111111111111';
+  const env={CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:high,SCENEWORKS_GPU_ID:'1'};
+  const rows=[`0, ${high}, 00000000:41:00.0, unit_fake_high, unit_fake_driver`,`1, ${low}, 00000000:01:00.0, unit_fake_low, unit_fake_driver`];
+  for(const csv of [rows.join('\n'),[...rows].reverse().join('\n')]){
+    const exec=async()=>({stdout:csv});
+    const observed=await hardware('cuda',high,{env,exec});assert.equal(observed.cuda.cudaVisibleDevices,high);assert.equal(observed.cuda.selectedPhysicalDevice.nvmlIndex,0);
+    await assert.rejects(hardware('cuda',low,{env,exec}),/manual physical device 1/);
+    await assert.rejects(hardware('cuda',high,{env:{...env,CUDA_VISIBLE_DEVICES:low},exec}),/PCI-ordered physical device 1/);
+    await assert.rejects(hardware('cuda',high,{env,exec:async()=>({stdout:rows[1]})}),/missing physical CUDA device 1/);
+  }
+});
 test('native unknown source size stays unknown while a real zero-byte size stays zero',()=>{assert.equal(observedSourceBytes(undefined),null);assert.equal(observedSourceBytes(null),null);assert.equal(observedSourceBytes('None'),null);assert.equal(observedSourceBytes(0),0);assert.equal(observedSourceBytes('0'),0);assert.equal(observedSourceBytes(1024),1024);});
 async function coldCancelFake(t){
   const f=await fixture(t,'lifecycle','generation-source-prep-cancel');
