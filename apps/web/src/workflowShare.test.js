@@ -5,6 +5,10 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { composeImageJobPrompt } from "./imageJobRequest.js";
+import { composeNegativePrompt } from "./data/appearanceCatalog.js";
+import { styleTextForId } from "./data/styleCatalog.js";
+import { recipeToStudioPatch } from "./screens/imageStudio/recipeToStudioPatch.js";
 
 import {
   ADVANCED_PREFILL,
@@ -72,6 +76,67 @@ function report(overrides = {}) {
     ...overrides,
   };
 }
+
+describe("imported appearance and style replay", () => {
+  const model = "moss_image_base";
+  const appearance = { film: "film-kodak-tri-x-400", looks: ["look-moody-dark"] };
+  const authored = ["Subject: a lighthouse\nStyle: hand-painted edges", "Subject: a fox\nStyle: precise pencil"];
+  const negative = "bad anatomy";
+  const compose = (prompt, selection, styleId) => composeImageJobPrompt({ promptToSend: prompt, sendStructured: false,
+    model, appearance: selection, styleText: styleTextForId(styleId) });
+  const context = { model, advancedDefaultsModel: model, mossEditActive: false, recipeMode: (recipe) => recipe.mode };
+  const styleReport = (resolved) => report({ model: { state: "resolved", catalogId: model },
+    styles: resolved ? [{ field: "styleId", id: "ghibli-style", state: "resolved" }] : [{ field: "styleId", id: "ghibli-style", state: "missing" }] });
+
+  it.each(["single", "batch", "edit"])("preserves the effective positive/negative and %s prompts when a catalog style is unavailable", (kind) => {
+    const effective = authored.map((prompt) => compose(prompt, appearance, "ghibli-style"));
+    const effectiveNegative = composeNegativePrompt(negative, effective[0].appearanceNegative);
+    const source = share({ model, mode: kind === "edit" ? "edit_image" : "text_to_image", styleId: "ghibli-style",
+      prompt: effective[0].prompt, negativePrompt: effectiveNegative,
+      advanced: { styleId: "ghibli-style", stylePrompt: authored[0], appearance, appearancePrompt: authored[0], appearanceNegativePrompt: negative,
+        ...(kind === "single" ? {} : { promptBatch: effective.map((item) => item.prompt), appearancePromptBatch: authored }),
+        ...(kind === "edit" ? { mossImageAdvanced: { output: "images" } } : {}) } });
+    const before = structuredClone(source);
+    const recipe = recipeFromWorkflowShare(source, styleReport(false));
+    for (const key of ["styleId", "stylePrompt", "appearance", "appearancePrompt", "appearanceNegativePrompt", "appearancePromptBatch"]) {
+      expect(recipe.rawAdapterSettings).not.toHaveProperty(key);
+    }
+    const { values, flags } = recipeToStudioPatch({ view: "Image", recipe }, context);
+    expect(values.prompt).toBe(effective[0].prompt);
+    expect(values.styleId).toBeNull();
+    expect(values.appearance.looks).toEqual([]);
+    expect(flags.clearGeneralStack).toBe(true);
+    const replayed = compose(values.prompt, values.appearance, values.styleId);
+    expect(replayed.prompt).toBe(effective[0].prompt);
+    expect(composeNegativePrompt(values.negativePrompt, replayed.appearanceNegative)).toBe(effectiveNegative);
+    if (kind === "batch") expect(values.batchPromptsText).toBe(effective.map((item) => item.prompt).join("\n---\n"));
+    if (kind === "edit") expect(values.mossPromptBatch).toEqual(effective.map((item) => item.prompt));
+    for (const row of workflowSettingRows(source, styleReport(false)).filter((row) => row.key.startsWith("appearance"))) {
+      expect(row.restored).toBe(false);
+      expect(row.detail).toContain("kept in the composed prompts");
+    }
+    expect(workflowSettingRows(source, styleReport(false)).find((row) => row.key === "promptBatch")?.restored).toBe(kind === "single" ? undefined : true);
+    expect(source).toEqual(before);
+  });
+
+  it.each([true, false])("retains editable appearance inputs when catalog style resolution is %s or no catalog style was selected", (withStyle) => {
+    const styleId = withStyle ? "ghibli-style" : null;
+    const effective = compose(authored[0], appearance, styleId);
+    const source = share({ model, styleId, prompt: effective.prompt,
+      negativePrompt: composeNegativePrompt(negative, effective.appearanceNegative),
+      advanced: { ...(withStyle ? { styleId, stylePrompt: authored[0] } : {}), appearance, appearancePrompt: authored[0], appearanceNegativePrompt: negative } });
+    const here = withStyle ? styleReport(true) : report({ model: { state: "resolved", catalogId: model } });
+    const recipe = recipeFromWorkflowShare(source, here);
+    const { values } = recipeToStudioPatch({ view: "Image", recipe }, context);
+    expect(recipe.uiPreserveComposedPrompt).toBeUndefined();
+    expect(values.prompt).toBe(authored[0]);
+    expect(values.appearance).toMatchObject(appearance);
+    const replayed = compose(values.prompt, values.appearance, values.styleId);
+    expect(replayed.prompt).toBe(effective.prompt);
+    expect(composeNegativePrompt(values.negativePrompt, replayed.appearanceNegative)).toBe(source.negativePrompt);
+    expect(workflowSettingRows(source, here).find((row) => row.key === "appearance").restored).toBe(true);
+  });
+});
 
 describe("looksLikeWorkflowCandidate", () => {
   it("accepts a PNG", async () => {

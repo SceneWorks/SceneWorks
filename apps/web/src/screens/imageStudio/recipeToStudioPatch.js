@@ -20,6 +20,7 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
     return null;
   }
   const recipe = launchRequest.recipe;
+  if (recipe.uiPreserveComposedPrompt === true) flags.clearGeneralStack = true;
   const settings = recipe.normalizedSettings ?? {};
   const rawSettings = recipe.rawAdapterSettings ?? {};
   const replayPromptBatch = typeof rawSettings.appearancePrompt === "string" && Array.isArray(rawSettings.appearancePromptBatch) ? rawSettings.appearancePromptBatch : rawSettings.promptBatch;
