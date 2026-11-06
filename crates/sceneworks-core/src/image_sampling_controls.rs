@@ -172,7 +172,7 @@ pub fn requested_scheduler_shift(advanced: &JsonObject) -> Result<Option<f32>, S
         .as_f64()
         .or_else(|| value.as_str()?.trim().parse().ok())
         .ok_or_else(|| format!("advanced.{SCHEDULER_SHIFT_KEY} must be a number, got {value}"))?;
-    if !(shift.is_finite() && shift > 0.0 && (shift as f32).is_finite()) {
+    if !(shift.is_finite() && shift > 0.0 && (shift as f32).is_finite() && (shift as f32) > 0.0) {
         return Err(format!(
             "advanced.{SCHEDULER_SHIFT_KEY} {shift} must be a finite value > 0"
         ));
@@ -495,15 +495,26 @@ mod tests {
         let overflow = object(json!({ "captionOverflow": "warn" }));
         let message = image_sampling_control_error("plain", &overflow, "", &plain()).unwrap();
         assert!(message.contains("caption-overflow"), "{message}");
-        // A non-declaring model keeps its historical shift handling (no validation here).
+        // All Shift values are positive finite native floats, including imported models.
         let shift = object(json!({ "schedulerShift": -1 }));
+        for (id, entry) in [("plain", plain()), ("iris_like", iris_like())] {
+            let message = image_sampling_control_error(id, &shift, "", &entry).unwrap();
+            assert!(message.contains("> 0"), "{message}");
+        }
+        let shift = object(json!({ "schedulerShift": 18.375 }));
         assert_eq!(
             image_sampling_control_error("plain", &shift, "", &plain()),
             None
         );
-        // A declaring model validates it.
-        let message = image_sampling_control_error("iris_like", &shift, "", &iris_like()).unwrap();
-        assert!(message.contains("> 0"), "{message}");
+        let mut unsupported = plain();
+        unsupported.insert("image".into(), json!({"supportsSchedulerShift":false}));
+        assert!(
+            image_sampling_control_error("unsupported", &shift, "", &unsupported)
+                .unwrap()
+                .contains("no native schedule shift")
+        );
+        let underflow = object(json!({"schedulerShift":1e-100}));
+        assert!(requested_scheduler_shift(&underflow).is_err());
     }
 
     #[test]
