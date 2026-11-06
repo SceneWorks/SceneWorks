@@ -1,3 +1,4 @@
+import { composeNegativePrompt } from "../../data/appearanceCatalog.js";
 import { ltxVideoModelId, ltx25VideoModelId } from "./videoTierHelpers.js";
 import { parseResolution } from "../../resolutionMatch.js";
 import { effectiveFitMode } from "../../components/FitModeControl.jsx";
@@ -55,6 +56,9 @@ export function useVideoSubmission({
   replacementModeLabels,
   styleId,
   stylePromptBase,
+  appearanceSelection,
+  appearanceActive,
+  appearanceNegative,
   replayReferenceResize,
   selectedModel,
   ltxPipeline,
@@ -118,7 +122,8 @@ export function useVideoSubmission({
         // An engine with no negative-prompt axis gets an empty one rather than whatever a preset
         // stack composed — the field is hidden for it, so sending text the user cannot see or edit
         // (and the worker discards anyway) would be a ghost input on the recipe.
-        negativePrompt: supportsNegativePrompt ? (stackActive ? composedStack.negativePrompt : negativePrompt) : "",
+        negativePrompt: supportsNegativePrompt ? composeNegativePrompt(stackActive ? composedStack.negativePrompt : negativePrompt, appearanceNegative) : "",
+        ...(appearanceActive ? { appearance: appearanceSelection } : {}),
         model,
         expectedImportedModelRef: expectedImportedModelRef ?? undefined,
         // The duration head chooses a legal duration only when the user explicitly opts in. Do not
@@ -218,7 +223,8 @@ export function useVideoSubmission({
           // prompt without double-wrapping. Rides advanced → rawAdapterSettings (cloned verbatim by
           // the worker; no backend change). Emitted only when a style is applied so styleless recipes
           // stay byte-identical.
-          ...(styleApplied ? { styleId, stylePrompt: stylePromptBase } : {}),
+          ...(styleApplied && styleId ? { styleId, stylePrompt: stylePromptBase } : {}),
+          ...(appearanceActive ? { appearance: appearanceSelection, appearancePrompt: stylePromptBase, appearanceNegativePrompt: supportsNegativePrompt ? stackActive ? composedStack.negativePrompt : negativePrompt : "" } : {}),
           // sc-26691: a replayed H3 recipe's reference sizing, only while an H3 model is active
           // (any other family refuses the key at enqueue).
           ...(replayReferenceResize && isMinimaxH3Entry(selectedModel) ? replayReferenceResize : {}),

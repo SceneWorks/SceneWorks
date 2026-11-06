@@ -21,7 +21,7 @@ This document is the contract. It exists for two people:
 
 > ## Your prompt is in the file, as you wrote it
 >
-> These six fields are recorded as authored, and are deliberately **exempt from the filesystem-path
+> These ten fields are recorded as authored, and are deliberately **exempt from the filesystem-path
 > guard** that drops every other field that looks like a location. Silently mangling someone's
 > prompt because it mentions a directory would be worse than the leak it prevents — you wrote it,
 > and you can read it back before you share. The only things removed from them are control
@@ -36,6 +36,10 @@ This document is the contract. It exists for two people:
 > | --- | --- |
 > | `prompt` | The prompt. |
 > | `negativePrompt` | The negative prompt. |
+> | `advanced.appearancePromptBatch[]` | Each pre-appearance native batch prompt. |
+> | `advanced.promptBatch[]` | Each effective native batch prompt recorded by the worker. |
+> | `advanced.appearancePrompt` | The authored prompt before Camera, Film, Looks and Lighting were composed. |
+> | `advanced.appearanceNegativePrompt` | The negative prompt before recipe contributions. |
 > | `advanced.stylePrompt` | The pre-style prompt, before a catalog style was composed onto it. |
 > | `advanced.systemMessage` | The interleaved-document system prompt, when it was edited away from the default. |
 > | `advanced.structuredPrompt.intent` | The authored intent line of a structured-caption recipe. |
@@ -335,7 +339,7 @@ in that table is not in the file. Named explicitly because these are the ones pe
   the shape of a Hugging Face repo id (`acme/mira`), which `loras[].repo` carries for real, and a
   slash turns up in free-text labels people write by hand (`Ghibli / soft light`). So a
   `loras[].name` or a `styleId` reading `Clients/Acme` is not caught and reaches the file; three or
-  more segments (`Clients/Acme/brief`) is. **Three:** it does not apply at all to the six prose
+  more segments (`Clients/Acme/brief`) is. **Three:** it does not apply at all to the ten prose
   fields, which is the callout at the top of this document.
 - **Project, job and asset identity.** `projectId`, `projectName`, `jobId`, `assetId`,
   `generationSetId`, `characterId`, `characterLookId`.
@@ -419,6 +423,10 @@ smuggled under a scalar key.
 | `faceRestore` | `Scalar` | Face-restoration opt-in. |
 | `controlMode` | `Scalar` | Control type (canny / depth / …). The control *image* rides as an input shape instead. |
 | `controlScale` | `Scalar` | Control-lock strength. |
+| `appearance` | `Appearance` | Public Camera, Film, Looks and Lighting catalog IDs; only the four typed selection fields travel. |
+| `appearancePromptBatch` | `PromptBatch` | Raw pre-appearance native batch text, separate from the worker-owned effective batch; retained for exact replay. |
+| `appearancePrompt` | `Scalar` | Raw pre-appearance prompt, preserved as bounded authored prose. |
+| `appearanceNegativePrompt` | `Scalar` | Raw pre-appearance negative prompt, preserved as bounded authored prose. |
 | `styleId` | `Scalar` | The catalog style picked. |
 | `stylePrompt` | `Scalar` | **Prose.** The raw pre-style prompt. Path-exempt — see the callout. |
 | `cnScale` | `Scalar` | Tile-ControlNet strength for the Detail pass. |
@@ -1119,7 +1127,7 @@ Three claims outside a pinned block are checked too, because each had a way to d
   stopped having;
 - the pose **coordinate arrays** the callout-adjacent bullet and the `poses` row name are asserted
   to be exactly `POSE_FIELDS`;
-- the number of prose fields the callout says it lists ("These six fields") is asserted against the
+- the number of prose fields the callout says it lists ("These ten fields") is asserted against the
   row count of the table under it.
 
 What is **not** machine-checked is the prose in the right-hand "what it is" columns and the narrative

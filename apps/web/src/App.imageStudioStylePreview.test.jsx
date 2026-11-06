@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { withImageStudioContext, settle } from "./main.testSupport.jsx";
 import { STYLE_GROUPS, styleHintForId, styleTextForId } from "./data/styleCatalog.js";
+import { recipeToStudioPatch } from "./screens/imageStudio/recipeToStudioPatch.js";
 
 // sc-13131 — End-to-end wiring guard for the live Style preview. Renders the real ImageStudio,
 // types a prompt, picks a style through the actual StylePicker, and asserts that the on-screen
@@ -129,7 +130,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     await selectStyle(firstStyle.name);
 
     const shown = previewText();
-    expect(shown).toContain("Subject: a fox in the snow");
+    expect(shown).toContain("Description: a fox in the snow");
     expect(shown).toContain("\nStyle: ");
 
     const submittedPrompt = await submitAndReadPayloadPrompt();
@@ -191,7 +192,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     await typePrompt("a wolf on a ridge at dusk");
     const second = previewText();
     expect(second).not.toBe(first);
-    expect(second).toContain("Subject: a wolf on a ridge at dusk");
+    expect(second).toContain("Description: a wolf on a ridge at dusk");
 
     const submittedPrompt = await submitAndReadPayloadPrompt();
     expect(second).toBe(submittedPrompt);
@@ -251,7 +252,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
       const submittedPrompt = await submitAndReadPayloadPrompt();
       expect(submittedPrompt).toBe(TAGS);
       expect(submittedPrompt).not.toContain("Style:");
-      expect(submittedPrompt).not.toContain("Subject:");
+      expect(submittedPrompt).not.toContain("Description:");
     });
 
     it("the SAME persisted style still composes on a prose model (proves the gate is what suppressed it)", async () => {
@@ -260,7 +261,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
       await renderStudio();
       expect(styleAxis()).toBeTruthy();
       const submittedPrompt = await submitAndReadPayloadPrompt();
-      expect(submittedPrompt).toBe(`Subject: ${TAGS}\nStyle: ${styleTextForId(firstStyle.id)}`);
+      expect(submittedPrompt).toBe(`Description: ${TAGS}\nStyle: ${styleTextForId(firstStyle.id)}`);
     });
 
     it("keeps the style-hint suggestion pill off, so no prose hint leaks in", async () => {
@@ -275,4 +276,77 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
       expect(pills.length).toBeGreaterThan(1);
     });
   });
+  it.each(["z_image_turbo", "krea_2_turbo"])("keeps appearance available on %s despite inactive MOSS edit inputs", async (id) => {
+    window.localStorage.setItem("sceneworks-studio-image-project-1", JSON.stringify({
+      mossImageAdvanced: { positive: { assetId: "embedding" }, negative: { assetId: "negative" }, negativePrompts: ["edit-only"] },
+    }));
+    await renderStudio({ ...IMAGE_MODEL, id });
+    for (const label of ["Camera", "Film", "Looks", "Lighting"]) {
+      expect(container.querySelector(`button[aria-label="${label}"]`)).toBeTruthy();
+    }
+  });
+
+  it("replays a native text-to-image appearance batch from authored rows exactly once", async () => {
+    const model = { ...IMAGE_MODEL, image: { maxPromptBatchImages: 2 } };
+    const authored = ["a fox", "a cat"];
+    window.localStorage.setItem("sceneworks-studio-image-project-1", JSON.stringify({
+      count: 1, batchMode: true, batchPromptsText: authored.join("\n"), appearance: { film: "film-kodak-portra-400", looks: ["look-moody-dark"] },
+    }));
+    await renderStudio(model);
+    async function runBatch() {
+      const run = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch"));
+      await act(async () => run.click());
+      await settle();
+      return createImageJob.mock.calls.at(-1)[0];
+    }
+    const original = await runBatch();
+    expect(original.prompts).toHaveLength(2);
+    expect(original.advanced.appearancePromptBatch).toEqual(authored);
+    expect(original.prompts.every((prompt) => prompt.includes("Film:") && prompt.includes("Look:"))).toBe(true);
+    const { values } = recipeToStudioPatch({ view: "Image", recipe: {
+      model: model.id, mode: "text_to_image", prompt: original.prompt,
+      rawAdapterSettings: { ...original.advanced, promptBatch: original.prompts }, normalizedSettings: { count: original.count },
+    } }, { model: model.id, advancedDefaultsModel: model.id, mossEditActive: false, recipeMode: () => "text_to_image" });
+    expect(values.batchPromptsText).toBe(authored.join("\n"));
+    await act(async () => root.unmount());
+    window.localStorage.setItem("sceneworks-studio-image-project-1", JSON.stringify(values));
+    await renderStudio(model);
+    const replay = await runBatch();
+    expect(replay.prompts).toEqual(original.prompts);
+    expect(replay.advanced.appearancePromptBatch).toEqual(authored);
+  });
+
+  it("Appearance selections preview and submit exactly once, including multiple Looks", async () => {
+    await renderStudio();
+    await typePrompt("Subject: a fox\nCamera: 50mm\nAction: running");
+    async function recipe(label, name) {
+      await act(async () => container.querySelector(`button[aria-label="${label}"]`).click());
+      const option = [...container.querySelectorAll(".appearance-option")].find((item) => item.querySelector("strong")?.textContent === name);
+      expect(option).toBeTruthy();
+      await act(async () => option.querySelector("input").click());
+      if (label === "Looks") await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Done").click());
+    }
+    await recipe("Camera", "Disposable");
+    await recipe("Film", "Kodak Portra 400");
+    await recipe("Looks", "Warm golden");
+    await recipe("Looks", "Matte faded film");
+    await recipe("Lighting", "Golden hour");
+    const shown = previewText();
+    expect(shown).toContain("Subject: a fox");
+    expect(shown).toContain("Action: running");
+    expect(shown.match(/^Camera:/gm)).toHaveLength(1);
+    expect(shown).toContain(", 50mm");
+    expect(shown).toContain("Film:");
+    expect(shown).toContain("Look:");
+    expect(shown).toContain("Lighting:");
+    expect(shown).not.toContain("Style:");
+    const submittedPrompt = await submitAndReadPayloadPrompt();
+    expect(submittedPrompt).toBe(shown);
+    const payload = createImageJob.mock.calls.at(-1)[0];
+    expect(payload.appearance.looks).toHaveLength(2);
+    expect(payload.advanced.appearancePrompt).toBe("Subject: a fox\nCamera: 50mm\nAction: running");
+    expect(payload.advanced.appearance).toEqual(payload.appearance);
+    expect(payload.presetPromptResolvedClientSide).toBe(true);
+  });
+
 });

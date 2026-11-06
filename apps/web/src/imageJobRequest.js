@@ -1,3 +1,4 @@
+import { resolveAppearance, composeNegativePrompt } from "./data/appearanceCatalog.js";
 import { mossPositivePromptIssue } from "./mossImageAdvancedValidation.js";
 import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
 import { effectiveFitMode } from "./fitMode.js";
@@ -22,14 +23,17 @@ import { injectStyleIntoCaption, isCaption, parseCaption, serializeCaption } fro
 // This is the single-submit payload verbatim (the correct reference), parameterized only by those
 // overrides. Every omit-when-default and mode gate is preserved; `advanced` is delegated to the
 // already-pure buildImageJobAdvanced so its guards stay in one place.
-export function composeImageJobPrompt({ promptToSend, sendStructured, styleText }) {
+export function composeImageJobPrompt({ promptToSend, sendStructured, styleText, appearance, model }) {
+  const resolved = resolveAppearance(appearance, model);
+  if (sendStructured && resolved.entries.length) throw new Error("Appearance recipes require a prose prompt.");
+  const appearanceApplied = !sendStructured && resolved.entries.length > 0;
   const hasStyle = typeof styleText === "string" && styleText.trim() !== "";
   const proseStyleApplied = !sendStructured && hasStyle;
   const structuredStyleSelected = sendStructured && hasStyle;
   let prompt = promptToSend;
   let structuredInjected = false;
-  if (proseStyleApplied) {
-    prompt = composeStyledPrompt({ styleText, userPrompt: promptToSend });
+  if (proseStyleApplied || appearanceApplied) {
+    prompt = composeStyledPrompt({ styleText, userPrompt: promptToSend, directives: resolved.directives });
   } else if (structuredStyleSelected) {
     const { caption } = parseCaption(promptToSend);
     if (isCaption(caption)) {
@@ -41,6 +45,8 @@ export function composeImageJobPrompt({ promptToSend, sendStructured, styleText 
     prompt,
     styleApplied: proseStyleApplied || structuredInjected,
     structuredInjected,
+    appearanceApplied,
+    appearanceNegative: resolved.negative,
   };
 }
 
@@ -194,14 +200,16 @@ export function buildImageJobRequest(state) {
   // client never transformed — silently dropping the style. So `structuredInjected` is computed
   // INSIDE the isCaption branch and gates `styleApplied`; a non-caption structured prompt is passed
   // through with no flag/styleId so the server can still handle it.
-  const { prompt: composedPrompt, styleApplied, structuredInjected } = composeImageJobPrompt({
+  const { prompt: composedPrompt, styleApplied, structuredInjected, appearanceApplied, appearanceNegative } = composeImageJobPrompt({
     promptToSend,
     sendStructured,
     styleText,
+    appearance: state.appearance,
+    model: state.appearanceModel ?? model,
   });
 
   const mossPrompts = mossEdit && state.mossPromptBatch?.length
-    ? state.mossPromptBatch.map((text) => composeImageJobPrompt({ promptToSend: text, sendStructured: false, styleText }).prompt)
+    ? state.mossPromptBatch.map((text) => composeImageJobPrompt({ promptToSend: text, sendStructured: false, styleText, appearance: state.appearance, model: state.appearanceModel ?? model }).prompt)
     : undefined;
   const effectivePrompt = mossPrompts?.[0] ?? composedPrompt;
   if (mossEdit) {
@@ -212,7 +220,8 @@ export function buildImageJobRequest(state) {
     mode,
     prompt: effectivePrompt,
     ...(mossPrompts ? { prompts: mossPrompts } : {}),
-    negativePrompt,
+    negativePrompt: composeNegativePrompt(negativePrompt, state.appearanceNegativeEnabled === false ? "" : appearanceNegative),
+    ...(appearanceApplied ? { appearance: state.appearance } : {}),
     model,
     count: posePayload.length ? 1 : count,
     seed: mossEdit && state.mossImageAdvanced?.noise || seed === "" ? null : Number(seed),
@@ -232,7 +241,7 @@ export function buildImageJobRequest(state) {
     // stacked fragments — the server can't reconstruct a stack from one recipePresetId), so it
     // sends the composed prompt verbatim and this flag tells the server to skip its own
     // prefix/suffix fold (epic 11949, mirrors presetLorasResolvedClientSide).
-    presetPromptResolvedClientSide: presetPromptResolvedClientSide || styleApplied || (mossEdit && Boolean(mossPrompts || state.mossImageAdvanced?.positive)) || undefined,
+    presetPromptResolvedClientSide: presetPromptResolvedClientSide || styleApplied || appearanceApplied || (mossEdit && Boolean(mossPrompts || state.mossImageAdvanced?.positive)) || undefined,
     characterId: mode === "character_image" ? characterId || null : null,
     characterLookId: mode === "character_image" ? characterLookId || null : null,
     // edit_image: a single source image, except for a multi-reference model (sc-6211,
@@ -361,6 +370,10 @@ export function buildImageJobRequest(state) {
       //    (submitCaption), and replay re-serializes + re-injects from THAT. `stylePrompt` only needs
       //    to be a string so the round-trip re-selects the picker (see ImageStudio replay), so we
       //    store "" — the raw prompt lives in the caption blob, not here.
+      appearance: appearanceApplied ? state.appearance : undefined,
+      appearanceUserPrompt: promptToSend,
+      appearanceUserPromptBatch: mossPrompts ? state.mossPromptBatch : state.appearancePromptBatch,
+      appearanceUserNegative: negativePrompt,
       styleId: styleApplied ? styleId : undefined,
       styleUserPrompt: styleApplied ? (mossPrompts ? null : structuredInjected ? "" : promptToSend) : undefined,
       // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885): the resolved gate + the editor's phase

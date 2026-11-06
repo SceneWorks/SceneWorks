@@ -30,4 +30,27 @@ describe("recipeToStudioPatch", () => {
     expect(Object.keys(values).filter((key) => key.startsWith("upscale")))
       .toEqual(["upscaleEnabled", "upscaleFactor", "upscaleEngine", "upscaleSoftness"]);
   });
+  it("restores raw appearance inputs and multiple look IDs rather than already composed text", () => {
+    const appearance = { camera: null, film: "film-kodak-tri-x-400", looks: ["look-moody-dark", "look-light-leaks"], lighting: null };
+    const { values, flags } = recipeToStudioPatch(launch({ appearance, appearancePrompt: "Subject: a dancer", appearanceNegativePrompt: "authored", styleId: "style" }, { negativePrompt: "authored, recipe negatives" }), context);
+    expect(values.appearance).toEqual(appearance);
+    expect(values.prompt).toBe("Subject: a dancer");
+    expect(values.negativePrompt).toBe("authored");
+    expect(values.styleId).toBe("style");
+    expect(flags.clearGeneralStack).toBe(true);
+    const old = recipeToStudioPatch(launch({ appearance }, {}), context).values;
+    expect(old.appearance.looks).toEqual([]);
+    expect(old.prompt).toBe("composed prompt");
+  });
+
+  it("restores an appearance batch from its authored carrier, preserving the worker's effective batch", () => {
+    const { values } = recipeToStudioPatch(launch({ appearance: { looks: ["look-moody-dark"] }, appearancePrompt: "a fox",
+      appearancePromptBatch: ["a fox", "a cat"], promptBatch: ["Description: a fox\nLook: dark", "Description: a cat\nLook: dark"],
+      mossImageAdvanced: { output: "images" }, styleId: "style" }, { model: "moss_image_base", mode: "edit_image" }), context);
+    expect(values.mossPromptBatch).toEqual(["a fox", "a cat"]);
+    expect(values.prompt).toBe("a fox");
+    expect(values.styleId).toBe("style");
+    expect(values.appearance.looks).toEqual(["look-moody-dark"]);
+  });
+
 });

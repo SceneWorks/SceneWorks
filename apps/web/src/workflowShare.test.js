@@ -479,7 +479,14 @@ function sampleValueFor(key) {
     case "mossImageAdvanced":
       return { output: "images" };
     case "promptBatch":
+    case "appearancePromptBatch":
       return ["one", "two"];
+    case "appearance":
+      return { film: "film-kodak-portra-400", looks: ["look-moody-dark"] };
+    case "appearancePrompt":
+      return "a lighthouse";
+    case "appearanceNegativePrompt":
+      return "blur";
     case "poses":
       return [{ keypoints: [1, 2] }, { keypoints: [3, 4] }];
     case "phases":

@@ -307,6 +307,10 @@ export const ADVANCED_PREFILL = {
   controlScale: { label: "Control strength", prefill: PREFILL_CONTROL },
   styleId: { label: "Style", prefill: PREFILL_CONTROL },
   stylePrompt: { label: "Pre-style prompt", prefill: PREFILL_PROMPT },
+  appearance: { label: "Appearance", prefill: PREFILL_CONTROL },
+  appearancePrompt: { label: "Pre-appearance prompt", prefill: PREFILL_PROMPT },
+  appearanceNegativePrompt: { label: "Authored negative prompt", prefill: PREFILL_CONTROL },
+  appearancePromptBatch: { label: "Pre-appearance prompt batch", prefill: PREFILL_CONTROL },
   phases: { label: "Multi-phase denoise", prefill: PREFILL_CONTROL },
   // Shared by Image Studio substitutions and the older LTX video selector. Image workflow replay
   // restores the opaque authored id even when this install no longer lists it; Image Studio keeps
