@@ -68,7 +68,7 @@ jobs:
           node scripts\h3-cuda-memory-terminal.mjs check
           if errorlevel 1 exit /b %ERRORLEVEL%
           node --test scripts\h3-cuda-memory-terminal.test.mjs
-      - name: Build and execute the two stationary-pair anchors
+      - name: Build and execute the three stationary-pair anchors
         working-directory: sceneworks
         shell: cmd
         run: |

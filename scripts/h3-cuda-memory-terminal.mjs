@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// SW-F329: exactly two full long-clip anchors. Manual Actions only; no ordinary CI compute.
+// SW-F329: one bounded three-anchor campaign. Manual Actions only; no ordinary CI compute.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { copyFile, link, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { fileSha256 } from './lib/file-sha256.mjs';
 import { OwnedService, ProcessObservations, processSample, assertQueuedMatchesSubmitted, bindCompletedMedia, hardware } from './h3-finetune-terminal-runtime.mjs';
 import { runScenario } from './h3-finetune-terminal-api.mjs';
-import { authorized, sourcePair, verifyRenderedContent } from './h3-finetune-terminal.mjs';
+import { authorized, sourcePair, verifyRenderedContent, decodedDelta, validateAVAgainstRequest } from './h3-finetune-terminal.mjs';
 
 const exec=promisify(execFile), GIB=1024**3;
 const json=async file=>JSON.parse(await readFile(file,'utf8'));
@@ -38,8 +38,8 @@ export function validatePlan(p){
   bytes(p.hostBudgetBytes,'hostBudgetBytes');bytes(p.workstationDeviceBytes,'workstationDeviceBytes');
   assert.ok(p.workstationDeviceBytes<=96*GIB,'reported workstation envelope cannot be enlarged');
   assert.ok(Number.isInteger(p.timeoutSeconds)&&p.timeoutSeconds>=60&&p.timeoutSeconds<=7200);
-  if(p.additionalSparse24!==undefined)assert.equal(typeof p.additionalSparse24,'boolean');
-  if(p.additionalSparse24)assert.ok(typeof p.additionalSparse24Reason==='string'&&p.additionalSparse24Reason.trim(),'focused additional sparse render requires the concrete evidence gap');
+  assert.equal(p.additionalSparse24,true,'normal sparse24GiB anchor is required for resident/window Veda equivalence');
+  assert.ok(typeof p.additionalSparse24Reason==='string'&&p.additionalSparse24Reason.trim(),'focused additional sparse render requires the concrete evidence gap');
   assert.deepEqual(Object.keys(p.sources).sort(),Object.keys(SOURCES).sort());
   for(const [role,spec] of Object.entries(SOURCES)){
     const source=p.sources[role];absolute(source.root);sha40(source.revision);
@@ -96,6 +96,120 @@ export function validateMaterializingProofLog(log){
   const receipts=[...log.matchAll(/S3_DEVICE_RECEIPT (\{[^\n]+\})/g)].map(match=>JSON.parse(match[1]));
   for(const dtype of ['BF16','F16'])assert.ok(receipts.some(row=>row.schema==='sc-25777-actual-cuda-kernel-v2'&&row.device_ordinal===0&&row.dtype===dtype&&row.sparse_calls>0&&row.forced_failure_dense===true),'actual CUDA kernel receipts must cover both output dtypes');
   return {materializedCalls:materialized,receipts};
+}
+
+
+// Existing CUDA H3 terminal operator maximumBaselineDelta: 0.001 (sc-26691 campaign).
+// Keep that same-backend RMS ceiling fixed before observing this campaign. Full native
+// frames/channels below strengthen the existing sampled decodedDelta witness; neither
+// cross-backend tolerances nor forced-dense outputs are an equality oracle.
+export const VEDA_EQUIVALENCE = Object.freeze({video:0.001,audio:0.001,
+  basis:'sc-26691 CUDA same-backend maximumBaselineDelta=0.001; full native decoded RGB and stereo PCM RMS'});
+
+export function validateVedaParityPair(records){
+  const take=id=>{const found=records.filter(r=>r.id===id);assert.equal(found.length,1,`one actual ${id} anchor required`);return found[0];};
+  const resident=take('workstation-veda'),streamed=take('24gib-veda-sparse');
+  assert.notEqual(resident.job?.id,streamed.job?.id,'independent completed generations required');
+  assert.deepEqual(resident.sourcePair,streamed.sourcePair,'Veda parity source pair changed');
+  sha40(resident.sourcePair?.sceneworks);sha40(resident.sourcePair?.inference);
+  assert.deepEqual(resident.settings,streamed.settings,'Veda parity changed creative settings');
+  const witnesses=[];
+  for(const [record,windowed] of [[resident,false],[streamed,true]]){
+    assert.equal(record.passed,true);assert.equal(record.job?.status,'completed');
+    assert.ok(typeof record.job.id==='string'&&record.job.id.length>0);
+    assertQueuedMatchesSubmitted({...record.settings,projectId:record.job.payload?.projectId},record.job);
+    assert.equal(record.settings.advanced?.veda?.enabled,true);
+    const veda=record.generationMetrics?.vedaExecution??record.generationMetrics?.veda_execution;
+    assert.equal(veda?.requested,true);assert.ok(numeric(veda.sparseCalls??veda.sparse_calls,'actual sparse calls')>0,'both parity anchors must execute sparse attention');
+    assert.ok(typeof veda.kernel==='string'&&veda.kernel.length>0,'actual sparse kernel identity required');
+    assert.ok(!/forced for validation/.test(veda.fallbackReason??veda.fallback_reason??''),'forced dense is not the Veda equality oracle');
+    assert.equal(record.media?.length,1);const media=record.media[0];
+    assert.equal(media.jobId,record.job.id);sha64(media.sha256);assert.equal(media.decoded?.sha256,media.sha256);
+    assert.equal(media.av,path.basename(media.av),'bound media path must stay in its anchor directory');
+    validateAVAgainstRequest(media.decoded,record.settings,{model:'minimax_h3',fps:24,width:1344,height:768,audio:{required:true,sampleRate:32000,channels:2,codec:'aac'}});
+    const selections=record.events?.filter(e=>e.event==='video_memory_strategy_selected'&&e.route==='minimax_h3'&&e.request_frames===345)??[];
+    const strategy=windowed?'BoundedTransformerResidency':'Resident';
+    assert.ok(selections.length&&selections.every(e=>e.strategy===strategy),'actual selected residency differs from the parity route');
+    const executions=record.events.filter(e=>e.event==='h3_attention_execution');
+    assert.equal(executions.length,1,'one completed request execution-policy witness required');
+    const execution=executions[0];
+    assert.equal(execution.transformer_window,windowed?'Some(1)':'None');
+    assert.equal(execution.transformer_component,windowed?'Some(Both)':'None');
+    const transfers=record.events.filter(e=>e.event==='h3_transformer_window_materialized');
+    if(windowed){
+      for(const component of ['text_encoder','dit']){
+        const rows=transfers.filter(e=>e.component===component);assert.ok(rows.length>0,`actual ${component} transfer windows required`);
+        for(const row of rows){assert.equal(row.block_count,1);assert.ok(numeric(row.base_bytes,'transferred bytes')>0);assert.ok(Number.isInteger(row.first_block)&&row.first_block>=0);assert.match(row.device,/Cuda\s*\{\s*gpu_id:\s*0\s*\}/,'actual CUDA transfer device required');}
+      }
+    }else assert.equal(transfers.length,0,'resident anchor must not silently execute a transformer window');
+    witnesses.push({anchor:record.id,jobId:record.job.id,media:media.av,sha256:media.sha256,strategy,execution,sparseCalls:veda.sparseCalls??veda.sparse_calls,kernel:veda.kernel});
+  }
+  const left=resident.generationMetrics.vedaExecution??resident.generationMetrics.veda_execution;
+  const right=streamed.generationMetrics.vedaExecution??streamed.generationMetrics.veda_execution;
+  for(const key of ['kernel','predictor','plan','planMatch','executionGrid','planGrid'])assert.deepEqual(right[key],left[key],`Veda parity changed ${key}`);
+  return {resident,streamed,witnesses};
+}
+
+// Read fixed-size chunks, never materialize a long-clip RGB vector in JS memory.
+export async function rawNumericDifference(a,b,{stream,expectedElements,channels}){
+  assert.ok(['video','audio'].includes(stream));assert.ok(Number.isInteger(channels)&&channels>0);
+  const width=stream==='video'?1:4,[as,bs]=await Promise.all([stat(a),stat(b)]);
+  assert.ok(as.size>0&&as.size===bs.size&&as.size%width===0,'decoded stream length differs or is empty');
+  const elements=as.size/width;assert.equal(elements%channels,0,'incomplete channel tuple');
+  if(expectedElements!==undefined)assert.equal(elements,expectedElements,'full decoded frame/sample coverage required');
+  const files=await Promise.all([open(a,'r'),open(b,'r')]),buffers=[Buffer.alloc(64*1024),Buffer.alloc(64*1024)];
+  let squared=0,maxAbs=0;const channelSquares=Array(channels).fill(0);
+  try{
+    for(let offset=0;offset<as.size;offset+=buffers[0].length){
+      const length=Math.min(buffers[0].length,as.size-offset);
+      await Promise.all(files.map(async(file,j)=>{let n=0;while(n<length){const read=await file.read(buffers[j],n,length-n,offset+n);assert.ok(read.bytesRead>0,'decoded stream truncated during comparison');n+=read.bytesRead;}}));
+      for(let i=0;i<length;i+=width){
+        const x=width===1?buffers[0][i]/255:buffers[0].readFloatLE(i),y=width===1?buffers[1][i]/255:buffers[1].readFloatLE(i);
+        assert.ok(Number.isFinite(x)&&Number.isFinite(y),'non-finite decoded PCM value');
+        const d=Math.abs(x-y),sq=d*d;squared+=sq;maxAbs=Math.max(maxAbs,d);channelSquares[((offset+i)/width)%channels]+=sq;
+      }
+    }
+  }finally{await Promise.all(files.map(f=>f.close()));}
+  return {elements,channels,rmse:Math.sqrt(squared/elements),maxAbs,channelRmse:channelSquares.map(sum=>Math.sqrt(sum/(elements/channels))),coverage:'all native-resolution frames or all native-rate interleaved audio samples'};
+}
+
+export async function compareDecodedMedia(a,b,dir,{videoElements,audioSamples,audioPadding=0,audioChannels=2,command=exec,sampledDelta=decodedDelta}={}){
+  assert.ok(Number.isSafeInteger(videoElements)&&videoElements>0&&videoElements%3===0,'native video element count required');
+  assert.ok(Number.isSafeInteger(audioSamples)&&audioSamples>0&&Number.isSafeInteger(audioPadding)&&audioPadding>=0,'native audio sample coverage required');
+  const report={policy:VEDA_EQUIVALENCE,streams:{}};const raw=[];
+  try{
+    for(const stream of ['video','audio']){
+      const files=[];
+      for(const [index,file] of [a,b].entries()){
+        const target=path.join(dir,`veda-parity-${randomUUID()}-${index}-${stream}.raw`);raw.push(target);files.push(target);
+        const args=stream==='video'?['-map','0:v:0','-an','-vsync','0','-pix_fmt','rgb24','-f','rawvideo']:['-map','0:a:0','-vn','-c:a','pcm_f32le','-f','f32le'];
+        await command('ffmpeg',['-v','error','-xerror','-nostdin','-n','-i',file,...args,target],{timeout:300000,maxBuffer:1048576});
+      }
+      if(stream==='audio')for(const file of files){const count=(await stat(file)).size/(4*audioChannels);assert.ok(Number.isInteger(count)&&count>=audioSamples-audioPadding&&count<=audioSamples+audioPadding,'full decoded audio sample coverage required');}
+      const full=await rawNumericDifference(...files,{stream,channels:stream==='video'?3:audioChannels,expectedElements:stream==='video'?videoElements:undefined});
+      if(stream==='audio')assert.ok(full.elements/audioChannels>=audioSamples-audioPadding&&full.elements/audioChannels<=audioSamples+audioPadding,'full decoded audio sample coverage required');
+      report.streams[stream]={...full,maximumRmse:VEDA_EQUIVALENCE[stream],sampledRmse:await sampledDelta(a,b,stream)};
+      assert.ok(full.rmse<=VEDA_EQUIVALENCE[stream]&&full.channelRmse.every(v=>v<=VEDA_EQUIVALENCE[stream]),`${stream} full decoded Veda residency comparison exceeds fixed same-backend RMS ceiling`);
+      assert.ok(Number.isFinite(report.streams[stream].sampledRmse)&&report.streams[stream].sampledRmse>=0&&report.streams[stream].sampledRmse<=VEDA_EQUIVALENCE[stream],`${stream} existing decodedDelta witness exceeds same-backend RMS ceiling`);
+    }
+    return report;
+  }catch(error){error.comparison=report;throw error;}
+  finally{await Promise.all(raw.map(file=>rm(file,{force:true})));}
+}
+
+export async function compareVedaAnchors(records,output,{compare=compareDecodedMedia}={}){
+  let report={kind:'cuda-veda-resident-window-equivalence',passed:false,policy:VEDA_EQUIVALENCE};
+  try{
+    const {resident,streamed,witnesses}=validateVedaParityPair(records);
+    const files=[resident,streamed].map(record=>path.join(output,record.id,record.media[0].av));
+    for(const [i,file] of files.entries())assert.equal(await fileSha256(file),witnesses[i].sha256,'bound parity media changed');
+    report={...report,sourcePair:resident.sourcePair,anchors:witnesses};
+    const verification=validateAVAgainstRequest(resident.media[0].decoded,resident.settings,{model:'minimax_h3',fps:24,width:1344,height:768,audio:{required:true,sampleRate:32000,channels:2,codec:'aac'}});
+    report.comparison=await compare(...files,output,{videoElements:1344*768*345*3,audioSamples:verification.audio.expectedSamples,audioPadding:verification.audio.frameSamples+1});
+    for(const [i,file] of files.entries())assert.equal(await fileSha256(file),witnesses[i].sha256,'bound parity media changed while decoding');
+    report.passed=true;return report;
+  }catch(error){report.error=error.stack;if(error.comparison)report.comparison=error.comparison;throw error;}
+  finally{await save(path.join(output,'veda-equivalence.json'),report);}
 }
 
 async function walk(root,prefix=''){
@@ -179,8 +293,7 @@ export async function run(p,swRoot,inferenceRoot,output){
   const proofs=await retainedProofs(p,inferenceRoot);await save(path.join(output,'focused-proofs.json'),proofs);
   const inventory=await hardware('cuda',process.env.CUDA_VISIBLE_DEVICES);await save(path.join(output,'hardware.json'),inventory);
   const staged=await stageModels(p,output),results=[];
-  const anchors=[['workstation-veda',false,false],['24gib-veda-dense',true,true]];
-  if(p.additionalSparse24===true){assert.ok(typeof p.additionalSparse24Reason==='string'&&p.additionalSparse24Reason.trim(),'focused additional sparse render requires the concrete evidence gap');anchors.push(['24gib-veda-sparse',true,false]);}
+  const anchors=[['workstation-veda',false,false],['24gib-veda-dense',true,true],['24gib-veda-sparse',true,false]];
   for(const [id,capped,forceDense] of anchors){
     const dir=path.join(output,id);await mkdir(dir);const parameters={...p,output};
     const c={id,backend:'cuda',timeoutSeconds:p.timeoutSeconds,loadHostBudgetBytes:p.hostBudgetBytes,loadDeviceBudgetBytes:capped?24*GIB:p.workstationDeviceBytes,declaredSourceBindings:[{family:'h3',model:{modelId:'minimax_h3',baseModel:'minimax_h3'}}],runtime:{port:0,gpuId:'1',deviceId:process.env.CUDA_VISIBLE_DEVICES,cudaProofFeatures:['sceneworks-rust-api/h3-memory-proof'],memoryCap:capped?{kind:'cuda-vram-gb',value:24}:undefined,cudaProofEnvironment:capped?{SCENEWORKS_CUDA_PROOF_POOL_BYTES:String(p.poolBytes),...(forceDense?{SCENEWORKS_H3_VEDA_FORCE_DENSE:'1'}:{})}:{}}};
@@ -206,7 +319,8 @@ export async function run(p,swRoot,inferenceRoot,output){
     finally{if(observer)try{record.observations=await observer.finish();}catch(error){record.observationError=error.message;}if(service.worker)try{await service.stop();}catch(error){record.passed=false;record.shutdownError=error.message;}if(service.binary)try{assert.equal(await fileSha256(service.binary),service.binaryHash,'owned executable changed during the anchor');}catch(error){record.passed=false;record.binaryError=error.message;}record.endedAt=new Date().toISOString();await save(path.join(dir,'result.json'),record);}
     assert.equal(record.passed,true,record.shutdownError);results.push(record);
   }
-  await sourcePair({...p,output},swRoot,inferenceRoot);await save(path.join(output,'result.json'),{feature:'SW-F329',passed:true,sourcePair:{sceneworks:p.sceneworks,inference:p.inference},anchors:results.map(result=>({id:result.id,jobId:result.job.id,passed:result.passed,envelope:result.envelope})),proofs});
+  const equivalence=await compareVedaAnchors(results,output);
+  await sourcePair({...p,output},swRoot,inferenceRoot);await save(path.join(output,'result.json'),{feature:'SW-F329',passed:true,equivalence,sourcePair:{sceneworks:p.sceneworks,inference:p.inference},anchors:results.map(result=>({id:result.id,jobId:result.job.id,passed:result.passed,envelope:result.envelope})),proofs});
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

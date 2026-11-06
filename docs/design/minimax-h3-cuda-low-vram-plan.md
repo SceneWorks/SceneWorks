@@ -224,10 +224,13 @@ Acceptance criteria:
 Use one terminal campaign for these outcomes, reusing bounded numerical,
 cancellation, and contract evidence from earlier items. Recover the original
 job or recipe for its remaining settings when available; otherwise record the
-chosen prompt, seed, steps, and sparse controls explicitly. Start with two full
-render anchors: the workstation Veda case and a 24 GiB case with forced dense
-fallback. If the latter cannot also establish normal sparse execution within
-24 GiB, add only the focused sparse render needed to prove it. An actual 24 GiB
+chosen prompt, seed, steps, and sparse controls explicitly. The bounded campaign
+uses the workstation normal-Veda case, a 24 GiB case with forced dense fallback,
+and one focused normal-Veda24 GiB render. The third render establishes both
+normal sparse fit and E5 numerical equivalence against the workstation's
+resident Veda execution: identical creative settings, positive sparse calls on
+both, different executed residency policies, and actual video/audio comparison.
+The forced-dense render remains a separate fallback/envelope proof. An actual 24 GiB
 GPU or an enforceable allocation cap plus whole-device peak observation can
 establish the memory envelope; a Blackwell run must not be reported as RTX 3090
 hardware or performance validation.
@@ -248,8 +251,11 @@ anchor cannot establish the required envelope. All inference computation stays
 in separate dedicated validation workflows.
 
 Check video dimensions, frame count, duration, changing nonblack frames, and
-the generated audio stream. Reuse fixed-input intermediate parity checks to
-detect silent numerical regressions; file existence alone is insufficient.
+the generated audio stream. Compare every decoded RGB frame and both native-rate
+audio channels for the two equivalent normal-Veda anchors under the existing
+same-backend H3 RMS bound, retaining their job/media and execution witnesses.
+Reuse fixed-input intermediate parity checks as additional numerical evidence;
+file existence and two independently successful renders are insufficient.
 Record host peak separately from device peak and account for other GPU
 processes. Timing is reported to expose transfer overhead, with no invented
 latency target. Failed anchors require a focused diagnosis and repair, not a
