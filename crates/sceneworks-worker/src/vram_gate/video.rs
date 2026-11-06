@@ -445,10 +445,8 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
         .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
 }
 
-/// Fail-closed admission for the MiniMax-H3 Candle lane. Every user-selectable tier has a
-/// real-weight whole-render peak measured at the shipped 1344x768 geometry; admitting without the
-/// exact tier row (or without a live free-VRAM reading) would make the catalog flip an unproved OOM
-/// path. User LoRA bytes are independently resident and are charged above that baseline.
+/// Archived MiniMax-H3 catalog-row regression fixture. Keep the measured baseline and its
+/// adapter arithmetic testable; production uses resolved source/request/strategy admission.
 #[cfg(test)]
 pub(crate) fn minimax_h3_fit_error(
     manifest_entry: &JsonObject,
@@ -467,6 +465,9 @@ pub(crate) fn minimax_h3_fit_error(
     )
 }
 
+// Historical catalog-row fixture only. Production H3 admission uses the resolved source,
+// request, live pools and selected strategy in video_admission before tensor materialization.
+#[cfg(test)]
 pub(crate) fn minimax_h3_fit_error_with_sparse(
     manifest_entry: &JsonObject,
     tier_key: &str,

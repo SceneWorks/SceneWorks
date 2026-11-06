@@ -4144,7 +4144,7 @@ fn minimax_h3_sparse_cold_admission_does_not_borrow_dense_peak() {
     assert!(
         minimax_h3_fit_error_with_sparse(&manifest, "q4", 0, "0", budget, Some(&bound)).is_some()
     );
-    let needed = 42.068 + bound.total_bytes as f64 / BYTES_PER_GIB;
+    let needed = 42.068 + bound.device_peak_bytes() as f64 / BYTES_PER_GIB;
     assert!(minimax_h3_fit_error_with_sparse(
         &manifest,
         "q4",

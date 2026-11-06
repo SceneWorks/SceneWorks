@@ -27,7 +27,7 @@ on:
         required: true
         default: standard
         type: choice
-        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-import-mlx, h3-import-cuda, h3-import-both, h3-admission-proof, h3-ui-proof, h3-terminal-mlx, h3-terminal-cuda]
+        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-import-mlx, h3-import-cuda, h3-import-both, h3-admission-proof, h3-ui-proof, h3-terminal-mlx, h3-terminal-cuda, h3-cuda-memory]
       inference_revision:
         description: Exact merged inference commit for terminal provisioning.
         required: false
@@ -77,10 +77,16 @@ concurrency:
   # Preserve StarVector's non-canceling bridge and ordinary ref-keyed builds.
   # Explicit CPU, import and terminal runs have separate per-run caller groups,
   # distinct from reusable callees and the unchanged native-device queues below.
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-ui-proof' && format('h3-ui-hosted-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' && format('h3-admission-cpu-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') && format('h3-terminal-bridge-{0}-{1}', github.run_id, github.run_attempt)) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref)) || 'starvector-terminal-bridge' }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-cuda-memory' && format('h3-cuda-memory-bridge-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-ui-proof' && format('h3-ui-hosted-{0}-{1}', github.run_id, github.run_attempt)) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' && format('h3-admission-cpu-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') && format('h3-terminal-bridge-{0}-{1}', github.run_id, github.run_attempt)) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref)) || 'starvector-terminal-bridge' }}
   cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
 
 jobs:
+  h3-cuda-memory:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-cuda-memory' }}
+    uses: ./.github/workflows/h3-cuda-memory-terminal.yml
+    with:
+      plan: ${{ inputs.campaign_run_id }}
+
   # Asset staging is folded into the registered h3-terminal-mlx/cuda reusable execution, which
   # ensure-assets and conditioning inside the SAME terminal route before the reduced 25/backend
   # operational cases are run. There is no separate staging phase or route.

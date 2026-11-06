@@ -58,7 +58,7 @@ fn imported_h3_fixture_budget(
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn imported_h3_admission_requires_a_known_sufficient_budget() {
+fn historical_imported_h3_catalog_fixture_requires_a_known_sufficient_budget() {
     let data = tempfile::tempdir().unwrap();
     let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
         data.path(),
@@ -430,7 +430,6 @@ fn drive_candle_imported_minimax_h3(
     settings: &Settings,
     probe: &ArmProbe,
     request: &VideoRequest,
-    budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<Value> {
     let job: JobSnapshot = serde_json::from_value(json!({
         "id": "job-candle-imported-h3", "type": "video_generate", "status": "running",
@@ -457,11 +456,22 @@ fn drive_candle_imported_minimax_h3(
                 &project_path,
                 "minimax_h3",
                 "candle",
-                std::future::ready(budget),
                 probe.loader(),
             ),
         )
-        .map(|(_decoded, raw)| raw)
+        .map(|(decoded, raw)| {
+            if let Some(expected) = &probe.audio {
+                let actual = decoded
+                    .audio
+                    .expect("generated synchronized audio survives admission");
+                assert_eq!(actual.samples, expected.samples);
+                assert_eq!(
+                    (actual.sample_rate, actual.channels),
+                    (expected.sample_rate, expected.channels)
+                );
+            }
+            raw
+        })
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -522,19 +532,32 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         ..offline_settings()
     };
 
-    let request = imported_minimax_h3_request("singularity_fl2va_dense", &imported.entry);
+    let mut request = imported_minimax_h3_request("singularity_fl2va_dense", &imported.entry);
+    request.duration = 14.375;
+    request.width = 1344;
+    request.height = 768;
+    request.seed = Some(42);
     assert!(
         resolve_candle_video_route_for_test(&request, &settings).is_ok(),
         "the candle router claims the imported entry"
     );
-    let probe = ArmProbe::default();
-    let raw = drive_candle_imported_minimax_h3(
-        &settings,
-        &probe,
-        &request,
-        Some(imported_h3_fixture_budget(&imported.entry)),
-    )
-    .expect("an imported dense DiT with a resident install renders");
+    let mut probe = ArmProbe::default();
+    let raw = drive_candle_imported_minimax_h3(&settings, &probe, &request)
+        .expect("an imported dense DiT with a resident install renders");
+    assert_eq!(
+        probe.engine_frames(),
+        345,
+        "the fixed 124-frame catalog baseline must not shorten the request"
+    );
+    let engine_request = probe.request.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        (
+            engine_request.width,
+            engine_request.height,
+            engine_request.seed
+        ),
+        (1344, 768, Some(42))
+    );
     let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
     let Some(WeightsSource::Dir(transformer)) = spec.components.get("transformer") else {
         panic!("the imported DiT must ride components[\"transformer\"]");
@@ -601,30 +624,71 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         json!(imported.semantic_digest)
     );
 
+    // Add an actual, dimension-compatible Turbo/style stack on the queued jobs. Source
+    // metadata and host/device sizing must be rebuilt for these overlays, while the recipe,
+    // original geometry and synchronized audio stay attached to the same imported source.
+    let mut adapters = Vec::new();
+    for id in ["minimax_h3_turbo_8step", "community_h3_style"] {
+        let path = data.path().join("loras").join(format!("{id}.safetensors"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let header = json!({
+            "transformer_blocks.0.attn.to_q.lora_A.default.weight":{"dtype":"F32","shape":[1,8],"data_offsets":[0,32]},
+            "transformer_blocks.0.attn.to_q.lora_B.default.weight":{"dtype":"F32","shape":[12,1],"data_offsets":[32,80]}
+        });
+        let encoded = serde_json::to_vec(&header).unwrap();
+        let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(encoded);
+        bytes.extend([0u8; 80]);
+        std::fs::write(&path, bytes).unwrap();
+        adapters.push(json!({"id":id,"path":path,"weight":1.0,"family":"minimax-h3"}));
+    }
+    request.loras = adapters;
+    probe.audio = Some(gen_core::AudioTrack {
+        samples: vec![0.125; 32],
+        sample_rate: 32000,
+        channels: 2,
+        stems: vec![],
+    });
     // The stock BF16 measured row no longer prices an imported source (terminal review finding 2):
-    // an absent budget probe, or one far below the stock dense row, must still reach the ACTUAL
-    // source-aware admission in the shared funnel rather than being refused by another
-    // checkpoint's measurement. The builtin gate policy itself is preserved and pinned by
-    // `imported_h3_admission_requires_a_known_sufficient_budget` against the same entry.
-    for budget in [
-        None,
-        Some(crate::vram_gate::VramBudget {
-            free_gb: 0.1,
-            total_gb: 0.1,
-        }),
-    ] {
+    // the queued request reaches ACTUAL source-aware admission in the shared funnel, rather
+    // than being refused by another checkpoint's measurement. Repeat through the warm metadata handle so an earlier
+    // request cannot satisfy the next generation's admission or identity assertions.
+    for _queued in 0..2 {
         // The cached generator retains the original probe, so observe a fresh GENERATE rather
         // than requiring its loader to run again. Clear the prior request before every call:
         // an earlier successful render must never satisfy this iteration's admission proof.
         probe.request.lock().unwrap().take();
-        let raw = drive_candle_imported_minimax_h3(&settings, &probe, &request, budget)
-            .unwrap_or_else(|error| {
+        let raw =
+            drive_candle_imported_minimax_h3(&settings, &probe, &request).unwrap_or_else(|error| {
                 panic!("the stock row must not refuse an imported source: {error}")
             });
-        assert!(
-            probe.request.lock().unwrap().take().is_some(),
-            "this imported render reached provider generation under actual source-aware admission"
+        let generated = probe
+            .request
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the current queued render reached provider generation");
+        assert_eq!(generated.frames, Some(345));
+        assert_eq!(generated.seed, Some(42));
+        assert_eq!(
+            generated.steps,
+            Some(8),
+            "Turbo recipe survives source-aware admission"
         );
+        assert_eq!(generated.scheduler_shift, Some(12.0));
+        let loaded = probe.spec.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            loaded.adapters.len(),
+            2,
+            "neither adapter may be dropped by residency selection"
+        );
+        for (loaded, requested) in loaded.adapters.iter().zip(&request.loras) {
+            assert_eq!(
+                canonical(&loaded.path),
+                canonical(Path::new(requested["path"].as_str().unwrap()))
+            );
+        }
+        assert_eq!(raw["minimaxH3Turbo"], json!("minimax_h3_turbo_8step"));
         assert_eq!(
             raw["importPlan"]["checkpointId"],
             json!(imported.checkpoint_id),
@@ -643,7 +707,6 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
             &settings,
             &probe,
             &imported_minimax_h3_request(model, entry),
-            Some(imported_h3_fixture_budget(&imported.entry)),
         )
         .expect_err("refused");
         assert!(error.to_string().contains(needle), "{model}: {error}");
@@ -1508,12 +1571,7 @@ fn drive_bound_component_import(
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
-        drive_candle_imported_minimax_h3(
-            settings,
-            probe,
-            request,
-            Some(imported_h3_fixture_budget(&request.model_manifest_entry)),
-        )
+        drive_candle_imported_minimax_h3(settings, probe, request)
     }
 }
 

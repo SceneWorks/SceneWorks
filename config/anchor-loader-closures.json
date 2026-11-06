@@ -1,15 +1,15 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "178eb45e5ad986d2a7236c8f6b800139675baa31",
+  "inferenceRevision": "d8b1242a4505193757d66b9854797ce9c587109e",
   "models": {
     "bernini:candle": {
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-bernini/src/bernini.rs",
         "crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "55642a8ddcc191e1d88f5db1a2268666a4b2430d2ebb74c282c233f541ede71d",
-      "closureFileCount": 403,
+      "digest": "532884a4acb3cd4f4f83f6e745acb76be36e00ada03dc0dbbe84c4f3d79fb833",
+      "closureFileCount": 404,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -327,6 +327,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -421,7 +422,7 @@
         "crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
         "crates/media/mlx-gen/mlx-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "952b2839bf438b89104893e1af00ec214ecf314107f3da816c77678cbe88ff29",
+      "digest": "1b1189c7b2f50a1ae7840fca682e941afd82fa0e4c74a0ef714b4a5eb9547ead",
       "closureFileCount": 399,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -831,8 +832,8 @@
         "crates/media/candle-gen/candle-gen-bernini/src/bernini.rs",
         "crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "efcdaa499874345b134dbd78a1d4fa7a9ee400c53f53c2e0c531d01749773cef",
-      "closureFileCount": 403,
+      "digest": "836515a51a116a340060c988de1ca7d402b464823b8e4078749754ba3fd93a0f",
+      "closureFileCount": 404,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -1150,6 +1151,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -1245,7 +1247,7 @@
         "crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
         "crates/media/mlx-gen/mlx-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "4ca589675f3dd770ff709a56d15e66fd2d02af8234d2f894fa3a3e76779eeb64",
+      "digest": "3fca3fc598d49d032971bd34be351ed75fdaf0fae7c879285ca81f5753a8c879",
       "closureFileCount": 399,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -1655,8 +1657,8 @@
         "crates/media/candle-gen/candle-gen-chroma/src/lib.rs",
         "crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
       ],
-      "digest": "db94d61259b07d69bd4de8886504ba6e207630b438a3f76c701370adceacaf7e",
-      "closureFileCount": 343,
+      "digest": "70cc3998d46a7f627fcd92b9685525839ab8ba5dfc530954a2690da7e47088ab",
+      "closureFileCount": 344,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -1916,6 +1918,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -2010,7 +2013,7 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "785962aa0062509ab7a399651c72b880b422659945ef22f1b34c4b09fccb4fda",
+      "digest": "93218eec4069c2f6d839cf60954fd879f759619388e31711ec58bd5b0df11d39",
       "closureFileCount": 578,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -2599,8 +2602,8 @@
         "crates/media/candle-gen/candle-gen-chroma/src/lib.rs",
         "crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
       ],
-      "digest": "ae4b0a7d3356324200a8d9701b1ff04dc54c7430939ccc335941ef624553a86d",
-      "closureFileCount": 343,
+      "digest": "f717a8c815e2eb4e8b20d5c42671828062648cd868a4db2d3dd70381f1c5973e",
+      "closureFileCount": 344,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -2860,6 +2863,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -2954,7 +2958,7 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "e7fdf2a570e635e2a4fa561bc7817dd664622e32c0b24dc006233cff507977f6",
+      "digest": "74476f4fcb3bb5961ae32b6264397b29b08c9116a5d175cb8f9ba643dc434278",
       "closureFileCount": 578,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -3543,8 +3547,8 @@
         "crates/media/candle-gen/candle-gen-chroma/src/lib.rs",
         "crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
       ],
-      "digest": "210998a7feeb437d011f6f8d7ed7570802f15b2d038fb6809324ad4c9a898ff8",
-      "closureFileCount": 343,
+      "digest": "34bb1e3de1b74d2d26e13cc45bae68317851d592e88904114fdeb73b20ef1019",
+      "closureFileCount": 344,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -3804,6 +3808,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -3898,7 +3903,7 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "0398f1c7b5086518b0dafb683470a1b0dbe0c06632ecf533229de818be790274",
+      "digest": "308f92dcc6f4a36d7fa5d8050535e4f6bc183965818da089894ef2578f658593",
       "closureFileCount": 578,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -4487,8 +4492,8 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "fa8eaeaa8175420979cf919377c3baf565d8aba8d4f1cf67f9fe9b068281ed27",
-      "closureFileCount": 446,
+      "digest": "a37a9645e107aae814c91b34a09d23efd4675c17a0df8983e9e55127901265a0",
+      "closureFileCount": 447,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -4848,6 +4853,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -4944,7 +4950,7 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "19177d7cf2c8f1c6e0f2433ba456e5f453bc5a22f5129fa6b601a0b579b9e834",
+      "digest": "3a3fecc8183f1136e36396760375220c2508d4b9f1b2519ac95728f8238c3453",
       "closureFileCount": 332,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -5287,8 +5293,8 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "6d79324724926b9e951ef2681c47b863823eaf2ec206463cc62e5abc68472551",
-      "closureFileCount": 446,
+      "digest": "3cee81bd380598dd8d08a769bf40adfdcf8cdb6c0ea8431ba929b9c26e35c571",
+      "closureFileCount": 447,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -5648,6 +5654,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -5745,7 +5752,7 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "2b6e78d72082aaa4263de0be4d27e46793fa963d1b0f96d7e67423016bfd31bd",
+      "digest": "cb5384b7faf387e5358f27d0a445bf06815c9a7f4d56e9f5ddeb3be9034c832d",
       "closureFileCount": 332,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -6089,8 +6096,8 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "112c6a02032af3c3b1c0e115459fcc337698f82edce6f17b33b3c04beb9b1854",
-      "closureFileCount": 446,
+      "digest": "a0ccc60e2679cdac4f625c8ac511360a9bf5b3ceb47f5a4ebf7af78dabb34594",
+      "closureFileCount": 447,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -6450,6 +6457,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -6548,7 +6556,7 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "7a1dc21dc1c0cbcda110d36398a600113db5f201960014dcbb2f4254eba90a0f",
+      "digest": "33ab976d6d7763f8ab0e6f35d6a3ac8ada5f6a7b81a6a38c9ef668da1ee593d9",
       "closureFileCount": 332,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -6891,8 +6899,8 @@
         "crates/media/candle-gen/candle-gen-flux3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-flux3/src/model.rs"
       ],
-      "digest": "7794e2db3f8036acfcdf4e0f5920b295c2b66503c4642fb2f5ee1cc2217d060e",
-      "closureFileCount": 429,
+      "digest": "c3abbaec2bd37f08cf1195d0c21fa2170426729f47748f989fc583fc4d608fdb",
+      "closureFileCount": 430,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -7235,6 +7243,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -7331,7 +7340,7 @@
         "crates/media/mlx-gen/mlx-gen-flux3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux3/src/model.rs"
       ],
-      "digest": "d132bdecad76e3c8cf72565c3ed4d0a15d29ce5a49e3f1564b5499d7318a4d56",
+      "digest": "5a4f962d81f3953ff92c77ccf481ead44032a4bacf7a5b784a653c1e438f9f09",
       "closureFileCount": 286,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -7628,8 +7637,8 @@
         "crates/media/candle-gen/candle-gen-flux3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-flux3/src/model.rs"
       ],
-      "digest": "29b0efefee3c73b3e7a696542f22eabcb3295d1d6ac381997dd61240155063be",
-      "closureFileCount": 429,
+      "digest": "0bb129706b03dbb67acac042348165c5bdeefe3af1bfda014c07774bb726fc73",
+      "closureFileCount": 430,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -7972,6 +7981,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -8068,7 +8078,7 @@
         "crates/media/mlx-gen/mlx-gen-flux3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux3/src/model.rs"
       ],
-      "digest": "ab217cdd3636c3e80dcad1c25f6df25974e824fdf652faee24c94a0278ba8893",
+      "digest": "8bfc213f1a0642a00e5370e7c248448abadc3462f7c2c4d451061165ad5c7e44",
       "closureFileCount": 286,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -8365,8 +8375,8 @@
         "crates/media/candle-gen/candle-gen-flux/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux/src/memory_strategy.rs"
       ],
-      "digest": "65e74b684092b64bb8526a2959f781cdb9856f7ce67be098328842cda7900448",
-      "closureFileCount": 422,
+      "digest": "abd44d99a0d68c7eaab263c61e71e06ae027e1b67e0fb838f54cfe6b5ddda2eb",
+      "closureFileCount": 423,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -8702,6 +8712,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -8799,7 +8810,7 @@
         "crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux/src/model.rs"
       ],
-      "digest": "05e6fc63d2b4c6d40ad93a2a03c9196b43f62094c4889463746623d9f086a4a1",
+      "digest": "c9da083347dc54446a88c5c73885b9b4ddef82a4278be51cf67855ac03a3c9e1",
       "closureFileCount": 566,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -9376,8 +9387,8 @@
         "crates/media/candle-gen/candle-gen-flux/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux/src/memory_strategy.rs"
       ],
-      "digest": "5b05a4eeb712caba1e369ecd96f63215c0373f5ba2d998339d31589093afc10e",
-      "closureFileCount": 422,
+      "digest": "b658e8e09e629d5b4f0890bbb4a1fad78cc863859d85dd72d5035dc1d3c87e86",
+      "closureFileCount": 423,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -9713,6 +9724,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -9810,7 +9822,7 @@
         "crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux/src/model.rs"
       ],
-      "digest": "d1a9a72c9589a8d3a3121d61e387c0e0bdba2c064689783a6bc56ca5341abbb7",
+      "digest": "d4fe5966db811f97c3389a176775608a33ce392a0c9f9fd94c79be09d7b45a3c",
       "closureFileCount": 566,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -10386,8 +10398,8 @@
         "crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs"
       ],
-      "digest": "f41542dff4e767aae1660db76b79a52a512860a17a62b6a351941cc82e158db0",
-      "closureFileCount": 342,
+      "digest": "25cde9b8c082d416fa252bd35a28402e5c31dd5f696241496f276d67bb5475e5",
+      "closureFileCount": 343,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -10646,6 +10658,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -10738,7 +10751,7 @@
         "crates/media/mlx-gen/mlx-gen-ideogram/src/lib.rs",
         "crates/media/mlx-gen/mlx-gen-ideogram/src/model.rs"
       ],
-      "digest": "5cf351715b247ebcb44f17b5b8f9340e287661a0301ea676a8f39347a0c741b2",
+      "digest": "41f33b041e9724d9488e576a222fce6d14dfe94c5fbd24952ce6802c47768287",
       "closureFileCount": 350,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -11098,8 +11111,8 @@
         "crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs"
       ],
-      "digest": "dc0a6e4523ac8229e08d142838567c9f532e60ff60a8eba48613f9881be46fa6",
-      "closureFileCount": 342,
+      "digest": "c9b96b905051d8ce99e952e8ed6521c3b758308f70d5f890351d3bbfb3657ddb",
+      "closureFileCount": 343,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -11358,6 +11371,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -11450,7 +11464,7 @@
         "crates/media/mlx-gen/mlx-gen-ideogram/src/lib.rs",
         "crates/media/mlx-gen/mlx-gen-ideogram/src/model.rs"
       ],
-      "digest": "cb821006f9f013e56f9d7c316c67ea65a74e5dd6f0f3efa43879682a39e70a3a",
+      "digest": "ef30afc5cbd54d9abad793426d438228384bcb6056f6ba5ce17f85958ed4c014",
       "closureFileCount": 350,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -11811,8 +11825,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "2c9d6987fc9a4e34d7fc1bc3d866b3ef2080113102af91a28cd694daaa6b9661",
-      "closureFileCount": 394,
+      "digest": "b8c34c99e8a8968718e7e842ab168d68cfa7b6e2c3a0a8138a12e90853fbb122",
+      "closureFileCount": 395,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -12120,6 +12134,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -12216,7 +12231,7 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "e9d69cee39bcdcf979c8560d45bb7fafa5350da77dffa292af444252e7220776",
+      "digest": "ceeb48196f25e4c6ca6b7830a7695fbceac43642572cf05e6f76bd654f794ba4",
       "closureFileCount": 504,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -12731,8 +12746,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "cfebdf43269e1d88193fdcceb7c95e8e550cc1f43b23c8052db3042c1bd681a1",
-      "closureFileCount": 394,
+      "digest": "af72af5bd4ddc09b46f05ab75143c630b6cd5e8ec5dbf074dc52bf05b5787206",
+      "closureFileCount": 395,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -13040,6 +13055,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -13136,7 +13152,7 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "aadf7069909255b250f0a905a6a489c269b339b26d47fb6f659af8f6211908fa",
+      "digest": "c14982c69ed68fe3ed3e4632c9bd7a8b73ebbe2f5909d2747bdbdcf7e373a31e",
       "closureFileCount": 504,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -13651,8 +13667,8 @@
         "crates/media/candle-gen/candle-gen-instantid/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-instantid/src/model.rs"
       ],
-      "digest": "1eac2d3bcb53473307147a3d5a0aacbfdc42e6bd366d0598114755f498778b39",
-      "closureFileCount": 401,
+      "digest": "839cf2e939dc949925a9782ee47d4f3ae3d61840638085e2d0b006301518e8ee",
+      "closureFileCount": 402,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -13967,6 +13983,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -14063,7 +14080,7 @@
         "crates/media/mlx-gen/mlx-gen-instantid/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-instantid/src/model.rs"
       ],
-      "digest": "b7b27d664389c766a2bcc0e9f6f9524db806d693899dac38fc48f9ee54e48804",
+      "digest": "de21940dbe70fd118c6cb6138fe36089504a93c6e2cceffac30eb4f5a81eb8d6",
       "closureFileCount": 512,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -14586,8 +14603,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-iris/src/model.rs"
       ],
-      "digest": "9505799a8798249665ff1a2837934745d34955f821a0204d8bd215c98281937d",
-      "closureFileCount": 431,
+      "digest": "d11cc90984481ab62b53bbfe7c82e0ccf00bb353981d30876c681dacad33f5e4",
+      "closureFileCount": 432,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -14932,6 +14949,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -15028,7 +15046,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/model.rs"
       ],
-      "digest": "1f9daf2f0f0863d89e083235fdbe9c743c4ead1cb59f670597d63d40d3d8fb1f",
+      "digest": "d8d6f9e310745a2b45057362e56fb5521f8aabbe9ba815bd9a76c2df8ba4c6a8",
       "closureFileCount": 306,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -15345,8 +15363,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/depth.rs",
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs"
       ],
-      "digest": "7fedf239078341e613c11c16572509e117906262184bcb212711f5bae387ca3c",
-      "closureFileCount": 431,
+      "digest": "a478705f88bb13a63347a1f15832c7d5cc316e1176380b0ed91893b54f1b8b85",
+      "closureFileCount": 432,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -15691,6 +15709,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -15787,7 +15806,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/depth.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs"
       ],
-      "digest": "440b943b360026a2e8c5aa1b7e062373a4b5cbe5d3df36a1a37254bcc147ae52",
+      "digest": "3fe2390d2166018cefc1c90b4ecb2d04aaa69a5b249039c07469df6ce90807f7",
       "closureFileCount": 306,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -16104,8 +16123,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-iris/src/restoration.rs"
       ],
-      "digest": "6e5096ae93d6242a5a8b93125b61bdd300bd96bab28e9d6f0fdd36d1c72b10c9",
-      "closureFileCount": 428,
+      "digest": "5e5e2c67e8bb05a765e1ae200ce5849fc9d7d5b7a8bdcf52fe447f855f36b387",
+      "closureFileCount": 429,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -16447,6 +16466,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -16543,7 +16563,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/restoration.rs"
       ],
-      "digest": "9637f2ffc81640f852af0559e187656f530ff5c54a9ba7d3968d2d6d01e45202",
+      "digest": "d19c800ea2356e0d9af80100d0e7d208c1944dabc06532ea4b1c6fe16331bc4e",
       "closureFileCount": 303,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -16856,8 +16876,8 @@
         "crates/media/candle-gen/candle-gen-kolors/src/lib.rs",
         "crates/media/candle-gen/candle-gen-kolors/src/memory_strategy.rs"
       ],
-      "digest": "2ec6e9c4d2398990efb2f62aad98533f35f9c63cc3d41c437b6edd7c4a744c8d",
-      "closureFileCount": 408,
+      "digest": "61e3b2a7433e31796d020e24d051ee3edfb6538773bc1a86fc83baab76882a1f",
+      "closureFileCount": 409,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -17179,6 +17199,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -17274,7 +17295,7 @@
         "crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-kolors/src/registry.rs"
       ],
-      "digest": "49bde980a0f82a32a319545b390419e61b1b6cff28ad7469832b5d027fa15133",
+      "digest": "37aa8827465623933ae330068088afa34f678fd06ec666cd25dd241d6a826656",
       "closureFileCount": 515,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -17798,8 +17819,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "f52fa0e990791395fb33285986259b0c4358c6b9a1f0e5336a90ad3e5758c73c",
-      "closureFileCount": 413,
+      "digest": "fb095196a9acad61b6d569d55f3288419a3435d8f61b854781335b8a03107fd9",
+      "closureFileCount": 414,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -18127,6 +18148,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -18221,7 +18243,7 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "982865c8d78d372d1386801308bc5f3e406622b529c15bf0ab45cf87f7093e91",
+      "digest": "7fe5552d4375cc4bb6cbf991da7d20f5083c59a25b728dd276f5e082a90f5053",
       "closureFileCount": 528,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -18758,8 +18780,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "edf6d2e4409fb11239bcd55174cc70f7ae275654fa32620b0d4766b03d141b0e",
-      "closureFileCount": 413,
+      "digest": "10d1d744bfad37c3be61cbc27ea0ffb46bdf7624f72bc82c0f525abf72e58555",
+      "closureFileCount": 414,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -19087,6 +19109,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -19181,7 +19204,7 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "4dc0c59d1770c5023c9fac5b709853340f36bd4667d405af404f01bcf31ed518",
+      "digest": "aaab69a0fc32d51f06ed5f8c8fdc18003c70a2ae207c0fce9aada78117d3835b",
       "closureFileCount": 528,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -19720,7 +19743,7 @@
         "crates/media/mlx-gen/mlx-gen-krea-realtime/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea-realtime/src/pipeline.rs"
       ],
-      "digest": "c7db351f8b1acfeb2a206b68001b03cdeb0374929a63135653b2c0ff4befa0e9",
+      "digest": "13d599508a833ec8b79604635acd047e8abcc06e618ad348e46ab9588c39a948",
       "closureFileCount": 388,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -20117,8 +20140,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-lens/src/lib.rs"
       ],
-      "digest": "b3eeb7caed002e4f35eb09f7f93e280831c983f81529aa520230b90437d4eb0e",
-      "closureFileCount": 472,
+      "digest": "06a82b06c16e3898c7d4e496736f9b5753b6415bc95a5a653f35218bed09067d",
+      "closureFileCount": 473,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -20504,6 +20527,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -20599,7 +20623,7 @@
         "crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-lens/src/registry.rs"
       ],
-      "digest": "b954e0fce31a5c50960a11ff890eadb27c570c4d2d46a1f4ca0a95363348118f",
+      "digest": "ace23282ff83b46adac837cc58c1e18e39f72e79f5b2005795063152617c446b",
       "closureFileCount": 380,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -20988,8 +21012,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-lens/src/lib.rs"
       ],
-      "digest": "66ee2f43263a6e061aff5b11782be20c1844c535f25f4ab7e41ce8549140276f",
-      "closureFileCount": 472,
+      "digest": "566fed6c313afb80d11b57edab31b4d570481533dbdbb0a4fc7f25c91608cc8f",
+      "closureFileCount": 473,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -21375,6 +21399,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -21470,7 +21495,7 @@
         "crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-lens/src/registry.rs"
       ],
-      "digest": "0e7c2b594099545f567d550a36befa1df61a6e104d2c679d17f8b3c51f9db5eb",
+      "digest": "6e32847b01a29bb8dc48af41f4558c9989a71fb9a4f2b8ce54c3f63f6bafa87f",
       "closureFileCount": 380,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -21861,8 +21886,8 @@
         "crates/media/candle-gen/candle-gen-ltx/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ltx/src/memory_strategy.rs"
       ],
-      "digest": "0d3e8d2daddce8ceb3a82127303e2b4ba303782da066cdff4ae12bc92bcdb574",
-      "closureFileCount": 485,
+      "digest": "dcd49599ce4492c3e2874d48296665fff7a9bd9f4c2a0a94b81a4a8d6459ba6a",
+      "closureFileCount": 486,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -22261,6 +22286,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -22356,7 +22382,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "d6ebbcb2cea1a6c52e139a294da950d7c171e55501a256b0fcc34031ea759a88",
+      "digest": "7348cf8b9493a5c12ab79376b0efa752de2cfd5560432729fa3ab2e6c866b32e",
       "closureFileCount": 400,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -22767,8 +22793,8 @@
         "crates/media/candle-gen/candle-gen-ltx/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ltx/src/memory_strategy_2_5.rs"
       ],
-      "digest": "77ebfea635728a4be8b116947b982918c441152269ed9f9a86a4b49f8e25e422",
-      "closureFileCount": 485,
+      "digest": "1a56d4e7edd013a66f99d330228f112fa7dff9a4c0ccb5d565711206bebed244",
+      "closureFileCount": 486,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -23167,6 +23193,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -23262,7 +23289,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy_2_5.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "9ab8560ad65f457f295b2f04a2344d9647d59a5da56b44c4bea3c5ad40f91f58",
+      "digest": "87e3d77b5171bfafe8e0c8493887d38f267bc39be2db983439dcaf9f7e8daa4d",
       "closureFileCount": 400,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -23673,8 +23700,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "575f04c7927da172ac687d70f26018726557f930e53942bb0e01096f73d4a3ea",
-      "closureFileCount": 332,
+      "digest": "2d9b3927d3f5618db6dcf37d11e945c9f6b231af3ad4ad06439f4cd1455d3207",
+      "closureFileCount": 333,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -23920,6 +23947,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -24017,7 +24045,7 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "2023254fd9de5a0fa65e4c8eac2b056eaa914aff75c44a436f9b97d6547606b3",
+      "digest": "ad7c6b72416eafcc1d5c58f9c39444dedd1b59472e9babbc4cf9837b9d444874",
       "closureFileCount": 440,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -24468,8 +24496,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "458ecca7a445142523a3d4bb76d728190aa4089e1cc10129e32c3de7c383d396",
-      "closureFileCount": 332,
+      "digest": "ef9885583e7113277029f0baccdf31953a6f2ce15bb2fc10d60a2bbefa5228d4",
+      "closureFileCount": 333,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -24715,6 +24743,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -24812,7 +24841,7 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "5bbf3dfb20e7e9f8b885cbad598666cdfbb43026b0a8c36dd94474a4772a8f93",
+      "digest": "3186d53738eec2a9bdb6ee9bb8f4d45997d2ffd7730bda3d3d05614ea5dc7bb7",
       "closureFileCount": 440,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -25264,8 +25293,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "d19992ce7a8cc974512eaf3f6ceb10dd1332d8f6d693916ae6f4fcb0c29599ac",
-      "closureFileCount": 332,
+      "digest": "6b81b02922dda6169e3d8b6299a83efd102ad177bf39acf9fb1fefd77c55e3a7",
+      "closureFileCount": 333,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -25511,6 +25540,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -25608,7 +25638,7 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "7c24780dd1e183eead2fd2bfd439633eb75cdd6dd0274a45e4b5251c09588228",
+      "digest": "8e520c8b15767183d955ff75470e24a75f2d4816f42fe2a759dbf55c55ffaa89",
       "closureFileCount": 440,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -26060,8 +26090,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "c874baf2d9df5a715315fb9909fc4f8a0fe18305f49626d1bf204a110ba732a5",
-      "closureFileCount": 332,
+      "digest": "02c91e1d356df5b89077194fbd7cf94b7acd6cb6c585376ad706851798498dab",
+      "closureFileCount": 333,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -26307,6 +26337,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -26404,7 +26435,7 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "f1e310296f1f4cc8dd09cc3b4f152af194c1f9c2bad0c7d2da9b6b1d3dbdc1c9",
+      "digest": "11dd21dfed0f9667d883b3b3826449e8deb557ec72746c94ea4f1d9cdd2198d2",
       "closureFileCount": 440,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -26856,8 +26887,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "abd60d7e43e8c634d173cf57709ae577d5926ead21859f3ac0a886a6a926faa7",
-      "closureFileCount": 332,
+      "digest": "3a66fb9d7d7691eb7cc8b1800a0c183899ccbe75b494686fcf3e65581048ae5c",
+      "closureFileCount": 333,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -27103,6 +27134,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -27200,7 +27232,7 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "0cd3f4bb0d2ccb8f15a38f9e9403b7ac9b69bd66216880364d2ecf3f212681ab",
+      "digest": "33609eeac3da79f3d62a45d4d5b073de35abd8eee462b752eb5f8579f9d13702",
       "closureFileCount": 440,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -27651,8 +27683,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "f48440c1cb1438827fcebdc06f09bfb6150d4943c9dce3f76da821c96cfdd347",
-      "closureFileCount": 332,
+      "digest": "689a367c225a56b52cdf64b601986264401ce67a6460aa16c6f8c3efcef71806",
+      "closureFileCount": 333,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -27898,6 +27930,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -27995,7 +28028,7 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "a85ff89eb44289dedc5040dea31f98281eeac8b5a9bdecf3d9b7d6daa29f4e95",
+      "digest": "b0a40c5ddf699a4808a13ee02e3f49cd9157af426a3b727c6f3ea22777e13550",
       "closureFileCount": 440,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -28445,8 +28478,8 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "b1a3fd188561fe3123b934f1db12f46132dfb140da71e8dc5a4bd6850a941006",
-      "closureFileCount": 717,
+      "digest": "bd0d23cc92975dc0111d9963f4c2088e044e8a6945dd3f8c979450c35bb51ab9",
+      "closureFileCount": 724,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -28747,6 +28780,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/audio_config.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/audio_vae.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/audio_vae_encoder.rs",
+        "crates/media/candle-gen/candle-gen-minimax-h3/src/block_stream.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/blocks.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/chunking.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/conditioning.rs",
@@ -28774,6 +28808,9 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/adapters.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/conditioning.rs",
+        "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/execution.rs",
+        "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/routes.rs",
+        "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/streaming.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/nn.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/pipeline.rs",
@@ -28791,6 +28828,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/veda.rs",
         "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
         "crates/media/candle-gen/candle-gen/src/attention.rs",
+        "crates/media/candle-gen/candle-gen/src/block_window.rs",
         "crates/media/candle-gen/candle-gen/src/cuda_arch.rs",
         "crates/media/candle-gen/candle-gen/src/cuda_mempool.rs",
         "crates/media/candle-gen/candle-gen/src/fused_attention.rs",
@@ -28810,6 +28848,7 @@
         "crates/media/candle-gen/candle-gen/src/quant/sidecar.rs",
         "crates/media/candle-gen/candle-gen/src/quant/w4a8_int8.rs",
         "crates/media/candle-gen/candle-gen/src/reference_training_attention.rs",
+        "crates/media/candle-gen/candle-gen/src/request_scope.rs",
         "crates/media/candle-gen/candle-gen/src/seed.rs",
         "crates/media/candle-gen/candle-gen/src/sync.rs",
         "crates/media/candle-gen/candle-gen/src/train/checkpoint.rs",
@@ -28853,6 +28892,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -29172,7 +29212,7 @@
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "b973f6f057fd31601623fb12555cae403e3187291643409ece21e9d23adb6160",
+      "digest": "686bda6fbfa9d7b186edf385452177981a27931706990725818bbf844d09f344",
       "closureFileCount": 486,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -29669,8 +29709,8 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "5d074905b37d8b75ed7833fd6a8d5c277c18e45978594c6b18068713662fba3f",
-      "closureFileCount": 717,
+      "digest": "43757567e6d1bc62760146b50fd030926904d09632a1fec8ee5acbf9bc59fdde",
+      "closureFileCount": 724,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -29971,6 +30011,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/audio_config.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/audio_vae.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/audio_vae_encoder.rs",
+        "crates/media/candle-gen/candle-gen-minimax-h3/src/block_stream.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/blocks.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/chunking.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/conditioning.rs",
@@ -29998,6 +30039,9 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/adapters.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/conditioning.rs",
+        "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/execution.rs",
+        "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/routes.rs",
+        "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy/streaming.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/nn.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/pipeline.rs",
@@ -30015,6 +30059,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/veda.rs",
         "crates/media/candle-gen/candle-gen/src/architecture_facts.rs",
         "crates/media/candle-gen/candle-gen/src/attention.rs",
+        "crates/media/candle-gen/candle-gen/src/block_window.rs",
         "crates/media/candle-gen/candle-gen/src/cuda_arch.rs",
         "crates/media/candle-gen/candle-gen/src/cuda_mempool.rs",
         "crates/media/candle-gen/candle-gen/src/fused_attention.rs",
@@ -30034,6 +30079,7 @@
         "crates/media/candle-gen/candle-gen/src/quant/sidecar.rs",
         "crates/media/candle-gen/candle-gen/src/quant/w4a8_int8.rs",
         "crates/media/candle-gen/candle-gen/src/reference_training_attention.rs",
+        "crates/media/candle-gen/candle-gen/src/request_scope.rs",
         "crates/media/candle-gen/candle-gen/src/seed.rs",
         "crates/media/candle-gen/candle-gen/src/sync.rs",
         "crates/media/candle-gen/candle-gen/src/train/checkpoint.rs",
@@ -30077,6 +30123,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -30397,7 +30444,7 @@
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "78d0b42f4bd3ff4973cb120621b89c2e40d78c4beb96cef27c49e080d5afe3f0",
+      "digest": "3262a2c30f2f6776d56906d1eb9607593bc229cdc2a5330c309f029cd4a23d90",
       "closureFileCount": 486,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -30894,8 +30941,8 @@
         "crates/media/candle-gen/candle-gen-pulid/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-pulid/src/pulid_flux.rs"
       ],
-      "digest": "ed4eacf9ad486bd3035f67ba613a6c5830a2084c43b6a1fb64e096ff89d4e2eb",
-      "closureFileCount": 378,
+      "digest": "032342c67faf7ce044fe4c66c32dcefaf7b8c9f249473109bf6ef98b201b1f09",
+      "closureFileCount": 379,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -31189,6 +31236,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -31283,7 +31331,7 @@
         "crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-pulid/src/pulid_flux.rs"
       ],
-      "digest": "f072a3c24fff0f95b11541777331ad31c2ae2d3c7174d2ea48d75309eec9446d",
+      "digest": "a22331b483105b75e2529c92ce182c774ade6305a2f9ad2325985ac8e9309850",
       "closureFileCount": 578,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -31871,8 +31919,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
       ],
-      "digest": "db6aad7251e73ecea63dcbe74ffe6ab17f424d51b927dd288be62c9c755a3e76",
-      "closureFileCount": 353,
+      "digest": "71e39cc44722e48d90d15c7e730197cf4cf8266269d983ac9d0f6ad47dbce204",
+      "closureFileCount": 354,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -32142,6 +32190,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -32234,7 +32283,7 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/model.rs"
       ],
-      "digest": "0c226183c3e3c07ac5345abee116ad9238bc7891566057f46e7cf74172bfccc0",
+      "digest": "6127860fbacf6f2afab4ead77c190d5eca070b8e4e8abe7b639e15be1be197cc",
       "closureFileCount": 439,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -32683,8 +32732,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/lib.rs",
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"
       ],
-      "digest": "ca7317b95837d50ee480ef92ee7443f1a921adeb6ba754f23bb85babde9b6621",
-      "closureFileCount": 453,
+      "digest": "f4395d9438de929baf853b5669f6d16ac21644b342b327a3940a1bcc3c41e7b3",
+      "closureFileCount": 454,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -33051,6 +33100,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -33146,7 +33196,7 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/model.rs"
       ],
-      "digest": "75ccfb4b14d2708cfa1179a89682d42cb1e657bcc904561e311ba158587f1b23",
+      "digest": "91797a9b55bbc239ec23bbe8892f0c26cd85c2ad0e8eefa78745c00f04f831ce",
       "closureFileCount": 410,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -33566,8 +33616,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/lib.rs",
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"
       ],
-      "digest": "96620b71a0d0d4ee364572bd7af56c0bc2ee42e6a5c3ac60a49bbf0b914af806",
-      "closureFileCount": 453,
+      "digest": "10639138832900948f4efb7e8b933baa9249f8dc97eb246f15aa0e0774f38b73",
+      "closureFileCount": 454,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -33934,6 +33984,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -34029,7 +34080,7 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/model.rs"
       ],
-      "digest": "6ce677d52c478f905938e17309918f78c136a2fed815d88b0f529314098643b8",
+      "digest": "12b2a77a9a7f5d3c4606dc0178eaa7a3404f84e6e68c4573a404ae9741ddf919",
       "closureFileCount": 410,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -34450,8 +34501,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/edit.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
       ],
-      "digest": "87a0e7b2ded91017f2ef228cae7b9f2b984e9a940522ad3e0e604f29116e771f",
-      "closureFileCount": 352,
+      "digest": "595ac1881919350f9d49e56a42d9763571c860886ea7837a090bb3d1e56648e1",
+      "closureFileCount": 353,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -34720,6 +34771,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -34813,7 +34865,7 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/model_edit.rs"
       ],
-      "digest": "519c4eaaaf4f9052ca4d13dcaca6a41e112580cb05e645eff66b85151ff80495",
+      "digest": "5c7ab0952ab869875950ad61b29650d50b3f56abbd9f5a8c4de999d2278b6ce7",
       "closureFileCount": 439,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -35263,8 +35315,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/edit.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
       ],
-      "digest": "549ac9ec04e6c26a7d442ae2161ca324817972b3314b845a01ef24b47a752b0f",
-      "closureFileCount": 352,
+      "digest": "10960e43e10f2f0cda01374e66a77eb4b3a33adf02ae76d0d627e859c6e0fa90",
+      "closureFileCount": 353,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -35533,6 +35585,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -35626,7 +35679,7 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/model_edit.rs"
       ],
-      "digest": "766ffac29fcdbbc4c734c2af7e39ac91de611144356fdc4963f5f68440f015fd",
+      "digest": "3d4204c5e708d5c5cb49f4ba7d3139e61aa869af294a075098b2e308824484fa",
       "closureFileCount": 439,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -36076,8 +36129,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "055637e545766907e4c41584b775c5ddf7fe5e19d953dbaa792712a081ecca0d",
-      "closureFileCount": 394,
+      "digest": "514b8c303125772a8058c1213f644e29738fa975ba7302ea3599b54df3a9af1c",
+      "closureFileCount": 395,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -36385,6 +36438,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -36481,7 +36535,7 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "3fcc29925a9a7f8005958e87b61f6a71d3269edf6bd058d5899af4cf980d5db3",
+      "digest": "3c92d32cbf37be156ea4833145ceba2f283cb50bd1d713d08e1dfdc14c5fc653",
       "closureFileCount": 504,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -36996,8 +37050,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "fa59391016cbb35aca87a4bf52aab56904679afaddceca1125867ae3cbf1e70c",
-      "closureFileCount": 394,
+      "digest": "61719d6b9a29df1dd3a72182377f3592fba7f7731b1cb66020a48ba9a4bba333",
+      "closureFileCount": 395,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -37305,6 +37359,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -37401,7 +37456,7 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "c0bf7b68ab14bd4091a92ffd4b6f7d1e0253b01f67fb3d39b98e5e426f56c8c4",
+      "digest": "92de8f1d26bb62af2b71c4dbadc86ce9fe31abfe3c72767f7b6388832e139725",
       "closureFileCount": 504,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -37915,8 +37970,8 @@
         "crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-sana/src/model.rs"
       ],
-      "digest": "fc32c21a257994ca2bbac70238261624ec65483cefb89e602c966b2ba7bfde98",
-      "closureFileCount": 326,
+      "digest": "8de841509f9cd54405a1b5aa788d994fcce682b1e363e259b16b130b9e72c676",
+      "closureFileCount": 327,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -38159,6 +38214,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -38252,7 +38308,7 @@
         "crates/media/mlx-gen/mlx-gen-sana/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sana/src/model.rs"
       ],
-      "digest": "468fe4d0b3ee81b50c31e9fdd61ba0d65be5cad0f453fe7c14a387fae4768801",
+      "digest": "5c3c436d2ddb9e2bceeb9aed5b16168bc4f29dea380cdf23558b667df65d3d56",
       "closureFileCount": 320,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -38582,8 +38638,8 @@
         "crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-sana/src/model.rs"
       ],
-      "digest": "b2d5b05c0963f3f3eaa7d1e890877719ca3b3667dfa98a879d67edf43388804d",
-      "closureFileCount": 326,
+      "digest": "67e4268b58389cf93e428392c4efeea5e6ad05048f2cd5722f00e2fab7f4962d",
+      "closureFileCount": 327,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -38826,6 +38882,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -38919,7 +38976,7 @@
         "crates/media/mlx-gen/mlx-gen-sana/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sana/src/model.rs"
       ],
-      "digest": "96b4442d50aa7e876845751e08a493509acb7f0ba32736acb86b73e2b767ad3e",
+      "digest": "fdf70836e79951aab50e4bf7b8b1357b4de735af102d7e18a5122e1c6637b6b7",
       "closureFileCount": 320,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -39249,8 +39306,8 @@
         "crates/media/candle-gen/candle-gen-scail2/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-scail2/src/pipeline.rs"
       ],
-      "digest": "abe67505c73243285266679e37c8eed478f982c48a0092028d3c66de841e71ff",
-      "closureFileCount": 392,
+      "digest": "ffc4c97cd85bfa07d7245a78795caa70c09d5964e9c0f3371c48859db5797cf4",
+      "closureFileCount": 393,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -39557,6 +39614,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -39651,7 +39709,7 @@
         "crates/media/mlx-gen/mlx-gen-scail2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-scail2/src/pipeline.rs"
       ],
-      "digest": "05ee2e38bda3361ef134d8cbd70f6bf50afe1afc3d8b68e01eb400ba225d282e",
+      "digest": "30a55695473ec69e214a3a6be4d489e30107e3d609e523a221c2218248c10fb6",
       "closureFileCount": 389,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -40050,8 +40108,8 @@
         "crates/media/candle-gen/candle-gen-sd3/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
       ],
-      "digest": "90891fb4b505cc9b1c570cf37277ed1fcb009ae5f315072ae1e8e193c7d0fabb",
-      "closureFileCount": 341,
+      "digest": "dac61950bf4f3d33d91fd71ba60f4a8276faf29e2a1581ce1986b931e56a7897",
+      "closureFileCount": 342,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -40307,6 +40365,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -40403,7 +40462,7 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "ca2a379b28c156c6d2fa7b09ae98c7069dd315ba5c00f329a3be88f117de5b80",
+      "digest": "d400b916ad7f8ecfe8124cf1ee7b8423092407c3e59a046e7431fb6e3d054b84",
       "closureFileCount": 584,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -40997,8 +41056,8 @@
         "crates/media/candle-gen/candle-gen-sd3/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
       ],
-      "digest": "96951a9822ceb1a40810ce7b382edce58efaaac18e747509db12c983be626e88",
-      "closureFileCount": 341,
+      "digest": "b60d329c921d2b1a5171ead07fe6e931761315267ca577d1935a0ad98144e2c5",
+      "closureFileCount": 342,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -41254,6 +41313,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -41350,7 +41410,7 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "f78cc8d92e11a5817456c715e3268574c69e4084928e85bae8832785cdfd6756",
+      "digest": "d77e33451d920936c1e2fb6a6e4da431ecbebae68face950dbc9de85ff1f5ed4",
       "closureFileCount": 584,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -41944,8 +42004,8 @@
         "crates/media/candle-gen/candle-gen-sd3/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
       ],
-      "digest": "d374eed1601f97761ea72c5c050b1065d8381438b5a89ca614466a89975559e2",
-      "closureFileCount": 341,
+      "digest": "d6fd63cc6dff56cb366498d22de5e00e77746d8382561d002a404530074ecffe",
+      "closureFileCount": 342,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -42201,6 +42261,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -42297,7 +42358,7 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "be31f7588353c3c77153831f4fd847bb1fd1129a63426d52a4505efb042e6985",
+      "digest": "4be41c3ee5ac2ed974de531dc3ba59f232bf187dcef49d05f3ce050e5e04ead0",
       "closureFileCount": 584,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -42891,8 +42952,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "e679918a802582d7f6234f0ee36ee297c6f1d1d40d72a46194cbe61e3969a1f4",
-      "closureFileCount": 394,
+      "digest": "7eda2751cbe6a39b899f91b0e342980f595caa5f7fc03360701078897fc65ac2",
+      "closureFileCount": 395,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -43200,6 +43261,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -43295,7 +43357,7 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "12ba4030fafffcc4c1cd7d67ca34cbb9a2ef8f7d5029324a5b46da84f9030a78",
+      "digest": "164913db1d70228a5acc8d0dfdce453e3f3feed2c554eeb53e80c953f8aadeaf",
       "closureFileCount": 504,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -43809,8 +43871,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "5f0843d80236241be629e1884be19b6f011583f87a8f761409b6d1975fd5ba37",
-      "closureFileCount": 413,
+      "digest": "0aedaeaad68b803922bbcd127aea73dc4cea15a0c9b88ea18edeff5014b52756",
+      "closureFileCount": 414,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -44137,6 +44199,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -44232,7 +44295,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "4946dda8c87a09b2a5c652e148832ec3e49a7e026a61269b81d556603b38f8a0",
+      "digest": "a89b003c042c8e7aafd9a09653ddb4c172a6bb064832dcfa175777506915dea2",
       "closureFileCount": 277,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -44519,8 +44582,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "af64fe2c924d1ae7481f376cf65cdf1b6ed1958cca1842b67c86b38a94b8e027",
-      "closureFileCount": 413,
+      "digest": "88dcd6ca0529724363886c983dbb24ff254126d321f94238f1675b638834015c",
+      "closureFileCount": 414,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -44847,6 +44910,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -44942,7 +45006,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "f094381680a02c5256709f03215b46cba522fcc30d7463369ab45dcb9ebeaffb",
+      "digest": "5f8e4370dc9f9bcd500015eacfaf44427b6f6fe0026424bba58b6be9e38bbac2",
       "closureFileCount": 277,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -45230,8 +45294,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "660c1fb3fb6bc21e9045c24b3604c36a160d83c52027da01464710e33d4f68d9",
-      "closureFileCount": 413,
+      "digest": "69ac3565973b4aa4ebb08a5f504bd2a881b3bdea4f187fd95f63b14871c37059",
+      "closureFileCount": 414,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -45558,6 +45622,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -45654,7 +45719,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "0fdd725bba95501e7c440cf58b68c55a03d17a298855338c0989a4d2db6138d7",
+      "digest": "56d0edd048d60556ee3f07c6eb1e1383a73bc67a1f8fbd2821249f84d43b4aea",
       "closureFileCount": 277,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -45942,8 +46007,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "7c831c557e5ad1e70ba84064dc75bac76c1691fa1a2e9fcc07451c60ed3c74f2",
-      "closureFileCount": 413,
+      "digest": "8b8ce0d08d38b868ddffc66c83b8cffd7f14093d0af1cde6d28f1a67cc4998f4",
+      "closureFileCount": 414,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -46270,6 +46335,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -46366,7 +46432,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "65a51a77f0c5481cc34861b0f4b02edf9b121362c00684103c4dd0de6a5aeec1",
+      "digest": "212aa1e7dc4fd2b97479b4a57a852f3d190044913a9f4a60110de4866805977e",
       "closureFileCount": 277,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -46654,8 +46720,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "ba68f0d5b0c6c91d06bc900b1befee6f227b376c7fa311ef48efdb2c02028f03",
-      "closureFileCount": 413,
+      "digest": "8b079288b44255ca41c23dfa6ad655ebd5b09f080e02ac35128809e778882524",
+      "closureFileCount": 414,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -46982,6 +47048,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -47078,7 +47145,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "114bead752bcef64d737dc803fb13b986a53de42d71c6f8c3820ba5a01b6274d",
+      "digest": "79611f4e7204a4ecbf0043356143e6d648bfad5c3059f9d06d17675eef59cdb9",
       "closureFileCount": 277,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -47366,8 +47433,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "d693274226911081b7dd539917727b3e17508bd9d66aed783817032be29943b2",
-      "closureFileCount": 413,
+      "digest": "93ff550009ff43aca4d486c028ff5e1a3ca4158a87ab3c600481bcd0b48a8348",
+      "closureFileCount": 414,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -47694,6 +47761,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -47790,7 +47858,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "24502b64a4adcbaebec94ee6814a37b1ff274ceea009412253d9de82b3a665a6",
+      "digest": "225359f82c0164b5cdd40c0afad6d3556cf70c67e25120d9dc945183393d0e52",
       "closureFileCount": 277,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -48078,8 +48146,8 @@
         "crates/media/candle-gen/candle-gen-supra2/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-supra2/src/model.rs"
       ],
-      "digest": "bc611c8cda3075e90b0f76a6411d06762dfe6b8bc34e383bd2a8bd3a29a53725",
-      "closureFileCount": 401,
+      "digest": "397d8aea30bbad216968d6605fac50d936208634835315bd492f5415c78cbbb0",
+      "closureFileCount": 402,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -48394,6 +48462,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -48490,7 +48559,7 @@
         "crates/media/mlx-gen/mlx-gen-supra2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-supra2/src/model.rs"
       ],
-      "digest": "3496d028f2fe807678179870b8c32e2c80a33335badfd425a052d33dea1611a7",
+      "digest": "6bb71bc430c8e51afc66a41288ce65301e72c9d2032c77b8053caaa2ebaf7590",
       "closureFileCount": 510,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -49011,8 +49080,8 @@
         "crates/media/candle-gen/candle-gen-wan/src/config.rs",
         "crates/media/candle-gen/candle-gen-wan/src/memory_strategy.rs"
       ],
-      "digest": "2f16c6204c5470d9949491e13840c5258cb392e9ada6903e3b5f4cc2c1225ba4",
-      "closureFileCount": 380,
+      "digest": "016029520d6fb47e79088aa7ece1defee8c575699c3564886e84901fc023fc5f",
+      "closureFileCount": 381,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -49307,6 +49376,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -49402,7 +49472,7 @@
         "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-wan/src/model.rs"
       ],
-      "digest": "d93fc31403b0c2b2d9e978a869980f53d1ba1fa46709cec9a48b9f09ee21fd0f",
+      "digest": "3a44da00330b6ba7f9988ac98e332d487c2cb18d0c17e37d82c9c2feffd14c35",
       "closureFileCount": 377,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -49790,8 +49860,8 @@
         "crates/media/candle-gen/candle-gen-wan/src/config.rs",
         "crates/media/candle-gen/candle-gen-wan/src/i2v_memory_strategy.rs"
       ],
-      "digest": "9e5a90d7e0a49b1c8bd43067b16df8bce0ade41c60d859403236a3e5df4faceb",
-      "closureFileCount": 380,
+      "digest": "d8cecebafed94c58a3b9a829a82143195a1f0baac4a28270e9699fe07c6d633f",
+      "closureFileCount": 381,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -50086,6 +50156,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -50181,7 +50252,7 @@
         "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-wan/src/model.rs"
       ],
-      "digest": "62d3c3357be3c23157b550c79fe81a938f240814948440c798e5d4ce9e756cb4",
+      "digest": "a34d5ec8db1109e47ca35981a4e2e70394adcc75699ed1dd12d57ef10e09dbe3",
       "closureFileCount": 377,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -50569,8 +50640,8 @@
         "crates/media/candle-gen/candle-gen-wan/src/config.rs",
         "crates/media/candle-gen/candle-gen-wan/src/i2v_memory_strategy.rs"
       ],
-      "digest": "c6407bb75b1576b0ad336c9d546fdd4b3ca0005b3a30f0edce5ec54ffcd78a24",
-      "closureFileCount": 380,
+      "digest": "1760de2fa6313251ab0c6297cde711e6c44c50c2368a37fc809b47c4ef242328",
+      "closureFileCount": 381,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -50865,6 +50936,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -50960,7 +51032,7 @@
         "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-wan/src/model.rs"
       ],
-      "digest": "2f6849ec6ff6734adff6e87cb4d54416fc130a7d9858da85e3fa5c5bb2048ab2",
+      "digest": "759cb95f937f38a3088c68f94440e6e1550d0c3b47e4edbe89dad029e2ca5372",
       "closureFileCount": 377,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -51347,8 +51419,8 @@
         "crates/media/candle-gen/candle-gen-z-image/src/base.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "7d6cb98aceb5c7de9c43a7d4c8eac530f5bb8f81803ac69d6a837041d16325f4",
-      "closureFileCount": 377,
+      "digest": "2d7a05fca34a6e54416be4b0721adf8281f46741feacc82246dcfca2e99a6a24",
+      "closureFileCount": 378,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -51639,6 +51711,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -51734,7 +51807,7 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-z-image/src/model_base.rs"
       ],
-      "digest": "42aaabc9808f0e49e27c5bb8be73194df1db4f4c1854f26ad2e584d26204edc7",
+      "digest": "320ea44068593a404dac4769c18f26bc62c2edbeb3e3d901a877d331440357e9",
       "closureFileCount": 391,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -52136,8 +52209,8 @@
         "crates/media/candle-gen/candle-gen-z-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "0462b62f3b03737fbc3b30ccf45821a66b83fb5b0e35dd46144bde7de00ec530",
-      "closureFileCount": 379,
+      "digest": "72aa07b1b8691c60b38a609c751f66e62f947ffa2cd54a2a505c50fec995e457",
+      "closureFileCount": 380,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -52430,6 +52503,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -52526,7 +52600,7 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-z-image/src/model.rs"
       ],
-      "digest": "a1ecc68d3c80bf9daf68fefda713a1b09486ead3ddc6c625ee18f0c1d76bc83e",
+      "digest": "fe3c2e8c8fb7139e6fe5a56afaf63d6f4faf63c86e87ed32b1f3f906a66776ef",
       "closureFileCount": 391,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -52927,8 +53001,8 @@
         "crates/media/candle-gen/candle-gen-z-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "d198f1717c6b74150a0579b79bbf5381551c553ae07d92356ee83087139d803e",
-      "closureFileCount": 379,
+      "digest": "988ab715218ec6be51281115b799a92c48c782cfb71b52d8a981a6ce78f4af9d",
+      "closureFileCount": 380,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -53221,6 +53295,7 @@
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+        "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs",
         "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
         "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
         "crates/media/candle-gen/vendor/candle-core/src/device.rs",
@@ -53316,7 +53391,7 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-z-image/src/model.rs"
       ],
-      "digest": "d579fadf33fea15eebc8eb06bd7fbc4c80f0c2a33fdf35be35e9e25e8aa8787a",
+      "digest": "0fce7e60a2a33d0b4a3d44a0c53ad468ee5aec79f4767a269127ce8ee861659b",
       "closureFileCount": 391,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
