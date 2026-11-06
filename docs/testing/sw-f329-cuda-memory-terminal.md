@@ -171,8 +171,12 @@ assertions are mandatory. The controller also reads the original/target sources:
 it checks the unchanged Resident/refiner QKV arm and surrounding operators, the
 exact CUDA/Both-window guard, projection release only in a CUDA streamed model,
 unchanged legacy allocation arithmetic and full/None pricing, and bounded calls
-only in the explicit selected-window branches. The original request-policy file
-is outside the permitted diff. Unknown paths, changed guards, modified Resident
+only in the explicit selected-window branches. The selected-window FFN5/legacy4
+and norm9/legacy8 buffer counts, reduction and
+norm-weight allowances are checked as exact conditional expressions; their false
+arms must reduce to the original allocation arithmetic.
+The original request-policy file is outside the permitted diff. Unknown paths,
+changed guards, modified Resident
 math/pricing and incomplete/incorrect object bindings refuse reuse.
 
 These assertions establish only original95 source applicability. They do not

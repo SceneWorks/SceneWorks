@@ -256,11 +256,11 @@ pub(super) fn precondition_projected_qk() {}
 fn map_qk_token_chunks() {}`;
   const model='fn forward() {\nlet video = project_video();\nlet audio = project_audio();\nlet x = scatter(&video,&audio);\nbody(x);\n}';
   const nextModel=model.replace('body(x);','if self.stream_window.is_some() && self.device.is_cuda() {\ndrop(video);\ndrop(audio);\n}\nbody(x);');
-  const operation='let attention = self.qk_norm_peak(rows, inner)?.max(self.rotary_peak(rows, inner)?).max(materialized); Ok(attention)';
+  const operation='let attention = self.qk_norm_peak(rows, inner)?.max(self.rotary_peak(rows, inner)?).max(materialized); let ffn = plus(times(4, hidden)?, work)?; Ok(attention.max(ffn).max(times(8, hidden)?))';
   const denoise='work = work.max(self.cuda_working.ok_or_else(invalid)?.operation_peak_with_adapter(rows.packed,task.adapter.as_ref().map_or(0,|a|{a.forward_working_bytes_for(backend,rows,RowDomain::Packed)}),)?,); Ok(work)';
   const veda='let facts = self.cuda_working.ok_or_else(invalid)?; let dense = self.denoise_peak_bytes(task,backend,rows,window)?; let attention = dense.max(facts.bytes); Ok(attention)';
   const window=`struct Facts { bytes: u64 }\nimpl Facts {\nfn operation_peak() { self.operation_peak_with_adapter(rows,0) }\nfn operation_peak_with_adapter(self, rows: u64, adapter_work: u64) -> Result<u64> {${operation}}\nfn denoise_peak_bytes() {${denoise}}\nfn denoise_with_veda_bytes() {${veda}}\n}`;
-  const operationFor='let precondition = if windowed {self.windowed_qk_precondition_peak(rows,inner)?} else {self.qk_norm_peak(rows,inner)?.max(self.rotary_peak(rows,inner)?)}; '+operation.replace('self.qk_norm_peak(rows, inner)?.max(self.rotary_peak(rows, inner)?)','precondition');
+  const operationFor='let precondition = if windowed {self.windowed_qk_precondition_peak(rows,inner)?} else {self.qk_norm_peak(rows,inner)?.max(self.rotary_peak(rows,inner)?)}; '+operation.replace('self.qk_norm_peak(rows, inner)?.max(self.rotary_peak(rows, inner)?)','precondition').replace('times(4, hidden)?','times(if windowed { 5 } else { 4 }, hidden)?').replace('Ok(attention','let block_norm = if windowed {plus(plus(times(9, hidden)?, times(8, rows)?)?, times(4, self.hidden)?,)?} else {times(8, hidden)?}; Ok(attention').replace('.max(times(8, hidden)?)','.max(block_norm)');
   const nextWindow=window.replace(`{${operation}}`,'{self.operation_peak_for(rows,adapter_work,false)}').replace(`{${denoise}}`,'{self.denoise_peak_bytes_impl(task,backend,rows,window,false)}').replace(`{${veda}}`,'{let facts = self.cuda_working.ok_or_else(invalid)?; let dense = self.denoise_peak_bytes(task,backend,rows,window)?; self.compose_veda_peak(task,backend,rows,window,veda,facts,dense)}')+`
 pub const CUDA_QK_PRECONDITION_ELEMENTS: u64 = crate::veda::workspace::CUDA_DENSE_SCORE_ELEMENTS;
 fn qk_precondition_token_block() {}
@@ -384,6 +384,24 @@ test('bounded Q/K source audit requires all exact reviewed objects and every exp
   }
   for(const mutate of [a=>a.engineChanges.pop(),a=>a.engineChanges[1].before='e'.repeat(40),a=>a.engineChanges[1].after='e'.repeat(40),a=>a.engineChanges.push({path:'crates/media/candle-gen/candle-gen-minimax-h3/src/nn.rs',before:'a'.repeat(40),after:'b'.repeat(40)})]){
     const bad=structuredClone(fixture.audit);mutate(bad);await assert.rejects(fixture.verify(bad));
+  }
+});
+
+test('selected-window FFN/norm allowances keep exact legacy false arms and cannot escape their reviewed flag',()=>{
+  const fixture=boundedQkSourceFixture();validateBoundedQkResidentSources(fixture.before,fixture.after);
+  for(const [from,to] of [
+    ['if windowed { 5 } else { 4 }','if windowed { 5 } else { 3 }'],
+    ['if windowed { 5 } else { 4 }','if true { 5 } else { 4 }'],
+    ['if windowed { 5 } else { 4 }','if windowed { 6 } else { 4 }'],
+    ['let block_norm = if windowed','let block_norm = if true'],
+    ['else {times(8, hidden)?}','else {times(7, hidden)?}'],
+    ['times(9, hidden)?','times(8, hidden)?'],
+    ['times(8, rows)?','times(4, rows)?'],
+    ['times(4, self.hidden)?','times(2, self.hidden)?'],
+    ['.max(block_norm)','.max(times(9, hidden)?)'],
+  ]){
+    const after=[...fixture.after];assert.ok(after[2].includes(from));after[2]=after[2].replace(from,to);
+    assert.throws(()=>validateBoundedQkResidentSources(fixture.before,after),undefined,from);
   }
 });
 

@@ -466,6 +466,9 @@ export function validateBoundedQkResidentSources(before,after){
   let operation=body(next[2],'operation_peak_for');
   operation=residentReplace(operation,'letprecondition=ifwindowed{self.windowed_qk_precondition_peak(rows,inner)?}else{self.qk_norm_peak(rows,inner)?.max(self.rotary_peak(rows,inner)?)};','');
   operation=residentReplace(operation,'precondition.max(materialized)','self.qk_norm_peak(rows,inner)?.max(self.rotary_peak(rows,inner)?).max(materialized)');
+  operation=residentReplace(operation,'times(ifwindowed{5}else{4},hidden)?','times(4,hidden)?');
+  operation=residentReplace(operation,'letblock_norm=ifwindowed{plus(plus(times(9,hidden)?,times(8,rows)?)?,times(4,self.hidden)?,)?}else{times(8,hidden)?};','');
+  operation=residentReplace(operation,'.max(block_norm)','.max(times(8,hidden)?)');
   assert.equal(operation,body(old[2],'operation_peak_with_adapter'),'legacy operation arithmetic changed');
   assert.equal(body(next[2],'denoise_peak_bytes'),'self.denoise_peak_bytes_impl(task,backend,rows,window,false)','legacy denoise must select the unchanged arm');
   let denoise=body(old[2],'denoise_peak_bytes');
