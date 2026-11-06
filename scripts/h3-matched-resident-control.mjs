@@ -70,6 +70,12 @@ export function validateCompleteControl(record){
   assert.match(record.controllerSourcePair.sceneworks,/^[a-f0-9]{40}$/);assert.equal(record.controllerSourcePair.inference,ORIGINAL.inference);
   assert.equal(record.binarySha256,ORIGINAL.binarySha256);assert.equal(record.job.status,'completed');assert.equal(record.media.length,1);
   assert.match(record.job.id,/^job_/);assert.match(record.media[0].sha256,/^[a-f0-9]{64}$/);
+  assert.ok(typeof record.media[0].av==='string'&&record.media[0].av.length>0);
+  assert.equal(record.content.frames,345);assert.ok(Number.isFinite(record.content.spatialStd.median));
+  assert.equal(record.avValidation.frameCount,345);assert.equal(record.avValidation.width,1344);assert.equal(record.avValidation.height,768);assert.equal(record.avValidation.fps,24);
+  assert.equal(record.avValidation.audio.codec,'aac');assert.equal(record.avValidation.audio.sampleRate,32000);assert.equal(record.avValidation.audio.channels,2);assert.equal(record.avValidation.audio.expectedSamples,460000);
+  assert.equal(record.generationMetrics.steps,8);const veda=record.generationMetrics.vedaExecution??record.generationMetrics.veda_execution;
+  assert.equal(veda.requested,true);assert.ok((veda.sparseCalls??veda.sparse_calls)>0);assert.equal(veda.denseCalls??veda.dense_calls,0);
   validateResidentEvents(record.events);
   assert.equal(record.residency.windowTransfers,0);assert.equal(record.residency.policy.strategy,'Resident');
   assert.equal(record.envelope.totalEnvelopeBytes,95*GIB);assert.equal(record.envelope.externalReserveBytes,3*GIB);
