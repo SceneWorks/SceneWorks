@@ -1,0 +1,81 @@
+// Coverage of the accepted C4 TE component case; never full E5 or campaign acceptance.
+import assert from 'node:assert/strict';
+import { canonicalJson } from './lib/canonical-json.mjs';
+import { sha256 } from './lib/file-sha256.mjs';
+import { RESIDENCY_COMPONENT_SOURCE as SOURCE } from './h3-residency-component-evidence.mjs';
+import { stripVerbatim } from './lib/windows-verbatim-path.mjs';
+
+const PAIR=Object.freeze({sceneworks:SOURCE.consumer,inference:SOURCE.runtime});
+const HIDDEN=[1,588,5120],TABLE=[16384,64];
+const UUID='GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0';
+const BINDING='candle-gen-minimax-h3/candle_gen_minimax_h3/text_encoder::encoder::residency_te::production_prompt_resident_window_first_difference';
+const hash=value=>assert.match(value??'',/^[a-f0-9]{64}$/,'complete SHA256 required');
+function identity(value,shape){assert.equal(value?.dtype,'F32');assert.deepEqual(value.shape,shape);hash(value.sha256);}
+function metric(value,shape,exact){
+  assert.equal(value?.dtype,'F32');assert.deepEqual(value.shape,shape);
+  assert.equal(value.elements,shape.reduce((a,b)=>a*b,1),'every element must be compared');
+  hash(value.leftSha256);hash(value.rightSha256);assert.equal(value.nonfinite,0);
+  for(const key of ['maxAbs','referencePeak','relativePeak','rms'])assert.ok(typeof value[key]==='number'&&Number.isFinite(value[key])&&value[key]>=0,'finite nonnegative metric required');
+  assert.equal(typeof value.exact,'boolean');assert.equal(value.exact,value.leftSha256===value.rightSha256,'hash/exact consistency');
+  if(exact){assert.equal(value.exact,true);for(const key of ['maxAbs','relativePeak','rms'])assert.equal(value[key],0);}
+}
+
+export function validateResidencyTextEncoderCoverage(value,{proofRevision,runtimeSourcePair=PAIR,runReceipt,caseReceipt}={}){
+  assert.equal(proofRevision,SOURCE.proof,'only the exact C4 TE source is recognized');assert.deepEqual(runtimeSourcePair,PAIR);
+  // Device and source evidence belong to the existing supervisor, not invented TE JSON fields.
+  assert.equal(runReceipt?.accepted,true);assert.equal(runReceipt.selected,1);assert.equal(runReceipt.completed,1);
+  assert.equal(runReceipt.request_selection,BINDING);assert.deepEqual(runReceipt.selected_bindings,[BINDING]);
+  assert.equal(runReceipt.cases?.length,1);assert.equal(runReceipt.cases[0].binding,BINDING);assert.equal(runReceipt.cases[0].accepted,true);
+  assert.deepEqual(runReceipt.source,{revision:SOURCE.proof,tree:'77670bdf615c0991dfccff91e489d5f2c81bc53b'});
+  assert.equal(runReceipt.acceptance_scope,'source-bound-case-execution');assert.equal(caseReceipt?.accepted,true);
+  assert.equal(caseReceipt.binding,BINDING);assert.equal(caseReceipt.acceptance_scope,runReceipt.acceptance_scope);
+  assert.equal(caseReceipt.source_file_sha256,'5dba681a3dde8d83f6974358688da24811f3cd1e1628002342ff936ecc15a56a');
+  assert.deepEqual(caseReceipt.actual_devices,['candle-cuda']);assert.equal(caseReceipt.body_completed,1);assert.equal(caseReceipt.successful_libtest_summaries,1);assert.equal(caseReceipt.resource_verification_pending,false);
+  const physical=caseReceipt.physical_execution;assert.equal(physical?.physical_index,0);assert.equal(physical.device_uuid,UUID);assert.equal(physical.post_execution_verified,true);
+  for(const receipt of [runReceipt,caseReceipt]){
+    assert.equal(receipt.input_grade,'successful-reader-binding');
+    assert.equal(receipt.required_input_content_attested,false);assert.equal(receipt.checkpoint_byte_integrity_attested,false);
+  }
+  assert.equal(value?.kind,'h3-residency-te/v1');assert.equal(value.schemaVersion,1);assert.equal(value.accepted,true);
+  assert.equal(value.completedLayerPairs,50);assert.equal(value.completedDefaultResidentLayers,50);assert.equal(value.materializedAttentionCalls,150);assert.equal(value.actualF32ReducedPrecision,false);
+  assert.deepEqual(value.readback,{maximumAllowedChunkElements:1048576,elementBytes:4,everyChunkLayoutStartOffset:0,everyStorageElementCountEqualsChunk:true});
+  const source=value.source;assert.equal(source?.manifestSha256,'2bad494f27a89b6770f98fb0858ed1d89620cbc452716bcbd44a562dc92df113');
+  assert.equal(sha256(canonicalJson(source.manifest)),'d5a42e9030b4b0f5e10ac98132547504514bd00f70401637349b29dbdecb0752','frozen TE manifest content differs');
+  assert.deepEqual(source.manifest.acceptedSourcePair,PAIR);assert.equal(source.requestSha256,'b5b5ba095203fab1eddb9ba1793162959328e16ee34a0ca6e19d44e2325bce23');
+  const assets=source.verifiedAssets;assert.equal(assets?.length,16);assert.equal(new Set(assets.map(a=>a.relative)).size,16);
+  const windows=path=>{assert.equal(typeof path,'string');return stripVerbatim(path).replaceAll('/','\\').toLowerCase();};
+  for(const expected of source.manifest.assets){
+    const matches=assets.filter(a=>a.repo===expected.repo&&a.revision===expected.revision&&a.relative===expected.relative);assert.equal(matches.length,1);
+    const actual=matches[0];assert.equal(windows(actual.path),windows(expected.path));assert.equal(actual.bytes,expected.bytes);assert.ok(Number.isSafeInteger(actual.bytes)&&actual.bytes>0);assert.equal(actual.sha256,expected.sha256);hash(actual.sha256);
+  }
+  assert.equal(value.input?.tokens,588);assert.deepEqual(value.input.idsShape,[1,588]);assert.equal(value.input.idsSha256,'d9802bdf058b1573c35815ccb846f20d8f09f3a00c3311158143727d635f3ae3');
+  assert.deepEqual(value.input.attentionMask,{shape:[1,588],dtype:'U32',elements:588,sha256:'88a68adb6223ea1c1e1a3034bfe6bea4b59cbe1bda1c517fbb0e13ffdeb26d11'});
+  const plan=value.planning;for(const [key,expected] of Object.entries({residentWeights:15818835168,windowOneWeights:884400352,projectionDecodeAllowance:6223298560,carriedAndWorkingAllowance:1301561344,plannedDevicePeakBytes:24228095424,diagnosticDeviceCapBytes:34359738368}))assert.equal(plan?.[key],expected);
+  assert.equal(plan.residentWeights+plan.windowOneWeights+plan.projectionDecodeAllowance+plan.carriedAndWorkingAllowance,plan.plannedDevicePeakBytes);assert.ok(plan.plannedDevicePeakBytes<=plan.diagnosticDeviceCapBytes);
+  assert.equal(plan.inventoryIncludesUnusedVisionRootConservatively,true);
+  assert.deepEqual(plan.workingTerms,{hiddenBytes:12042240,headBytes:19267584,mlpBytes:60211200,scoreElements:22127616,hiddenCopies:16,headCopies:12,mlpCopies:8,scoreScratchBytesPerElement:16});
+  const same=value.same_policy;assert.equal(same?.exact,true);assert.equal(same.workspaceBytes,33554432);assert.equal(same.firstDifference,null);
+  metric(same.embeddings,HIDDEN,true);
+  for(const name of ['runtimeCos','runtimeSin'])metric(same.tables[name],TABLE,true);
+  for(const [discarded,runtime] of [['discardedCpuCosVsDirectGpu','runtimeCos'],['discardedCpuSinVsDirectGpu','runtimeSin']]){
+    metric(same.tables[discarded],TABLE,false);assert.equal(same.tables[discarded].rightSha256,same.tables[runtime].leftSha256);
+  }
+  for(const name of ['resident','streamed'])identity(same.masks[name],[1,1,588,588]);assert.equal(same.masks.resident.sha256,same.masks.streamed.sha256);
+  assert.equal(same.layers?.length,50);let previous=same.embeddings.leftSha256;
+  for(const [index,layer] of same.layers.entries()){
+    assert.equal(layer.index,index,'all50 distinct layers must complete in order');metric(layer.input,HIDDEN,true);assert.equal(layer.input.leftSha256,previous,'adjacent layer boundaries must bind');
+    const preparation=layer.preparation;assert.equal(preparation?.exact,true);
+    assert.deepEqual(preparation.packedProjections?.map(p=>p.name),['q','k','v','o','gate','up','down']);
+    for(const projection of preparation.packedProjections){hash(projection.residentSha256);hash(projection.preparedSha256);assert.equal(projection.exact,true);assert.equal(projection.residentSha256,projection.preparedSha256);}
+    assert.deepEqual(preparation.norms?.map(n=>n.name),['input','post','q','k']);
+    for(const norm of preparation.norms)metric(norm.metrics,['q','k'].includes(norm.name)?[128]:[5120],true);
+    metric(layer.output,HIDDEN,true);previous=layer.output.leftSha256;
+  }
+  metric(same.context,HIDDEN,true);assert.equal(same.context.leftSha256,previous);
+  metric(value.workspace_default_vs_32m,HIDDEN,false);assert.equal(value.workspace_default_vs_32m.rightSha256,same.context.leftSha256);
+  return {kind:'h3-residency-te-covered-boundaries/v1',proofRevision,runtimeSourcePair:PAIR,
+    boundaries:['original prompt/tokenizer/mask identities','same32MiB real packed TE preparation, runtime tables, embeddings,50layer pairs and final F32 context: exact'],
+    observations:{defaultWorkspaceContextExact:value.workspace_default_vs_32m.exact,discardedCpuTablesExact:['discardedCpuCosVsDirectGpu','discardedCpuSinVsDirectGpu'].map(k=>same.tables[k].exact)},
+    inputScope:{grade:caseReceipt.input_grade,requiredInputContentAttested:caseReceipt.required_input_content_attested,checkpointByteIntegrityAttested:caseReceipt.checkpoint_byte_integrity_attested},
+    exclusions:['overall E5 acceptance','DiT/FFN/Veda/VAE/audio parity','full-media drift cause or acceptability','24GiB product fit','primitive whole-tree or rawVeda45 proof reuse']};
+}
