@@ -1142,12 +1142,10 @@ pub(crate) fn validate_audio_job_for_model(
                  song length follows the lyrics and segments)"
             )));
         }
-        // A segmented-song model reads a scale in 0..=1 as "guidance off", so an explicit ON scale
-        // must be above 1 — turn guidance off with guidanceEnabled: false instead.
-        if payload.guidance_enabled != Some(false) && payload.guidance.is_some_and(|g| g <= 1.0) {
+        // YuE accepts nonnegative scales; 0..=1 uses its native CFG-off path.
+        if payload.guidance.is_some_and(|guidance| guidance < 0.0) {
             return Err(ApiError::bad_request(format!(
-                "{model}: a guidance scale must be greater than 1 (set guidanceEnabled: false to \
-                 turn guidance off)"
+                "{model}: guidance must be nonnegative"
             )));
         }
     } else if payload.guidance_enabled.is_some() {

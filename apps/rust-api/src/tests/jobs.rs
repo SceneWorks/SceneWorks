@@ -6305,6 +6305,21 @@ async fn create_audio_job_maps_the_full_yue_control_set() {
     assert_eq!(job["payload"]["iclReferenceAssetId"], "asset_mix");
     assert_eq!(job["payload"]["guidanceEnabled"], false);
 
+    for guidance in [0.0, 0.5, 1.0, 1.01] {
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/audio/jobs",
+            json!({
+                "projectId": project_id, "model":"yue_en_cot", "prompt":"rock", "lyrics":lyrics,
+                "guidanceEnabled":true, "guidance":guidance
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert!((job["payload"]["guidance"].as_f64().unwrap() - guidance).abs() < 1e-6);
+    }
+
     // A CoT render with no reference is the plain lyrics2song path.
     let (status, job) = request(
         app.clone(),
@@ -6430,9 +6445,9 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
             "guidanceEnabled is false",
         ),
         (
-            "guidance ON scale at or below 1",
-            json!({ "model": "yue_en_cot", "guidance": 1.0 }),
-            "greater than 1",
+            "negative YuE guidance scale",
+            json!({ "model": "yue_en_cot", "guidance": -0.5 }),
+            "must be nonnegative",
         ),
         (
             "unknown tier",

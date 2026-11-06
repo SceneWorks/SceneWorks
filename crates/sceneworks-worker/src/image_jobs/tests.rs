@@ -30907,3 +30907,24 @@ fn explicit_sampling_prototype_preserves_experimental_values_without_defaults() 
     assert_eq!(explicit.scheduler.as_deref(), Some("karras"));
     assert_eq!(explicit.negative_prompt.as_deref(), Some("blurry"));
 }
+
+#[cfg(native_lane)]
+#[test]
+fn checkpoint_plan_native_request_keeps_sampling_overrides_and_defaults() {
+    let empty = super::checkpoint_plan::checkpoint_plan_generation_request(&request(
+        json!({"projectId":"p"}),
+    ));
+    assert_eq!((empty.guidance, empty.scheduler_shift), (None, None));
+    assert!(empty.sampler.is_none() && empty.scheduler.is_none());
+    let explicit = super::checkpoint_plan::checkpoint_plan_generation_request(&request(json!({
+        "projectId":"p", "model":"kreamania_v4_int8", "width":768,"height":1024,
+        "advanced":{"guidanceScale":1.5,"schedulerShift":33.375,"sampler":"heun","scheduler":"karras"}
+    })));
+    assert_eq!((explicit.width, explicit.height), (768, 1024));
+    assert_eq!(
+        (explicit.guidance, explicit.scheduler_shift),
+        (Some(1.5), Some(33.375))
+    );
+    assert_eq!(explicit.sampler.as_deref(), Some("heun"));
+    assert_eq!(explicit.scheduler.as_deref(), Some("karras"));
+}

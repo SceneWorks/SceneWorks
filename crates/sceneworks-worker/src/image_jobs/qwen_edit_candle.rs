@@ -624,12 +624,6 @@ fn qwen_edit_candle_guidance(request: &ImageRequest) -> f32 {
                 .as_f64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .or_else(|| {
-            sceneworks_core::image_sampling_controls::effective_guidance(
-                &JsonObject::new(),
-                &request.model_manifest_entry,
-            )
-        })
         .map(|value| value as f32)
         .unwrap_or_else(|| {
             if is_qwen_edit_lightning(&request.model) {
@@ -1234,20 +1228,32 @@ mod qwen_edit_tier_reconcile_tests {
     use serde_json::json;
 
     #[test]
-    fn lightning_guidance_defaults_off_and_explicit_values_win() {
-        for (advanced, expected) in [(json!({}), 1.0), (json!({"guidanceScale":1.5}), 1.5)] {
-            let value = json!({"projectId":"p","model":"qwen_image_edit_2511_lightning","advanced":advanced});
-            let mut request = ImageRequest::from_payload(value.as_object().unwrap());
-            assert_eq!(qwen_edit_candle_guidance(&request), expected);
-            request
-                .model_manifest_entry
-                .insert("defaults".into(), json!({"guidanceScale":1.0}));
-            assert_eq!(qwen_edit_candle_guidance(&request), expected);
-            request.model_manifest_entry.remove("defaults");
-            request
-                .model_manifest_entry
-                .insert("guidanceScale".into(), json!(1.0));
-            assert_eq!(qwen_edit_candle_guidance(&request), expected);
+    fn edit_guidance_keeps_standard_and_lightning_defaults_and_explicit_values() {
+        for (model, default) in [
+            ("qwen_image_edit_2511", 4.0),
+            ("qwen_image_edit_2511_lightning", 1.0),
+        ] {
+            for (advanced, expected) in [(json!({}), default), (json!({"guidanceScale":1.5}), 1.5)]
+            {
+                let value = json!({"projectId":"p","model":model,"advanced":advanced});
+                let mut request = ImageRequest::from_payload(value.as_object().unwrap());
+                // This nested scale is embedded guidance, separate from native true CFG.
+                request
+                    .model_manifest_entry
+                    .insert("defaults".into(), json!({"guidanceScale":1.0}));
+                assert_eq!(qwen_edit_candle_guidance(&request), expected);
+                request
+                    .model_manifest_entry
+                    .insert("guidanceScale".into(), json!(3.25));
+                assert_eq!(
+                    qwen_edit_candle_guidance(&request),
+                    if request.advanced.is_empty() {
+                        3.25
+                    } else {
+                        expected
+                    }
+                );
+            }
         }
     }
 
