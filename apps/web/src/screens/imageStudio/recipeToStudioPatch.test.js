@@ -32,11 +32,12 @@ describe("recipeToStudioPatch", () => {
   });
   it("restores raw appearance inputs and multiple look IDs rather than already composed text", () => {
     const appearance = { camera: null, film: "film-kodak-tri-x-400", looks: ["look-moody-dark", "look-light-leaks"], lighting: null };
-    const { values } = recipeToStudioPatch(launch({ appearance, appearancePrompt: "Subject: a dancer", appearanceNegativePrompt: "authored", styleId: "style" }, { negativePrompt: "authored, recipe negatives" }), context);
+    const { values, flags } = recipeToStudioPatch(launch({ appearance, appearancePrompt: "Subject: a dancer", appearanceNegativePrompt: "authored", styleId: "style" }, { negativePrompt: "authored, recipe negatives" }), context);
     expect(values.appearance).toEqual(appearance);
     expect(values.prompt).toBe("Subject: a dancer");
     expect(values.negativePrompt).toBe("authored");
     expect(values.styleId).toBe("style");
+    expect(flags.clearGeneralStack).toBe(true);
     const old = recipeToStudioPatch(launch({ appearance }, {}), context).values;
     expect(old.appearance.looks).toEqual([]);
     expect(old.prompt).toBe("composed prompt");

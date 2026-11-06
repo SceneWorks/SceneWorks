@@ -2439,6 +2439,7 @@ export function ImageStudio() {
       flux3ReferenceIds: layoutReferences.map(({ id }) => id),
       // Overrides — the one legitimate single-vs-batch difference.
       promptToSend,
+      appearancePromptBatch: overrides.appearancePromptBatch?.map((text) => composeJobPrompt({ ...overrides, promptToSend: text }).promptToSend),
       submitIntent: overrides.submitIntent,
       sendStructured: isStructured,
       submitCaption: overrides.submitCaption,
@@ -2582,6 +2583,7 @@ export function ImageStudio() {
   const buildBatchJobRequest = (resolvedPrompt, opts = {}) =>
     buildJobRequest({
       promptToSend: opts.promptToSend ?? resolvedPrompt,
+      appearancePromptBatch: opts.appearancePromptBatch,
       submitIntent: resolvedPrompt,
       sendStructured: opts.sendStructured ?? false,
       submitCaption: opts.submitCaption ?? caption,

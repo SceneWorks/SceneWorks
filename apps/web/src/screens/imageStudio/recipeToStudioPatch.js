@@ -92,7 +92,12 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
   values.styleId = hasRawStylePrompt ? restoredStyleId : null;
   const hasRawAppearance = rawSettings.appearance && typeof rawSettings.appearancePrompt === "string";
   values.appearance = hasRawAppearance ? normalizeAppearance(rawSettings.appearance) : emptyAppearance();
-  if (hasRawAppearance) values.styleId = restoredStyleId;
+  if (hasRawAppearance) {
+    values.styleId = restoredStyleId;
+    // Appearance carriers already contain the preset fold. Replaying them must not fold
+    // whatever general presets happen to be active in the destination Studio a second time.
+    flags.clearGeneralStack = true;
+  }
   if (replayMossEdit && rawSettings.mossImageAdvanced && Array.isArray(replayPromptBatch) && replayPromptBatch.length) {
     values.prompt = replayPromptBatch[0];
   } else if (restoredCaption && validateCaption(restoredCaption).ok) {

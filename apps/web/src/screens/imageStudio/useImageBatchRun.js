@@ -216,14 +216,11 @@ export function useImageBatchRun({
             resolution,
           });
         } else {
-          request = buildBatchJobRequest(cleanPrompt, { resolution });
+          request = buildBatchJobRequest(cleanPrompt, { resolution, appearancePromptBatch: n > 1 ? chunk.map((item) => item.prompt) : undefined });
           // Each prompt composed exactly as its own job would be; `prompt` stays prompts[0].
           if (n > 1) {
             const requests = chunk.map((item) => buildBatchJobRequest(item.prompt, { resolution }));
             request.prompts = requests.map((item) => item.prompt);
-            if (request.appearance) {
-              request.advanced.appearancePromptBatch = requests.map((item) => item.advanced.appearancePrompt);
-            }
           }
         }
         if (stopped()) break;

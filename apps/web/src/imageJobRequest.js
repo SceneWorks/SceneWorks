@@ -372,7 +372,7 @@ export function buildImageJobRequest(state) {
       //    store "" — the raw prompt lives in the caption blob, not here.
       appearance: appearanceApplied ? state.appearance : undefined,
       appearanceUserPrompt: promptToSend,
-      appearanceUserPromptBatch: mossPrompts ? state.mossPromptBatch : undefined,
+      appearanceUserPromptBatch: mossPrompts ? state.mossPromptBatch : state.appearancePromptBatch,
       appearanceUserNegative: negativePrompt,
       styleId: styleApplied ? styleId : undefined,
       styleUserPrompt: styleApplied ? (mossPrompts ? null : structuredInjected ? "" : promptToSend) : undefined,
