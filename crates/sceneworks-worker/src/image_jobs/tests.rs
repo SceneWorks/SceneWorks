@@ -12867,9 +12867,9 @@ fn lora_declares_accelerator_role_matches_only_the_accelerator_marker() {
 
 // sc-13883 (epic 13879 S3) — the DISCRIMINATING param-selection test. The turbo-on-Raw lane resolves
 // its sampling regime against the `krea_2_turbo` descriptor (while loading Raw weights), so the whole
-// regime falls out for free: fixed-mu engine, ~8 steps, guidance off, no negative forwarded. Pinning
+// default regime falls out for free: fixed-mu engine, ~8 steps and guidance off. Pinning
 // the NON-default turbo values here makes the test FAIL if the lane ever reverts to the Raw defaults
-// (52 steps / guidance 1.0 / dynamic-mu / negative forwarded). mu itself is engine-internal
+// (52 steps / guidance 1.0 / dynamic-mu). mu itself is engine-internal
 // (`TURBO_MU = 1.15` in the pinned Krea engine's `turbo_sigmas`), reached by selecting the
 // `krea_2_turbo` engine id — so asserting that engine id IS the worker-observable proof of fixed mu.
 #[cfg(target_os = "macos")]
@@ -12878,7 +12878,7 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
     let raw = mlx_model("krea_2_raw").expect("krea_2_raw engine registered");
     let turbo = mlx_model("krea_2_turbo").expect("krea_2_turbo engine registered");
 
-    // The lane routes to the `krea_2_turbo` engine — the FIXED mu 1.15 / CFG-free `render_turbo`
+    // The lane routes to the `krea_2_turbo` engine — the FIXED mu 1.15 / default CFG-off `render_turbo`
     // regime — NOT the `krea_2_raw` engine (resolution-DYNAMIC mu, true-CFG `render_base`). This engine
     // swap IS the mu-1.15 mechanism (the pinned engine keys the schedule on the descriptor id).
     assert_eq!(turbo.engine_id(), "krea_2_turbo");
@@ -12909,11 +12909,11 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default is 52"
     );
 
-    // Guidance: CFG off (the turbo descriptor advertises no guidance → None), NOT the Raw 1.0.
+    // Guidance: Turbo retains its CFG-off default zero, while Raw defaults to one.
     assert_eq!(
         resolve_guidance(&req, &turbo),
-        None,
-        "turbo-on-Raw forwards no guidance (CFG off)",
+        Some(0.0),
+        "turbo-on-Raw retains its CFG-off guidance default",
     );
     assert_eq!(
         resolve_guidance(&req, &raw),
@@ -12921,12 +12921,11 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default guidance is 1.0",
     );
 
-    // Negative prompt: NOT forwarded under turbo (the descriptor advertises no negative), even though
-    // the request carries one; the Raw path DOES forward it.
+    // Both providers retain negative conditioning for explicit experimental CFG. Admission gates CFG-off requests.
     assert_eq!(
         resolve_negative_prompt(&req, &turbo),
-        None,
-        "turbo-on-Raw must not forward the negative prompt (CFG off)",
+        Some("blurry, low quality".to_owned()),
+        "turbo-on-Raw can forward negative conditioning for experimental CFG",
     );
     assert_eq!(
         resolve_negative_prompt(&req, &raw),
@@ -16215,7 +16214,7 @@ fn ideogram_tier_subdir_maps_q8_optin() {
 
 /// Boogu (epic 6387) resolves each of its three ids to its own engine + the reference defaults, and
 /// quant resolution returns Q8 — the catalog declares `mlx.quantize: 8` (the pre-packed Q8 turnkey
-/// default). Turbo is CFG-free so `resolve_guidance` returns None. Runs in CI on Mac (no weights).
+/// default). Turbo retains its CFG-off default zero and accepts explicit guidance. Runs on Mac without weights.
 #[cfg(target_os = "macos")]
 #[test]
 fn boogu_engine_defaults_and_quant_resolution() {
@@ -16235,14 +16234,21 @@ fn boogu_engine_defaults_and_quant_resolution() {
             "modelManifestEntry": { "mlx": { "quantize": 8 } },
         }))
     };
-    // Base: true-CFG guidance 4.0 from the model row. Turbo: CFG-free → resolve_guidance None.
+    // Base retains guidance 4.0; Turbo retains its CFG-off default zero.
     assert_eq!(
         resolve_guidance(&req("boogu_image", json!({})), &base),
         Some(4.0)
     );
     assert_eq!(
         resolve_guidance(&req("boogu_image_turbo", json!({})), &turbo),
-        None
+        Some(0.0)
+    );
+    assert_eq!(
+        resolve_guidance(
+            &req("boogu_image_turbo", json!({ "guidanceScale": 1.5 })),
+            &turbo
+        ),
+        Some(1.5)
     );
     // Default → Q8 (the shipped pre-packed turnkey); advanced.mlxQuantize overrides to Q4 / bf16-dense.
     assert!(matches!(

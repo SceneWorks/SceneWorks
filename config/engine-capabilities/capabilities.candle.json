@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+    "inferenceRevision": "198e4777f335df67d28e3929ec5102eb0f37b2b8",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -8141,7 +8141,7 @@
     {
       "id": "minimax_h3",
       "composed": false,
-      "selectorDigest": "sha256:fc971226df944b8287b61c964650dc8b0640a3cf071e92b6af7dca058252ad7c",
+      "selectorDigest": "sha256:c6b95a7272ba813982908a39ba8b821d67cefbf0665ae4d77ea37030beb96387",
       "surfaces": [
         {
           "selector": {
@@ -8150,10 +8150,16 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -8162,7 +8168,10 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -8174,10 +8183,16 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -8186,7 +8201,10 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -8198,10 +8216,16 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -8210,7 +8234,10 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -8222,10 +8249,16 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -8234,7 +8267,10 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -8246,10 +8282,16 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -8258,7 +8300,10 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -8270,10 +8315,16 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -8282,7 +8333,10 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
