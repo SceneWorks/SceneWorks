@@ -442,7 +442,12 @@ export async function retainedWorkstationSources(swRoot,inferenceRoot,target,aud
     }else if(file==='.github/workflows/h3-cuda-memory-terminal.yml'){
       const before=await git(swRoot,['show',`${swFrom}:${file}`]),after=await git(swRoot,['show',`${swTo}:${file}`]);
       const shallow='path: sceneworks\n          fetch-depth: 1';assert.equal(before.split(shallow).length,2);
-      assert.equal(before.replace(shallow,'path: sceneworks\n          fetch-depth: 128'),after,'manual source/configuration changed beyond reference history checkout');
+      const receipts='            ${{ env.SW_F329_OUTPUT }}/workstation-veda/*.json';
+      const originals='            ${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**/*.json';
+      assert.equal(before.split(receipts+'\n').length,2,'one original workstation artifact anchor required');
+      assert.ok(!before.includes(originals),'original workflow must not already contain the retained receipt pattern');
+      const expected=before.replace(shallow,'path: sceneworks\n          fetch-depth: 128').replace(receipts+'\n',`${receipts}\n${originals}\n`);
+      assert.equal(expected,after,'manual source/configuration changed beyond reference history checkout and exact retained receipt artifact path');
     }else if(ciPaths.has(file)){
       if(file==='.github/workflows/server-candle-linux.yml'){
         const outside=source=>{

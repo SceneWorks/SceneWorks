@@ -91,6 +91,7 @@ jobs:
             ${{ env.SW_F329_OUTPUT }}-lease/*.json
             ${{ env.SW_F329_OUTPUT }}-lease/*.log
             ${{ env.SW_F329_OUTPUT }}/workstation-veda/*.json
+            ${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**/*.json
             ${{ env.SW_F329_OUTPUT }}/workstation-veda/*.log
             ${{ env.SW_F329_OUTPUT }}/workstation-veda/*.mp4
             ${{ env.SW_F329_OUTPUT }}/24gib-veda-dense/*.json

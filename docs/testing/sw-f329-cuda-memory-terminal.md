@@ -170,6 +170,9 @@ the new output and hashed before and after full native AV comparison. The old
 video is decoded and its content is checked again. New staging hashes must match
 all original source roles/files. Each fresh24GiB service still binds its own
 current executable/hash/source and must use the equivalent native configuration.
+The acceptance artifact includes the six original receipt files under
+`workstation-veda/original/**/*.json`, preserving their bytes for inspection
+alongside the recorded hash commitments.
 
 Only the workstation generation is skipped. Both forced-dense and normal sparse
 24GiB anchors run fresh. The complete original95GiB versus fresh normal24GiB RGB/

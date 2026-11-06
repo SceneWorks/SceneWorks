@@ -146,6 +146,7 @@ test('manual wrapper keeps CUDA memory acceptance separate from ordinary CI and 
   assert.match(workflow,/python scripts\\h3-cuda-memory-lease\.py "%GITHUB_WORKSPACE%\\sceneworks" "%GITHUB_WORKSPACE%\\inference" "%SW_F329_OUTPUT%"/);
   assert.doesNotMatch(workflow,/node scripts\\h3-cuda-memory-terminal\.mjs run/);
   assert.match(workflow,/\$\{\{ env\.SW_F329_OUTPUT \}\}-lease\/\*\.json/);
+  assert.equal(workflow.split('            ${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**/*.json\n').length,2,'all six nested original receipts must be uploaded once');
 });
 
 
@@ -241,7 +242,8 @@ function retainedRecord(){
   record.content={frames:345,spatialStd:{min:0.12,floor:0.07}};record.observations={hostPeakBytes:30*GIB,devicePeakBytes:42*GIB};return record;
 }
 
-function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,ciOutsideChange=false,manualOutsideChange=false}={}){
+function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,ciOutsideChange=false,manualOutsideChange=false,
+  manualArtifactPattern='${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**/*.json'}={}){
   const target={sceneworks:'c'.repeat(40),inference:'d'.repeat(40)},before='a'.repeat(40),after='b'.repeat(40);
   const enginePath='crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs';
   const metadata='config/inference-provider-closures.json',workflow='.github/workflows/server-candle-linux.yml';
@@ -261,7 +263,7 @@ function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,c
     assert.equal(args[0],'show');const [revision,file]=args[1].split(':');
     const old=revision===RETAINED_WORKSTATION.sourcePair.sceneworks;
     if(file===workflow)return {stdout:`name: fixture\njobs:\n  build-candle:\n    steps: ${old?'old':'new'}\n  other-job:\n    unchanged: ${!old&&ciOutsideChange?'false':'true'}\n`};
-    if(file==='.github/workflows/h3-cuda-memory-terminal.yml')return {stdout:`path: sceneworks\n          fetch-depth: ${old?'1':'128'}\nCUDA_COMPUTE_CAP: ${!old&&manualOutsideChange?'80':'120'}`};
+    if(file==='.github/workflows/h3-cuda-memory-terminal.yml')return {stdout:`path: sceneworks\n          fetch-depth: ${old?'1':'128'}\nCUDA_COMPUTE_CAP: ${!old&&manualOutsideChange?'80':'120'}\n            \${{ env.SW_F329_OUTPUT }}/workstation-veda/*.json\n${!old&&manualArtifactPattern!==null?'            '+manualArtifactPattern+'\n':''}          if-no-files-found: error\n`};
     return {stdout:`inference = "${old?RETAINED_WORKSTATION.sourcePair.inference:target.inference}"${!old&&graphDrift?'\nother = "changed"':''}`};
   };
   return {target,audit,command,verify:(review=audit)=>retainedWorkstationSources('consumer','engine',target,review,command)};
@@ -291,6 +293,18 @@ test('retention source review allows only exact reviewed cap, pin and standard-b
   for(const mutate of mutations){const bad=structuredClone(fixture.audit);mutate(bad);await assert.rejects(fixture.verify(bad));}
   for(const options of [{engineExtra:['crates/kernels/candle-quant-kernels/src/veda_int8.cu']},
     {consumerExtra:['crates/sceneworks-worker/src/video_jobs/wan.rs']},{graphDrift:true},{ciOutsideChange:true},{manualOutsideChange:true}])await assert.rejects(sourceReviewFixture(options).verify());
+});
+
+test('manual retention mapping requires the exact nested original-receipt artifact pattern and refuses broader workflow changes',async()=>{
+  await sourceReviewFixture().verify();
+  for(const options of [{manualArtifactPattern:null},
+    {manualArtifactPattern:'${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**'},
+    {manualArtifactPattern:'${{ env.SW_F329_OUTPUT }}/**/*.json'},
+    {manualArtifactPattern:'${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**/*.json\n            ${{ env.SW_F329_OUTPUT }}/extra/*.json'},
+    {manualArtifactPattern:'${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**/*.json\n            ${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**/*.json'},
+    {manualOutsideChange:true}]){
+    await assert.rejects(sourceReviewFixture(options).verify(),/manual source\/configuration changed/);
+  }
 });
 
 test('retained parity needs the verified narrow source mapping and still compares all native AV',async t=>{
