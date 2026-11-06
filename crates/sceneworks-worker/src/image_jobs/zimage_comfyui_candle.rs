@@ -325,6 +325,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     let descriptor = crate::inference_runtime::imported_model_descriptor(
         "z-image",
         gen_core::ImportedModelSource::ComfyUiTree,
@@ -399,7 +400,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                         conditioning,
                         preview,
                         cancel: cancel.clone(),
-                        ..Default::default()
+                        ..sampling_controls.clone()
                     };
                     let output = match model.generate(&request, &mut *on_progress) {
                         Ok(output) => output,

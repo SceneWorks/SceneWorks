@@ -2473,10 +2473,17 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
         }
     };
 
+    let sampling_controls = GenerationRequest {
+        sampler: Some("heun".into()),
+        scheduler: Some("karras".into()),
+        scheduler_shift: Some(33.375),
+        ..Default::default()
+    };
     let edit_generator = HiresProbeGenerator::new();
     let edit = evaluation(gen_core::MemoryMode::Edit, 2, true, false);
     krea_edit_generate_one(
         &edit_generator,
+        &sampling_controls,
         "edit",
         None,
         4,
@@ -2512,6 +2519,9 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
     );
     let edit_request = edit_generator.requests.lock().unwrap();
     assert!(edit_request[0].use_pid);
+    assert_eq!(edit_request[0].scheduler_shift, Some(33.375));
+    assert_eq!(edit_request[0].sampler.as_deref(), Some("heun"));
+    assert_eq!(edit_request[0].scheduler.as_deref(), Some("karras"));
     assert_eq!(edit_request[0].image_reference_count(), 2);
     assert!(edit_request[0]
         .memory
@@ -2522,6 +2532,7 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
     let phase = evaluation(gen_core::MemoryMode::TextToImage, 0, false, true);
     krea_multiphase_generate_one(
         &phase_generator,
+        &sampling_controls,
         "phases",
         None,
         4,
@@ -2547,6 +2558,9 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
     );
     let phase_request = phase_generator.requests.lock().unwrap();
     assert!(phase_request[0].phases.is_some());
+    assert_eq!(phase_request[0].scheduler_shift, Some(33.375));
+    assert_eq!(phase_request[0].sampler.as_deref(), Some("heun"));
+    assert_eq!(phase_request[0].scheduler.as_deref(), Some("karras"));
     assert!(phase_request[0]
         .memory
         .is_some_and(|memory| memory.stream_transformer_blocks));
@@ -8224,6 +8238,7 @@ fn sc3031_ab_dump_pose() {
     let conditioning = build_control_conditioning(control, ControlKind::Pose, control_scale, None);
     let (ow, oh, pixels) = zimage_control_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         &req.prompt,
         w,
         h,
@@ -8450,6 +8465,7 @@ fn zimage_control_real_weights_generates_one_pose() {
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
     let (w, h, pixels) = zimage_control_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         512,
         512,
@@ -8511,6 +8527,7 @@ fn zimage_base_control_real_weights_generates_per_mode() {
         let mut steps_seen = 0u32;
         let (ow, oh, pixels) = zimage_base_control_generate_one(
             generator.as_ref(),
+            &gen_core::GenerationRequest::default(),
             "a person standing in a meadow",
             None,
             w,
@@ -18153,6 +18170,7 @@ fn matrix_zimage_turbo_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = zimage_control_generate_one(
         generator,
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         side,
         side,
@@ -18292,6 +18310,7 @@ fn matrix_zimage_base_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = zimage_base_control_generate_one(
         generator,
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         None,
         side,
@@ -30927,4 +30946,36 @@ fn checkpoint_plan_native_request_keeps_sampling_overrides_and_defaults() {
     );
     assert_eq!(explicit.sampler.as_deref(), Some("heun"));
     assert_eq!(explicit.scheduler.as_deref(), Some("karras"));
+}
+
+#[cfg(native_lane)]
+#[test]
+fn zimage_control_forwards_experimental_sampling_to_the_native_request() {
+    let generator = HiresProbeGenerator::new();
+    let sampling = super::sampling::explicit_sampling_request(&request(json!({
+        "projectId":"p", "negativePrompt":"blurry", "advanced":{
+            "guidanceScale":1.5,"sampler":"heun","scheduler":"karras","schedulerShift":33.375
+        }
+    })));
+    zimage_control_generate_one(
+        &generator,
+        &sampling,
+        "p",
+        4,
+        4,
+        7,
+        2,
+        vec![],
+        gen_core::PreviewSink::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    )
+    .unwrap();
+    let captured = generator.requests.lock().unwrap();
+    let native = &captured[0];
+    assert_eq!(native.guidance, Some(1.5));
+    assert_eq!(native.negative_prompt.as_deref(), Some("blurry"));
+    assert_eq!(native.scheduler_shift, Some(33.375));
+    assert_eq!(native.sampler.as_deref(), Some("heun"));
+    assert_eq!(native.scheduler.as_deref(), Some("karras"));
 }
