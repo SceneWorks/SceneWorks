@@ -20,6 +20,20 @@ The explicit `sceneworks-rust-api/h3-memory-proof` feature enables the scoped
 validation controls; normal product feature defaults remain unchanged. The
 exact native build command/features are retained in each build receipt.
 
+The whole campaign additionally takes the accepted engine's existing
+`PUBLIC/SceneWorks/gpu-locks/<uuid>.lock` lease through `execution_claim`.
+This coordinates separate proof workflows on the same physical host. A busy
+lease waits within the original590minute campaign deadline; it cannot start an
+anchor early or reset that deadline after waiting. The plan's pool plus external
+reserve supplies the24GiB minimum free-memory check, while the resident anchor
+keeps its own provider admission. No device ordinal fallback is permitted.
+The existing suspended-child Windows Job owns Node and all descendants. Normal
+exit, nonzero exit, timeout and interruption reap owned descendants before the
+physical post-idle check and lease release. Sixty seconds are reserved for
+cleanup, and ten workflow minutes remain for upload. The sibling `-lease`
+directory retains claim/release samples, child logs and `campaign-lease.json`;
+an unsuccessful child or unverified release cannot produce a passing receipt.
+
 ## Required plan fields
 
 | Field | Value or meaning |

@@ -68,6 +68,8 @@ jobs:
           node scripts\h3-cuda-memory-terminal.mjs check
           if errorlevel 1 exit /b %ERRORLEVEL%
           node --test scripts\h3-cuda-memory-terminal.test.mjs
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          python scripts\h3-cuda-memory-lease.test.py
       - name: Build and execute the three stationary-pair anchors
         working-directory: sceneworks
         shell: cmd
@@ -78,7 +80,7 @@ jobs:
           if errorlevel 1 exit /b %ERRORLEVEL%
           where ffprobe
           if errorlevel 1 exit /b %ERRORLEVEL%
-          node scripts\h3-cuda-memory-terminal.mjs run "%GITHUB_WORKSPACE%\sceneworks" "%GITHUB_WORKSPACE%\inference" "%SW_F329_OUTPUT%"
+          python scripts\h3-cuda-memory-lease.py "%GITHUB_WORKSPACE%\sceneworks" "%GITHUB_WORKSPACE%\inference" "%SW_F329_OUTPUT%"
       - name: Keep output, source, allocation, numerical and media evidence
         if: always() && env.SW_F329_OUTPUT != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -86,6 +88,8 @@ jobs:
           name: sw-f329-cuda-memory-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.SW_F329_OUTPUT }}/*.json
+            ${{ env.SW_F329_OUTPUT }}-lease/*.json
+            ${{ env.SW_F329_OUTPUT }}-lease/*.log
             ${{ env.SW_F329_OUTPUT }}/workstation-veda/*.json
             ${{ env.SW_F329_OUTPUT }}/workstation-veda/*.log
             ${{ env.SW_F329_OUTPUT }}/workstation-veda/*.mp4
