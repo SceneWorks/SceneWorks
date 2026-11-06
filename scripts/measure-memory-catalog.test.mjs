@@ -69,6 +69,7 @@ import {
   readSdxlCandleRoutes,
   sdxlCandleRouteDrift,
   parseDeclaredStrategySupport,
+  RuntimeDependentStrategySupport,
   readDeclaredStrategySupport,
   compatibilityDefaultSupport,
   readCompatibilityDefaultSupport,
@@ -3905,12 +3906,12 @@ test("every sensenova env family and repository is the one the adapter binaries 
 test("an anchor row plans the lane's default rung unless the manifest exempts it", async (t) => {
   const plan = await readPlan();
   const models = new Map((await readManifestModels()).map((model) => [model.id, model]));
-  // sc-22736: the SECOND derived source. A provider whose contract simply does not IMPLEMENT the
+  // sc-22736: retained concrete surface evidence. A provider whose contract does not IMPLEMENT the
   // lane default — Candle SCAIL-2 publishes `Resident` alone, `Missing` rather than structurally
   // inapplicable, so no manifest exemption is honest — is read off the checked-in engine
   // capability dump, which records every contract's `implementedRungs` per (tier, load shape) at
-  // the pin. Absence from the dump is NOT evidence: a row that overrides a provider the dump does
-  // not know falls through to the third source below, and is refused if that cannot speak either.
+  // dump's recorded pin. Current readable source takes precedence below; the dump can answer when
+  // that declaration depends on a concrete surface. Absence from either is not support evidence.
   const dumps = new Map();
   for (const backend of ["mlx", "candle"]) {
     const dump = JSON.parse(
@@ -3928,8 +3929,8 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     if (surfaces.length === 0) return null;
     return surfaces.every((surface) => !surface.implementedRungs.includes(fallbackRung));
   };
-  // sc-22736, pin 8a65db2a: the THIRD derived source, consulted only where the dump has no surface
-  // to offer. `candle-gen-scail2` registers a memory strategy WITHOUT a weights-free surface
+  // sc-22736, pin 8a65db2a: the pinned declaration also covers providers with no dump surface.
+  // `candle-gen-scail2` registers a memory strategy WITHOUT a weights-free surface
   // resolver, so `memory_contract_surfaces()` — and therefore capabilities.candle.json — never sees
   // it; no regeneration at any pin would change that. Its `build_contract` does declare the support
   // per rung, and the anchor loader closure already names that file as this (model, lane)'s
@@ -3939,7 +3940,15 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
   const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
   const declaredRefusesDefault = async (backend, modelId, fallbackRung) => {
     const support = await readDeclaredStrategySupport(modelId, backend, closures);
-    return support === null ? null : support(fallbackRung) !== "Implemented";
+    if (support === null) return null;
+    try {
+      return support(fallbackRung) !== "Implemented";
+    } catch (error) {
+      // A parsed condition depending on the concrete surface cannot answer statically.
+      // Unreadable source and every other error still fail closed.
+      if (!(error instanceof RuntimeDependentStrategySupport)) throw error;
+      return null;
+    }
   };
   let overridden = 0;
   let candleExempt = 0;
@@ -3954,11 +3963,14 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     const manifestExempt = Object.hasOwn(exemptions, "staged_residency");
     const fallbackForDump = ANCHOR_STRATEGY[backend].rung;
     const judged = !manifestExempt && fallbackForDump === "staged_residency";
-    let contractRefusesDefault = judged ? dumpRefusesDefault(backend, anchor, tier, fallbackForDump) : false;
-    if (judged && contractRefusesDefault === null) {
-      const declared = await declaredRefusesDefault(backend, modelId, fallbackForDump);
-      if (declared !== null) declaredEvidence += 1;
-      contractRefusesDefault = declared;
+    // A readable declaration at the pinned source is current contract evidence. Capability
+    // dumps retain their measured source identity and can predate newly implemented rungs.
+    // They remain a fallback when the source has no answer; unreadable declarations still throw.
+    let contractRefusesDefault = false;
+    if (judged) {
+      contractRefusesDefault = await declaredRefusesDefault(backend, modelId, fallbackForDump);
+      if (contractRefusesDefault !== null) declaredEvidence += 1;
+      else contractRefusesDefault = dumpRefusesDefault(backend, anchor, tier, fallbackForDump);
     }
     // sc-24217: the FOURTH source, and only ever a justification for an override that is already
     // planned — never a demand for one. Candle Supra2-IMG registers a resident-only witness (not in
@@ -4246,7 +4258,8 @@ fn build_contract() -> MemoryContract {
     "guarded.rs",
   );
   assert.equal(guarded("resident"), "Implemented");
-  assert.throws(() => guarded("bounded_transformer_residency"), /runtime condition/);
+  assert.throws(() => guarded("bounded_transformer_residency"), error =>
+    error instanceof RuntimeDependentStrategySupport && /runtime condition/.test(error.message));
 
   // The same for the if/else form with a compound condition (`candle-gen-sdxl`): the rungs the
   // condition decides statically still resolve, and only the gated one refuses.
@@ -4270,7 +4283,16 @@ fn build_contract() -> MemoryContract {
   assert.equal(surfaceGated("bounded_transformer_residency"), "Missing");
   assert.equal(surfaceGated("resident"), "Implemented");
   assert.equal(surfaceGated("bounded_decode"), "Implemented");
-  assert.throws(() => surfaceGated("staged_residency"), /runtime condition|not about the strategy/);
+  assert.throws(() => surfaceGated("staged_residency"), error =>
+    error instanceof RuntimeDependentStrategySupport && /runtime condition|not about the strategy/.test(error.message));
+  assert.throws(() => parseDeclaredStrategySupport(
+    `strategies: MemoryStrategy::ALL.into_iter().map(|strategy| MemoryStrategyCapability {
+      strategy, support: if surface === SdxlSurface::Bespoke {
+        MemoryStrategySupport::Missing
+      } else { MemoryStrategySupport::Implemented },
+      parameters: MemoryParameterRanges::default(),
+    }).collect(),`, "malformed.rs")("staged_residency"), error =>
+    !(error instanceof RuntimeDependentStrategySupport) && /cannot\s+read/.test(error.message));
 });
 
 test("strategy declarations follow transparent helpers and immutable block-local support", () => {
@@ -4295,6 +4317,8 @@ fn strategies() -> Vec<MemoryStrategyCapability> { strategies_for(false) }
 fn contract() -> MemoryProviderContract { MemoryProviderContract { strategies: strategies() } }
 `;
   const support = parseDeclaredStrategySupport(modular, "modular.rs");
+  const unreadableError = error => !(error instanceof RuntimeDependentStrategySupport)
+    && /cannot\s+read/.test(error.message);
   for (const rung of ["resident", "staged_residency", "bounded_decode", "bounded_attention"]) {
     assert.equal(support(rung), "Implemented");
   }
@@ -4309,9 +4333,10 @@ fn contract() -> MemoryProviderContract { MemoryProviderContract { strategies: s
   assert.throws(() => parseDeclaredStrategySupport(modular.replace("let support =", "let mut support ="), "mutable.rs"), /cannot\s+read/);
   assert.throws(() => parseDeclaredStrategySupport(modular.replace("        match strategy {", "        support = MemoryStrategySupport::Missing;\n        match strategy {"), "assignment.rs"), /cannot\s+read/);
   assert.throws(() => parseDeclaredStrategySupport(modular.replace("        MemoryStrategyCapability { strategy, support, parameters }", "        let support = MemoryStrategySupport::Missing;\n        MemoryStrategyCapability { strategy, support, parameters }"), "shadow.rs"), /cannot\s+read/);
-  assert.throws(() => parseDeclaredStrategySupport(modular.replace("fn strategies_for(", "fn renamed("), "missing.rs"), /cannot\s+read/);
-  assert.throws(() => parseDeclaredStrategySupport(modular.replace("strategies_for(false)", "strategies_for(false, true)"), "arity.rs"), /cannot\s+read/);
-  assert.throws(() => parseDeclaredStrategySupport(modular.replace("{ strategies_for(false) }", "{ strategies() }"), "cycle.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("fn strategies_for(", "fn renamed("), "missing.rs"), unreadableError);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("strategies_for(false)", "strategies_for(false, true)"), "arity.rs"), unreadableError);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("{ strategies_for(false) }", "{ strategies() }"), "cycle.rs"), unreadableError);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("{ strategy, support, parameters }", "{ strategy, support, parameters"), "unbalanced.rs"), unreadableError);
   assert.throws(() => parseDeclaredStrategySupport(modular.replace("strategy, support, parameters", "strategy, support: absent, parameters"), "unbound.rs"), /cannot\s+read/);
   assert.throws(() => parseDeclaredStrategySupport(modular.replace("{ strategy, support, parameters }", "{ strategy, support, parameters };\n        runtime_capability()"), "tail.rs"), /cannot\s+read/);
   assert.throws(() => parseDeclaredStrategySupport(modular.replace("    MemoryStrategy::ALL.into_iter()", "    let advertised = MemoryStrategy::ALL;\n    runtime_strategies().into_iter()"), "wrong-input.rs"), /cannot\s+read/);
@@ -4361,6 +4386,7 @@ test("the engine's own declaration parses for every provider the override rule c
       try {
         assert.match(support(rung), /^[A-Z]\w+$/, `${key}: ${rung} support`);
       } catch (error) {
+        assert.ok(error instanceof RuntimeDependentStrategySupport, `${key}: ${rung} must be a recognized runtime condition`);
         assert.doesNotMatch(
           error.message,
           /cannot\s+read/s,

@@ -853,6 +853,25 @@ export async function readCompatibilityDefaultSupport(
   }
 }
 
+// A recognized source condition can require a concrete contract surface. This is distinct from
+// an unreadable declaration: callers may consult surface evidence, but must not guess support.
+export class RuntimeDependentStrategySupport extends Error {}
+
+function readableRuntimeCondition(condition) {
+  let depth = 0;
+  for (const ch of condition) {
+    if (ch === "(") depth += 1;
+    else if (ch === ")" && --depth < 0) return false;
+  }
+  if (depth !== 0) return false;
+  const name = "[A-Za-z_]\\w*(?:(?:::|\\.)[A-Za-z_]\\w*)*";
+  const comparison = new RegExp(`^${name}\\s*(?:==|!=)\\s*${name}$`);
+  return condition.replace(/[()]/g, "").split(/\|\||&&/).every(term => {
+    const text = term.trim();
+    return /^!?\s*[A-Za-z_]\w*$/.test(text) || comparison.test(text);
+  });
+}
+
 export function parseDeclaredStrategySupport(rawSource, sourcePath) {
   const source = stripRustComments(rawSource);
   const field = /\bstrategies:/.exec(source);
@@ -891,7 +910,8 @@ export function parseDeclaredStrategySupport(rawSource, sourcePath) {
       const variant = strategyVariant(rung);
       const holds = evaluateStrategyCondition(condition, variant, bindings);
       if (holds === null) {
-        return fail(
+        if (!readableRuntimeCondition(condition)) return unreadable(sourcePath, "unsupported runtime condition syntax");
+        throw new RuntimeDependentStrategySupport(
           `${sourcePath} gates MemoryStrategy::${variant} on a condition that is not about the strategy `
             + "itself, so its support is a runtime value rather than a fact this source text states. Read "
             + "the rung from the engine capability dump instead of guessing which side of the branch holds.",
@@ -911,7 +931,8 @@ export function parseDeclaredStrategySupport(rawSource, sourcePath) {
         if (arm.variants !== null && !arm.variants.includes(variant)) continue;
         const holds = arm.guarded ? evaluateStrategyCondition(arm.condition, variant, bindings) : true;
         if (holds === null) {
-          return fail(
+          if (!readableRuntimeCondition(arm.condition)) return unreadable(sourcePath, "unsupported runtime guard syntax");
+          throw new RuntimeDependentStrategySupport(
             `${sourcePath} declares MemoryStrategy::${variant} behind an \`if\` guard, so its support is a `
               + "runtime condition rather than a fact this source text states. Read the rung from the engine "
               + "capability dump instead of guessing which side of the guard holds.",
