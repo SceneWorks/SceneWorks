@@ -30948,7 +30948,7 @@ fn checkpoint_plan_native_request_keeps_sampling_overrides_and_defaults() {
     assert_eq!(explicit.scheduler.as_deref(), Some("karras"));
 }
 
-#[cfg(native_lane)]
+#[cfg(target_os = "macos")]
 #[test]
 fn zimage_control_forwards_experimental_sampling_to_the_native_request() {
     let generator = HiresProbeGenerator::new();
