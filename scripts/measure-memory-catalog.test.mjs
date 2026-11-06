@@ -4099,6 +4099,8 @@ test("the engine's strategy declaration is parsed per rung, and an unreadable sh
   assert.equal(support("resident"), "Implemented");
   assert.equal(support("staged_residency"), "Missing");
   assert.equal(support("bounded_decode"), "Missing");
+  assert.throws(() => parseDeclaredStrategySupport(
+    shipped.replace("            })", "            }.with_support(runtime_flag()))"), "builder.rs"), /cannot\s+read/);
   // No declaration at all: null, never "implements everything".
   assert.equal(parseDeclaredStrategySupport("fn build_contract() {}", "fixture.rs"), null);
   // MUTATION: the same file after an upstream refactor this parser does not know. It must throw —
@@ -4269,6 +4271,66 @@ fn build_contract() -> MemoryContract {
   assert.equal(surfaceGated("resident"), "Implemented");
   assert.equal(surfaceGated("bounded_decode"), "Implemented");
   assert.throws(() => surfaceGated("staged_residency"), /runtime condition|not about the strategy/);
+});
+
+test("strategy declarations follow transparent helpers and immutable block-local support", () => {
+  const modular = `
+fn strategies_for(streamable: bool) -> Vec<MemoryStrategyCapability> {
+    MemoryStrategy::ALL.into_iter().map(|strategy| {
+        let mut parameters = MemoryParameterRanges::default();
+        let support = match strategy {
+            MemoryStrategy::BoundedTransformerResidency if !streamable => MemoryStrategySupport::Missing,
+            _ => MemoryStrategySupport::Implemented,
+        };
+        match strategy {
+            MemoryStrategy::BoundedTransformerResidency if streamable => {
+                parameters.transformer_window_sizes = vec![1];
+            }
+            _ => {}
+        }
+        MemoryStrategyCapability { strategy, support, parameters }
+    }).collect()
+}
+fn strategies() -> Vec<MemoryStrategyCapability> { strategies_for(false) }
+fn contract() -> MemoryProviderContract { MemoryProviderContract { strategies: strategies() } }
+`;
+  const support = parseDeclaredStrategySupport(modular, "modular.rs");
+  for (const rung of ["resident", "staged_residency", "bounded_decode", "bounded_attention"]) {
+    assert.equal(support(rung), "Implemented");
+  }
+  assert.equal(support("bounded_transformer_residency"), "Missing");
+  assert.equal(parseDeclaredStrategySupport(modular.replace("strategies_for(false)", "strategies_for(true)"), "enabled.rs")("bounded_transformer_residency"), "Implemented");
+  const delegated = modular.replace("{ strategies_for(false) }", "{ delegated(false) }")
+    + "\nfn delegated(enabled: bool) -> Vec<MemoryStrategyCapability> { strategies_for(enabled) }";
+  assert.equal(parseDeclaredStrategySupport(delegated, "delegated.rs")("bounded_transformer_residency"), "Missing");
+  // No local literal decides an external flag: keep the existing explicit ambiguity refusal.
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("strategies_for(false)", "strategies_for(runtime_flag())"), "runtime.rs")("bounded_transformer_residency"), /runtime condition/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("let mut parameters", "let streamable = runtime_flag();\n        let mut parameters"), "flag-shadow.rs")("bounded_transformer_residency"), /runtime condition/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("let support =", "let mut support ="), "mutable.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("        match strategy {", "        support = MemoryStrategySupport::Missing;\n        match strategy {"), "assignment.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("        MemoryStrategyCapability { strategy, support, parameters }", "        let support = MemoryStrategySupport::Missing;\n        MemoryStrategyCapability { strategy, support, parameters }"), "shadow.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("fn strategies_for(", "fn renamed("), "missing.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("strategies_for(false)", "strategies_for(false, true)"), "arity.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("{ strategies_for(false) }", "{ strategies() }"), "cycle.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("strategy, support, parameters", "strategy, support: absent, parameters"), "unbound.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("{ strategy, support, parameters }", "{ strategy, support, parameters };\n        runtime_capability()"), "tail.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("    MemoryStrategy::ALL.into_iter()", "    let advertised = MemoryStrategy::ALL;\n    runtime_strategies().into_iter()"), "wrong-input.rs"), /cannot\s+read/);
+});
+
+test("pinned Candle H3 modular declaration retains its own default support table", async (t) => {
+  if (!process.env.INFERENCE_REPO) {
+    assert.ok(!process.env.CI, "CI must provide the pinned inference checkout");
+    t.diagnostic("no pinned inference checkout; actual declaration not read");
+    return;
+  }
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  const support = await readDeclaredStrategySupport("minimax_h3", "candle", closures);
+  assert.ok(support, "the pinned H3 declaration must supply support evidence");
+  assert.equal(support("resident"), "Implemented");
+  assert.equal(support("staged_residency"), "Implemented");
+  assert.equal(support("bounded_decode"), "Implemented");
+  assert.equal(support("bounded_attention"), "Implemented");
+  assert.equal(support("bounded_transformer_residency"), "Missing", "the metadata-only default delegates with streamable=false");
 });
 
 // The fixtures above are shapes; this is the pin. EVERY memory-strategy entry point the anchor
