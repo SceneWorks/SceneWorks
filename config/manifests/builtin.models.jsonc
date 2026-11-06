@@ -14721,6 +14721,8 @@
       "id": "kolors",
       "name": "Kolors",
       "family": "kolors",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "kolors_diffusers",
       "capabilities": ["text_to_image", "edit_image", "character_image"],
@@ -17111,6 +17113,8 @@
       "recommended": true,
       "name": "Stable Diffusion XL",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // character_image: h94/IP-Adapter plus-face for Character Studio reference
@@ -18326,6 +18330,8 @@
       "id": "realvisxl",
       "name": "RealVisXL (photoreal SDXL)",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // Photoreal SDXL finetune with the full SDXL feature set (t2i + edit +
@@ -19360,6 +19366,8 @@
       "id": "realvisxl_lightning",
       "name": "RealVisXL Lightning (fast photoreal SDXL)",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // Few-step distilled sibling of RealVisXL_V5.0 (sc-6075). A STANDALONE checkpoint
@@ -20355,6 +20363,8 @@
       "id": "illustrious_xl_v1",
       "name": "Illustrious-XL v1.0 (anime)",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // Danbooru-tag anime SDXL finetune (OnomaAI). Architecturally vanilla SDXL — identical UNet,
@@ -21321,6 +21331,8 @@
       "id": "illustrious_xl_v2",
       "name": "Illustrious-XL v2.0 (anime)",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // The `v2.0-STABLE` last-annealing-phase snapshot of a cosine-annealing run. A SEPARATE
@@ -22288,6 +22300,8 @@
       "id": "instantid_realvisxl",
       "name": "InstantID (RealVisXL)",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "instantid_sdxl",
       // Reference-driven only: identity comes from an insightface ArcFace embedding
@@ -24568,6 +24582,8 @@
       "id": "bernini_image",
       "name": "Bernini (Image)",
       "family": "bernini",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "bernini",
       "capabilities": ["text_to_image", "edit_image"],

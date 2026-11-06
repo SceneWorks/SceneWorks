@@ -3454,6 +3454,21 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
     expect(createImageJob.mock.calls.at(-1)[0].advanced.schedulerShift).toBeUndefined();
   });
 
+  it("keeps unsupported Shift disabled and omits a replayed override", async () => {
+    const unsupported = { ...GUIDED, image: { ...GUIDED.image, supportsSchedulerShift: false } };
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: unsupported.id, schedulerShift: 33.375, schedulerShiftExplicit: true,
+    }));
+    const createImageJob = vi.fn(async () => ({ id: "job-with-native-default" }));
+    await render(baseContext({ imageModels: [unsupported], createImageJob }));
+    await openAdvanced();
+    expect(labelStartingWith("Sampler")?.querySelector("select")).toBeTruthy();
+    expect(labelStartingWith("Scheduler")?.querySelector("select")).toBeTruthy();
+    expect(field(container, "Schedule shift").disabled).toBe(true);
+    await generate();
+    expect(createImageJob.mock.calls[0][0].advanced.schedulerShift).toBeUndefined();
+  });
+
   it("hides both controls for a CFG-free engine and sends neither, even from a replayed recipe", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
