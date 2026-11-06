@@ -44,30 +44,30 @@ describe("composeStyledPrompt", () => {
       want: "a fox in the snow",
     },
     {
-      // The template order itself: Subject block first, Style block second. Fails if the two
+      // The plain-prompt order: Description first, Style second. Fails if the two
       // blocks are ever emitted Style-first again.
-      name: "clean prompt → Subject leads, Style trails",
+      name: "clean prompt → Description leads, Style trails",
       styleText: "cinematic watercolor",
       userPrompt: "a fox in the snow",
-      want: "Subject: a fox in the snow\nStyle: cinematic watercolor",
+      want: "Description: a fox in the snow\nStyle: cinematic watercolor",
     },
     {
       name: "mid-sentence colon is NOT a directive",
       styleText: "oil painting",
       userPrompt: "a portrait: dramatic lighting on her face",
-      want: "Subject: a portrait: dramatic lighting on her face\nStyle: oil painting",
+      want: "Description: a portrait: dramatic lighting on her face\nStyle: oil painting",
     },
     {
       name: "lowercase line-start colon is NOT a directive",
       styleText: "oil painting",
       userPrompt: "style: not really a directive",
-      want: "Subject: style: not really a directive\nStyle: oil painting",
+      want: "Description: style: not really a directive\nStyle: oil painting",
     },
     {
-      name: "unrecognized capitalized key is NOT a directive (folds into Subject)",
+      name: "unrecognized capitalized key is NOT a directive (folds into Description)",
       styleText: "oil painting",
       userPrompt: "Note: this is a plain sentence",
-      want: "Subject: Note: this is a plain sentence\nStyle: oil painting",
+      want: "Description: Note: this is a plain sentence\nStyle: oil painting",
     },
     {
       // Discriminates the LINE-ANCHOR (^) rule for a RECOGNIZED key: "Lighting" appears
@@ -76,14 +76,14 @@ describe("composeStyledPrompt", () => {
       name: "recognized key mid-line is NOT a directive (stays prose)",
       styleText: "oil painting",
       userPrompt: "a photo with dramatic Lighting: soft",
-      want: "Subject: a photo with dramatic Lighting: soft\nStyle: oil painting",
+      want: "Description: a photo with dramatic Lighting: soft\nStyle: oil painting",
     },
     {
       // Same anchor rule with "Setting" preceded by a word on the same line.
       name: "recognized key after leading word is NOT a directive (stays prose)",
       styleText: "oil painting",
       userPrompt: "The Setting: was perfect",
-      want: "Subject: The Setting: was perfect\nStyle: oil painting",
+      want: "Description: The Setting: was perfect\nStyle: oil painting",
     },
     {
       // CRLF (\r\n) line breaks must classify recognized keys as directives (issue 1). A
@@ -169,13 +169,13 @@ describe("composeStyledPrompt", () => {
       name: "styleText is trimmed before templating",
       styleText: "  cinematic watercolor  ",
       userPrompt: "a fox",
-      want: "Subject: a fox\nStyle: cinematic watercolor",
+      want: "Description: a fox\nStyle: cinematic watercolor",
     },
     {
-      name: "unicode content is preserved in Subject",
+      name: "unicode content is preserved in Description",
       styleText: "浮世絵",
       userPrompt: "富士山と桜、朝の光",
-      want: "Subject: 富士山と桜、朝の光\nStyle: 浮世絵",
+      want: "Description: 富士山と桜、朝の光\nStyle: 浮世絵",
     },
     {
       name: "unicode prose alongside a foreign directive",
@@ -255,6 +255,9 @@ describe("STYLE_DIRECTIVE_KEYS", () => {
       "Mood",
       "Composition",
       "Negative",
+      "Action",
+      "Film",
+      "Look",
     ]);
   });
 });

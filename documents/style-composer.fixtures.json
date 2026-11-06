@@ -20,40 +20,40 @@
       "expected": "a fox in the snow"
     },
     {
-      "name": "clean prompt -> Subject leads, Style trails",
+      "name": "clean prompt -> Description leads, Style trails",
       "styleText": "cinematic watercolor",
       "userPrompt": "a fox in the snow",
-      "expected": "Subject: a fox in the snow\nStyle: cinematic watercolor"
+      "expected": "Description: a fox in the snow\nStyle: cinematic watercolor"
     },
     {
       "name": "mid-sentence colon is NOT a directive",
       "styleText": "oil painting",
       "userPrompt": "a portrait: dramatic lighting on her face",
-      "expected": "Subject: a portrait: dramatic lighting on her face\nStyle: oil painting"
+      "expected": "Description: a portrait: dramatic lighting on her face\nStyle: oil painting"
     },
     {
       "name": "lowercase line-start colon is NOT a directive",
       "styleText": "oil painting",
       "userPrompt": "style: not really a directive",
-      "expected": "Subject: style: not really a directive\nStyle: oil painting"
+      "expected": "Description: style: not really a directive\nStyle: oil painting"
     },
     {
-      "name": "unrecognized capitalized key is NOT a directive (folds into Subject)",
+      "name": "unrecognized capitalized key is NOT a directive (folds into Description)",
       "styleText": "oil painting",
       "userPrompt": "Note: this is a plain sentence",
-      "expected": "Subject: Note: this is a plain sentence\nStyle: oil painting"
+      "expected": "Description: Note: this is a plain sentence\nStyle: oil painting"
     },
     {
       "name": "recognized key mid-line is NOT a directive (stays prose)",
       "styleText": "oil painting",
       "userPrompt": "a photo with dramatic Lighting: soft",
-      "expected": "Subject: a photo with dramatic Lighting: soft\nStyle: oil painting"
+      "expected": "Description: a photo with dramatic Lighting: soft\nStyle: oil painting"
     },
     {
       "name": "recognized key after leading word is NOT a directive (stays prose)",
       "styleText": "oil painting",
       "userPrompt": "The Setting: was perfect",
-      "expected": "Subject: The Setting: was perfect\nStyle: oil painting"
+      "expected": "Description: The Setting: was perfect\nStyle: oil painting"
     },
     {
       "name": "CRLF directive lines classify correctly, no stray carriage return",
@@ -131,13 +131,13 @@
       "name": "styleText is trimmed before templating",
       "styleText": "  cinematic watercolor  ",
       "userPrompt": "a fox",
-      "expected": "Subject: a fox\nStyle: cinematic watercolor"
+      "expected": "Description: a fox\nStyle: cinematic watercolor"
     },
     {
-      "name": "unicode content is preserved in Subject",
+      "name": "unicode content is preserved in Description",
       "styleText": "浮世絵",
       "userPrompt": "富士山と桜、朝の光",
-      "expected": "Subject: 富士山と桜、朝の光\nStyle: 浮世絵"
+      "expected": "Description: 富士山と桜、朝の光\nStyle: 浮世絵"
     },
     {
       "name": "unicode prose alongside a foreign directive",
@@ -168,6 +168,30 @@
       "styleText": "noir",
       "userPrompt": "a detective\nunder a streetlamp\nSetting: alley",
       "expected": "Subject: a detective\nunder a streetlamp\nStyle: noir\nSetting: alley"
+    },
+    {
+      "name": "all requested directives remain distinct with catalog Style merge",
+      "styleText": "watercolor",
+      "userPrompt": "Subject: a dancer\nStyle: loose brushwork\nCamera: 50mm lens, f/2\nComposition: full body, off center\nLighting: soft window light\nEnvironment: an old studio\nSetting: morning\nAction: turning mid-step\nFilm: fine grain, soft contrast\nLook: muted colors",
+      "expected": "Subject: a dancer\nStyle: watercolor, loose brushwork\nCamera: 50mm lens, f/2\nComposition: full body, off center\nLighting: soft window light\nEnvironment: an old studio\nSetting: morning\nAction: turning mid-step\nFilm: fine grain, soft contrast\nLook: muted colors"
+    },
+    {
+      "name": "all requested directives pass through unchanged without a selected style",
+      "styleText": null,
+      "userPrompt": "Subject: a dancer\nStyle: loose brushwork\nCamera: 50mm lens, f/2\nComposition: full body, off center\nLighting: soft window light\nEnvironment: an old studio\nSetting: morning\nAction: turning mid-step\nFilm: fine grain, soft contrast\nLook: muted colors",
+      "expected": "Subject: a dancer\nStyle: loose brushwork\nCamera: 50mm lens, f/2\nComposition: full body, off center\nLighting: soft window light\nEnvironment: an old studio\nSetting: morning\nAction: turning mid-step\nFilm: fine grain, soft contrast\nLook: muted colors"
+    },
+    {
+      "name": "new directives preserve order and CRLF normalization",
+      "styleText": "noir",
+      "userPrompt": "Action: running\r\nFilm: coarse grain\r\nLook: cool shadows",
+      "expected": "Style: noir\nAction: running\nFilm: coarse grain\nLook: cool shadows"
+    },
+    {
+      "name": "explicit Description stays a single directive",
+      "styleText": "noir",
+      "userPrompt": "Description: a rainy street at night",
+      "expected": "Style: noir\nDescription: a rainy street at night"
     }
   ]
 }

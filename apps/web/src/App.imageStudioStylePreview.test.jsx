@@ -129,7 +129,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     await selectStyle(firstStyle.name);
 
     const shown = previewText();
-    expect(shown).toContain("Subject: a fox in the snow");
+    expect(shown).toContain("Description: a fox in the snow");
     expect(shown).toContain("\nStyle: ");
 
     const submittedPrompt = await submitAndReadPayloadPrompt();
@@ -191,7 +191,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     await typePrompt("a wolf on a ridge at dusk");
     const second = previewText();
     expect(second).not.toBe(first);
-    expect(second).toContain("Subject: a wolf on a ridge at dusk");
+    expect(second).toContain("Description: a wolf on a ridge at dusk");
 
     const submittedPrompt = await submitAndReadPayloadPrompt();
     expect(second).toBe(submittedPrompt);
@@ -251,7 +251,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
       const submittedPrompt = await submitAndReadPayloadPrompt();
       expect(submittedPrompt).toBe(TAGS);
       expect(submittedPrompt).not.toContain("Style:");
-      expect(submittedPrompt).not.toContain("Subject:");
+      expect(submittedPrompt).not.toContain("Description:");
     });
 
     it("the SAME persisted style still composes on a prose model (proves the gate is what suppressed it)", async () => {
@@ -260,7 +260,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
       await renderStudio();
       expect(styleAxis()).toBeTruthy();
       const submittedPrompt = await submitAndReadPayloadPrompt();
-      expect(submittedPrompt).toBe(`Subject: ${TAGS}\nStyle: ${styleTextForId(firstStyle.id)}`);
+      expect(submittedPrompt).toBe(`Description: ${TAGS}\nStyle: ${styleTextForId(firstStyle.id)}`);
     });
 
     it("keeps the style-hint suggestion pill off, so no prose hint leaks in", async () => {

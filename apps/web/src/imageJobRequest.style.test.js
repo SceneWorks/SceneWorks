@@ -151,8 +151,8 @@ describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
     const state = baseState({ styleText: STYLE_TEXT });
     const req = buildImageJobRequest(state);
     expect(req.prompt).toBe(composeStyledPrompt({ styleText: STYLE_TEXT, userPrompt: "a fox in the snow" }));
-    // Sanity: the composed prompt actually carries the Subject:/Style: template.
-    expect(req.prompt).toBe(`Subject: a fox in the snow\nStyle: ${STYLE_TEXT}`);
+    // Sanity: the composed prompt actually carries the Description:/Style: template.
+    expect(req.prompt).toBe(`Description: a fox in the snow\nStyle: ${STYLE_TEXT}`);
     expect(req.presetPromptResolvedClientSide).toBe(true);
   });
 
@@ -162,7 +162,7 @@ describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
     const presetComposed = "cinematic, moody. a fox in the snow";
     const req = buildImageJobRequest(baseState({ styleText: STYLE_TEXT, promptToSend: presetComposed }));
     expect(req.prompt).toBe(composeStyledPrompt({ styleText: STYLE_TEXT, userPrompt: presetComposed }));
-    expect(req.prompt).toBe(`Subject: ${presetComposed}\nStyle: ${STYLE_TEXT}`);
+    expect(req.prompt).toBe(`Description: ${presetComposed}\nStyle: ${STYLE_TEXT}`);
   });
 
   it("preserves an existing presetPromptResolvedClientSide=true even with no style", () => {
@@ -183,14 +183,14 @@ describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
     );
 
     // The outgoing prompt is the caption with the style merged into style_description.aesthetics —
-    // exactly what injectStyleIntoCaption + serializeCaption produce (NOT the prose Subject:/Style:
+    // exactly what injectStyleIntoCaption + serializeCaption produce (NOT the prose Description:/Style:
     // wrap, which would be wrong for a JSON-caption model).
     const expected = serializeCaption(
       injectStyleIntoCaption(parseCaption(caption).caption, STYLE_TEXT),
     );
     expect(req.prompt).toBe(expected);
     expect(req.prompt).not.toBe(caption); // the caption was actually transformed
-    expect(req.prompt.startsWith("Subject:")).toBe(false); // no prose composer
+    expect(req.prompt.startsWith("Description:")).toBe(false); // no prose composer
     expect(req.prompt).not.toContain("\nStyle: ");
     expect(req.prompt).toContain(STYLE_TEXT); // style folded into aesthetics
 
