@@ -117,7 +117,7 @@ normalized by255; audio keeps native floating-point amplitude. Retain stream and
 channel RMS, maximum differences and nonfinite/length checks. These metrics
 describe output differences; they do not establish an inherited acceptance bound.
 The historical [`maximumBaselineDelta:0.001`](sc-26691-campaign/h3-terminal-cuda.json)
-tests unchanged-repeat stability on 1 fps, 16×16 RGB and mono 8 kHz audio. It is neither
+tests unchanged-repeat stability on 1 fps, 16x16 RGB and mono 8 kHz audio. It is neither
 a tensor tolerance nor a universal full-pixel/native-stereo residency tolerance.
 No new full-media threshold is selected here.
 
