@@ -50,22 +50,23 @@ an unsuccessful child or unverified release cannot produce a passing receipt.
 | `hostBudgetBytes` | Separate positive host-RSS observation budget |
 | `workstationDeviceBytes` | Actual chosen workstation observation envelope, no more than96GiB |
 | `timeoutSeconds` | Per-anchor deadline, maximum7200seconds |
-| `additionalSparse24`, `additionalSparse24Reason` | `true` and the explicit E5 gap: normal resident versus normal streamed Veda AV equivalence |
+| `additionalSparse24`, `additionalSparse24Reason` | `true` and the explicit E5 gap: normal streamed Veda fit plus resident/window media diagnostics and matched-input component parity |
 | `sources` | `tier`, `base`, `predictor`, `turbo`, each `{root,revision}` identifying the actual installed HF snapshot |
 | `primitiveProof` | `{directory,runUrl,revision?}`; original measured revision defaults to the final pin, otherwise must be its ancestor with an identical complete Git tree |
 | `materializingProof` | `{logPath,revision,runUrl}` for the accepted exact forced-materializing numerical test; the existing45 numerical/layout/getter/build selections must match final inference, subject only to the two exact non-numerical-file mappings below |
 | `retainedWorkstation` | Optional, narrowly committed accepted workstation control described below; both24GiB anchors still run fresh |
 
 GPU0 selection refuses `retainedWorkstation`: all three product anchors run fresh
-on GPU0, and the full video/audio oracle compares that fresh workstation output
+on GPU0, and full video/audio diagnostics compare that fresh workstation output
 with the fresh normal24GiB output on the same card. `device-selection.json`
 records physical index/UUID and logical CUDA ordinal0 under its single-UUID mask.
 The accepted B9 DiT, raw Veda and512MiB primitive receipts remain their original
 GPU1 component/source evidence (B9 and M4 have identical whole trees). They are
 not relabeled as GPU0 measurements; the new full-model anchors establish the
-actual GPU0 cap enforcement, fit and AV parity. GPU selection changes neither
+actual GPU0 cap enforcement and fit; E5 component parity remains separate.
+GPU selection changes neither
 the21GiB pool plus3GiB outside reserve nor the384GiB host,95GiB workstation,
-7200second deadlines, original request/seed42, or0.001 AV RMS limit. Other H3
+7200second deadlines or original request/seed42. Other H3
 manual callers retain their GPU1 default.
 
 The source revisions and minimal file domains are fixed in the runner. The real
@@ -105,26 +106,60 @@ extra repeated-baseline model render.
 After all three anchors pass their existing full decode, dimensions,345-frame
 count, duration, stereo32kHz audio and nondegenerate-content checks, compare the
 workstation and normal-sparse24GiB outputs. The forced-dense output is excluded
-from this equality comparison. Both source-bound normal executions must report
+from this equivalent-route diagnostic. Both source-bound normal executions must
+report
 positive sparse calls; a CPU/skipped/fallback-only witness cannot pass.
 
-The comparison reuses the terminal `decodedDelta` RMS witness and adds full
+The diagnostic reuses the terminal `decodedDelta` witness and adds full
 native-resolution RGB24 decoding of **all345 frames** plus native-rate,
-interleaved floating-point PCM for **both audio channels**. It applies the
-existing CUDA H3 campaign's predeclared same-backend
-[`maximumBaselineDelta:0.001`](sc-26691-campaign/h3-terminal-cuda.json) RMS
-ceiling, including each channel separately. RGB values are normalized by255;
-audio keeps native floating-point amplitude. This is a decoded-media RMS
-criterion, separate from the retained intermediate tensor tolerance checks;
-no cross-backend allowance or post-result tolerance adjustment is used.
+interleaved floating-point PCM for **both audio channels**. RGB values are
+normalized by255; audio keeps native floating-point amplitude. Retain stream and
+channel RMS, maximum differences and nonfinite/length checks. These metrics
+describe output differences; they do not establish an inherited acceptance bound.
+The historical [`maximumBaselineDelta:0.001`](sc-26691-campaign/h3-terminal-cuda.json)
+tests unchanged-repeat stability on 1 fps, 16×16 RGB and mono 8 kHz audio. It is neither
+a tensor tolerance nor a universal full-pixel/native-stereo residency tolerance.
+No new full-media threshold is selected here.
 
 Raw vectors are compared in64KiB file chunks and removed after comparison,
 including failure. They are never retained as multi-gigabyte JSON arrays or
 uploaded artifacts. `veda-equivalence.json` retains actual element counts,
-per-stream/per-channel RMS, maximum absolute differences, fixed bounds,
+per-stream/per-channel RMS, maximum absolute differences, original harness bounds,
 sampled-comparator deltas, executed policy/kernel witnesses and the original
 bound media hashes. A failed comparison writes a failed receipt and prevents
-the campaign's successful aggregate result.
+the campaign's successful aggregate result in the current CGPU controller.
+
+### Numerical acceptance and current failed-run disposition
+
+E5 requires identical fixed inputs through equivalent affected production paths,
+with dtype, task, adapter stack and workspace policy held equivalent. Compare
+residency separately from cuBLAS default versus explicit 32 MiB workspace. That
+workspace difference is a source-backed, unproven confound; no causal explanation
+or acceptable-drift claim follows from it alone. Reuse valid unchanged component
+proofs and fill demonstrated coverage gaps with the bounded real-q4/Turbo BF16
+projection and large-Q/K witness before another full render.
+
+Existing Q/K RMS/partial-RoPE assertions are exact for their fixed inputs. Keep
+exact Veda mask/score assertions for common inputs and the source-defined output
+error checks. Differing upstream inputs cannot be treated as identical-input
+mask proof. The small F32 DiT fixture's 1e-5 relative bound does not certify the
+production BF16 projection/FFN path, and no general BF16 projection/FFN acceptance
+bound is established here. Locate the first differing intermediate, apply the
+relevant established component contract, and repair any violation. Full media
+content/geometry and actual normal-Veda24 execution remain mandatory alongside
+this numerical evidence; neither two valid clips nor diagnostic RMS alone passes E5.
+
+[Campaign 42243645213](https://github.com/SceneWorks/SceneWorks/actions/runs/42243645213),
+measured at consumer `c8815c7cd`/inference `2ff035382`, remains failed under the
+predeclared 0.001 harness rule. All three fresh GPU0 children passed fit/media
+checks and the lease verified
+post-idle. Preserve those receipts and their source/binary/media hashes unchanged.
+The normal-pair full-video RMS 0.09263594898258952 is a recorded divergence. The
+original comparator stopped before audio; a later CPU-only native-stereo diagnostic
+recorded RMS 0.015946034316153112, separately from that failed execution. Neither
+number is declared acceptable. This docs correction changes no controller or test;
+a reviewed acceptance implementation still awaits the component findings/schema.
+No higher post-result threshold or retrospective campaign pass is authorized.
 
 An earlier focused forced-materializing numerical proof remains required:
 Veda-to-dense can still use FlashAttention. Job-stage sampled peaks retain their
@@ -206,7 +241,8 @@ accept the fresh registered DiT `cuda0_materialized` receipt and its entire late
 BODY/device/numerical/chunk/tail/cancellation controls at the reviewed source.
 The primitive whole-tree and raw Veda45-source guards stay strict; changed source
 must satisfy them with fresh affected evidence. Both full24GiB anchors and native
-AV equivalence remain mandatory. Preserve the historical audit/parameters and
+media diagnostics and matched-input component parity remain mandatory. Preserve
+the historical audit/parameters and
 write a new source-bound audit for the repaired final pair.
 
 The accepted record must still match the original seed42, request/queued recipe,
@@ -223,7 +259,8 @@ alongside the recorded hash commitments.
 
 Only the workstation generation is skipped. Both forced-dense and normal sparse
 24GiB anchors run fresh. The complete original95GiB versus fresh normal24GiB RGB/
-stereo PCM oracle and fixed0.001 ceiling remain mandatory. Output reports both
+stereo PCM diagnostics and the production-path component acceptance above remain
+mandatory. Output reports both
 actual measured source pairs and the explicit source mapping; nothing relabels
 the old binary or measured peaks as a new-source execution.
 

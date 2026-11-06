@@ -226,10 +226,12 @@ cancellation, and contract evidence from earlier items. Recover the original
 job or recipe for its remaining settings when available; otherwise record the
 chosen prompt, seed, steps, and sparse controls explicitly. The bounded campaign
 uses the workstation normal-Veda case, a 24 GiB case with forced dense fallback,
-and one focused normal-Veda24 GiB render. The third render establishes both
-normal sparse fit and E5 numerical equivalence against the workstation's
+and one focused normal-Veda24 GiB render. The third render establishes normal
+sparse fit and supplies complete media diagnostics against the workstation's
 resident Veda execution: identical creative settings, positive sparse calls on
 both, different executed residency policies, and actual video/audio comparison.
+E5 additionally requires matched-input component parity through the affected
+production paths and dtypes; independent successful renders are not parity proof.
 The forced-dense render remains a separate fallback/envelope proof. An actual 24 GiB
 GPU or an enforceable allocation cap plus whole-device peak observation can
 establish the memory envelope; a Blackwell run must not be reported as RTX 3090
@@ -251,11 +253,33 @@ anchor cannot establish the required envelope. All inference computation stays
 in separate dedicated validation workflows.
 
 Check video dimensions, frame count, duration, changing nonblack frames, and
-the generated audio stream. Compare every decoded RGB frame and both native-rate
-audio channels for the two equivalent normal-Veda anchors under the existing
-same-backend H3 RMS bound, retaining their job/media and execution witnesses.
-Reuse fixed-input intermediate parity checks as additional numerical evidence;
-file existence and two independently successful renders are insufficient.
+the generated audio stream. Retain full decoded RGB and native-rate stereo
+comparison diagnostics for the two normal-Veda anchors, including their
+job/media hashes and executed policy witnesses. The sc-26691
+`maximumBaselineDelta:0.001` measures sampled unchanged-repeat stability; it is
+not an established full-frame, per-channel resident/window tolerance. Do not
+promote it to that role or choose a replacement threshold after seeing outputs.
+
+Verify equivalent-route numerical semantics with identical fixed inputs through
+the affected production-dtype components, including real q4/Turbo projections,
+adapters, Q/K preprocessing, TE/DiT and audio paths as affected. Hold the CUDA
+workspace policy equivalent when comparing residency, and isolate default versus
+explicit workspace as a separate diagnostic. A workspace-policy difference is
+an unproven confound until a component witness establishes its effect. Keep the
+existing exact Q/K contract and exact Veda mask/score assertions for common
+inputs. Existing small F32 DiT parity does not certify production BF16; no
+general BF16 projection/FFN bound is established by it. Locate and explain the
+first differing intermediate, enforce applicable source-defined component
+contracts, and repair violations. Do not infer a final-media bound from those
+contracts or declare the observed media drift acceptable without this evidence.
+
+Preserve campaign 42243645213 (consumer `c8815c7cd`, inference `2ff035382`) as failed
+under its predeclared harness criterion. Its three successful fit/media children
+and cleanup remain evidence
+with their original source/device identities. The measured video RMS 0.09263595
+and later audio RMS 0.01594603 remain divergence diagnostics, not accepted
+equivalence or permission to loosen a threshold. Numerical acceptance remains
+open pending the production-path component evidence and reviewed harness update.
 Record host peak separately from device peak and account for other GPU
 processes. Timing is reported to expose transfer overhead, with no invented
 latency target. Failed anchors require a focused diagnosis and repair, not a
