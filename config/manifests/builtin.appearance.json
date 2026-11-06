@@ -1,0 +1,1377 @@
+{
+  "version": 1,
+  "sources": {
+    "moss": "https://www.robertcreative.com/blog/moss-image-film-camera-prompts",
+    "z_image": "https://www.robertcreative.com/blog/z-image-turbo-film-camera-recipes",
+    "lighting": "https://www.robertcreative.com/blog/z-image-turbo-lighting-prompts",
+    "comparison": "https://www.robertcreative.com/blog/film-camera-prompts-z-image-vs-krea-2"
+  },
+  "profiles": {
+    "z_image": {
+      "models": [
+        "z_image_turbo",
+        "z_image",
+        "z_image_edit",
+        "krea_2_turbo",
+        "krea_2_raw"
+      ],
+      "label": "Z-Image / Krea 2",
+      "negative": false,
+      "families": [
+        "z-image",
+        "krea_2"
+      ]
+    },
+    "moss": {
+      "models": [
+        "moss_image_base",
+        "moss_image_sft"
+      ],
+      "label": "MOSS Image",
+      "negative": true,
+      "families": [
+        "moss_image"
+      ]
+    }
+  },
+  "notes": [
+    "Original descriptive recipes informed by the linked external comparisons; native SceneWorks output has not been validated.",
+    "The author reports 25 lighting setups, but the page contains 25 base setups plus 2 neon alternatives; all 27 are included.",
+    "Model-aware descriptive directives are used; no sampler, CFG, resolution or authored prompt is changed automatically."
+  ],
+  "entries": [
+    {
+      "id": "film-kodak-portra-400",
+      "name": "Kodak Portra 400",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with gentle warm skin, restrained greens, creamy bright tones, subtle grain. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "cool skin, harsh contrast",
+          "note": "The MOSS baseline can already resemble this treatment, so the change may be subtle."
+        },
+        "z_image": {
+          "prompt": "gentle warm skin, restrained greens, creamy bright tones, subtle grain.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-kodak-ektar-100",
+      "name": "Kodak Ektar 100",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with intense primary colors, crisp textures and exceptionally small grain. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "dull color"
+        },
+        "z_image": {
+          "prompt": "intense primary colors, crisp textures and exceptionally small grain.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-kodak-gold-200",
+      "name": "Kodak Gold 200",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with amber warmth, lively reds, slightly dense shadows and everyday film texture. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "cold white balance"
+        },
+        "z_image": {
+          "prompt": "amber warmth, lively reds, slightly dense shadows and everyday film texture.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-fuji-superia-400",
+      "name": "Fuji Superia 400",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with cool consumer-film color with greenish shadows and prominent greens. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "orange warmth"
+        },
+        "z_image": {
+          "prompt": "cool consumer-film color with greenish shadows and prominent greens.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-fuji-pro-400h",
+      "name": "Fuji Pro 400H",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with delicate pastel color, mint greens and pale cool highlights. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "dense blacks, loud color"
+        },
+        "z_image": {
+          "prompt": "delicate pastel color, mint greens and pale cool highlights.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-cinestill-800t",
+      "name": "CineStill 800T",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with teal-blue dark tones, reddish glow surrounding lamps and textured shadows. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "neutral lighting, hard lamp edges"
+        },
+        "z_image": {
+          "prompt": "teal-blue dark tones, reddish glow surrounding lamps and textured shadows.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-cinestill-50d",
+      "name": "CineStill 50D",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with balanced cool daylight, clean whites and delicate motion-picture texture. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "yellow cast"
+        }
+      }
+    },
+    {
+      "id": "film-kodachrome-64",
+      "name": "Kodachrome 64",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with dense blues and reds, firm contrast and a trace of warmth. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "faded color"
+        },
+        "z_image": {
+          "prompt": "dense blues and reds, firm contrast and a trace of warmth.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-fuji-velvia-50",
+      "name": "Fuji Velvia 50",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with very rich green-blue color, strong contrast and near-black shadows. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "low saturation"
+        },
+        "z_image": {
+          "prompt": "very rich green-blue color, strong contrast and near-black shadows.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-cross-processed-slide",
+      "name": "Cross-processed slide",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with unusual cyan shadows against yellow-green highlights and aggressive contrast. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "accurate neutral color"
+        },
+        "z_image": {
+          "prompt": "unusual cyan shadows against yellow-green highlights and aggressive contrast.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-kodak-tri-x-400",
+      "name": "Kodak Tri-X 400",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with monochrome silver-film tones, pronounced gritty texture and deep contrast. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "chromatic color, rainbow hues, sepia"
+        },
+        "z_image": {
+          "prompt": "monochrome silver-film tones, pronounced gritty texture and deep contrast.",
+          "source": "z_image"
+        }
+      },
+      "monochrome": true
+    },
+    {
+      "id": "film-ilford-hp5-pushed-to-3200",
+      "name": "Ilford HP5 pushed to 3200",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with monochrome, coarse gritty texture, compressed dark tones and brilliant highlights. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "chromatic color, fine smooth texture, sepia"
+        },
+        "z_image": {
+          "prompt": "monochrome, coarse gritty texture, compressed dark tones and brilliant highlights.",
+          "source": "z_image"
+        }
+      },
+      "monochrome": true
+    },
+    {
+      "id": "film-kodak-t-max-100",
+      "name": "Kodak T-Max 100",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with monochrome with a broad gray scale, clean detail and delicate silver texture. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "chromatic color, coarse texture, sepia"
+        },
+        "z_image": {
+          "prompt": "monochrome with a broad gray scale, clean detail and delicate silver texture.",
+          "source": "z_image"
+        }
+      },
+      "monochrome": true
+    },
+    {
+      "id": "film-polaroid-sx-70",
+      "name": "Polaroid SX-70",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with a broad white instant-print border, mellow warm color and softly resolved detail. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "borderless picture, severe contrast"
+        },
+        "z_image": {
+          "prompt": "a broad white instant-print border, mellow warm color and softly resolved detail.",
+          "source": "z_image"
+        }
+      },
+      "note": "May pull back the framing to fit the border."
+    },
+    {
+      "id": "film-expired-polaroid",
+      "name": "Expired Polaroid",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with aged instant-print border with uneven chemistry, blue-pink stains and bleeding edges. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "pristine print, accurate color"
+        },
+        "z_image": {
+          "prompt": "An aged white-bordered instant print with faded cool-pink color and soft detail.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-instax-mini",
+      "name": "Instax Mini",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with a small white-bordered instant print with pale bright color and soft edges. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "dark exposure, borderless picture"
+        },
+        "z_image": {
+          "prompt": "a small white-bordered instant print with pale bright color and soft edges.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "film-kodak-vision3-500t",
+      "name": "Kodak Vision3 500T",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with cinema-film texture with blue-green dark tones, amber highlights and gentle highlight transitions. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "uniform neutral color"
+        }
+      }
+    },
+    {
+      "id": "film-super-8",
+      "name": "Super 8",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with soft home-movie texture, coarse grain, aged yellow color and rounded dark frame corners. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "razor-sharp detail, smooth digital clarity"
+        },
+        "z_image": {
+          "prompt": "soft home-movie texture, coarse grain, aged yellow color and rounded dark frame corners.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "camera-disposable",
+      "name": "Disposable",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with daylight flash flattening the face, pale hot highlights, yellow-green color and coarse texture. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "gentle available light, refined detail"
+        },
+        "z_image": {
+          "prompt": "daylight flash flattening the face, pale hot highlights, yellow-green color and coarse texture.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "camera-holga",
+      "name": "Holga",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Toy-film photograph with broad black side margins, a crisp central subject, smeared outer detail, very dark corners, cyan dark tones and yellow highlights.",
+          "source": "moss",
+          "negative": "uniform edge sharpness"
+        },
+        "z_image": {
+          "prompt": "soft toy-lens edges, sharply focused center, cyan dark tones and yellow bright tones.",
+          "source": "z_image"
+        }
+      },
+      "note": "The guides report incomplete framing/vignette control; this does not change output dimensions."
+    },
+    {
+      "id": "camera-diana",
+      "name": "Diana",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with dreamy center focus, hazy highlights, pale pastels and noticeably dark corners. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "clinical sharpness, intense contrast"
+        },
+        "z_image": {
+          "prompt": "dreamy center focus, hazy highlights, pale pastels and noticeably dark corners.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "camera-lomo-lc-a",
+      "name": "Lomo LC-A",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with intense reds and blues, underexposed outer frame and strongly darkened corners. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "uniform illumination, muted color"
+        }
+      }
+    },
+    {
+      "id": "camera-pinhole",
+      "name": "Pinhole",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with murky diffuse detail throughout, brownish faded color and rounded dark corners. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "crisp focus, clean bright exposure"
+        }
+      }
+    },
+    {
+      "id": "camera-fisheye-toy-camera",
+      "name": "Fisheye toy camera",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with curving straight lines, exaggerated barrel perspective and a circular black image boundary. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "rectilinear perspective"
+        },
+        "z_image": {
+          "prompt": "curving straight lines, exaggerated barrel perspective and a circular black image boundary.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "camera-sprocket-rocket",
+      "name": "Sprocket Rocket",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with a photographic strip with visible perforations and small edge markings above and below. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "unmarked image edges"
+        },
+        "z_image": {
+          "prompt": "a photographic strip with visible perforations and small edge markings above and below.",
+          "source": "z_image"
+        }
+      },
+      "note": "Perforations can appear without panoramic framing; select output dimensions separately."
+    },
+    {
+      "id": "camera-half-frame-diptych",
+      "name": "Half-frame diptych",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with two adjacent upright photographs, separated by a narrow dark strip, showing slightly different instants. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "one undivided frame"
+        },
+        "z_image": {
+          "prompt": "two adjacent upright photographs, separated by a narrow dark strip, showing slightly different instants.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "camera-contax-t2",
+      "name": "Contax T2",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with bright frontal flash on the face, darker background, lively color and clear central detail. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "soft available light"
+        }
+      },
+      "note": "Reported as subtle on MOSS; omitted from the Z-Image catalog after weak results."
+    },
+    {
+      "id": "camera-kodak-brownie-box-camera",
+      "name": "Kodak Brownie box camera",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with an old square snapshot print, soft peripheral focus and a small pale paper margin. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "contemporary sharpness"
+        },
+        "z_image": {
+          "prompt": "an old square snapshot print, soft peripheral focus and a small pale paper margin.",
+          "source": "z_image"
+        }
+      },
+      "note": "A square-frame description does not guarantee square output."
+    },
+    {
+      "id": "camera-kodak-instamatic-110",
+      "name": "Kodak Instamatic 110",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with small-format snapshot texture, warm punchy color, coarse detail and very bright highlights. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "fine clear detail"
+        },
+        "z_image": {
+          "prompt": "small-format snapshot texture, warm punchy color, coarse detail and very bright highlights.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "camera-2000s-digicam",
+      "name": "2000s digicam",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with cold direct flash, noisy dark areas, hard sharpening and a small amber date imprint. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "organic silver grain, warm available light"
+        },
+        "z_image": {
+          "prompt": "cold direct flash, noisy dark areas, hard sharpening and a small amber date imprint.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "camera-fujifilm-classic-chrome",
+      "name": "Fujifilm Classic Chrome",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with restrained documentary color, subdued blue tones, firm shadows and a cool balance. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "intense saturation, amber tint"
+        },
+        "z_image": {
+          "prompt": "restrained documentary color, subdued blue tones, firm shadows and a cool balance.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "camera-glass-plate",
+      "name": "Glass plate",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with early silver monochrome, chipped plate boundaries, soft detail and silvery edge haze. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "chromatic color, modern clean image"
+        },
+        "z_image": {
+          "prompt": "early silver monochrome, chipped plate boundaries, soft detail and silvery edge haze.",
+          "source": "z_image"
+        }
+      },
+      "monochrome": true
+    },
+    {
+      "id": "camera-tintype-wet-plate",
+      "name": "Tintype / wet plate",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with dark antique metallic monochrome, uneven chemistry and visibly worn plate edges. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "chromatic color, clean modern print"
+        },
+        "z_image": {
+          "prompt": "dark antique metallic monochrome, uneven chemistry and visibly worn plate edges.",
+          "source": "z_image"
+        }
+      },
+      "monochrome": true
+    },
+    {
+      "id": "camera-daguerreotype",
+      "name": "Daguerreotype",
+      "axis": "camera",
+      "group": "Cameras",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with a reflective silver antique image with fine detail, dim contrast and aged metal margins. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "chromatic color, modern color print"
+        },
+        "z_image": {
+          "prompt": "a reflective silver antique image with fine detail, dim contrast and aged metal margins.",
+          "source": "z_image"
+        }
+      },
+      "monochrome": true
+    },
+    {
+      "id": "look-warm-golden",
+      "name": "Warm golden",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with honey-colored bright tones and gently amber dark tones. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "cold blue balance"
+        },
+        "z_image": {
+          "prompt": "honey-colored bright tones and gently amber dark tones.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-faded-1970s-print",
+      "name": "Faded 1970s print",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with an aged print with pale orange-magenta color and lifted dark tones. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "fresh intense color"
+        },
+        "z_image": {
+          "prompt": "an aged print with pale orange-magenta color and lifted dark tones.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-matte-faded-film",
+      "name": "Matte faded film",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with matte low contrast, gray lifted blacks and restrained saturation. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "dense blacks, intense color"
+        },
+        "z_image": {
+          "prompt": "matte low contrast, gray lifted blacks and restrained saturation.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-cool-muted",
+      "name": "Cool muted",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with quiet blue-gray color, restrained greens and soft gray shadows. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "strong amber warmth"
+        },
+        "z_image": {
+          "prompt": "quiet blue-gray color, restrained greens and soft gray shadows.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-teal-and-orange",
+      "name": "Teal and orange",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with blue-green shadows paired with warm peach-orange skin. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "uniform neutral color"
+        },
+        "z_image": {
+          "prompt": "blue-green shadows paired with warm peach-orange skin.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-bleach-bypass",
+      "name": "Bleach bypass",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with drained color, hard silver contrast, cold metallic skin and strong texture. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "bright saturated skin, soft contrast"
+        },
+        "z_image": {
+          "prompt": "drained color, hard silver contrast, cold metallic skin and strong texture.",
+          "source": "z_image"
+        }
+      },
+      "note": "Strongly named scene colors can remain selectively colored."
+    },
+    {
+      "id": "look-sepia",
+      "name": "Sepia",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with a single warm brown tonal scale with soft aged edges. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "multicolored image, blue tint"
+        },
+        "z_image": {
+          "prompt": "a single warm brown tonal scale with soft aged edges.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-warm-vintage-filter",
+      "name": "Warm vintage filter",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with golden yellow color, softened dark tones and gently darkened edges. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "cold neutral balance"
+        },
+        "z_image": {
+          "prompt": "golden yellow color, softened dark tones and gently darkened edges.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-pastel-dream",
+      "name": "Pastel dream",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with pale soft color, glowing bright tones and gentle overall contrast. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "dark dense contrast"
+        },
+        "z_image": {
+          "prompt": "pale soft color, glowing bright tones and gentle overall contrast.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-moody-dark",
+      "name": "Moody dark",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with deep shadow coverage, low-key exposure and restrained highlights. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "bright evenly lit image"
+        },
+        "z_image": {
+          "prompt": "deep shadow coverage, low-key exposure and restrained highlights.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-golden-hour-glow",
+      "name": "Golden hour glow",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with a warm luminous amber treatment with soft radiant highlights. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "cold blue treatment"
+        },
+        "z_image": {
+          "prompt": "a warm luminous amber treatment with soft radiant highlights.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-light-leaks",
+      "name": "Light leaks",
+      "axis": "look",
+      "group": "Broken film",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with obvious warm translucent streaks bleeding inward from the photographic frame. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "uniform clean exposure"
+        }
+      }
+    },
+    {
+      "id": "look-fogged-film",
+      "name": "Fogged film",
+      "axis": "look",
+      "group": "Broken film",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with milky veiling haze across the photograph, weak blacks and pale contrast. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "dense clear blacks"
+        }
+      }
+    },
+    {
+      "id": "look-accidental-double-exposure",
+      "name": "Accidental double exposure",
+      "axis": "look",
+      "group": "Broken film",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with an unmistakable second city image overlaid across the complete photograph. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "single exposure, isolated sharp scene"
+        }
+      },
+      "note": "May alter scene content; the guide uses a city overlay."
+    },
+    {
+      "id": "look-scratched-negative",
+      "name": "Scratched negative",
+      "axis": "look",
+      "group": "Broken film",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with multiple visible thin abrasion lines crossing the photographic surface. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "pristine unmarked surface"
+        }
+      }
+    },
+    {
+      "id": "look-smeared-lens",
+      "name": "Smeared lens",
+      "axis": "look",
+      "group": "Broken film",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with greasy directional smearing across bright areas with diffuse soft detail. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "perfect lens clarity"
+        }
+      }
+    },
+    {
+      "id": "look-end-of-the-roll",
+      "name": "End of the roll",
+      "axis": "look",
+      "group": "Broken film",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with an irregular bright orange-red chemical burn across one frame edge. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "even clean margins"
+        }
+      }
+    },
+    {
+      "id": "look-expired-film",
+      "name": "Expired film",
+      "axis": "look",
+      "group": "Broken film",
+      "variants": {
+        "moss": {
+          "prompt": "Photographic rendering with irregular faded color, patchy chemistry and uneven photographic texture. Make these visual traits distinct across the image.",
+          "source": "moss",
+          "negative": "uniform modern color"
+        }
+      }
+    },
+    {
+      "id": "film-kodak-portra-800",
+      "name": "Kodak Portra 800",
+      "axis": "film",
+      "group": "Film stocks",
+      "variants": {
+        "z_image": {
+          "prompt": "warm low-light color, subdued contrast and noticeable film texture.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "look-faded-1990s-snapshot",
+      "name": "Faded 1990s snapshot",
+      "axis": "look",
+      "group": "General looks",
+      "variants": {
+        "z_image": {
+          "prompt": "subtle aged snapshot color, mild yellowing and softened contrast.",
+          "source": "z_image"
+        }
+      }
+    },
+    {
+      "id": "lighting-overcast",
+      "name": "Overcast",
+      "axis": "lighting",
+      "group": "Outdoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "Diffuse gray overhead daylight, low shadow definition and evenly distributed illumination.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Diffuse gray overhead daylight, low shadow definition and evenly distributed illumination.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-hard-midday-sun",
+      "name": "Hard midday sun",
+      "axis": "lighting",
+      "group": "Outdoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "Intense overhead sunlight producing short hard-edged shadows and bright ground reflections.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Intense overhead sunlight producing short hard-edged shadows and bright ground reflections.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-golden-hour",
+      "name": "Golden hour",
+      "axis": "lighting",
+      "group": "Outdoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "Low warm sun behind the subject, luminous backlit edges and long ground shadows.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Low warm sun behind the subject, luminous backlit edges and long ground shadows.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-sunset",
+      "name": "Sunset",
+      "axis": "lighting",
+      "group": "Outdoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "The sun at the horizon, orange-pink sky and a dark near-silhouette subject.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "The sun at the horizon, orange-pink sky and a dark near-silhouette subject.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-morning-fog",
+      "name": "Morning fog",
+      "axis": "lighting",
+      "group": "Outdoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "Pale diffuse morning illumination through dense mist, with distant features fading away.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Pale diffuse morning illumination through dense mist, with distant features fading away.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-snow-at-dusk",
+      "name": "Snow at dusk",
+      "axis": "lighting",
+      "group": "Outdoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "Twilight snowfall, blue-toned shadows and pale fresh snow catching the remaining light.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Twilight snowfall, blue-toned shadows and pale fresh snow catching the remaining light.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-blue-hour",
+      "name": "Blue hour",
+      "axis": "lighting",
+      "group": "Outdoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "Deep blue ambient twilight with a faint luminous horizon after sunset.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Deep blue ambient twilight with a faint luminous horizon after sunset.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-sodium-streetlight",
+      "name": "Sodium streetlight",
+      "axis": "lighting",
+      "group": "Outdoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "One overhead amber streetlamp illuminating the subject while the surrounding area stays dark.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "One overhead amber streetlamp illuminating the subject while the surrounding area stays dark.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-shelter-fluorescent-tube",
+      "name": "Shelter fluorescent tube",
+      "axis": "lighting",
+      "group": "Outdoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "A single tube inside a shelter casting cold green-white illumination; the surrounding road remains black.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "A single tube inside a shelter casting cold green-white illumination; the surrounding road remains black.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-headlights",
+      "name": "Headlights",
+      "axis": "lighting",
+      "group": "Outdoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "An approaching vehicle casts strong headlamp illumination toward the subject, with long shadows behind.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "An approaching vehicle casts strong headlamp illumination toward the subject, with long shadows behind.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-wet-road-reflections",
+      "name": "Wet road reflections",
+      "axis": "lighting",
+      "group": "Outdoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "One streetlamp at night reflected across rain-soaked pavement and standing puddles.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "One streetlamp at night reflected across rain-soaked pavement and standing puddles.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-police-lights",
+      "name": "Police lights",
+      "axis": "lighting",
+      "group": "Outdoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "Alternating red-blue emergency illumination washes across the subject from a nearby vehicle.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Alternating red-blue emergency illumination washes across the subject from a nearby vehicle.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-morning-window-light",
+      "name": "Morning window light",
+      "axis": "lighting",
+      "group": "Indoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "Pale cool morning illumination enters through a window, making gentle indoor shadows.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Pale cool morning illumination enters through a window, making gentle indoor shadows.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-hard-midday-window-light",
+      "name": "Hard midday window light",
+      "axis": "lighting",
+      "group": "Indoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "Direct noon sunlight enters a window and casts a sharply defined bright rectangle on nearby surfaces.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Direct noon sunlight enters a window and casts a sharply defined bright rectangle on nearby surfaces.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-late-afternoon-window-light",
+      "name": "Late afternoon window light",
+      "axis": "lighting",
+      "group": "Indoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "Low warm sunlight enters a window as long visible beams through dusty air.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Low warm sunlight enters a window as long visible beams through dusty air.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-rainy-day-window-light",
+      "name": "Rainy-day window light",
+      "axis": "lighting",
+      "group": "Indoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "Dim gray daylight filters through a window into a softly shadowed interior.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Dim gray daylight filters through a window into a softly shadowed interior.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-dawn-window-light",
+      "name": "Dawn window light",
+      "axis": "lighting",
+      "group": "Indoor daylight",
+      "variants": {
+        "z_image": {
+          "prompt": "The earliest pink-gray daylight enters a window while most of the interior stays dark.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "The earliest pink-gray daylight enters a window while most of the interior stays dark.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-open-fridge",
+      "name": "Open fridge",
+      "axis": "lighting",
+      "group": "Indoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "The cold interior light of an open refrigerator is the only illumination in a dark room.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "The cold interior light of an open refrigerator is the only illumination in a dark room.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-streetlight-through-blinds",
+      "name": "Streetlight through blinds",
+      "axis": "lighting",
+      "group": "Indoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "An amber streetlamp casts bands of light through window blinds across the dark interior.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "An amber streetlamp casts bands of light through window blinds across the dark interior.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-tv-in-the-next-room",
+      "name": "TV in the next room",
+      "axis": "lighting",
+      "group": "Indoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "Blue television illumination spills through a doorway from the adjoining room; this room stays dark.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Blue television illumination spills through a doorway from the adjoining room; this room stays dark.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-one-pendant-lamp",
+      "name": "One pendant lamp",
+      "axis": "lighting",
+      "group": "Indoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "A single low warm pendant illuminates the nearby surface and leaves the corners in shadow.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "A single low warm pendant illuminates the nearby surface and leaves the corners in shadow.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-under-cabinet-light",
+      "name": "Under-cabinet light",
+      "axis": "lighting",
+      "group": "Indoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "Only a small warm lamp beneath a cabinet lights the working surface; the room beyond stays dark.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Only a small warm lamp beneath a cabinet lights the working surface; the room beyond stays dark.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-bare-fluorescent-tube",
+      "name": "Bare fluorescent tube",
+      "axis": "lighting",
+      "group": "Indoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "A lone exposed ceiling tube casts cold green-white illumination through a nighttime interior.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "A lone exposed ceiling tube casts cold green-white illumination through a nighttime interior.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-blue-hour-and-one-lamp",
+      "name": "Blue hour and one lamp",
+      "axis": "lighting",
+      "group": "Indoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "Cool twilight enters a window while a small warm tabletop lamp illuminates the otherwise dark room.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Cool twilight enters a window while a small warm tabletop lamp illuminates the otherwise dark room.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively."
+    },
+    {
+      "id": "lighting-phone-screen",
+      "name": "Phone screen",
+      "axis": "lighting",
+      "group": "Indoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "A nearby glowing phone screen lights the face and hands within a nearly black interior.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "A nearby glowing phone screen lights the face and hands within a nearly black interior.",
+          "source": "lighting"
+        }
+      },
+      "note": "Describes a light source and may introduce the objects or weather it requires. The source tested this setup on Z-Image Turbo; these adapted descriptions have not been validated natively. The guide reports weak face illumination."
+    },
+    {
+      "id": "lighting-neon-glow-through-a-window",
+      "name": "Neon glow through a window",
+      "axis": "lighting",
+      "group": "Indoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "Colored neon illumination enters a window from an unseen exterior source, tinting the dark room.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Colored neon illumination enters a window from an unseen exterior source, tinting the dark room.",
+          "source": "lighting"
+        }
+      },
+      "note": "Uses glow rather than a named sign to reduce unwanted lettering. The adapted description is unvalidated beyond the source examples."
+    },
+    {
+      "id": "lighting-neon-glow-on-a-wet-road",
+      "name": "Neon glow on a wet road",
+      "axis": "lighting",
+      "group": "Outdoor night",
+      "variants": {
+        "z_image": {
+          "prompt": "Colored neon illumination spills from beyond the frame across wet pavement and reflections.",
+          "source": "lighting"
+        },
+        "moss": {
+          "prompt": "Colored neon illumination spills from beyond the frame across wet pavement and reflections.",
+          "source": "lighting"
+        }
+      },
+      "note": "Uses glow rather than a named sign to reduce unwanted lettering. The adapted description is unvalidated beyond the source examples."
+    }
+  ]
+}

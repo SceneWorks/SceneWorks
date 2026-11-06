@@ -1,3 +1,4 @@
+import { emptyAppearance, normalizeAppearance } from "../../data/appearanceCatalog.js";
 import { mossAdvancedDefaults } from "../../mossImageAdvanced.js";
 import { isMossEdit, mossEditDefaults, mossDefaults } from "../../mossImage.js";
 import { deserializePhases } from "../../imageMultiPhase.js";
@@ -19,8 +20,10 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
     return null;
   }
   const recipe = launchRequest.recipe;
+  if (recipe.uiPreserveComposedPrompt === true) flags.clearGeneralStack = true;
   const settings = recipe.normalizedSettings ?? {};
   const rawSettings = recipe.rawAdapterSettings ?? {};
+  const replayPromptBatch = typeof rawSettings.appearancePrompt === "string" && Array.isArray(rawSettings.appearancePromptBatch) ? rawSettings.appearancePromptBatch : rawSettings.promptBatch;
   const restoredTier = rawSettings.quantTier ??
     (rawSettings.convRot === true ? "int8-convrot" : quantizeTier(rawSettings.mlxQuantize));
   values.recipeTierRequest = restoredTier ? { model: recipe.model, tier: restoredTier } : null;
@@ -59,7 +62,7 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
   flags.referenceTuningDeclaredArmed = false;
   values.selectedPresetId = noPresetId;
   // Native batch rows already contain the effective preset/style text captured by the worker.
-  if (replayMossEdit && rawSettings.mossImageAdvanced && rawSettings.promptBatch?.length) {
+  if (replayMossEdit && rawSettings.mossImageAdvanced && replayPromptBatch?.length) {
     flags.clearGeneralStack = true;
   }
   values.mode = nextMode;
@@ -88,8 +91,16 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
   const hasRawStylePrompt =
     restoredStyleId != null && typeof rawSettings.stylePrompt === "string";
   values.styleId = hasRawStylePrompt ? restoredStyleId : null;
-  if (replayMossEdit && rawSettings.mossImageAdvanced && Array.isArray(rawSettings.promptBatch) && rawSettings.promptBatch.length) {
-    values.prompt = rawSettings.promptBatch[0];
+  const hasRawAppearance = rawSettings.appearance && typeof rawSettings.appearancePrompt === "string";
+  values.appearance = hasRawAppearance ? normalizeAppearance(rawSettings.appearance) : emptyAppearance();
+  if (hasRawAppearance) {
+    values.styleId = restoredStyleId;
+    // Appearance carriers already contain the preset fold. Replaying them must not fold
+    // whatever general presets happen to be active in the destination Studio a second time.
+    flags.clearGeneralStack = true;
+  }
+  if (replayMossEdit && rawSettings.mossImageAdvanced && Array.isArray(replayPromptBatch) && replayPromptBatch.length) {
+    values.prompt = replayPromptBatch[0];
   } else if (restoredCaption && validateCaption(restoredCaption).ok) {
     values.caption = orderCaption(restoredCaption);
     values.promptMode = "form";
@@ -97,6 +108,8 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
     // The intent (original idea) seeds the plain box; the serialized caption is
     // authoritative for generation and is rebuilt from `caption` on submit.
     values.prompt = String(structuredRecipe.intent ?? "");
+  } else if (hasRawAppearance) {
+    values.prompt = rawSettings.appearancePrompt;
   } else if (hasRawStylePrompt) {
     // Styled recipe (sc-13132): seed the box with the RAW pre-style prompt, NOT the composed
     // `recipe.prompt`. With the picker re-selected above, submit recomposes the identical
@@ -107,7 +120,7 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
     values.prompt = String(recipe.prompt ?? "");
   }
   flags.promptEdited = true;
-  values.negativePrompt = String(recipe.negativePrompt ?? "");
+  values.negativePrompt = String(hasRawAppearance ? rawSettings.appearanceNegativePrompt ?? "" : recipe.negativePrompt ?? "");
   // Recipe replay leaves Seed random by default so "Use this recipe" makes a close
   // variation instead of a byte-for-byte rerun. When the launcher passes a replaySeed
   // (viewer "Keep seed" toggle), the launcher resolves this image's own seed or
@@ -129,7 +142,7 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
   values.mossImage = rawSettings.mossImage ?? mossDefaults();
   values.mossImageEdit = rawSettings.mossImageEdit ?? mossEditDefaults();
   values.mossImageAdvanced = rawSettings.mossImageAdvanced ?? mossAdvancedDefaults();
-  values.mossPromptBatch = replayMossEdit && rawSettings.mossImageAdvanced ? rawSettings.promptBatch ?? [] : [];
+  values.mossPromptBatch = replayMossEdit && rawSettings.mossImageAdvanced ? replayPromptBatch ?? [] : [];
   values.mossDmdSteps = rawSettings.mossImage?.acceleration && rawSettings.mossImage.acceleration !== "off" ? rawSettings.steps ?? 8 : 8;
   values.stepsOverride = replayMossEdit ? rawSettings.steps ?? 30 : rawSettings.mossImage?.acceleration && rawSettings.mossImage.acceleration !== "off" ? "" : rawSettings.steps ?? rawSettings.numInferenceSteps ?? "";
   values.guidanceOverride = rawSettings.guidanceScale ?? (replayMossEdit ? 4 : "");
@@ -140,7 +153,7 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
   values.cfgInterval = rawSettings.cfgInterval?.join?.(", ") ?? "";
   values.captionOverflow = rawSettings.captionOverflow ?? "default";
   // sc-25681: an image of a native prompt batch reopens the whole batch.
-  const batch = rawSettings.promptBatch;
+  const batch = replayPromptBatch;
   const replayBatch = !(replayMossEdit && rawSettings.mossImageAdvanced) && Array.isArray(batch) && batch.length > 1;
   values.batchMode = replayBatch;
   if (replayBatch) {

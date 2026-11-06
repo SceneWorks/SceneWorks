@@ -115,7 +115,7 @@ describe("composeThumbnailPrompt", () => {
     const expected = composeStyledPrompt({ styleText: styleTextForId(id), userPrompt: REF });
     const actual = composeThumbnailPrompt(id, REF);
     expect(actual).toBe(expected);
-    expect(actual.startsWith(`Subject: ${REF}`)).toBe(true);
+    expect(actual.startsWith(`Description: ${REF}`)).toBe(true);
     expect(actual).toContain("\nStyle: ");
   });
 
@@ -125,7 +125,7 @@ describe("composeThumbnailPrompt", () => {
     const expected = composeStyledPrompt({ styleText: styleTextForId(id), userPrompt: REF });
     const actual = composeThumbnailPrompt(id, REF);
     expect(actual).toBe(expected);
-    expect(actual.startsWith(`Subject: ${REF}`)).toBe(true);
+    expect(actual.startsWith(`Description: ${REF}`)).toBe(true);
     expect(actual).toContain("\nStyle: ");
   });
 });

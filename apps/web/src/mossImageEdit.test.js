@@ -56,7 +56,7 @@ describe("effective MOSS text conditioning", () => {
   const rows = ["  first row  ", "second row"];
   it("styles every native row once and records the effective batch for replay", () => {
     const request = buildImageJobRequest(state({ promptToSend: rows[0], mossPromptBatch: rows, styleText: "watercolor", styleId: "watercolor" }));
-    expect(request.prompts).toEqual(["Subject: first row\nStyle: watercolor", "Subject: second row\nStyle: watercolor"]);
+    expect(request.prompts).toEqual(["Description: first row\nStyle: watercolor", "Description: second row\nStyle: watercolor"]);
     expect(request.prompt).toBe(request.prompts[0]);
     expect(request.advanced.promptBatch).toEqual(request.prompts);
     expect(request.advanced.styleId).toBe("watercolor");

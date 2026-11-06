@@ -23,7 +23,7 @@ import { promptBudget } from "../styleComposer.js";
 // "N / 4000" readout beside the string it measures, flipping to an over-budget warning before the
 // user submits. The measurement is on the SAME composed string shown above, so the count and the
 // blocking Generate error (imageGenerateValidation) can never disagree.
-export function StyledPromptPreview({ active, composedPrompt }) {
+export function StyledPromptPreview({ active, composedPrompt, appearanceActive = false, negativePrompt }) {
   if (!active) {
     return null;
   }
@@ -31,9 +31,10 @@ export function StyledPromptPreview({ active, composedPrompt }) {
   return (
     <div className="preset-stack-preview styled-prompt-preview" data-testid="styled-prompt-preview">
       <div className="preset-stack-prompt">
-        <span className="eyebrow">Style-composed prompt sent</span>
+        <span className="eyebrow">{appearanceActive ? "Appearance-composed prompt sent" : "Style-composed prompt sent"}</span>
         <p>{composedPrompt ? composedPrompt : <span className="token">your prompt</span>}</p>
       </div>
+      {negativePrompt !== undefined ? <div className="preset-stack-prompt"><span className="eyebrow">Negative prompt sent</span><p>{negativePrompt || "None"}</p></div> : null}
       <p
         className={budget.over ? "styled-prompt-budget over" : "styled-prompt-budget"}
         role={budget.over ? "alert" : undefined}
@@ -41,7 +42,7 @@ export function StyledPromptPreview({ active, composedPrompt }) {
       >
         {budget.over ? (
           <>
-            Too long: {budget.length} / {budget.max} characters — shorten your prompt or pick a shorter style.
+            Too long: {budget.length} / {budget.max} characters — {appearanceActive ? "shorten your prompt or clear an appearance selection." : "shorten your prompt or pick a shorter style."}
           </>
         ) : (
           <>

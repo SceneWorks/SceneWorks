@@ -278,6 +278,12 @@ pub struct ListLorasArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateImageArgs {
+    #[schemars(
+        schema_with = "appearance_schema",
+        description = "Camera, film, multiple looks and lighting recipe IDs from list_appearance. The API resolves model-specific prompt directives and MOSS negatives; incompatible selections are refused."
+    )]
+    pub appearance: Option<Value>,
+
     #[schemars(description = "Project to generate into (from list_projects).")]
     pub project_id: String,
     #[schemars(
@@ -378,6 +384,12 @@ fn moss_image_edit_options_schema(_: &mut schemars::SchemaGenerator) -> schemars
     sceneworks_core::moss_image::edit_options_schema()
         .try_into()
         .expect("MOSS edit options schema object")
+}
+
+fn appearance_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    sceneworks_core::appearance::selection_schema()
+        .try_into()
+        .expect("appearance schema")
 }
 
 fn moss_image_advanced_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -680,6 +692,18 @@ impl SceneWorksMcp {
             .await
             .map_err(api_error)?;
         json_result(compact_models(&models))
+    }
+
+    #[tool(
+        description = "List model-aware Camera, Film, Looks and Lighting recipes. Returns profile model IDs, descriptive prompts, MOSS negatives, provenance and limitations. Select IDs for generate_image.appearance; unsupported model/recipe combinations are refused."
+    )]
+    async fn list_appearance(&self) -> Result<CallToolResult, ErrorData> {
+        let catalog = self
+            .api
+            .get_json("/api/v1/appearance", &[])
+            .await
+            .map_err(api_error)?;
+        json_result(catalog)
     }
 
     #[tool(
@@ -1447,6 +1471,7 @@ pub(crate) fn image_job_body(args: &GenerateImageArgs) -> Result<Value, String> 
     body.insert("prompt".to_owned(), json!(args.prompt));
     body.insert("count".to_owned(), json!(args.count.unwrap_or(1)));
     let optional = [
+        ("appearance", args.appearance.clone()),
         (
             "negativePrompt",
             args.negative_prompt.as_ref().map(|v| json!(v)),
@@ -2645,6 +2670,17 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn appearance_recipe_ids_reach_the_typed_api_boundary() {
+        let selection = json!({"camera":null,"film":"film-kodak-portra-400","looks":["look-moody-dark"],"lighting":null});
+        let args = args_from(
+            json!({"projectId":"p1","prompt":"a fox","model":"krea_2_turbo","appearance":selection}),
+        );
+        assert_eq!(image_job_body(&args).unwrap()["appearance"], selection);
+        let schema = serde_json::to_value(schemars::schema_for!(GenerateImageArgs)).unwrap();
+        assert!(schema["properties"].get("appearance").is_some());
+    }
+
     #[test]
     fn image_job_body_maps_every_optional_field() {
         let args = args_from(json!({

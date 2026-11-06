@@ -295,7 +295,7 @@ use prompt_batches::{
     list_prompt_batches, update_prompt_batch,
 };
 mod styles;
-use styles::list_styles;
+use styles::{list_appearance, list_styles};
 mod credentials;
 use credentials::{delete_credential, list_credentials, set_credential};
 mod preferences;
