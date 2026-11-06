@@ -1,5 +1,5 @@
 // Build-output selection only; no compilation or kernel execution.
-import { createHash } from "node:crypto";
+import { sha256 as hash } from "./lib/file-sha256.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, realpath, mkdir, appendFile } from "node:fs/promises";
@@ -7,7 +7,6 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
 
-const hash = (value) => createHash("sha256").update(value).digest("hex");
 const required = (value) => {
   if (typeof value !== "string" || !value.trim() || value.includes("\0")) throw new Error("missing FlashAttention compiler input");
   return value;
