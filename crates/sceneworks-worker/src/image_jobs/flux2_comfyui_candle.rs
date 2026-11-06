@@ -445,6 +445,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     let descriptor = crate::inference_runtime::imported_model_descriptor(
         "flux2",
         gen_core::ImportedModelSource::ComfyUiTree,
@@ -526,7 +527,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
                         guidance,
                         preview,
                         cancel: cancel.clone(),
-                        ..Default::default()
+                        ..sampling_controls.clone()
                     };
                     let output = match model.generate(&request, &mut *on_progress) {
                         Ok(output) => output,

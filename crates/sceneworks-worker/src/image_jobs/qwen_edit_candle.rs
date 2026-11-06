@@ -21,7 +21,6 @@ use super::nvfp4_selected;
 use super::quantization::gate_tier_key;
 use super::quantization::tier_key_from_resolved_dir;
 use super::resolve_seed;
-use super::sampling::resolve_advanced_or_manifest_f32;
 use super::sampling::resolve_advanced_or_manifest_u32_with;
 use super::standard_tier_subdir;
 #[cfg(test)]
@@ -606,7 +605,8 @@ fn qwen_edit_candle_steps(request: &ImageRequest) -> u32 {
 fn qwen_edit_candle_guidance(request: &ImageRequest) -> f32 {
     if let Some(value) = request
         .advanced
-        .get("trueCfgScale")
+        .get("guidanceScale")
+        .or_else(|| request.advanced.get("trueCfgScale"))
         .or_else(|| request.advanced.get("imageGuidanceScale"))
         .and_then(|value| {
             value
@@ -614,14 +614,24 @@ fn qwen_edit_candle_guidance(request: &ImageRequest) -> f32 {
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
     {
-        return (value as f32).clamp(1.0, 10.0);
+        return value as f32;
     }
-    resolve_advanced_or_manifest_f32(
-        request,
-        "guidanceScale",
-        QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE,
-        0.0..=30.0,
-    )
+    request
+        .model_manifest_entry
+        .get("guidanceScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or_else(|| {
+            if is_qwen_edit_lightning(&request.model) {
+                1.0
+            } else {
+                QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE
+            }
+        })
 }
 
 /// Flat telemetry recorded on candle Qwen-Image-Edit assets. `base_dir` is the RESOLVED base
@@ -789,14 +799,10 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     let references = load_qwen_edit_references(request, project_path, settings)?;
 
     let lightning = is_qwen_edit_lightning(&request.model);
+    let sampling = super::sampling::explicit_sampling_request(request);
     let steps = qwen_edit_candle_steps(request);
-    // Lightning is CFG-distilled → run CFG-off (guidance 1.0); the provider forces a single forward when
-    // `lightning` is set, so guidance is recorded for telemetry only there.
-    let guidance = if lightning {
-        1.0
-    } else {
-        qwen_edit_candle_guidance(request)
-    };
+    // The Lightning default is CFG-off; explicit Advanced guidance remains editable.
+    let guidance = qwen_edit_candle_guidance(request);
     let repo = qwen_edit_candle_repo(request);
     // The lightx2v distill LoRA, lazily fetched into the HF cache — `QwenEdit` folds it into the MMDiT at
     // load (sc-6220). Empty for the production (multi-step true-CFG) variants.
@@ -1133,6 +1139,9 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         width,
                         height,
                         steps: steps as usize,
+                        sampler: sampling.sampler.clone(),
+                        scheduler: sampling.scheduler.clone(),
+                        scheduler_shift: sampling.scheduler_shift,
                         guidance,
                         seed: seed as u64,
                         lightning,
@@ -1217,6 +1226,36 @@ pub(super) async fn generate_candle_qwen_edit_stream(
 mod qwen_edit_tier_reconcile_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn edit_guidance_keeps_standard_and_lightning_defaults_and_explicit_values() {
+        for (model, default) in [
+            ("qwen_image_edit_2511", 4.0),
+            ("qwen_image_edit_2511_lightning", 1.0),
+        ] {
+            for (advanced, expected) in [(json!({}), default), (json!({"guidanceScale":1.5}), 1.5)]
+            {
+                let value = json!({"projectId":"p","model":model,"advanced":advanced});
+                let mut request = ImageRequest::from_payload(value.as_object().unwrap());
+                // This nested scale is embedded guidance, separate from native true CFG.
+                request
+                    .model_manifest_entry
+                    .insert("defaults".into(), json!({"guidanceScale":1.0}));
+                assert_eq!(qwen_edit_candle_guidance(&request), expected);
+                request
+                    .model_manifest_entry
+                    .insert("guidanceScale".into(), json!(3.25));
+                assert_eq!(
+                    qwen_edit_candle_guidance(&request),
+                    if request.advanced.is_empty() {
+                        3.25
+                    } else {
+                        expected
+                    }
+                );
+            }
+        }
+    }
 
     #[test]
     fn ordered_plural_references_and_true_cfg_are_contractual() {

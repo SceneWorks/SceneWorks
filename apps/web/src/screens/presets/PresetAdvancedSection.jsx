@@ -39,11 +39,9 @@ export function PresetAdvancedSection({
           <span>Guidance</span>
           <input
             disabled={!editable}
-            max="60"
-            min="0"
             onChange={(event) => updateField("guidanceScale", event.target.value)}
             placeholder="model default"
-            step="0.1"
+            step="any"
             type="number"
             value={form.guidanceScale}
           />
@@ -59,6 +57,11 @@ export function PresetAdvancedSection({
           disabled={!editable}
           emptyLabel="No default"
         />
+        <label className="field">
+          <span>Schedule shift</span>
+          <input disabled={!editable} type="number" min="0" step="any" placeholder="model default"
+            value={form.schedulerShift} onChange={(event) => updateField("schedulerShift", event.target.value)} />
+        </label>
         <label className="field">
           <span>Sort order</span>
           <input

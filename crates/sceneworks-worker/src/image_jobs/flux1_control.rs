@@ -187,6 +187,7 @@ fn flux1_control_scale(request: &ImageRequest) -> f32 {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn flux1_control_generate_one(
     generator: &dyn Generator,
+    sampling: &GenerationRequest,
     prompt: &str,
     width: u32,
     height: u32,
@@ -211,6 +212,9 @@ pub(super) fn flux1_control_generate_one(
         memory: memory_evaluation.map(|evaluation| evaluation.memory),
         preview,
         cancel: cancel.clone(),
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
     };
     let output = crate::memory_strategy::generate_with_scope(
@@ -313,6 +317,7 @@ pub(super) async fn generate_flux1_dev_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling = super::sampling::explicit_sampling_request(request);
 
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.1-dev weights not found".to_owned()))?;
@@ -524,6 +529,7 @@ pub(super) async fn generate_flux1_dev_control_stream(
                     .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                 let (out_w, out_h, pixels) = flux1_control_generate_one(
                     generator,
+                    &sampling,
                     &prompt,
                     width,
                     height,

@@ -138,7 +138,7 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     const sampler = field(container, "Sampler");
     expect([...sampler.options].map((option) => option.value)).toEqual(["euler", "dpmpp_2m"]);
     expect(sampler.value).toBe("dpmpp_2m");
-    expect(field(container, "Scheduler")).toBeUndefined();
+    expect([...field(container, "Scheduler").options].map((option) => option.value)).toEqual(["default"]);
     expect(field(container, "Schedule shift").value).toBe("4");
     expect(field(container, "Guidance method")).toBeUndefined();
     expect(field(container, "Guidance interval")).toBeTruthy();

@@ -410,7 +410,7 @@ fn krea_control_raw_settings(
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     // Krea 2 Turbo is CFG-free (distilled) — no guidance.
-    raw.insert("guidanceScale".to_owned(), Value::Null);
+    raw.entry("guidanceScale".to_owned()).or_insert(Value::Null);
     raw.insert("controlScale".to_owned(), json!(control_scale));
     raw.insert("poseCount".to_owned(), json!(pose_count));
     raw.insert(
@@ -468,6 +468,7 @@ pub(super) fn krea_control_generate_one(
     height: u32,
     seed: i64,
     steps: u32,
+    sampling: &GenerationRequest,
     conditioning: Vec<Conditioning>,
     text_style_gain: Option<f32>,
     preview: gen_core::PreviewSink,
@@ -482,6 +483,11 @@ pub(super) fn krea_control_generate_one(
         count: 1,
         seed: Some(seed as u64),
         steps: Some(steps),
+        guidance: sampling.guidance,
+        negative_prompt: sampling.negative_prompt.clone(),
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         conditioning,
         text_style_gain,
         preview,
@@ -579,6 +585,7 @@ pub(super) async fn generate_krea_control_stream(
     )
     .await;
 
+    let sampling = super::sampling::explicit_sampling_request(request);
     let prompt = request.prompt.clone();
     // Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only),
     // applied to the pose-control lane's CFG-free context by the engine (inference sc-12009).
@@ -672,6 +679,7 @@ pub(super) async fn generate_krea_control_stream(
                     height,
                     seed,
                     steps,
+                    &sampling,
                     conditioning,
                     text_style_gain,
                     preview,

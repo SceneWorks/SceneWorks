@@ -3563,16 +3563,8 @@ def test_recipe_preset_schema_rejects_a_bad_id_pattern():
 # `resolve_negative_prompt` ALL return None. Every one is a guidance-distilled student.
 IMAGE_MODELS_WITHOUT_EITHER_AXIS = frozenset(
     {
-        "z_image_turbo",
-        "z_image_edit",  # runs on the z_image_turbo ENGINE
         "flux_schnell",
         "ideogram_4_turbo",
-        "boogu_image_turbo",
-        "krea_2_turbo",
-        "sd3_5_large_turbo",
-        "anima_turbo",
-        "mage_flow_turbo",
-        "mage_flow_edit_turbo",
         "flux3_klein",  # flow map: no CFG at all (sc-26234)
     }
 )
@@ -3583,8 +3575,6 @@ IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY = frozenset(
     {
         "flux_dev",
         "ideogram_4",
-        "boogu_image",
-        "boogu_image_edit",
         "flux2_dev",
         "sensenova_u1_8b",
         "sensenova_u1_8b_infographic_v2",
@@ -3599,6 +3589,20 @@ IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY = frozenset(
         "supra2_img",
     }
 )
+
+
+IMAGE_MODELS_WITH_EXPERIMENTAL_CFG = frozenset({
+    "z_image_turbo",
+    "z_image_edit",
+    "boogu_image_turbo",
+    "krea_2_turbo",
+    "sd3_5_large_turbo",
+    "anima_turbo",
+    "mage_flow_turbo",
+    "mage_flow_edit_turbo",
+    "boogu_image",
+    "boogu_image_edit",
+})
 
 
 def _image_models_by_id() -> dict:
@@ -3644,12 +3648,9 @@ def test_negative_only_image_models_keep_their_guidance_axis():
         )
 
 
-def test_guidance_taking_image_models_declare_nothing():
-    """sc-15299 polarity guard: absent means TRUE, so every image entry that genuinely takes both
-    axes must stay silent. Includes the true-CFG Chroma family, whose descriptor reads
-    supports_guidance=false but whose Guidance control IS live — the worker forwards
-    `advanced.guidanceScale` as `true_cfg` (base.rs `uses_true_cfg`/`resolve_true_cfg`). Declaring
-    an `image` block for Chroma would break a working knob."""
+def test_guidance_taking_image_models_keep_both_axes():
+    """Absent axis flags mean supported. Positive capability declarations and independent
+    Shift metadata must not hide either axis, including experimental Turbo CFG."""
     models = _image_models_by_id()
     # Only the two AXIS keys hide a control; `negativePromptRequiresGuidance` (sc-25679) keeps both
     # axes live and is policed by its own guard below.
@@ -3659,15 +3660,20 @@ def test_guidance_taking_image_models_declare_nothing():
         for model_id, model in models.items()
         if axis_keys & set(model.get("image") or {})
     }
-    expected = IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY
+    expected = IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY | IMAGE_MODELS_WITH_EXPERIMENTAL_CFG
     assert declared == expected, (
         "unexpected `image` declarations — every other image entry must stay silent so it keeps "
         f"both controls: unexpected={sorted(declared - expected)}, missing={sorted(expected - declared)}"
     )
     for model_id in ("chroma1_hd", "chroma1_base", "chroma1_flash", "sana_1600m", "krea_2_raw", "sdxl"):
-        assert models[model_id].get("image") is None, (
-            f"{model_id} takes both axes (Chroma via true_cfg) and must declare no `image` block"
-        )
+        block = models[model_id].get("image") or {}
+        assert block.get("supportsGuidance") is not False, model_id
+        assert block.get("supportsNegativePrompt") is not False, model_id
+    for model_id in IMAGE_MODELS_WITH_EXPERIMENTAL_CFG:
+        block = models[model_id]["image"]
+        assert block.get("supportsGuidance") is not False, model_id
+        assert block.get("supportsNegativePrompt") is True, model_id
+        assert block.get("negativePromptRequiresGuidance") is True, model_id
 
 
 def test_iris_all_native_tiers_share_the_dense_snapshot_and_encoder():

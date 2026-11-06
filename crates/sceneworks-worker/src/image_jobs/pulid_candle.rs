@@ -389,7 +389,7 @@ pub(super) async fn generate_candle_pulid_stream(
     // time-shift `mu`). Read + N3-normalize against the shared curated menu. N1: unset ⇒ `None` ⇒ the
     // native euler-over-native-schedule default runs byte-exact.
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,
@@ -598,6 +598,7 @@ pub(super) async fn generate_candle_pulid_stream(
                         seed: seed as u64,
                         sampler: sampler.clone(),
                         scheduler: scheduler.clone(),
+                        scheduler_shift,
                         preview: preview.clone(),
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
                         use_pid,

@@ -1345,10 +1345,8 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
   // (`memory_strategy_2_5.rs` `strategies`), a defect of the same class the capability-dump rule
   // in scripts/measure-memory-catalog.test.mjs surfaced on sc-22725's rows.
   //
-  // sc-22737 adds MiniMax-H3's six candle rows (both catalog entries, three tiers each) on exactly
-  // the same grounds: at the 8a65db2a pin the candle capability dump publishes `minimax_h3` with
-  // `implementedRungs: ["resident"]` at every (tier, load shape), so the lane default is a rung the
-  // contract does not implement.
+  // MiniMax-H3 now implements staged residency, so its six Candle rows must inherit the lane
+  // default. The historical Resident-only capability dump is not the current pinned contract.
   //
   // …and Bernini's six plus LTX-2.3's two on the THIRD derived source, because the dump cannot speak
   // for them: both plan a `deferred_materialization` load shape and the dump publishes only
@@ -1362,8 +1360,6 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
     ...["bf16", "q4", "q8"].flatMap((tier) => [
       `scail2_14b:${tier}:candle`,
       `ltx_2_5:${tier}:candle`,
-      `minimax_h3:${tier}:candle`,
-      `minimax_h3_ref:${tier}:candle`,
       `bernini:${tier}:candle`,
       `bernini_image:${tier}:candle`,
     ]),
@@ -1373,6 +1369,17 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
   ]) {
     assert.deepEqual(plan.anchors[key].strategy, { rung: "resident", engagedRungs: ["resident"] }, key);
     assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
+  }
+  for (const model of ["minimax_h3", "minimax_h3_ref"]) {
+    for (const tier of ["bf16", "q4", "q8"]) {
+      const key = `${model}:${tier}:candle`;
+      assert.equal(plan.anchors[key].strategy, undefined, `${key}: no obsolete Resident-only override`);
+      assert.deepEqual(planAnchor(plan, key).strategy, {
+        rung: ANCHOR_STRATEGY.candle.rung,
+        engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+        parameters: {},
+      }, key);
+    }
   }
   // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest
   // exemption, and so do the two Iris-3B task routes (sc-25690: depth and restoration load no text
@@ -1388,8 +1395,6 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
     "bernini_image:bf16:candle", "bernini_image:q4:candle", "bernini_image:q8:candle",
     "ltx_2_3:q4:candle", "ltx_2_3:q8:candle",
     "ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle",
-    "minimax_h3:bf16:candle", "minimax_h3:q4:candle", "minimax_h3:q8:candle",
-    "minimax_h3_ref:bf16:candle", "minimax_h3_ref:q4:candle", "minimax_h3_ref:q8:candle",
     "scail2_14b:bf16:candle", "scail2_14b:q4:candle", "scail2_14b:q8:candle",
     // sc-24217: Candle Supra2-IMG's contract is gen-core's compatibility default — Resident alone
     // (staged residency `Missing`, not structurally inapplicable, so no manifest exemption).

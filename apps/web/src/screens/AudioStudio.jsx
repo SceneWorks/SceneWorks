@@ -113,6 +113,8 @@ export function AudioStudio() {
     setSeed,
     guidance,
     setGuidance,
+    schedulerShift,
+    setSchedulerShift,
     steps,
     setSteps,
     bpm,
@@ -225,7 +227,9 @@ export function AudioStudio() {
   // on/off + scale pair below, so both plain knobs stay ACE-Step / MOSS-only.
   const showSteps = SAMPLING_KNOB_MODES.has(mode) || (mode === "music" && !songModel);
   const showGuidance = SAMPLING_KNOB_MODES.has(mode) || (musicSupportsGuidance && !songModel);
-  const showNegative = musicSupportsNegative;
+  const showNegative = Boolean(audio.supportsNegativePrompt);
+  const showSchedulerShift = Boolean(audio.supportsSchedulerShift);
+  const negativePromptCfgOff = showGuidance && Number(guidance === "" ? selectedModel?.defaults?.guidanceScale : guidance) === 1;
   // Streaming (sc-13675): the selected model renders the clip incrementally when it advertises
   // audio.supportsStreaming (backend Capabilities.supports_streaming). CAPABILITY-DRIVEN — never a
   // hardcoded id: the results zone reveals a streaming affordance and the worker's per-chunk progress
@@ -385,6 +389,7 @@ export function AudioStudio() {
   targetDurationSecs,
   seed,
   guidance,
+  schedulerShift,
   steps,
   bpm,
   musicalKey,
@@ -461,6 +466,7 @@ export function AudioStudio() {
   script,
   voice,
   guidance,
+  schedulerShift,
   steps,
   songModel,
   songPrompt,
@@ -485,6 +491,8 @@ export function AudioStudio() {
   bpm,
   musicalKey,
   lyrics,
+  showSchedulerShift,
+  negativePromptCfgOff,
   musicSupportsGuidance,
   musicSupportsNegative,
   negativePrompt,
@@ -745,6 +753,10 @@ export function AudioStudio() {
             showGuidance={showGuidance}
             setGuidance={setGuidance}
             guidance={guidance}
+            schedulerShift={schedulerShift}
+            setSchedulerShift={setSchedulerShift}
+            showSchedulerShift={showSchedulerShift}
+            selectedModel={selectedModel}
             showSteps={showSteps}
             setSteps={setSteps}
             steps={steps}
@@ -761,6 +773,7 @@ export function AudioStudio() {
             setOutputLimiter={setOutputLimiter}
             outputLimiter={outputLimiter}
             showNegative={showNegative}
+            negativePromptCfgOff={negativePromptCfgOff}
             setNegativePrompt={setNegativePrompt}
             negativePrompt={negativePrompt}
             sampleRates={sampleRates}

@@ -167,6 +167,7 @@ fn sdxl_advanced_spec(
 #[allow(clippy::too_many_arguments)]
 fn sdxl_advanced_generate_one(
     generator: &dyn Generator,
+    sampling_controls: &GenerationRequest,
     prompt: &str,
     negative_prompt: Option<String>,
     width: u32,
@@ -191,7 +192,7 @@ fn sdxl_advanced_generate_one(
         conditioning,
         preview,
         cancel: cancel.clone(),
-        ..Default::default()
+        ..sampling_controls.clone()
     };
     let output = generator.generate(&request, on_progress).map_err(|error| {
         WorkerError::Engine(format!("sdxl advanced generation failed: {error}"))
@@ -243,6 +244,7 @@ pub(super) async fn generate_sdxl_advanced_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     let model = sdxl_engine_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an SDXL engine model".to_owned()))?;
     let sub_mode = sdxl_sub_mode(request)
@@ -502,6 +504,7 @@ pub(super) async fn generate_sdxl_advanced_stream(
             drive_gen_items_scored(tx, seeds, move |_index, seed, preview, on_progress| {
                 let (out_w, out_h, pixels) = sdxl_advanced_generate_one(
                     generator,
+                    &sampling_controls,
                     &prompt,
                     negative_prompt.clone(),
                     width,

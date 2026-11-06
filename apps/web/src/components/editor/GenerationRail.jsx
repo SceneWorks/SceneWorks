@@ -257,20 +257,21 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
                   variant="rail"
                   rawLabels
                 />
-                {gen.showSchedulerPicker && gen.scheduler !== "default" ? (
+                {(
                   <label className="ve-field">
                     <span className="ve-field-label">Scheduler shift</span>
                     <input
                       className="ve-input"
-                      max="10"
-                      min="0.1"
-                      onChange={(e) => gen.setSchedulerShift(Number(e.target.value))}
-                      step="0.1"
+                      min="0"
+                      disabled={gen.selectedModel?.video?.supportsSchedulerShift === false}
+                      placeholder={gen.selectedModel?.defaults?.schedulerShift == null ? "Model default" : String(gen.selectedModel.defaults.schedulerShift)}
+                      onChange={(e) => gen.setSchedulerShift(e.target.value)}
+                      step="any"
                       type="number"
-                      value={gen.schedulerShift}
+                      value={gen.schedulerShift ?? ""}
                     />
                   </label>
-                ) : null}
+                )}
                 <SamplingStepsField
                   value={gen.lightningActive ? "" : gen.stepsOverride}
                   onChange={(value) => gen.setStepsOverride(value)}
@@ -285,10 +286,9 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
                     <span className="ve-field-label">Guidance</span>
                     <input
                       className="ve-input"
-                      disabled={gen.lightningActive}
                       onChange={(e) => gen.setGuidanceOverride(e.target.value)}
-                      placeholder={gen.lightningActive ? "off (Lightning)" : "auto"}
-                      value={gen.lightningActive ? "" : gen.guidanceOverride}
+                      placeholder={gen.lightningActive ? "1 (Lightning default)" : "auto"}
+                      value={gen.guidanceOverride}
                     />
                   </label>
                 ) : null}

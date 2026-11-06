@@ -205,7 +205,7 @@ export function negativePromptInertAtGuidance(model, guidanceOverride) {
 export function guidanceIsOff(model, guidanceOverride) {
   const override = guidanceOverride === "" || guidanceOverride == null ? Number.NaN : Number(guidanceOverride);
   const effective = Number.isFinite(override) ? override : guidanceDefaultFromModel(model);
-  return effective === 1;
+  return effective === (model?.image?.guidanceOffValue ?? 1);
 }
 
 // sc-24215: a model with ONE native size (`limits.minDimension === limits.maxDimension`,

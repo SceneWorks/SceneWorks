@@ -39,7 +39,8 @@ describe("shared sampling authoring contract", () => {
     expect(container.querySelector("input").placeholder).toBe("12");
     await act(async () => root.render(<Harness model={model} backend="candle" />));
     expect(state).toMatchObject({ sampler: "euler", scheduler: "normal", schedulerShift: 1 });
-    expect(container.querySelectorAll("select")).toHaveLength(0);
+    expect(container.querySelectorAll("select")).toHaveLength(2);
+    expect([...container.querySelectorAll("select")].map((select) => select.value)).toEqual(["euler", "normal"]);
     const inputs = container.querySelectorAll("input");
     await act(async () => { setInput(inputs[0], "8"); setInput(inputs[1], "0"); });
     expect(state).toMatchObject({ steps: "8", seed: "0" });
@@ -53,7 +54,7 @@ describe("shared sampling authoring contract", () => {
     await act(async () => root.render(<Harness model={next} reconcile={reconcile} />));
     expect(state.sampler).toBe(reconcile === "model-reset" ? "euler" : "heun");
     expect(state.scheduler).toBe("normal");
-    expect(state.schedulerShift).toBe(reconcile === "invalid" ? 1 : 5);
+    expect(state.schedulerShift).toBe(reconcile === "invalid" ? 1 : "");
   });
   it("keeps preset no-default values empty until the author chooses a value", async () => {
     await act(async () => root.render(<Harness model={null} reconcile="none" preset />));

@@ -65,6 +65,7 @@ struct AudioRequest {
     /// top-level `GenerationRequest::guidance` — NOT `AudioParams` (sc-13409). `None` ⇒ the model's
     /// sampler default.
     guidance: Option<f32>,
+    scheduler_shift: Option<f32>,
     /// Solver step count for diffusion-audio models. Rides the top-level `GenerationRequest::steps`.
     /// `None` ⇒ the model's sampler default.
     steps: Option<u32>,
@@ -219,6 +220,10 @@ impl AudioRequest {
             script: parse_speech_segments(payload.get("script")),
             guidance: payload
                 .get("guidance")
+                .and_then(Value::as_f64)
+                .map(|value| value as f32),
+            scheduler_shift: payload
+                .get("schedulerShift")
                 .and_then(Value::as_f64)
                 .map(|value| value as f32),
             steps: payload
@@ -1620,6 +1625,7 @@ async fn run_audio_synthesis_with(
         seed,
         steps,
         guidance,
+        scheduler_shift: request.scheduler_shift,
         audio: Some(AudioParams {
             voice,
             language,
@@ -2389,6 +2395,7 @@ fn audio_asset_fact(
         // Multi-speaker dialogue script (sc-13676) — `null` on a single-voice run.
         "script": script_to_json(&request.script),
         "guidance": request.guidance,
+        "schedulerShift": request.scheduler_shift,
         "steps": request.steps,
         "negativePrompt": request.negative_prompt,
         "bpm": request.bpm,
@@ -2435,6 +2442,7 @@ fn audio_asset_fact(
         // re-generate reconstructs the same dialogue. `null` on a single-voice run.
         "script": script_to_json(&request.script),
         "guidance": request.guidance,
+        "schedulerShift": request.scheduler_shift,
         "steps": request.steps,
         "negativePrompt": request.negative_prompt,
         "bpm": request.bpm,
@@ -2666,7 +2674,9 @@ mod tests {
             "prompt": "a heavy wooden door creaking open",
             "language": "en",
             "targetDurationSecs": 3.0,
-            "guidance": 6.5,
+            "guidance": 1.5,
+            "schedulerShift": 18.375,
+            "negativePrompt": "voices",
             "steps": 60,
             "seed": 11,
         })));
@@ -2674,7 +2684,9 @@ mod tests {
         assert_eq!(request.prompt, "a heavy wooden door creaking open");
         assert_eq!(request.language.as_deref(), Some("en"));
         assert_eq!(request.target_duration_secs, Some(3.0));
-        assert_eq!(request.guidance, Some(6.5));
+        assert_eq!(request.guidance, Some(1.5));
+        assert_eq!(request.scheduler_shift, Some(18.375));
+        assert_eq!(request.negative_prompt.as_deref(), Some("voices"));
         assert_eq!(request.steps, Some(60));
         assert_eq!(request.seed, Some(11));
         // SFX carries no voice — MOSS advertises no voice surface.

@@ -165,7 +165,7 @@ export function useVideoRecipeReplay({
     setGuidanceOverride(rawSettings.guidanceScale ?? "");
     setSampler(rawSettings.sampler ?? "default");
     setScheduler(rawSettings.scheduler ?? "default");
-    setSchedulerShift(rawSettings.schedulerShift ?? 3.0);
+    setSchedulerShift(rawSettings.schedulerShift ?? "");
     setMotion(rawSettings.motion ?? DEFAULT_MOTION);
     setLtxPipeline(rawSettings.ltxPipeline ?? "auto");
     setDistilledVariant(rawSettings.distilledVariant ?? "1.1");

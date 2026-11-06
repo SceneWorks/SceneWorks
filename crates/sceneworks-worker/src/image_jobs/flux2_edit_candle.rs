@@ -447,6 +447,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     let memory_context = memory_evaluation
         .as_ref()
         .map(|evaluation| evaluation.context.clone());
+    let sampling = super::sampling::explicit_sampling_request(request);
     let steps = flux2_edit_candle_steps(
         request,
         if is_dev {
@@ -548,6 +549,9 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         width,
                         height,
                         steps: steps as usize,
+                        sampler: sampling.sampler.clone(),
+                        scheduler: sampling.scheduler.clone(),
+                        scheduler_shift: sampling.scheduler_shift,
                         guidance,
                         seed: seed as u64,
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.

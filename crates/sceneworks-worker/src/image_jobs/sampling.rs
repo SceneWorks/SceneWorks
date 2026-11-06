@@ -45,12 +45,8 @@ pub(super) fn max_requested_steps(default_steps: u32) -> u32 {
     default_steps.max(sceneworks_core::image_request::BASE_MAX_IMAGE_STEPS)
 }
 
-/// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
-/// no guidance — the engine rejects `Some(_)` on them — so this returns `None`. For a
-/// guided variant (flux dev) it is `advanced.guidanceScale` else the family default.
-/// Shared by the MLX path and the candle lane (sc-5096); the descriptor's `supports_guidance` is the
-/// candle descriptor on the Windows lane, so a distilled candle family (z-image, flux schnell) still
-/// gets `None` and a guided one (flux dev, flux2, qwen, sdxl) gets the scale.
+/// Resolve explicit guidance or the native default for providers that accept this axis.
+/// Capability declarations distinguish CFG-off defaults from unsupported guidance.
 #[cfg(native_lane)]
 pub(super) fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
     if !model.supports_guidance() {
@@ -88,12 +84,8 @@ pub(super) fn resolve_advanced_or_manifest_u32(
     resolve_advanced_or_manifest_u32_with(request, key, || default, range)
 }
 
-/// Resolve a float advanced knob with a manifest fallback (sc-8825). The guidance twin of
-/// [`resolve_advanced_or_manifest_u32`]: the manifest `[key]` (JSON float OR numeric string) supplies
-/// the effective default (else the per-lane `default`), then [`advanced::f32_clamped`] reads
-/// `advanced[key]` — falling back to that manifest default — and clamps the result to `range`. Unlike
-/// the u32 twin, the resolved value here is always clamped (matching the historical `f32_clamped`
-/// call, which clamps the manifest/default fallback too). Each caller passes its OWN `range`/`default`.
+/// Resolve an advanced float with manifest fallback. Guidance remains uncapped; other
+/// knobs retain their existing mathematical bounds.
 #[cfg(native_lane)]
 pub(super) fn resolve_advanced_or_manifest_f32(
     request: &ImageRequest,
@@ -154,7 +146,22 @@ pub(super) fn resolve_advanced_or_manifest_f32_with(
         })
         .map(|value| value as f32)
         .unwrap_or_else(default_fn);
-    advanced::f32_clamped(&request.advanced, key, manifest_default, range)
+    if key == "guidanceScale" {
+        // Guidance recommendations are defaults, not experiment bounds. Native validation
+        // owns finite values and the provider's actual mathematical restrictions.
+        request
+            .advanced
+            .get(key)
+            .and_then(|value| {
+                value
+                    .as_f64()
+                    .or_else(|| value.as_str()?.trim().parse().ok())
+            })
+            .map(|value| value as f32)
+            .unwrap_or(manifest_default)
+    } else {
+        advanced::f32_clamped(&request.advanced, key, manifest_default, range)
+    }
 }
 
 /// True for a TRUE-CFG family whose engine reads the CFG scale from `true_cfg` (with a real
@@ -501,3 +508,25 @@ pub(crate) fn curated_image_menu() -> (Vec<&'static str>, Vec<&'static str>) {
 #[cfg(test)]
 #[path = "tests/sampling_knob_tests.rs"]
 mod sampling_knob_tests;
+
+/// Explicit Advanced values for bespoke paths whose defaults belong to a selected recipe.
+/// Deliberately omit manifest fallbacks here: an accelerator can have different defaults from
+/// the selected base checkpoint. Its adapter supplies those only when an override is absent.
+#[cfg(any(native_lane, test))]
+pub(super) fn explicit_sampling_request(request: &ImageRequest) -> gen_core::GenerationRequest {
+    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let guidance = sceneworks_core::image_sampling_controls::effective_guidance(
+        &request.advanced,
+        &JsonObject::new(),
+    )
+    .map(|value| value as f32);
+    gen_core::GenerationRequest {
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance,
+        negative_prompt: (!request.negative_prompt.trim().is_empty())
+            .then(|| request.negative_prompt.clone()),
+        ..Default::default()
+    }
+}

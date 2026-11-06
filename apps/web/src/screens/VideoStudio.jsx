@@ -160,14 +160,15 @@ export function VideoStudio() {
     setSampler,
     scheduler,
     setScheduler,
-    schedulerShift,
+    schedulerShift: rawSchedulerShift,
     setSchedulerShift,
+    schedulerShiftExplicit,
     stepsOverride,
     setStepsOverride,
     guidanceOverride,
     setGuidanceOverride,
     toggleAdvanced
-  } = useStudioAdvancedSettings(saved, { schedulerShift: 3.0 });
+  } = useStudioAdvancedSettings(saved);
   const {
     model,
     setModel,
@@ -401,6 +402,8 @@ export function VideoStudio() {
   // LTX-2.5 keeps guidance provider-owned on both packed variants. Only negative conditioning is
   // variant-specific: the distilled default has no negative branch, while dev consumes one through
   // its fixed native multimodal guider. Other catalog entries retain absent-means-true above.
+  const schedulerShift = selectedModel?.video?.supportsSchedulerShift !== false && (schedulerShiftExplicit || Boolean(scheduler && scheduler !== "default"))
+    ? rawSchedulerShift ?? selectedModel?.defaults?.schedulerShift ?? "" : "";
   const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
   const supportsNegativePrompt =
     model === ltx25VideoModelId
@@ -730,6 +733,7 @@ export function VideoStudio() {
   sampler,
   scheduler,
   schedulerShift,
+  schedulerShiftExplicit,
   precision,
   quantization,
   ltxPipeline,

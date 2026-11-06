@@ -2323,6 +2323,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 req.width,
                 req.height,
                 1,
+                gen_core::GenerationRequest::default(),
                 case.conditioning,
                 None,
                 None,
@@ -2472,10 +2473,17 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
         }
     };
 
+    let sampling_controls = GenerationRequest {
+        sampler: Some("heun".into()),
+        scheduler: Some("karras".into()),
+        scheduler_shift: Some(33.375),
+        ..Default::default()
+    };
     let edit_generator = HiresProbeGenerator::new();
     let edit = evaluation(gen_core::MemoryMode::Edit, 2, true, false);
     krea_edit_generate_one(
         &edit_generator,
+        &sampling_controls,
         "edit",
         None,
         4,
@@ -2511,6 +2519,9 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
     );
     let edit_request = edit_generator.requests.lock().unwrap();
     assert!(edit_request[0].use_pid);
+    assert_eq!(edit_request[0].scheduler_shift, Some(33.375));
+    assert_eq!(edit_request[0].sampler.as_deref(), Some("heun"));
+    assert_eq!(edit_request[0].scheduler.as_deref(), Some("karras"));
     assert_eq!(edit_request[0].image_reference_count(), 2);
     assert!(edit_request[0]
         .memory
@@ -2521,6 +2532,7 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
     let phase = evaluation(gen_core::MemoryMode::TextToImage, 0, false, true);
     krea_multiphase_generate_one(
         &phase_generator,
+        &sampling_controls,
         "phases",
         None,
         4,
@@ -2546,6 +2558,9 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
     );
     let phase_request = phase_generator.requests.lock().unwrap();
     assert!(phase_request[0].phases.is_some());
+    assert_eq!(phase_request[0].scheduler_shift, Some(33.375));
+    assert_eq!(phase_request[0].sampler.as_deref(), Some("heun"));
+    assert_eq!(phase_request[0].scheduler.as_deref(), Some("karras"));
     assert!(phase_request[0]
         .memory
         .is_some_and(|memory| memory.stream_transformer_blocks));
@@ -3993,13 +4008,15 @@ fn client_sampler_fields_cannot_suppress_the_imported_krea_execution_fact() {
 #[cfg(native_lane)]
 #[test]
 fn imported_krea_records_the_sampler_it_explicitly_executes() {
-    let req = request(json!({
-        "projectId": "p",
-        "model": "kreamania_v4_int8",
-        "advanced": { "sampler": "not-the-runtime-sampler" }
-    }));
-    let raw = krea_imported_raw_settings(&req, 8, false, 0, None);
-    assert_eq!(raw.get("resolvedSampler"), Some(&json!("euler")));
+    for (advanced, expected) in [(json!({}), "euler"), (json!({"sampler":"heun"}), "heun")] {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "kreamania_v4_int8",
+            "advanced": advanced
+        }));
+        let raw = krea_imported_raw_settings(&req, 8, false, 0, None);
+        assert_eq!(raw.get("resolvedSampler"), Some(&json!(expected)));
+    }
 }
 
 /// Turning the setting off writes the file SceneWorks writes today, to the byte.
@@ -4936,7 +4953,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
             5.0,
             0.0..=30.0,
         ),
-        30.0
+        99.0
     );
     // A numeric string parses just like a JSON float.
     assert_eq!(
@@ -4956,7 +4973,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
             5.0,
             0.0..=30.0,
         ),
-        30.0
+        99.0
     );
     // Both absent → the per-lane default.
     assert_eq!(
@@ -5075,7 +5092,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     // differs from the u32 twin (whose closure is the whole-chain fallback and fires only when BOTH are
     // absent). These asserts lock that preserved semantic.
 
-    // advanced present wins and is clamped; manifest absent so default_fn still runs to build the
+    // advanced present wins without a recommendation clamp; manifest absent so default_fn still runs to build the
     // (discarded) manifest fallback — byte-identical to the pre-fold inline code.
     let called = Cell::new(false);
     assert_eq!(
@@ -5088,14 +5105,14 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
             },
             0.0..=30.0,
         ),
-        30.0
+        99.0
     );
     assert!(
         called.get(),
         "f32 default_fn builds the manifest fallback whenever the manifest key is absent"
     );
 
-    // manifest supplies the effective default (clamped) — default_fn NOT invoked.
+    // manifest supplies the effective default — default_fn NOT invoked.
     let called = Cell::new(false);
     assert_eq!(
         resolve_advanced_or_manifest_f32_with(
@@ -5107,7 +5124,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
             },
             0.0..=30.0,
         ),
-        30.0
+        99.0
     );
     assert!(
         !called.get(),
@@ -6257,7 +6274,7 @@ fn resolve_negative_prompt_only_for_true_cfg_families() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn resolve_guidance_none_for_distilled_set_for_dev() {
+fn resolve_guidance_keeps_native_defaults_and_explicit_overrides() {
     let schnell = mlx_model("flux_schnell").unwrap();
     let dev = mlx_model("flux_dev").unwrap();
     let zimage = mlx_model("z_image_turbo").unwrap();
@@ -6268,7 +6285,7 @@ fn resolve_guidance_none_for_distilled_set_for_dev() {
     );
     assert_eq!(
         resolve_guidance(&request(json!({ "projectId": "p" })), &zimage),
-        None
+        Some(0.0)
     );
     // flux dev defaults to 3.5, overridable via advanced.guidanceScale.
     assert_eq!(
@@ -8221,6 +8238,7 @@ fn sc3031_ab_dump_pose() {
     let conditioning = build_control_conditioning(control, ControlKind::Pose, control_scale, None);
     let (ow, oh, pixels) = zimage_control_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         &req.prompt,
         w,
         h,
@@ -8447,6 +8465,7 @@ fn zimage_control_real_weights_generates_one_pose() {
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
     let (w, h, pixels) = zimage_control_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         512,
         512,
@@ -8508,6 +8527,7 @@ fn zimage_base_control_real_weights_generates_per_mode() {
         let mut steps_seen = 0u32;
         let (ow, oh, pixels) = zimage_base_control_generate_one(
             generator.as_ref(),
+            &gen_core::GenerationRequest::default(),
             "a person standing in a meadow",
             None,
             w,
@@ -8596,6 +8616,7 @@ fn qwen_control_real_weights_generates_one_pose() {
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
     let (w, h, pixels) = qwen_control_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         Some("blurry, low quality".to_owned()),
         512,
@@ -9987,6 +10008,7 @@ fn flux2_dev_control_real_weights_generates_one_pose() {
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.75, None);
     let (w, h, pixels) = flux2_control_generate_one_scoped(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         // A directly-loaded generator has no live request evaluation to admit against; production
         // always supplies one (see `generate_flux2_dev_control_stream`).
         None,
@@ -10068,6 +10090,7 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
         let conditioning = build_control_conditioning(control_map.clone(), kind.clone(), 0.7, None);
         let (w, h, pixels) = flux1_control_generate_one(
             generator.as_ref(),
+            &gen_core::GenerationRequest::default(),
             "a person standing in a meadow, photorealistic",
             512,
             512,
@@ -11564,6 +11587,7 @@ fn flux2_edit_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         false,
         false,
         None,
@@ -12843,9 +12867,9 @@ fn lora_declares_accelerator_role_matches_only_the_accelerator_marker() {
 
 // sc-13883 (epic 13879 S3) — the DISCRIMINATING param-selection test. The turbo-on-Raw lane resolves
 // its sampling regime against the `krea_2_turbo` descriptor (while loading Raw weights), so the whole
-// regime falls out for free: fixed-mu engine, ~8 steps, guidance off, no negative forwarded. Pinning
+// default regime falls out for free: fixed-mu engine, ~8 steps and guidance off. Pinning
 // the NON-default turbo values here makes the test FAIL if the lane ever reverts to the Raw defaults
-// (52 steps / guidance 1.0 / dynamic-mu / negative forwarded). mu itself is engine-internal
+// (52 steps / guidance 1.0 / dynamic-mu). mu itself is engine-internal
 // (`TURBO_MU = 1.15` in the pinned Krea engine's `turbo_sigmas`), reached by selecting the
 // `krea_2_turbo` engine id — so asserting that engine id IS the worker-observable proof of fixed mu.
 #[cfg(target_os = "macos")]
@@ -12854,7 +12878,7 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
     let raw = mlx_model("krea_2_raw").expect("krea_2_raw engine registered");
     let turbo = mlx_model("krea_2_turbo").expect("krea_2_turbo engine registered");
 
-    // The lane routes to the `krea_2_turbo` engine — the FIXED mu 1.15 / CFG-free `render_turbo`
+    // The lane routes to the `krea_2_turbo` engine — the FIXED mu 1.15 / default CFG-off `render_turbo`
     // regime — NOT the `krea_2_raw` engine (resolution-DYNAMIC mu, true-CFG `render_base`). This engine
     // swap IS the mu-1.15 mechanism (the pinned engine keys the schedule on the descriptor id).
     assert_eq!(turbo.engine_id(), "krea_2_turbo");
@@ -12885,11 +12909,11 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default is 52"
     );
 
-    // Guidance: CFG off (the turbo descriptor advertises no guidance → None), NOT the Raw 1.0.
+    // Guidance: Turbo retains its CFG-off default zero, while Raw defaults to one.
     assert_eq!(
         resolve_guidance(&req, &turbo),
-        None,
-        "turbo-on-Raw forwards no guidance (CFG off)",
+        Some(0.0),
+        "turbo-on-Raw retains its CFG-off guidance default",
     );
     assert_eq!(
         resolve_guidance(&req, &raw),
@@ -12897,12 +12921,11 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default guidance is 1.0",
     );
 
-    // Negative prompt: NOT forwarded under turbo (the descriptor advertises no negative), even though
-    // the request carries one; the Raw path DOES forward it.
+    // Both providers retain negative conditioning for explicit experimental CFG. Admission gates CFG-off requests.
     assert_eq!(
         resolve_negative_prompt(&req, &turbo),
-        None,
-        "turbo-on-Raw must not forward the negative prompt (CFG off)",
+        Some("blurry, low quality".to_owned()),
+        "turbo-on-Raw can forward negative conditioning for experimental CFG",
     );
     assert_eq!(
         resolve_negative_prompt(&req, &raw),
@@ -13405,11 +13428,11 @@ fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default is 52"
     );
 
-    // Guidance: CFG off under the turbo (distilled) descriptor → None, NOT the Raw 1.0.
+    // Guidance: Turbo retains its CFG-off default zero, while Raw defaults to one.
     assert_eq!(
         resolve_guidance(&req, &turbo),
-        None,
-        "candle turbo-on-Raw forwards no guidance (CFG off)",
+        Some(0.0),
+        "candle turbo-on-Raw retains its CFG-off guidance default",
     );
     assert_eq!(
         resolve_guidance(&req, &raw),
@@ -13417,11 +13440,11 @@ fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default guidance is 1.0",
     );
 
-    // Negative prompt: NOT forwarded under turbo (distilled, no negative branch); the Raw path forwards it.
+    // Both providers retain negative conditioning for explicit experimental CFG. Admission gates CFG-off requests.
     assert_eq!(
         resolve_negative_prompt(&req, &turbo),
-        None,
-        "candle turbo-on-Raw must not forward the negative prompt (CFG off)",
+        Some("blurry, low quality".to_owned()),
+        "candle turbo-on-Raw can forward negative conditioning for experimental CFG",
     );
     assert_eq!(
         resolve_negative_prompt(&req, &raw),
@@ -15280,7 +15303,7 @@ fn qwen_edit_reference_ids_preserves_plural_and_supports_singular_or_source() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
+fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     let model = mlx_model("qwen_image_edit_2511").unwrap();
     // Default is the family true-CFG default (4.0).
     assert_eq!(
@@ -15290,19 +15313,18 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
         ),
         4.0
     );
-    // guidanceScale (the inert embedded-guidance knob the Python edit path pins at 1.0)
-    // is IGNORED — only trueCfgScale drives the engine's true CFG.
+    // The Advanced guidance control names true CFG on Qwen edit.
     assert_eq!(
         resolve_qwen_edit_guidance(
             &request(json!({
                 "projectId": "p", "mode": "edit_image",
-                "advanced": { "guidanceScale": 1.0 }
+                "advanced": { "guidanceScale": 1.5, "trueCfgScale": 4.0 }
             })),
             &model
         ),
-        4.0
+        1.5
     );
-    // trueCfgScale overrides.
+    // trueCfgScale remains an alias.
     assert_eq!(
         resolve_qwen_edit_guidance(
             &request(json!({
@@ -15324,7 +15346,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
         2.5,
         "legacy imageGuidanceScale remains a deliberate fallback"
     );
-    // The character reference path clamps to [1, 10].
+    // Recommendation ranges do not cap explicit CFG.
     assert_eq!(
         resolve_qwen_edit_guidance(
             &request(json!({
@@ -15333,7 +15355,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
             })),
             &model
         ),
-        10.0
+        50.0
     );
     assert_eq!(
         resolve_qwen_edit_guidance(
@@ -15343,9 +15365,9 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
             })),
             &model
         ),
-        1.0
+        0.5
     );
-    // edit_image floors at 1.0 (the engine needs CFG > 1 to engage).
+    // Inverse guidance remains explicit on edit requests too.
     assert_eq!(
         resolve_qwen_edit_guidance(
             &request(json!({
@@ -15354,7 +15376,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
             })),
             &model
         ),
-        1.0
+        0.5
     );
 }
 
@@ -15386,6 +15408,7 @@ fn qwen_edit_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = qwen_edit_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
         Some("blurry, low quality".to_owned()),
         512,
@@ -15452,6 +15475,7 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = qwen_edit_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
         // Lightning runs CFG-off: no negative prompt, guidance 1.0 (engine ignores it).
         None,
@@ -15545,6 +15569,7 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         false,
         false,
         None,
@@ -15683,6 +15708,7 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
             eprintln!("[sc-6702] generating {pose}/{arm} (seed {seed}) ...");
             let (w, h, pixels) = flux2_edit_generate_one(
                 generator.as_ref(),
+                &gen_core::GenerationRequest::default(),
                 false,
                 false,
                 None,
@@ -16188,7 +16214,7 @@ fn ideogram_tier_subdir_maps_q8_optin() {
 
 /// Boogu (epic 6387) resolves each of its three ids to its own engine + the reference defaults, and
 /// quant resolution returns Q8 — the catalog declares `mlx.quantize: 8` (the pre-packed Q8 turnkey
-/// default). Turbo is CFG-free so `resolve_guidance` returns None. Runs in CI on Mac (no weights).
+/// default). Turbo retains its CFG-off default zero and accepts explicit guidance. Runs on Mac without weights.
 #[cfg(target_os = "macos")]
 #[test]
 fn boogu_engine_defaults_and_quant_resolution() {
@@ -16208,14 +16234,21 @@ fn boogu_engine_defaults_and_quant_resolution() {
             "modelManifestEntry": { "mlx": { "quantize": 8 } },
         }))
     };
-    // Base: true-CFG guidance 4.0 from the model row. Turbo: CFG-free → resolve_guidance None.
+    // Base retains guidance 4.0; Turbo retains its CFG-off default zero.
     assert_eq!(
         resolve_guidance(&req("boogu_image", json!({})), &base),
         Some(4.0)
     );
     assert_eq!(
         resolve_guidance(&req("boogu_image_turbo", json!({})), &turbo),
-        None
+        Some(0.0)
+    );
+    assert_eq!(
+        resolve_guidance(
+            &req("boogu_image_turbo", json!({ "guidanceScale": 1.5 })),
+            &turbo
+        ),
+        Some(1.5)
     );
     // Default → Q8 (the shipped pre-packed turnkey); advanced.mlxQuantize overrides to Q4 / bf16-dense.
     assert!(matches!(
@@ -17849,6 +17882,7 @@ fn matrix_flux1_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = flux1_control_generate_one(
         generator,
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow, photorealistic",
         side,
         side,
@@ -17997,6 +18031,7 @@ fn matrix_flux2_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = flux2_control_generate_one_scoped(
         generator,
+        &gen_core::GenerationRequest::default(),
         // A directly-loaded generator has no live request evaluation to admit against; production
         // always supplies one (see `generate_flux2_dev_control_stream`).
         None,
@@ -18141,6 +18176,7 @@ fn matrix_zimage_turbo_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = zimage_control_generate_one(
         generator,
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         side,
         side,
@@ -18280,6 +18316,7 @@ fn matrix_zimage_base_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = zimage_base_control_generate_one(
         generator,
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         None,
         side,
@@ -18421,6 +18458,7 @@ fn matrix_qwen_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = qwen_control_generate_one(
         generator,
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         Some("blurry, low quality".to_owned()),
         side,
@@ -19995,6 +20033,7 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
             size,
             seed,
             steps,
+            &gen_core::GenerationRequest::default(),
             conditioning,
             None,
             gen_core::PreviewSink::default(),
@@ -22533,6 +22572,7 @@ fn sc_8253_8278_identity_angle_ab() {
                 let cancel = gen_core::CancelFlag::new();
                 let (w, h, pixels) = flux2_edit_generate_one(
                     generator.as_ref(),
+                    &gen_core::GenerationRequest::default(),
                     false,
                     false,
                     None,
@@ -29389,13 +29429,14 @@ fn checkpoint_negative_prompt_uses_provider_capabilities() {
         json!({"projectId":"p", "model":"kreamanai_v2", "prompt":"p",
         "negativePrompt":"  blur  "}),
     );
-    assert!(!descriptor.capabilities.supports_negative_prompt);
-    assert_eq!(checkpoint_plan_negative_prompt(&req, &descriptor), None);
-    descriptor.capabilities.supports_negative_prompt = true;
+    assert!(descriptor.capabilities.supports_negative_prompt);
     assert_eq!(
         checkpoint_plan_negative_prompt(&req, &descriptor).as_deref(),
         Some("blur")
     );
+    descriptor.capabilities.supports_negative_prompt = false;
+    assert_eq!(checkpoint_plan_negative_prompt(&req, &descriptor), None);
+    descriptor.capabilities.supports_negative_prompt = true;
     let mut blank = req;
     blank.negative_prompt = " \n ".into();
     assert_eq!(checkpoint_plan_negative_prompt(&blank, &descriptor), None);
@@ -30872,4 +30913,75 @@ fn stub_raw_settings_drops_a_forged_prefix_kv_cache() {
     let raw = stub_raw_settings(&req);
     assert!(raw.get(PREFIX_KV_CACHE_RESULT_KEY).is_none(), "{raw:?}");
     assert_eq!(raw["sampler"], "euler");
+}
+
+#[cfg(native_lane)]
+#[test]
+fn explicit_sampling_prototype_preserves_experimental_values_without_defaults() {
+    let empty = super::sampling::explicit_sampling_request(&request(json!({"projectId":"p"})));
+    assert_eq!((empty.guidance, empty.scheduler_shift), (None, None));
+    let explicit = super::sampling::explicit_sampling_request(&request(json!({
+        "projectId":"p", "negativePrompt":"blurry",
+        "advanced":{"guidanceScale":1.5,"schedulerShift":18.375,"sampler":"heun","scheduler":"karras"}
+    })));
+    assert_eq!(
+        (explicit.guidance, explicit.scheduler_shift),
+        (Some(1.5), Some(18.375))
+    );
+    assert_eq!(explicit.sampler.as_deref(), Some("heun"));
+    assert_eq!(explicit.scheduler.as_deref(), Some("karras"));
+    assert_eq!(explicit.negative_prompt.as_deref(), Some("blurry"));
+}
+
+#[cfg(native_lane)]
+#[test]
+fn checkpoint_plan_native_request_keeps_sampling_overrides_and_defaults() {
+    let empty = super::checkpoint_plan::checkpoint_plan_generation_request(&request(
+        json!({"projectId":"p"}),
+    ));
+    assert_eq!((empty.guidance, empty.scheduler_shift), (None, None));
+    assert!(empty.sampler.is_none() && empty.scheduler.is_none());
+    let explicit = super::checkpoint_plan::checkpoint_plan_generation_request(&request(json!({
+        "projectId":"p", "model":"kreamania_v4_int8", "width":768,"height":1024,
+        "advanced":{"guidanceScale":1.5,"schedulerShift":33.375,"sampler":"heun","scheduler":"karras"}
+    })));
+    assert_eq!((explicit.width, explicit.height), (768, 1024));
+    assert_eq!(
+        (explicit.guidance, explicit.scheduler_shift),
+        (Some(1.5), Some(33.375))
+    );
+    assert_eq!(explicit.sampler.as_deref(), Some("heun"));
+    assert_eq!(explicit.scheduler.as_deref(), Some("karras"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn zimage_control_forwards_experimental_sampling_to_the_native_request() {
+    let generator = HiresProbeGenerator::new();
+    let sampling = super::sampling::explicit_sampling_request(&request(json!({
+        "projectId":"p", "negativePrompt":"blurry", "advanced":{
+            "guidanceScale":1.5,"sampler":"heun","scheduler":"karras","schedulerShift":33.375
+        }
+    })));
+    zimage_control_generate_one(
+        &generator,
+        &sampling,
+        "p",
+        4,
+        4,
+        7,
+        2,
+        vec![],
+        gen_core::PreviewSink::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    )
+    .unwrap();
+    let captured = generator.requests.lock().unwrap();
+    let native = &captured[0];
+    assert_eq!(native.guidance, Some(1.5));
+    assert_eq!(native.negative_prompt.as_deref(), Some("blurry"));
+    assert_eq!(native.scheduler_shift, Some(33.375));
+    assert_eq!(native.sampler.as_deref(), Some("heun"));
+    assert_eq!(native.scheduler.as_deref(), Some("karras"));
 }

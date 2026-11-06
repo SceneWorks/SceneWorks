@@ -29,6 +29,7 @@ export function useAudioDraft({
   // the solver step count. Empty ⇒ the model's own default (MOSS: CFG 4.0 / 100 steps; ACE-Step turbo:
   // 8 steps, guidance baked in), matching the advanced hint.
   const [guidance, setGuidance] = useState(saved.guidance ?? "");
+  const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? "");
 
   const [steps, setSteps] = useState(saved.steps ?? "");
 
@@ -101,5 +102,5 @@ export function useAudioDraft({
   const [iclStartSecs, setIclStartSecs] = useState(saved.iclStartSecs ?? "");
 
   const [iclEndSecs, setIclEndSecs] = useState(saved.iclEndSecs ?? "");
-  return { prompt, setPrompt, script, setScript, voice, setVoice, language, setLanguage, editMode, setEditMode, targetDurationSecs, setTargetDurationSecs, seed, setSeed, guidance, setGuidance, steps, setSteps, bpm, setBpm, musicalKey, setMusicalKey, lyrics, setLyrics, negativePrompt, setNegativePrompt, sourceAudioAssetId, setSourceAudioAssetId, editRegionStartSecs, setEditRegionStartSecs, editRegionEndSecs, setEditRegionEndSecs, editStrength, setEditStrength, referenceAudioAssetId, setReferenceAudioAssetId, matchStrength, setMatchStrength, yueSections, setYueSections, genreTags, setGenreTags, segments, setSegments, maxNewTokensPerSegment, setMaxNewTokensPerSegment, repetitionPenalty, setRepetitionPenalty, guidanceEnabled, setGuidanceEnabled, songGuidance, setSongGuidance, outputLimiter, setOutputLimiter, iclMode, setIclMode, iclReferenceAssetId, setIclReferenceAssetId, iclVocalAssetId, setIclVocalAssetId, iclInstrumentalAssetId, setIclInstrumentalAssetId, iclStartSecs, setIclStartSecs, iclEndSecs, setIclEndSecs };
+  return { prompt, setPrompt, script, setScript, voice, setVoice, language, setLanguage, editMode, setEditMode, targetDurationSecs, setTargetDurationSecs, seed, setSeed, guidance, setGuidance, schedulerShift, setSchedulerShift, steps, setSteps, bpm, setBpm, musicalKey, setMusicalKey, lyrics, setLyrics, negativePrompt, setNegativePrompt, sourceAudioAssetId, setSourceAudioAssetId, editRegionStartSecs, setEditRegionStartSecs, editRegionEndSecs, setEditRegionEndSecs, editStrength, setEditStrength, referenceAudioAssetId, setReferenceAudioAssetId, matchStrength, setMatchStrength, yueSections, setYueSections, genreTags, setGenreTags, segments, setSegments, maxNewTokensPerSegment, setMaxNewTokensPerSegment, repetitionPenalty, setRepetitionPenalty, guidanceEnabled, setGuidanceEnabled, songGuidance, setSongGuidance, outputLimiter, setOutputLimiter, iclMode, setIclMode, iclReferenceAssetId, setIclReferenceAssetId, iclVocalAssetId, setIclVocalAssetId, iclInstrumentalAssetId, setIclInstrumentalAssetId, iclStartSecs, setIclStartSecs, iclEndSecs, setIclEndSecs };
 }

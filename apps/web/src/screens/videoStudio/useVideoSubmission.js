@@ -254,11 +254,8 @@ export function useVideoSubmission({
           // diffusers (torch) path actually applies these.
           ...(sampler && sampler !== "default" ? { sampler } : {}),
           ...(scheduler && scheduler !== "default" ? { scheduler } : {}),
-          // Schedule shift (time-shift mu) only pairs with a curated (non-default)
-          // scheduler — it shapes that schedule; the default scheduler keeps the
-          // engine's resolution-native shift (epic 7114).
-          ...(scheduler &&
-          scheduler !== "default" &&
+          // An explicit Shift overrides the native grid independently of scheduler selection.
+          ...(schedulerShift !== "" && schedulerShift != null &&
           Number.isFinite(Number(schedulerShift))
             ? { schedulerShift: Number(schedulerShift) }
             : {}),
@@ -285,7 +282,6 @@ export function useVideoSubmission({
             ? { steps: Number(stepsOverride) }
             : {}),
           ...(supportsGuidance &&
-          !lightningActive &&
           guidanceOverride !== "" &&
           Number.isFinite(Number(guidanceOverride))
             ? { guidanceScale: Number(guidanceOverride) }

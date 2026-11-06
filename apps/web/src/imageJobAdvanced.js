@@ -31,9 +31,7 @@ export function buildImageJobAdvanced(state) {
     sampler,
     scheduler,
     schedulerShift,
-    // sc-25681: a model with a schedule-shift axis but no scheduler menu (Iris-3B,
-    // `image.supportsSchedulerShift`) — the shift rides on its own.
-    supportsSchedulerShift,
+    // Shift is independent of the scheduler menu; an empty value retains the native grid.
     // sc-25681: the CFG interval `[start, end]` (already resolved by the studio: `null` when the
     // model does not offer one, the default full interval is selected, or CFG is off) and the
     // caption-overflow policy (`"default"` = the checkpoint's own).
@@ -164,13 +162,8 @@ export function buildImageJobAdvanced(state) {
     // method (CFG++) rides the payload. The worker N3-falls an unadvertised
     // method back to the default, so an invalid value is harmless.
     ...(!dmd && guidanceMethod && guidanceMethod !== "cfg" ? { guidanceMethod } : {}),
-    // The schedule shift (time-shift mu) is only honored when a curated
-    // (non-default) scheduler is active — it shapes that curated schedule;
-    // the default scheduler keeps the engine's resolution-native shift, so
-    // emitting it there would override the no-op default (epic 7114).
-    // sc-25681: a model that declares the shift axis without a scheduler menu (Iris-3B) sends
-    // its shift regardless — there is no scheduler picker to gate it on.
-    ...(!dmd && ((scheduler && scheduler !== "default") || supportsSchedulerShift) &&
+    // An explicit Shift overrides the native grid independently of scheduler selection.
+    ...(!dmd && schedulerShift !== "" && schedulerShift != null &&
     Number.isFinite(Number(schedulerShift))
       ? { schedulerShift: Number(schedulerShift) }
       : {}),

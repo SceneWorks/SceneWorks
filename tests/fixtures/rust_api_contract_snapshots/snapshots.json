@@ -2029,6 +2029,9 @@
               "family": "sdxl",
               "gated": false,
               "id": "realvisxl",
+              "image": {
+                "supportsSchedulerShift": false
+              },
               "limits": {
                 "count": [
                   1,

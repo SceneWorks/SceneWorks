@@ -416,3 +416,42 @@ fn external_comfyui_surface_uses_exact_candle_registration() {
     );
     assert!(mage_on_candle.get("runtimeQuantTiers").is_none());
 }
+
+#[test]
+fn imported_sampling_menus_follow_the_exact_provider_and_preserve_authored_values() {
+    for (family, provider) in [
+        ("krea_2", "krea_2_turbo"),
+        ("mage-flow", "mage_flow_base"),
+        ("sdxl", "sdxl"),
+    ] {
+        let mut imported = entry("my_fine_tune", family);
+        apply_imported_provider_surface_for_lanes(&mut imported, true, false);
+        let builtin = sceneworks_core::builtin_manifests::builtin_model_entry(provider).unwrap();
+        let limits = builtin
+            .get("mlx")
+            .and_then(|lane| lane.get("limits"))
+            .unwrap_or(&builtin["limits"]);
+        for key in ["samplers", "schedulers"] {
+            if let Some(expected) = limits.get(key) {
+                assert_eq!(&imported["limits"][key], expected, "{family} {key}");
+                assert_eq!(
+                    &imported["mlx"]["limits"][key], expected,
+                    "{family} mlx {key}"
+                );
+            }
+        }
+        imported.insert(
+            "defaults".into(),
+            json!({"steps": 19, "guidanceScale": 1.5, "schedulerShift": 17.25}),
+        );
+        imported.insert(
+            "limits".into(),
+            json!({"samplers": ["euler"], "schedulers": ["normal"]}),
+        );
+        apply_imported_provider_surface_for_lanes(&mut imported, true, false);
+        assert_eq!(imported["defaults"]["schedulerShift"], 17.25);
+        assert_eq!(imported["defaults"]["guidanceScale"], 1.5);
+        assert_eq!(imported["limits"]["samplers"], json!(["euler"]));
+        assert_eq!(imported["limits"]["schedulers"], json!(["normal"]));
+    }
+}

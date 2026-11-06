@@ -194,7 +194,11 @@ pub(super) fn zimage_control_guidance(request: &ImageRequest) -> f32 {
     resolve_advanced_or_manifest_f32(
         request,
         "guidanceScale",
-        ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE,
+        if is_zimage_base_model(&request.model) {
+            ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE
+        } else {
+            0.0
+        },
         0.0..=30.0,
     )
 }
@@ -329,6 +333,9 @@ pub(super) struct ZImageStrictControl {
     /// Base-mode classifier-free guidance scale (sc-8680); ignored on Turbo. Threaded to
     /// `ZImageControlRequest.guidance`.
     guidance: f32,
+    sampler: Option<String>,
+    scheduler: Option<String>,
+    scheduler_shift: Option<f32>,
     /// Base-mode negative prompt for the uncond CFG branch (sc-8680); ignored on Turbo. Threaded to
     /// `ZImageControlRequest.negative_prompt`.
     negative_prompt: String,
@@ -357,6 +364,9 @@ pub(super) fn zimage_strict_control_test_fixture(
         control_scale: 1.0,
         is_base,
         guidance: if is_base { 4.0 } else { 0.0 },
+        sampler: None,
+        scheduler: None,
+        scheduler_shift: None,
         negative_prompt: if is_base {
             "blurry".to_owned()
         } else {
@@ -482,11 +492,12 @@ impl CandleStrictControl for ZImageStrictControl {
             height: self.height,
             steps: self.steps as usize,
             control_scale: self.control_scale,
-            guidance: self.is_base.then_some(self.guidance),
-            negative_prompt: self
-                .is_base
-                .then(|| self.negative_prompt.clone())
-                .filter(|value| !value.trim().is_empty()),
+            guidance: Some(self.guidance),
+            sampler: self.sampler.clone(),
+            scheduler: self.scheduler.clone(),
+            scheduler_shift: self.scheduler_shift,
+            negative_prompt: (!self.negative_prompt.trim().is_empty())
+                .then(|| self.negative_prompt.clone()),
             seed,
             // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
             use_pid: self.load_spec.pid.is_some(),
@@ -671,6 +682,8 @@ pub(super) async fn generate_candle_zimage_control_stream(
         );
     }
 
+    let (sampler, scheduler, scheduler_shift) =
+        super::sampling::read_advanced_sampling_knobs(&request.advanced);
     let provider = ZImageStrictControl {
         snapshot: base,
         load_spec: selected_spec,
@@ -683,6 +696,9 @@ pub(super) async fn generate_candle_zimage_control_stream(
         control_scale,
         is_base,
         guidance,
+        sampler,
+        scheduler,
+        scheduler_shift,
         negative_prompt,
         engine_id,
         adapters,
