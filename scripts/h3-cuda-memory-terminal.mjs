@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { fileSha256 } from './lib/file-sha256.mjs';
 import { OwnedService, ProcessObservations, processSample, assertQueuedMatchesSubmitted, bindCompletedMedia, hardware } from './h3-finetune-terminal-runtime.mjs';
 import { runScenario } from './h3-finetune-terminal-api.mjs';
-import { authorized, sourcePair, verifyRenderedContent, decodedDelta, validateAVAgainstRequest } from './h3-finetune-terminal.mjs';
+import { authorized, sourcePair, verifyRenderedContent, decodedDelta, decodeAV, validateAVAgainstRequest } from './h3-finetune-terminal.mjs';
 
 const exec=promisify(execFile), GIB=1024**3;
 const json=async file=>JSON.parse(await readFile(file,'utf8'));
@@ -21,6 +21,43 @@ const SOURCES={
   predictor:{repo:'Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview',revision:'9a1fd3a41b4a754a7886e64e82edbddf599fd1bd',files:['minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors']},
   turbo:{repo:'lightx2v/Minimax-h3-Turbo',revision:'5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1',files:['minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors']},
 };
+// One previously accepted uncapped control, never a general anchor-resume mechanism.
+export const RETAINED_WORKSTATION=Object.freeze({
+  jobId:'job_b29fc9a4c1047efdabebe4eaaea1b754',
+  sourcePair:Object.freeze({sceneworks:'66b5d26d94676914eba718a9af3d4c2ad3561099',inference:'073e34f21382dc25ef711e0620ebf16bc7e74b6d'}),
+  runUrl:'https://github.com/SceneWorks/SceneWorks/actions/runs/42184091082',
+  binarySha256:'0437977ead2b1cf7582c59fdaf581952c0b9b04001bceaeb90eaf9a8e38af03a',
+  mediaSha256:'6fe29ea7d18c1288ff5b2e4e906455f989e4a16d1f20fb01d11032e08661fb6c',
+  files:Object.freeze({
+    'workstation-veda/result.json':'fe48b66bfaac3bd093a18188bed529af512be0fcfd57699efdd5be5606c4e5c4',
+    'workstation-veda/service-build.json':'b34facb80e9fb1fee0032b01b38cac4b7cbbf6ed00ab3564d1a18e650a7cc79b',
+    'workstation-veda/exits-1.json':'288878029bce877fd4318fdb4a9588c04eec2f8c4f5b62dc52754b65ea641c8e',
+    'hardware.json':'6b5a14871376735772c404b00c5fbbe86e73fcbbec988d21a7f75c18e8b020e1',
+    'staged-models.json':'1e4f6d59ddd436cfb032968f1e1e4ccc28d4e47861cf264ba94400740ed5f04c',
+    'request.json':'3d1f60aa44a8dfb85541353374f6e8cc75e009ddd6757b423ac2ea8694a87c71',
+  }),
+});
+const RETAINED_ENGINE_PATHS=[
+  'crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs',
+  'crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool.rs',
+  'crates/media/candle-gen/vendor/candle-core/src/cuda_backend/proof_pool/recovery.rs',
+  'crates/media/candle-gen/vendor/candle-core/src/lib.rs',
+  'crates/media/candle-gen/vendor/candle-core/VENDORED.md',
+  'crates/media/candle-gen/candle-gen/tests/cuda_proof_pool.rs',
+  'scripts/ci/cuda_memory_envelope_proof.py','scripts/tests/test_cuda_memory_envelope_proof.py',
+  'scripts/ci/safe_controls.json','scripts/check_model_inference_policy.py','scripts/tests/test_test_suites.py',
+];
+const RETAINED_PIN_METADATA=[
+  'config/anchor-loader-closures.json','config/inference-provider-closures.json','config/inference-third-party-source.json',
+];
+const RETAINED_CONTROLLER_PATHS=[
+  'scripts/h3-cuda-memory-terminal.mjs','scripts/h3-cuda-memory-terminal.test.mjs',
+  'docs/testing/sw-f329-cuda-memory-terminal.md','.github/workflows/h3-cuda-memory-terminal.yml',
+];
+const RETAINED_CI_PATHS=[
+  '.github/workflows/server-candle-linux.yml','scripts/select-linux-flash-cache.mjs','scripts/server-candle-linux-workflow.test.mjs',
+];
+const RETAINED_EQUIVALENCE=Symbol('validated SW-F329 uncapped control equivalence');
 const sha40=value=>assert.match(value??'',/^[a-f0-9]{40}$/,'exact source revision required');
 const sha64=value=>assert.match(value??'',/^[a-f0-9]{64}$/,'exact input content commitment required');
 const bytes=(value,name)=>assert.ok(Number.isSafeInteger(value)&&value>0,`${name}: positive integer bytes required`);
@@ -47,6 +84,13 @@ export function validatePlan(p){
     assert.ok(source.root.replaceAll('\\','/').endsWith(`/models--${spec.repo.replaceAll('/','--')}/snapshots/${source.revision}`),'source root must identify its exact HF snapshot');
   }
   absolute(p.primitiveProof.directory);assert.match(p.primitiveProof.runUrl,/^https:\/\/github\.com\/SceneWorks\/inference\/actions\/runs\/\d+$/);
+  if(p.primitiveProof.revision!==undefined)sha40(p.primitiveProof.revision);
+  if(p.retainedWorkstation!==undefined){
+    const r=p.retainedWorkstation;absolute(r.campaignDirectory);absolute(r.sourceAuditPath);sha64(r.sourceAuditSha256);
+    assert.equal(r.runUrl,RETAINED_WORKSTATION.runUrl);if(r.binaryPath!==undefined)absolute(r.binaryPath);
+    assert.equal(p.seed,42);assert.equal(p.workstationDeviceBytes,95*GIB);
+    assert.equal(p.poolBytes,21*GIB);assert.equal(p.externalReserveBytes,3*GIB);
+  }
   absolute(p.materializingProof.logPath);sha40(p.materializingProof.revision);
   assert.match(p.materializingProof.runUrl,/^https:\/\/github\.com\/SceneWorks\/inference\/actions\/runs\/\d+$/);
   return p;
@@ -114,11 +158,18 @@ export function validateMaterializingProofLog(log){
 export const VEDA_EQUIVALENCE = Object.freeze({video:0.001,audio:0.001,
   basis:'sc-26691 CUDA same-backend maximumBaselineDelta=0.001; full native decoded RGB and stereo PCM RMS'});
 
-export function validateVedaParityPair(records){
+export function validateVedaParityPair(records,{sourceEquivalence}={}){
   const take=id=>{const found=records.filter(r=>r.id===id);assert.equal(found.length,1,`one actual ${id} anchor required`);return found[0];};
   const resident=take('workstation-veda'),streamed=take('24gib-veda-sparse');
   assert.notEqual(resident.job?.id,streamed.job?.id,'independent completed generations required');
-  assert.deepEqual(resident.sourcePair,streamed.sourcePair,'Veda parity source pair changed');
+  if(sourceEquivalence){
+    assert.equal(sourceEquivalence[RETAINED_EQUIVALENCE],true,'source equivalence must be verified against actual Git objects');
+    assert.equal(resident.job?.id,RETAINED_WORKSTATION.jobId);
+    assert.deepEqual(resident.sourcePair,RETAINED_WORKSTATION.sourcePair);
+    assert.deepEqual(sourceEquivalence.originalSourcePair,resident.sourcePair);
+    assert.deepEqual(sourceEquivalence.targetSourcePair,streamed.sourcePair);
+    assert.equal(resident.media?.[0]?.sha256,RETAINED_WORKSTATION.mediaSha256);
+  }else assert.deepEqual(resident.sourcePair,streamed.sourcePair,'Veda parity source pair changed');
   sha40(resident.sourcePair?.sceneworks);sha40(resident.sourcePair?.inference);
   assert.deepEqual(resident.settings,streamed.settings,'Veda parity changed creative settings');
   const witnesses=[];
@@ -205,13 +256,13 @@ export async function compareDecodedMedia(a,b,dir,{videoElements,audioSamples,au
   finally{await Promise.all(raw.map(file=>rm(file,{force:true})));}
 }
 
-export async function compareVedaAnchors(records,output,{compare=compareDecodedMedia}={}){
+export async function compareVedaAnchors(records,output,{compare=compareDecodedMedia,sourceEquivalence}={}){
   let report={kind:'cuda-veda-resident-window-equivalence',passed:false,policy:VEDA_EQUIVALENCE};
   try{
-    const {resident,streamed,witnesses}=validateVedaParityPair(records);
+    const {resident,streamed,witnesses}=validateVedaParityPair(records,{sourceEquivalence});
     const files=[resident,streamed].map(record=>path.join(output,record.id,record.media[0].av));
     for(const [i,file] of files.entries())assert.equal(await fileSha256(file),witnesses[i].sha256,'bound parity media changed');
-    report={...report,sourcePair:resident.sourcePair,anchors:witnesses};
+    report={...report,sourcePair:sourceEquivalence?undefined:resident.sourcePair,sourcePairs:{resident:resident.sourcePair,streamed:streamed.sourcePair},sourceEquivalence,anchors:witnesses};
     const verification=validateAVAgainstRequest(resident.media[0].decoded,resident.settings,{model:'minimax_h3',fps:24,width:1344,height:768,audio:{required:true,sampleRate:32000,channels:2,codec:'aac'}});
     report.comparison=await compare(...files,output,{videoElements:1344*768*345*3,audioSamples:verification.audio.expectedSamples,audioPadding:verification.audio.frameSamples+1});
     for(const [i,file] of files.entries())assert.equal(await fileSha256(file),witnesses[i].sha256,'bound parity media changed while decoding');
@@ -314,13 +365,196 @@ export async function materializingProofSources(inferenceRoot,reference,target,c
   return sources;
 }
 
+export async function retainedWorkstationSources(swRoot,inferenceRoot,target,audit,command=exec){
+  const originalSourcePair=RETAINED_WORKSTATION.sourcePair;
+  sha40(target.sceneworks);sha40(target.inference);
+  assert.equal(audit.kind,'sw-f329-uncapped-workstation-source-equivalence-v1');
+  assert.deepEqual(audit.originalSourcePair,originalSourcePair);assert.deepEqual(audit.targetSourcePair,target);
+  assert.equal(audit.uncappedAllocatorPreserved,true,'reviewed uncapped allocation equivalence required');
+  assert.match(audit.reviewUrl,/^https:\/\/github\.com\/SceneWorks\/inference\/pull\/\d+$/);
+  const git=async(root,args)=>(await command('git',args,{cwd:root})).stdout.trim();
+  const object=async(root,revision,file)=>{
+    const row=await git(root,['ls-tree',revision,'--',file]);
+    if(!row)return null;const match=row.match(/^\d+ (?:blob|tree) ([a-f0-9]{40})\t/);assert.ok(match,'invalid Git object receipt');return match[1];
+  };
+  const audited=async(root,from,to,entries,allowed)=>{
+    assert.ok(Array.isArray(entries));const paths=new Set();
+    for(const entry of entries){
+      assert.ok(allowed.includes(entry.path),'retention cannot exempt an arbitrary source path');assert.ok(!paths.has(entry.path));paths.add(entry.path);
+      if(entry.before!==null)sha40(entry.before);sha40(entry.after);
+      assert.equal(await object(root,from,entry.path),entry.before,'reviewed original source object changed');
+      assert.equal(await object(root,to,entry.path),entry.after,'reviewed target source object changed');
+    }
+    return paths;
+  };
+  const changed=async(root,from,to)=>(await git(root,['diff','--name-only','--no-renames',from,to])).split('\n').filter(Boolean);
+  const engineFrom=originalSourcePair.inference,engineTo=target.inference;
+  await git(inferenceRoot,['merge-base','--is-ancestor',engineFrom,engineTo]);
+  const enginePaths=await audited(inferenceRoot,engineFrom,engineTo,audit.engineChanges,RETAINED_ENGINE_PATHS);
+  assert.deepEqual((await changed(inferenceRoot,engineFrom,engineTo)).sort(),[...enginePaths].sort(),'engine changes extend beyond reviewed capped allocator/primitive sources');
+  const swFrom=originalSourcePair.sceneworks,swTo=target.sceneworks;
+  await git(swRoot,['merge-base','--is-ancestor',swFrom,swTo]);
+  const metadataPaths=await audited(swRoot,swFrom,swTo,audit.consumerPinMetadata,RETAINED_PIN_METADATA);
+  const ciPaths=await audited(swRoot,swFrom,swTo,audit.consumerCiChanges??[],RETAINED_CI_PATHS);
+  const consumerChanges=[];
+  for(const file of await changed(swRoot,swFrom,swTo)){
+    if(file==='Cargo.lock'||file==='Cargo.toml'||/^crates\/[^/]+\/Cargo\.toml$/.test(file)){
+      const before=await git(swRoot,['show',`${swFrom}:${file}`]),after=await git(swRoot,['show',`${swTo}:${file}`]);
+      assert.equal(before.replaceAll(engineFrom,engineTo),after,'retained control cannot cross a dependency/configuration change');
+    }else if(file==='.github/workflows/h3-cuda-memory-terminal.yml'){
+      const before=await git(swRoot,['show',`${swFrom}:${file}`]),after=await git(swRoot,['show',`${swTo}:${file}`]);
+      const shallow='path: sceneworks\n          fetch-depth: 1';assert.equal(before.split(shallow).length,2);
+      assert.equal(before.replace(shallow,'path: sceneworks\n          fetch-depth: 128'),after,'manual source/configuration changed beyond reference history checkout');
+    }else if(ciPaths.has(file)){
+      if(file==='.github/workflows/server-candle-linux.yml'){
+        const outside=source=>{
+          const matches=[...source.matchAll(/^  build-candle:\n/gm)];assert.equal(matches.length,1,'one standard Linux build job required');
+          const start=matches[0].index,end=source.slice(start+matches[0][0].length).search(/^  [A-Za-z0-9_-]+:\n/m);
+          return source.slice(0,start)+(end<0?'':source.slice(start+matches[0][0].length+end));
+        };
+        assert.equal(outside(await git(swRoot,['show',`${swFrom}:${file}`])),outside(await git(swRoot,['show',`${swTo}:${file}`])),'CI retention exception extends beyond standard Linux build-candle');
+      }
+    }else assert.ok(metadataPaths.has(file)||RETAINED_CONTROLLER_PATHS.includes(file),`retained control application source changed: ${file}`);
+    consumerChanges.push({path:file,before:await object(swRoot,swFrom,file),after:await object(swRoot,swTo,file)});
+  }
+  assert.ok([...metadataPaths].every(file=>consumerChanges.some(row=>row.path===file)),'unused metadata exemption');
+  assert.ok([...ciPaths].every(file=>consumerChanges.some(row=>row.path===file)),'unused CI exemption');
+  return {kind:audit.kind,originalSourcePair,targetSourcePair:target,uncappedAllocatorPreserved:true,engineChanges:audit.engineChanges,consumerChanges,
+    reviewUrl:audit.reviewUrl,scope:'only this original uncapped control; reviewed cap-only engine change, exact remaining application/operator/kernel/build sources',
+    [RETAINED_EQUIVALENCE]:true};
+}
+
+export function validateRetainedWorkstationRecord(record,request){
+  assert.equal(record.id,'workstation-veda');assert.equal(record.passed,true);assert.equal(record.job?.id,RETAINED_WORKSTATION.jobId);
+  assert.deepEqual(record.sourcePair,RETAINED_WORKSTATION.sourcePair);assert.deepEqual(record.settings,request);
+  assert.equal(record.job.status,'completed');assert.equal(record.job.requestedGpu,'1');assert.equal(record.job.assignedGpu,'1');
+  for(const field of ['error','shutdownError','observationError','binaryError'])assert.equal(record[field],undefined,'failed/partial control cannot be retained');
+  assertQueuedMatchesSubmitted({...request,projectId:record.job.payload?.projectId},record.job);
+  const metrics=record.generationMetrics;assert.equal(metrics.backend,'cuda');assert.equal(metrics.steps,8);assert.equal(metrics.seed,42);
+  assert.equal(metrics.width,1344);assert.equal(metrics.height,768);assert.equal(metrics.quantBits,4);
+  assert.equal(record.media?.length,1);const media=record.media[0];assert.equal(media.jobId,record.job.id);
+  assert.equal(media.sha256,RETAINED_WORKSTATION.mediaSha256);assert.equal(media.decoded?.sha256,media.sha256);
+  assert.equal(media.av,path.basename(media.av));
+  validateAVAgainstRequest(media.decoded,request,{model:'minimax_h3',fps:24,width:1344,height:768,audio:{required:true,sampleRate:32000,channels:2,codec:'aac'}});
+  assert.equal(media.asset?.recipe?.rawAdapterSettings?.effectiveSteps,8);assert.equal(media.asset.recipe.rawAdapterSettings.minimaxH3Tier,'q4');
+  assert.equal(record.content?.frames,345);assert.ok(record.content.spatialStd?.min>=record.content.spatialStd?.floor&&record.content.spatialStd.floor>=0.07);
+  assert.ok(record.observations?.hostPeakBytes>0&&record.observations.devicePeakBytes>0&&record.observations.devicePeakBytes<=95*GIB);
+  assert.ok(record.events?.every(e=>!(e.cap_bytes>0)),'only the uncapped control can be retained');
+  const veda=metrics.vedaExecution??metrics.veda_execution;assert.equal(veda?.requested,true);assert.ok(veda.sparseCalls>0);
+  assert.ok(!veda.fallbackReason);assert.equal(veda.kernel,'cuda-veda-sage-int8-tiled-v2');
+  const selections=record.events.filter(e=>e.event==='video_memory_strategy_selected'&&e.route==='minimax_h3');
+  assert.ok(selections.length&&selections.every(e=>e.request_frames===345&&e.strategy==='Resident'));
+  assert.equal(record.events.filter(e=>e.event==='h3_transformer_window_materialized').length,0);
+  const executions=record.events.filter(e=>e.event==='h3_attention_execution');assert.equal(executions.length,1);
+  assert.equal(executions[0].transformer_window,'None');assert.equal(executions[0].transformer_component,'None');
+  return record;
+}
+
+export function retainedWorkstationWeights(reference,current,sources){
+  const normalize=receipt=>{
+    assert.equal(receipt.kind,'sw-f329-staged-models');assert.ok(receipt.files?.length>0);
+    assert.deepEqual([...new Set(receipt.files.map(file=>file.role))].sort(),Object.keys(SOURCES).sort(),'all original source roles required');
+    assert.equal(new Set(receipt.files.map(file=>`${file.role}/${file.relative}`)).size,receipt.files.length,'duplicate retained source file');
+    return receipt.files.map(file=>{
+      const spec=SOURCES[file.role];assert.ok(spec,'unknown retained weight role');assert.equal(file.repo,spec.repo);assert.equal(file.revision,sources[file.role].revision);
+      sha64(file.sha256);bytes(file.bytes,'retained source bytes');assert.ok(typeof file.relative==='string'&&!file.relative.includes('..'));
+      return {role:file.role,repo:file.repo,revision:file.revision,relative:file.relative,bytes:file.bytes,sha256:file.sha256};
+    }).sort((a,b)=>`${a.role}/${a.relative}`.localeCompare(`${b.role}/${b.relative}`));
+  };
+  assert.deepEqual(reference.sourcePair,RETAINED_WORKSTATION.sourcePair);
+  assert.deepEqual(normalize(reference),normalize(current),'actual staged source weight commitments differ');
+}
+
+export function retainedWorkstationHardware(reference,current){
+  const selected=hardware=>{
+    const cuda=hardware.cuda,device=cuda?.selectedPhysicalDevice;assert.equal(device?.nvmlIndex,1);
+    assert.equal(device.uuid,'GPU-e4b79931-7be6-f216-460a-f5405cfafffe');assert.equal(cuda.cudaVisibleDevices,device.uuid);assert.equal(cuda.cudaDeviceOrder,'PCI_BUS_ID');
+    return {device,driver:hardware.driver};
+  };
+  assert.deepEqual(selected(reference),selected(current),'retained control hardware/driver changed');
+}
+
+export function retainedWorkstationBuild(reference,current,target){
+  assert.equal(reference.sha256,RETAINED_WORKSTATION.binarySha256);sha64(current.sha256);
+  if(target){assert.equal(current.sceneworks,target.sceneworks);assert.equal(current.inference,target.inference);}
+  const configuration=build=>{
+    assert.equal(build.backend,'cuda');assert.equal(build.configuration?.proof_kind,'campaign_native');
+    assert.deepEqual(build.configuration.command,build.command,'native build receipt commands disagree');
+    const command=[...build.command],index=command.indexOf('--manifest-path');assert.ok(index>=0);command[index+1]='<owned-manifest>';
+    assert.ok(command.includes('release')&&command.includes('sceneworks-rust-api/h3-memory-proof'));
+    return {command,flags:build.configuration.flags};
+  };
+  assert.deepEqual(configuration(reference),configuration(current),'retained control native build configuration changed');
+}
+
+async function retainWorkstation(p,swRoot,inferenceRoot,output,request){
+  const spec=p.retainedWorkstation,root=spec.campaignDirectory,original={};
+  for(const [file,digest] of Object.entries(RETAINED_WORKSTATION.files)){
+    const input=path.join(root,file);assert.equal(await fileSha256(input),digest,`accepted control receipt changed: ${file}`);original[file]=await json(input);
+  }
+  const record=validateRetainedWorkstationRecord(original['workstation-veda/result.json'],request);
+  assert.ok(record.observations.hostPeakBytes<=p.hostBudgetBytes,'retained control exceeded the declared host observation budget');
+  assert.equal(original['request.json'].originalSeed,null);assert.equal(original['request.json'].chosenSeed,42);
+  assert.deepEqual(original['request.json'].request,request);assert.deepEqual(anchorRequest(original['request.json'].original,42),request);
+  for(const exit of ['workerExit','apiExit']){assert.equal(original['workstation-veda/exits-1.json'][exit]?.code,0);assert.equal(original['workstation-veda/exits-1.json'][exit]?.signal,null);}
+  const build=original['workstation-veda/service-build.json'];assert.equal(build.sha256,RETAINED_WORKSTATION.binarySha256);
+  assert.equal(build.sceneworks,record.sourcePair.sceneworks);assert.equal(build.inference,record.sourcePair.inference);
+  assert.equal(await fileSha256(spec.binaryPath??build.binary),build.sha256,'original accepted executable bytes changed or are unavailable');
+  assert.equal(await fileSha256(spec.sourceAuditPath),spec.sourceAuditSha256,'source equivalence review changed');
+  const sourceEquivalence=await retainedWorkstationSources(swRoot,inferenceRoot,{sceneworks:p.sceneworks,inference:p.inference},await json(spec.sourceAuditPath));
+  const dir=path.join(output,'workstation-veda');await mkdir(dir);
+  for(const file of Object.keys(RETAINED_WORKSTATION.files)){
+    const destination=path.join(dir,'original',file);await mkdir(path.dirname(destination),{recursive:true});await copyFile(path.join(root,file),destination);
+    assert.equal(await fileSha256(destination),RETAINED_WORKSTATION.files[file]);
+  }
+  await copyFile(spec.sourceAuditPath,path.join(dir,'source-equivalence-review.json'));
+  assert.equal(await fileSha256(path.join(dir,'source-equivalence-review.json')),spec.sourceAuditSha256);
+  const media=record.media[0],source=path.join(root,'workstation-veda',media.av),target=path.join(dir,media.av);
+  assert.equal(await fileSha256(source),media.sha256,'accepted reference media changed');
+  try{await link(source,target);}catch(error){if(error.code!=='EXDEV')throw error;await copyFile(source,target);}
+  assert.equal(await fileSha256(target),media.sha256,'retained reference media copy changed');
+  const decoded=await decodeAV(target);assert.equal(decoded.sha256,media.sha256);
+  validateAVAgainstRequest(decoded,request,{model:'minimax_h3',fps:24,width:1344,height:768,audio:{required:true,sampleRate:32000,channels:2,codec:'aac'}});
+  const content=await verifyRenderedContent(target);assert.equal(content.frames,345);
+  // Preserve the original measured result/build bytes and source pair. Revalidation has its own receipt.
+  await copyFile(path.join(root,'workstation-veda/result.json'),path.join(dir,'result.json'));
+  await copyFile(path.join(root,'workstation-veda/service-build.json'),path.join(dir,'service-build.json'));
+  const retention={kind:'retained-original-uncapped-workstation',runUrl:spec.runUrl,jobId:record.job.id,originalSourcePair:record.sourcePair,
+    originalReceipts:RETAINED_WORKSTATION.files,binarySha256:build.sha256,mediaSha256:media.sha256,sourceAuditSha256:spec.sourceAuditSha256,sourceAuditFile:'source-equivalence-review.json',sourceEquivalence,
+    revalidated:{decoded,content},meaning:'original95GiB execution retained; no new workstation measurement or current-source relabel'};
+  await save(path.join(dir,'retention.json'),retention);
+  return {record,build,hardware:original['hardware.json'],weights:original['staged-models.json'],sourceEquivalence,retention};
+}
+
+export async function primitiveProofSource(inferenceRoot,measured,target,command=exec){
+  sha40(measured);sha40(target);
+  await command('git',['merge-base','--is-ancestor',measured,target],{cwd:inferenceRoot});
+  const tree=async revision=>{
+    const object=(await command('git',['rev-parse','--verify',`${revision}^{tree}`],{cwd:inferenceRoot})).stdout.trim();
+    sha40(object);return object;
+  };
+  const measuredTree=await tree(measured),targetTree=await tree(target);
+  assert.equal(measuredTree,targetTree,'primitive proof requires identical complete source trees');
+  return {measuredRevision:measured,targetRevision:target,tree:measuredTree,scope:'original execution; ancestor with identical complete source tree'};
+}
+
+export function validatePrimitiveProofLog(log){
+  assert.match(log,/test result: ok\. 1 passed; 0 failed; 0 ignored/);
+  const marker=log.match(/CUDA_PROOF_POOL_EVIDENCE (\{[^\n]+\})/);assert.ok(marker,'positive allocator enforcement evidence required');
+  const primitive=JSON.parse(marker[1]);
+  for(const field of ['overCapRefused','bothConstructors','cublasStreamResetRebound','fragmentationRecoveryExercised'])assert.equal(primitive[field],true,`allocator primitive must prove ${field}`);
+  assert.ok(primitive.reservedHighBytes<=primitive.capBytes);return primitive;
+}
+
 async function retainedProofs(p,inferenceRoot){
-  assert.equal((await readFile(path.join(p.primitiveProof.directory,'source.txt'),'utf8')).trim(),p.inference,'primitive allocator proof must name the accepted inference main commit');
+  const measured=p.primitiveProof.revision??p.inference;
+  assert.equal((await readFile(path.join(p.primitiveProof.directory,'source.txt'),'utf8')).trim(),measured,'primitive allocator proof must name its original measured source');
+  const primitiveSource=await primitiveProofSource(inferenceRoot,measured,p.inference);
   const log=await readFile(path.join(p.primitiveProof.directory,'allocator-proof.log'),'utf8');
-  assert.match(log,/test result: ok\. 1 passed; 0 failed; 0 ignored/);const marker=log.match(/CUDA_PROOF_POOL_EVIDENCE (\{[^\n]+\})/);assert.ok(marker,'positive allocator enforcement evidence required');const primitive=JSON.parse(marker[1]);assert.equal(primitive.overCapRefused,true);assert.equal(primitive.bothConstructors,true);assert.equal(primitive.cublasStreamResetRebound,true);assert.ok(primitive.reservedHighBytes<=primitive.capBytes);
+  const primitive=validatePrimitiveProofLog(log);
   const numericLog=await readFile(p.materializingProof.logPath,'utf8'),materializing=validateMaterializingProofLog(numericLog);
   const sources=await materializingProofSources(inferenceRoot,p.materializingProof.revision,p.inference);
-  return {primitive:{...primitive,runUrl:p.primitiveProof.runUrl},materializing:{...materializing,revision:p.materializingProof.revision,sources,runUrl:p.materializingProof.runUrl,logSha256:await fileSha256(p.materializingProof.logPath)}};
+  return {primitive:{...primitive,source:primitiveSource,runUrl:p.primitiveProof.runUrl},materializing:{...materializing,revision:p.materializingProof.revision,sources,runUrl:p.materializingProof.runUrl,logSha256:await fileSha256(p.materializingProof.logPath)}};
 }
 
 export async function run(p,swRoot,inferenceRoot,output){
@@ -329,16 +563,21 @@ export async function run(p,swRoot,inferenceRoot,output){
   await mkdir(output);await sourcePair({...p,output},swRoot,inferenceRoot);assert.equal(await fileSha256(p.requestPath),p.requestSha256,'original request changed');
   const original=await json(p.requestPath),request=anchorRequest(original,p.seed);await save(path.join(output,'request.json'),{original,chosenSeed:p.seed,originalSeed:original.seed,request});
   const proofs=await retainedProofs(p,inferenceRoot);await save(path.join(output,'focused-proofs.json'),proofs);
+  const retained=p.retainedWorkstation?await retainWorkstation(p,swRoot,inferenceRoot,output,request):undefined;
   const inventory=await hardware('cuda',process.env.CUDA_VISIBLE_DEVICES);await save(path.join(output,'hardware.json'),inventory);
+  if(retained)retainedWorkstationHardware(retained.hardware,inventory);
   const staged=await stageModels(p,output),results=[];
+  if(retained)retainedWorkstationWeights(retained.weights,staged,p.sources);
   const anchors=[['workstation-veda',false,false],['24gib-veda-dense',true,true],['24gib-veda-sparse',true,false]];
   for(const [id,capped,forceDense] of anchors){
+    if(id==='workstation-veda'&&retained){results.push(retained.record);continue;}
     const dir=path.join(output,id);await mkdir(dir);const parameters={...p,output};
     const c={id,backend:'cuda',timeoutSeconds:p.timeoutSeconds,loadHostBudgetBytes:p.hostBudgetBytes,loadDeviceBudgetBytes:capped?24*GIB:p.workstationDeviceBytes,declaredSourceBindings:[{family:'h3',model:{modelId:'minimax_h3',baseModel:'minimax_h3'}}],runtime:{port:0,gpuId:'1',deviceId:process.env.CUDA_VISIBLE_DEVICES,cudaProofFeatures:['sceneworks-rust-api/h3-memory-proof'],memoryCap:capped?{kind:'cuda-vram-gb',value:24}:undefined,cudaProofEnvironment:capped?{SCENEWORKS_CUDA_PROOF_POOL_BYTES:String(p.poolBytes),...(forceDense?{SCENEWORKS_H3_VEDA_FORCE_DENSE:'1'}:{})}:{}}};
     const service=new StockService(parameters,c,swRoot,inferenceRoot,dir,{hardDeadlineMs:Date.now()+(p.timeoutSeconds+900)*1000});service.staged=staged;
     let observer,currentStage='before-submit',record={id,sourcePair:{sceneworks:p.sceneworks,inference:p.inference},settings:request,startedAt:new Date().toISOString(),passed:false};
     try{
-      await service.initialize();observer=new ProcessObservations(service,{intervalMs:250,sample:async s=>({...await processSample(s),stage:currentStage})}).start();
+      await service.initialize();if(retained){const build=await json(path.join(dir,'service-build.json'));assert.equal(build.sha256,service.binaryHash);retainedWorkstationBuild(retained.build,build,{sceneworks:p.sceneworks,inference:p.inference});}
+      observer=new ProcessObservations(service,{intervalMs:250,sample:async s=>({...await processSample(s),stage:currentStage})}).start();
       const transcript=[],scenario={caseId:id,baseUrl:'http://127.0.0.1:0',timeoutSeconds:p.timeoutSeconds,steps:[{id:'project',method:'POST',path:'/api/v1/projects',body:{name:`SW-F329 ${id}`},expectedStatus:201},{id:'submit',method:'POST',path:'/api/v1/video/jobs',body:{...request,projectId:{$capture:'project/id'}},expectedStatus:201},{id:'complete',waitJob:{$capture:'submit/id'},assert:[{pointer:'/status',equals:'completed'}]}]};
       const executed=await runScenario(scenario,{baseUrl:()=>service.baseUrl,fetchImpl:(...args)=>service.fetch(...args),beforeStep:({step,captures})=>service.checkStep(step,captures),onRecord:async row=>{transcript.push(row);if(row.result?.stage)currentStage=row.result.stage;if(row.method==='POST'&&row.route==='/api/v1/video/jobs'&&row.result?.id)service.jobs.add(row.result.id);await writeFile(path.join(dir,'api-transcript.json'),JSON.stringify(transcript,null,2)+'\n');}});
       const job=executed.captures.complete;record.job=job;assertQueuedMatchesSubmitted({...request,projectId:executed.captures.project.id},job);
@@ -357,8 +596,12 @@ export async function run(p,swRoot,inferenceRoot,output){
     finally{if(observer)try{record.observations=await observer.finish();}catch(error){record.observationError=error.message;}if(service.worker)try{await service.stop();}catch(error){record.passed=false;record.shutdownError=error.message;}if(service.binary)try{assert.equal(await fileSha256(service.binary),service.binaryHash,'owned executable changed during the anchor');}catch(error){record.passed=false;record.binaryError=error.message;}record.endedAt=new Date().toISOString();await save(path.join(dir,'result.json'),record);}
     assert.equal(record.passed,true,record.shutdownError);results.push(record);
   }
-  const equivalence=await compareVedaAnchors(results,output);
-  await sourcePair({...p,output},swRoot,inferenceRoot);await save(path.join(output,'result.json'),{feature:'SW-F329',passed:true,equivalence,sourcePair:{sceneworks:p.sceneworks,inference:p.inference},anchors:results.map(result=>({id:result.id,jobId:result.job.id,passed:result.passed,envelope:result.envelope})),proofs});
+  const equivalence=await compareVedaAnchors(results,output,{sourceEquivalence:retained?.sourceEquivalence});
+  if(retained){
+    assert.equal(await fileSha256(p.retainedWorkstation.sourceAuditPath),p.retainedWorkstation.sourceAuditSha256);
+    await retainedWorkstationSources(swRoot,inferenceRoot,{sceneworks:p.sceneworks,inference:p.inference},await json(p.retainedWorkstation.sourceAuditPath));
+  }
+  await sourcePair({...p,output},swRoot,inferenceRoot);await save(path.join(output,'result.json'),{feature:'SW-F329',passed:true,equivalence,sourcePair:{sceneworks:p.sceneworks,inference:p.inference},anchors:results.map(result=>({id:result.id,jobId:result.job.id,passed:result.passed,sourcePair:result.sourcePair,retained:result.id==='workstation-veda'?retained?.retention:undefined,envelope:result.envelope})),proofs});
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

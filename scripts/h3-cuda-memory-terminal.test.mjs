@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readFile, writeFile, mkdtemp, rm, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdtemp, mkdir as mkdirForTest, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { anchorRequest, validatePlan, validatePoolEvidence, validateMaterializingProofLog, materializingProofSources, validateVedaParityPair, rawNumericDifference, compareDecodedMedia, compareVedaAnchors, VEDA_EQUIVALENCE } from './h3-cuda-memory-terminal.mjs';
+import { anchorRequest, validatePlan, validatePoolEvidence, validateMaterializingProofLog, materializingProofSources, primitiveProofSource, validatePrimitiveProofLog, retainedWorkstationSources, validateRetainedWorkstationRecord, retainedWorkstationWeights, retainedWorkstationHardware, retainedWorkstationBuild, RETAINED_WORKSTATION, validateVedaParityPair, rawNumericDifference, compareDecodedMedia, compareVedaAnchors, VEDA_EQUIVALENCE } from './h3-cuda-memory-terminal.mjs';
 import { privateEnvironment } from './h3-finetune-terminal-runtime.mjs';
 
 const GIB=1024**3;
@@ -88,6 +88,18 @@ test('retained Veda proof maps accounting-only movement and rejects numerical, g
   }
   await assert.rejects(materializingProofSources(root,reference,target,async()=>{throw new Error('missing Git source object');}),/missing Git source object/);
   await assert.rejects(materializingProofSources(root,reference,target,async()=>({stdout:'not-an-object'})),/numerical source object must exist/);
+});
+test('primitive proof retains its measured revision only across an ancestor with the identical whole tree',async()=>{
+  const measured='a'.repeat(40),target='b'.repeat(40),tree='c'.repeat(40),calls=[];
+  const command=async(program,args)=>{assert.equal(program,'git');calls.push(args);return {stdout:tree+'\n'};};
+  const proof=await primitiveProofSource('D:\\unit_fake',measured,target,command);
+  assert.equal(proof.measuredRevision,measured);assert.equal(proof.targetRevision,target);assert.equal(proof.tree,tree);
+  assert.deepEqual(calls[0],['merge-base','--is-ancestor',measured,target]);
+  await assert.rejects(primitiveProofSource('D:\\unit_fake',measured,target,async(_program,args)=>{
+    if(args[0]==='merge-base')throw new Error('not an ancestor');return {stdout:tree};
+  }),/not an ancestor/);
+  await assert.rejects(primitiveProofSource('D:\\unit_fake',measured,target,async(_program,args)=>({stdout:args.at(-1)===`${target}^{tree}`?'d'.repeat(40):tree})),/identical complete source trees/);
+  await assert.rejects(primitiveProofSource('D:\\unit_fake',measured,target,async()=>({stdout:'missing'})),/exact source revision/);
 });
 test('manual wrapper keeps CUDA memory acceptance separate from ordinary CI and runs early startup checks',async()=>{
   const caller=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8');
@@ -184,4 +196,99 @@ test('equivalence failure writes a failed receipt and prevents a two-anchor-only
 test('fixed RMS policy stays bound to the existing same-backend CUDA H3 campaign ceiling',async()=>{
   const prior=JSON.parse(await readFile(new URL('../docs/testing/sc-26691-campaign/h3-terminal-cuda.json',import.meta.url),'utf8'));
   for(const stream of ['video','audio'])assert.equal(VEDA_EQUIVALENCE[stream],prior.bootstrap.operator.maximumBaselineDelta);
+});
+
+function retainedRecord(){
+  const record=parityRecords()[0];record.sourcePair=structuredClone(RETAINED_WORKSTATION.sourcePair);
+  record.job.id=RETAINED_WORKSTATION.jobId;record.job.assignedGpu='1';
+  record.media[0].jobId=record.job.id;record.media[0].sha256=RETAINED_WORKSTATION.mediaSha256;record.media[0].decoded.sha256=record.media[0].sha256;
+  record.media[0].asset={recipe:{rawAdapterSettings:{effectiveSteps:8,minimaxH3Tier:'q4'}}};
+  Object.assign(record.generationMetrics,{backend:'cuda',steps:8,seed:42,width:1344,height:768,quantBits:4});
+  record.generationMetrics.vedaExecution.kernel='cuda-veda-sage-int8-tiled-v2';
+  record.content={frames:345,spatialStd:{min:0.12,floor:0.07}};record.observations={hostPeakBytes:30*GIB,devicePeakBytes:42*GIB};return record;
+}
+
+function sourceReviewFixture({engineExtra=[],consumerExtra=[],graphDrift=false,ciOutsideChange=false,manualOutsideChange=false}={}){
+  const target={sceneworks:'c'.repeat(40),inference:'d'.repeat(40)},before='a'.repeat(40),after='b'.repeat(40);
+  const enginePath='crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs';
+  const metadata='config/inference-provider-closures.json',workflow='.github/workflows/server-candle-linux.yml';
+  const ci=['scripts/select-linux-flash-cache.mjs','scripts/server-candle-linux-workflow.test.mjs',workflow];
+  const audit={kind:'sw-f329-uncapped-workstation-source-equivalence-v1',originalSourcePair:structuredClone(RETAINED_WORKSTATION.sourcePair),targetSourcePair:target,
+    uncappedAllocatorPreserved:true,reviewUrl:'https://github.com/SceneWorks/inference/pull/9999',
+    engineChanges:[{path:enginePath,before,after}],consumerPinMetadata:[{path:metadata,before,after}],
+    consumerCiChanges:ci.map(file=>({path:file,before:file===workflow?before:null,after}))};
+  const command=async(program,args,{cwd})=>{
+    assert.equal(program,'git');
+    if(args[0]==='merge-base')return {stdout:''};
+    if(args[0]==='diff')return {stdout:(cwd==='engine'?[enginePath,...engineExtra]:['Cargo.toml','Cargo.lock',metadata,'scripts/h3-cuda-memory-terminal.mjs','.github/workflows/h3-cuda-memory-terminal.yml',...ci,...consumerExtra]).join('\n')};
+    if(args[0]==='ls-tree'){
+      const file=args.at(-1),old=args[1]===RETAINED_WORKSTATION.sourcePair.inference||args[1]===RETAINED_WORKSTATION.sourcePair.sceneworks;
+      return {stdout:old&&ci.includes(file)&&file!==workflow?'':`100644 blob ${old?before:after}\t${file}`};
+    }
+    assert.equal(args[0],'show');const [revision,file]=args[1].split(':');
+    const old=revision===RETAINED_WORKSTATION.sourcePair.sceneworks;
+    if(file===workflow)return {stdout:`name: fixture\njobs:\n  build-candle:\n    steps: ${old?'old':'new'}\n  other-job:\n    unchanged: ${!old&&ciOutsideChange?'false':'true'}\n`};
+    if(file==='.github/workflows/h3-cuda-memory-terminal.yml')return {stdout:`path: sceneworks\n          fetch-depth: ${old?'1':'128'}\nCUDA_COMPUTE_CAP: ${!old&&manualOutsideChange?'80':'120'}`};
+    return {stdout:`inference = "${old?RETAINED_WORKSTATION.sourcePair.inference:target.inference}"${!old&&graphDrift?'\nother = "changed"':''}`};
+  };
+  return {target,audit,command,verify:(review=audit)=>retainedWorkstationSources('consumer','engine',target,review,command)};
+}
+
+test('only the complete immutable uncapped workstation control can be retained',()=>{
+  validateRetainedWorkstationRecord(retainedRecord(),anchorRequest(original(),42));
+  const mutations=[r=>r.id='24gib-veda-dense',r=>r.passed=false,r=>r.job.id='other-job',r=>r.job.status='failed',r=>r.job.assignedGpu='0',
+    r=>r.sourcePair.inference='f'.repeat(40),r=>r.settings.seed=43,r=>r.generationMetrics.steps=4,r=>r.generationMetrics.quantBits=8,
+    r=>r.media[0].sha256='0'.repeat(64),r=>r.media[0].decoded.streams[0].nb_read_frames=124,r=>r.media[0].decoded.streams[1].channels=1,
+    r=>r.media[0].asset.recipe.rawAdapterSettings.effectiveSteps=4,r=>r.content.frames=124,r=>r.content.spatialStd.min=0,
+    r=>r.observations.devicePeakBytes=96*GIB,r=>r.events.push({cap_bytes:21*GIB}),r=>r.generationMetrics.vedaExecution.sparseCalls=0,
+    r=>r.generationMetrics.vedaExecution.fallbackReason='forced for validation',r=>r.events[0].strategy='BoundedTransformerResidency',
+    r=>r.events[1].transformer_window='Some(1)',r=>r.events.push({event:'h3_transformer_window_materialized'}),r=>r.shutdownError='partial cleanup'];
+  for(const mutate of mutations){const bad=retainedRecord();mutate(bad);assert.throws(()=>validateRetainedWorkstationRecord(bad,anchorRequest(original(),42)));}
+  const p=plan();p.retainedWorkstation={campaignDirectory:'D:\\accepted',sourceAuditPath:'D:\\review.json',sourceAuditSha256:hash,runUrl:RETAINED_WORKSTATION.runUrl};
+  p.poolBytes=21*GIB;p.externalReserveBytes=3*GIB;validatePlan(p);
+  for(const field of ['sourceAuditPath','sourceAuditSha256','runUrl']){const bad=structuredClone(p);delete bad.retainedWorkstation[field];assert.throws(()=>validatePlan(bad));}
+});
+
+test('retention source review allows only exact reviewed cap, pin and standard-build CI objects',async()=>{
+  const fixture=sourceReviewFixture(),verified=await fixture.verify();assert.deepEqual(verified.targetSourcePair,fixture.target);
+  const mutations=[a=>a.uncappedAllocatorPreserved=false,a=>a.targetSourcePair.sceneworks='f'.repeat(40),a=>a.reviewUrl='https://example.com/review',
+    a=>a.engineChanges[0].after='f'.repeat(40),a=>a.engineChanges[0].before='f'.repeat(40),a=>a.engineChanges.push({...a.engineChanges[0]}),
+    a=>a.engineChanges[0].path='crates/media/candle-gen/candle-gen-minimax-h3/src/nn.rs',a=>a.consumerPinMetadata[0].path='config/manifests/builtin.models.jsonc',
+    a=>a.consumerCiChanges=[]];
+  for(const mutate of mutations){const bad=structuredClone(fixture.audit);mutate(bad);await assert.rejects(fixture.verify(bad));}
+  for(const options of [{engineExtra:['crates/kernels/candle-quant-kernels/src/veda_int8.cu']},
+    {consumerExtra:['crates/sceneworks-worker/src/video_jobs/wan.rs']},{graphDrift:true},{ciOutsideChange:true},{manualOutsideChange:true}])await assert.rejects(sourceReviewFixture(options).verify());
+});
+
+test('retained parity needs the verified narrow source mapping and still compares all native AV',async t=>{
+  const fixture=sourceReviewFixture(),sourceEquivalence=await fixture.verify(),resident=retainedRecord(),streamed=parityRecords()[1];
+  streamed.sourcePair=fixture.target;streamed.generationMetrics.vedaExecution=structuredClone(resident.generationMetrics.vedaExecution);
+  assert.throws(()=>validateVedaParityPair([resident,streamed]),/source pair changed/);
+  assert.throws(()=>validateVedaParityPair([resident,streamed],{sourceEquivalence:JSON.parse(JSON.stringify(sourceEquivalence))}),/actual Git objects/);
+  assert.equal(validateVedaParityPair([resident,streamed],{sourceEquivalence}).resident.sourcePair.inference,RETAINED_WORKSTATION.sourcePair.inference);
+  const dir=await directory(t);let calls=0;
+  await mkdirForTest(path.join(dir,'workstation-veda'));await mkdirForTest(path.join(dir,'24gib-veda-sparse'));
+  // The real comparator's hash guard stays active; a fabricated media payload cannot reach decoding.
+  await writeFile(path.join(dir,'workstation-veda','unit_fake.mp4'),'unit_fake');await writeFile(path.join(dir,'24gib-veda-sparse','unit_fake.mp4'),'unit_fake');
+  await assert.rejects(compareVedaAnchors([resident,streamed],dir,{sourceEquivalence,compare:async()=>{calls++;}}),/bound parity media changed/);
+  assert.equal(calls,0);
+});
+
+test('retention independently binds all weight roles, native configuration, physical UUID and driver',()=>{
+  const p=plan(),files=Object.entries(p.sources).map(([role,source])=>({role,repo:({tier:'SceneWorks/minimax-h3-mlx',base:'MiniMaxAI/MiniMax-H3',predictor:'Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview',turbo:'lightx2v/Minimax-h3-Turbo'})[role],revision:source.revision,relative:'unit_fake.safetensors',bytes:1,sha256:hash}));
+  const weights={kind:'sw-f329-staged-models',sourcePair:structuredClone(RETAINED_WORKSTATION.sourcePair),files};retainedWorkstationWeights(weights,weights,p.sources);
+  for(const mutate of [w=>w.files.pop(),w=>w.files.push(w.files[0]),w=>w.files[0].sha256='f'.repeat(64),w=>w.files[0].revision='f'.repeat(40)]){const bad=structuredClone(weights);mutate(bad);assert.throws(()=>retainedWorkstationWeights(weights,bad,p.sources));}
+  const hardware={driver:'unit_fake_driver',cuda:{cudaDeviceOrder:'PCI_BUS_ID',cudaVisibleDevices:'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',selectedPhysicalDevice:{nvmlIndex:1,uuid:'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',name:'unit_fake'}}};retainedWorkstationHardware(hardware,hardware);
+  for(const mutate of [h=>h.driver='different',h=>h.cuda.selectedPhysicalDevice.nvmlIndex=0,h=>h.cuda.cudaVisibleDevices='0']){const bad=structuredClone(hardware);mutate(bad);assert.throws(()=>retainedWorkstationHardware(hardware,bad));}
+  const build={backend:'cuda',sha256:RETAINED_WORKSTATION.binarySha256,command:['cargo','build','--profile','release','--manifest-path','old/Cargo.toml','--features','sceneworks-rust-api/h3-memory-proof'],configuration:{proof_kind:'campaign_native',flags:{RUSTFLAGS:null}}};build.configuration.command=[...build.command];
+  const current=structuredClone(build);current.command[5]='new/Cargo.toml';current.configuration.command=[...current.command];current.sha256=hash;retainedWorkstationBuild(build,current);
+  for(const mutate of [b=>b.command.push('--no-default-features'),b=>b.configuration.flags.RUSTFLAGS='-C target-cpu=native',b=>b.backend='cpu',b=>b.configuration.proof_kind='unit_fake']){const bad=structuredClone(current);mutate(bad);assert.throws(()=>retainedWorkstationBuild(build,bad));}
+});
+
+test('new allocator primitive must actually exercise fragmentation recovery as well as prior enforcement checks',()=>{
+  const evidence={overCapRefused:true,bothConstructors:true,cublasStreamResetRebound:true,fragmentationRecoveryExercised:true,reservedHighBytes:500,capBytes:512};
+  const log=value=>'CUDA_PROOF_POOL_EVIDENCE '+JSON.stringify(value)+'\ntest result: ok. 1 passed; 0 failed; 0 ignored';
+  validatePrimitiveProofLog(log(evidence));
+  for(const field of ['overCapRefused','bothConstructors','cublasStreamResetRebound','fragmentationRecoveryExercised']){const bad={...evidence};delete bad[field];assert.throws(()=>validatePrimitiveProofLog(log(bad)));}
+  assert.throws(()=>validatePrimitiveProofLog(log({...evidence,reservedHighBytes:513})));
 });

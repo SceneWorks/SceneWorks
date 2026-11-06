@@ -32,7 +32,7 @@ jobs:
         with:
           ref: ${{ fromJSON(inputs.plan).sceneworks }}
           path: sceneworks
-          fetch-depth: 1
+          fetch-depth: 128
           persist-credentials: false
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:

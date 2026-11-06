@@ -51,8 +51,9 @@ an unsuccessful child or unverified release cannot produce a passing receipt.
 | `timeoutSeconds` | Per-anchor deadline, maximum7200seconds |
 | `additionalSparse24`, `additionalSparse24Reason` | `true` and the explicit E5 gap: normal resident versus normal streamed Veda AV equivalence |
 | `sources` | `tier`, `base`, `predictor`, `turbo`, each `{root,revision}` identifying the actual installed HF snapshot |
-| `primitiveProof` | `{directory,runUrl}` of downloaded accepted allocator primitive artifacts at the exact inference-main commit |
-| `materializingProof` | `{logPath,revision,runUrl}` for the accepted exact forced-materializing numerical test; H3 source tree must match final inference |
+| `primitiveProof` | `{directory,runUrl,revision?}`; original measured revision defaults to the final pin, otherwise must be its ancestor with an identical complete Git tree |
+| `materializingProof` | `{logPath,revision,runUrl}` for the accepted exact forced-materializing numerical test; the existing45 numerical/layout/getter/build source objects must match final inference |
+| `retainedWorkstation` | Optional, narrowly committed accepted workstation control described below; both24GiB anchors still run fresh |
 
 The source revisions and minimal file domains are fixed in the runner. The real
 q4 tier is `SceneWorks/minimax-h3-mlx@137ce668…`, Veda predictor `9a1fd3a4…`,
@@ -116,6 +117,73 @@ An earlier focused forced-materializing numerical proof remains required:
 Veda-to-dense can still use FlashAttention. Job-stage sampled peaks retain their
 latency/blind spots; the pool watermark is continuous and includes the whole
 process epoch, without resetting away loading/conditioning/decode.
+
+## Retaining the accepted uncapped control after the allocator repair
+
+The optional `retainedWorkstation` applies only to the accepted workstation job
+`job_b29fc9a4c1047efdabebe4eaaea1b754` from run42184091082, consumer
+`66b5d26d94676914eba718a9af3d4c2ad3561099` and inference
+`073e34f21382dc25ef711e0620ebf16bc7e74b6d`. It never reuses a24GiB, failed,
+partial, forced-dense or control-mismatched result. The controller owns exact
+commitments for the original result/build/exits/hardware/staged-model/request
+receipts, binary and media. Original measured source identities remain in the
+copied result; revalidation and current-target equivalence have separate receipts.
+
+Supply `{campaignDirectory,runUrl,sourceAuditPath,sourceAuditSha256,binaryPath?}`.
+`campaignDirectory` contains the retained original campaign; `runUrl` must name
+42184091082. `binaryPath`, when supplied, relocates the original executable only;
+its bytes must still match the committed original hash. All paths are absolute.
+
+Before dispatch, the coordinator must semantically review the actual final
+allocator repair and bind a D:-only source audit with this shape:
+
+```json
+{
+  "kind": "sw-f329-uncapped-workstation-source-equivalence-v1",
+  "originalSourcePair": {"sceneworks": "<original66b5 SHA>", "inference": "<original M2 SHA>"},
+  "targetSourcePair": {"sceneworks": "<final consumer SHA>", "inference": "<accepted M3 main SHA>"},
+  "uncappedAllocatorPreserved": true,
+  "reviewUrl": "https://github.com/SceneWorks/inference/pull/<reviewed repair>",
+  "engineChanges": [{"path": "<code-owned permitted path>", "before": "<original Git object or null for new file>", "after": "<reviewed target Git object>"}],
+  "consumerPinMetadata": [{"path": "<code-owned generated pin metadata path>", "before": "<original Git object>", "after": "<reviewed target Git object>"}],
+  "consumerCiChanges": [{"path": "<code-owned CI-only path>", "before": "<original Git object or null>", "after": "<reviewed target Git object>"}]
+}
+```
+
+This example is not evidence. Populate exact40hex objects after reviewing the
+uncapped early-return allocations and accepting the final source. The controller
+rechecks ancestry, actual objects and the complete engine changed-path set before
+reuse and again before the final success receipt. Its permitted paths are owned
+by code: capped allocator/recovery, their primitive/pure tests and registration,
+documentation, generated consumer pin metadata, and the reviewed standard Linux
+cache CI helper. There are no caller-supplied path exemptions. The CI workflow
+must remain byte-identical outside `build-candle`. All other application/operator/
+kernel/build source stays exact; manifests/lock may change only by substituting
+the accepted inference SHA. The audit's semantic assertion is bound to those exact
+reviewed objects; it is not inferred merely from filenames or a new commit id.
+
+The accepted record must still match the original seed42, request/queued recipe,
+q4/Turbo8/Veda controls, Resident execution, all345frames/audio/content, successful
+cleanup, physical GPU1 UUID and driver, exact weight-file commitments, native
+features/flags and original binary/media hashes. Media is hardlinked/copied into
+the new output and hashed before and after full native AV comparison. The old
+video is decoded and its content is checked again. New staging hashes must match
+all original source roles/files. Each fresh24GiB service still binds its own
+current executable/hash/source and must use the equivalent native configuration.
+
+Only the workstation generation is skipped. Both forced-dense and normal sparse
+24GiB anchors run fresh. The complete original95GiB versus fresh normal24GiB RGB/
+stereo PCM oracle and fixed0.001 ceiling remain mandatory. Output reports both
+actual measured source pairs and the explicit source mapping; nothing relabels
+the old binary or measured peaks as a new-source execution.
+
+The new allocator primitive must additionally report
+`fragmentationRecoveryExercised:true` from its successful-recovery assertion.
+A reviewed-branch primitive may be retained across its ancestor/main merge only
+when the whole source tree is identical, with original revision/run recorded.
+The raw Veda45-object comparison is unchanged: allocator changes in its Candle
+core tree require fresh affected dedicated evidence, rather than this uncapped
+control exception weakening that proof.
 
 Failed anchors retain results and raw traces. Do not retry unchanged candidates
 or enlarge a routine grid. Diagnose and repair the failing boundary, then rerun
