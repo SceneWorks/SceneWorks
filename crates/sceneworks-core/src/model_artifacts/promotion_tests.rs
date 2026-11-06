@@ -296,6 +296,17 @@ fn rows_sharing_one_snapshot_and_a_file_promote_as_one_member() {
 /// files must reach the bundle.
 #[test]
 fn a_moss_shaped_entry_promotes_every_co_requisite_file() {
+    assert_moss_shaped_entry_promotes_every_file(false);
+}
+
+/// Component installs can replace the receipt for the same model/repository/variant. A receipt
+/// for the shared encoder/VAE must not stand in for the transformer's primary declaration.
+#[test]
+fn a_moss_shared_snapshot_receipt_does_not_omit_the_primary_transformer() {
+    assert_moss_shaped_entry_promotes_every_file(true);
+}
+
+fn assert_moss_shaped_entry_promotes_every_file(receipt_is_shared: bool) {
     let temp = tempfile::tempdir().unwrap();
     let data_dir = temp.path().join("data");
     let library = temp.path().join("library");
@@ -330,7 +341,7 @@ fn a_moss_shaped_entry_promotes_every_co_requisite_file() {
             "repo": "owner/moss",
             "modelId": "moss",
             "variant": "default",
-            "resolvedFiles": primary,
+            "resolvedFiles": if receipt_is_shared { shared.as_slice() } else { primary.as_slice() },
             "snapshotRevision": PRIMARY_REVISION,
         }]),
     );
@@ -378,6 +389,16 @@ fn a_moss_shaped_entry_promotes_every_co_requisite_file() {
         bundled("owner/dmd"),
         dmd.iter().map(|file| file.to_string()).collect()
     );
+
+    // An old bundle can be internally complete while missing files the runtime needs. Correct
+    // selection must refuse it so the next job falls back to the installed source snapshot.
+    let mut incomplete = candidate.artifact.clone();
+    for member in &mut incomplete.closure.members {
+        member
+            .files
+            .retain(|file| !file.relative_path.starts_with("transformer"));
+    }
+    assert!(local_artifact_for_requirements(&[incomplete], &selected.requirements).is_none());
 
     let store = ResolvedCacheStore::open(&data_dir).unwrap();
     let outcome = ResolvedCacheMaterializer::new(store)
