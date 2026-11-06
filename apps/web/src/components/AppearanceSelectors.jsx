@@ -40,6 +40,15 @@ function RecipeSelector({ axis, control }) {
     control.setSelection({ ...control.selection, [key]: value });
     if (!multiple) { setOpen(false); trigger.current?.focus(); }
   }
+  function handleKeyDown(event) {
+    if (event.key === "Escape") { setOpen(false); trigger.current?.focus(); }
+    if (event.key === "Enter" && event.target.tagName === "INPUT") {
+      // These controls live inside the generation form. Enter searches or chooses a
+      // recipe; it must never implicitly submit an image/video generation request.
+      event.preventDefault();
+      if (event.target.type !== "search") event.target.click();
+    }
+  }
   const filtered = options.filter((entry) => `${entry.name} ${entry.group}`.toLowerCase().includes(query.toLowerCase()));
   return <div className="style-axis-field appearance-axis" ref={container}>
     <span className="settings-bar-label">{label}</span>
@@ -47,7 +56,7 @@ function RecipeSelector({ axis, control }) {
       <button type="button" className="compact-selector-pill appearance-selector-pill" aria-label={label} aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(!open)} ref={trigger} title={summary}>
         <span className="compact-selector-meta"><strong>{summary}</strong><span>{multiple ? selected.length ? `${selected.length} selected` : "Combine treatments" : "Prompt recipe"}</span></span><Icon.ChevDown className="chev" />
       </button>
-      {open ? <div className="compact-selector-menu appearance-selector-menu" style={position} role="dialog" aria-label={`Choose ${label}`} onKeyDown={(event) => { if (event.key === "Escape") { setOpen(false); trigger.current?.focus(); } }}>
+      {open ? <div className="compact-selector-menu appearance-selector-menu" style={position} role="dialog" aria-label={`Choose ${label}`} onKeyDown={handleKeyDown}>
         <input type="search" aria-label={`Search ${label}`} placeholder={`Search ${label.toLowerCase()}…`} className="style-picker-search" ref={search} value={query} onChange={(event) => setQuery(event.target.value)} />
         <button type="button" className="appearance-clear" onClick={() => { control.setSelection({ ...control.selection, [key]: multiple ? [] : null }); setOpen(false); trigger.current?.focus(); }}>None — clear {label.toLowerCase()}</button>
         <div className="appearance-options">

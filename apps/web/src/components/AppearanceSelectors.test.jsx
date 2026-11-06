@@ -7,7 +7,7 @@ import { AppearanceSelectors, AppearanceNotes } from "./AppearanceSelectors.jsx"
 let root, container;
 function Harness({ model }) {
   const control = useAppearance({ model });
-  return <><AppearanceSelectors control={control} /><AppearanceNotes control={control} /><output>{JSON.stringify(control.selection)}</output></>;
+  return <form onSubmit={(event) => event.preventDefault()}><AppearanceSelectors control={control} /><AppearanceNotes control={control} /><output>{JSON.stringify(control.selection)}</output></form>;
 }
 afterEach(() => { act(() => root?.unmount()); container?.remove(); });
 async function render(model) {
@@ -17,6 +17,36 @@ async function render(model) {
 }
 async function click(selector) { await act(async () => container.querySelector(selector).click()); }
 describe("Appearance selector interactions", () => {
+  it("keeps Enter inside search and activates recipe inputs without submitting the generation form", async () => {
+    root = null;
+    await render({ id: "krea_2_turbo" });
+    async function enter(input) {
+      const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+      await act(async () => input.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(true);
+    }
+    await click('button[aria-label="Camera"]');
+    await enter(container.querySelector('input[type="search"]'));
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(JSON.parse(container.querySelector("output").textContent).camera).toBeNull();
+    const radio = container.querySelector('input[type="radio"]');
+    const cameraName = radio.closest("label").querySelector("strong").textContent;
+    await enter(radio);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Camera"]').textContent).toContain(cameraName);
+    expect(document.activeElement).toBe(container.querySelector('button[aria-label="Camera"]'));
+    await click('button[aria-label="Looks"]');
+    const [first, second] = container.querySelectorAll('input[type="checkbox"]');
+    await enter(first);
+    await enter(second);
+    expect(JSON.parse(container.querySelector("output").textContent).looks).toHaveLength(2);
+    await enter(first);
+    expect(JSON.parse(container.querySelector("output").textContent).looks).toHaveLength(1);
+    const done = [...container.querySelectorAll("button")].find((button) => button.textContent === "Done");
+    const doneEnter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    await act(async () => done.dispatchEvent(doneEnter));
+    expect(doneEnter.defaultPrevented).toBe(false);
+  });
   it("supports searching, multiple looks, keyboard dismissal and model-compatible clearing", async () => {
     root = null;
     await render({ id: "moss_image_base" });
