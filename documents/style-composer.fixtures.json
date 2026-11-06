@@ -192,6 +192,30 @@
       "styleText": "noir",
       "userPrompt": "Description: a rainy street at night",
       "expected": "Style: noir\nDescription: a rainy street at night"
+    },
+    {
+      "name": "appearance-only plain prompt uses Description and selected labeled sections",
+      "styleText": null,
+      "userPrompt": "a fox",
+      "directives": {
+        "Camera": "soft flash",
+        "Film": "fine grain",
+        "Look": "muted color",
+        "Lighting": "window light"
+      },
+      "expected": "Description: a fox\nCamera: soft flash\nFilm: fine grain\nLook: muted color\nLighting: window light"
+    },
+    {
+      "name": "all selected appearance directives merge user refinements once",
+      "styleText": "watercolor",
+      "userPrompt": "Subject: a fox\nCamera: 50mm\nFilm: coarse texture\nLook: blue-gray\nLighting: from the left\nAction: running",
+      "directives": {
+        "Camera": "soft flash",
+        "Film": "fine grain",
+        "Look": "muted color",
+        "Lighting": "window light"
+      },
+      "expected": "Subject: a fox\nStyle: watercolor\nCamera: soft flash, 50mm\nFilm: fine grain, coarse texture\nLook: muted color, blue-gray\nLighting: window light, from the left\nAction: running"
     }
   ]
 }

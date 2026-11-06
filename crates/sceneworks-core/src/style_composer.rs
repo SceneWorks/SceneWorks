@@ -164,8 +164,29 @@ fn parse_directive_lines(text: &str) -> Vec<Line> {
 /// Returns the untouched `user_prompt` when `style_text` is empty/whitespace (identity, "no
 /// style selected"), else the Description/Style fallback or structured directive composition.
 pub fn compose_styled_prompt(style_text: &str, user_prompt: &str) -> String {
-    let style = style_text.trim();
-    if style.is_empty() {
+    compose_prompt_with_directives(style_text, user_prompt, &std::collections::BTreeMap::new())
+}
+
+/// Compose selected appearance directives, merging matching user-authored sections once.
+pub fn compose_prompt_with_directives(
+    style_text: &str,
+    user_prompt: &str,
+    directives: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let mut selected: Vec<(&str, &str)> = Vec::new();
+    if !style_text.trim().is_empty() {
+        selected.push((STYLE_KEY, style_text.trim()));
+    }
+    for key in ["Camera", "Film", "Look", "Lighting"] {
+        if let Some(text) = directives
+            .get(key)
+            .map(|text| text.trim())
+            .filter(|text| !text.is_empty())
+        {
+            selected.push((key, text));
+        }
+    }
+    if selected.is_empty() {
         return user_prompt.to_owned();
     }
 
@@ -181,15 +202,18 @@ pub fn compose_styled_prompt(style_text: &str, user_prompt: &str) -> String {
 
     // The user's own `Style:` content merges into our block; their own `Subject:` content folds
     // into the prose (in line order); every other directive is a sibling.
-    let mut user_style_parts: Vec<String> = Vec::new();
+    let mut user_parts: std::collections::BTreeMap<String, Vec<String>> = selected
+        .iter()
+        .map(|(key, _)| ((*key).to_owned(), Vec::new()))
+        .collect();
     let mut sibling_directives: Vec<String> = Vec::new();
     let mut prose_lines: Vec<String> = Vec::new();
     for line in parsed {
         match line {
             Line::Directive { key, content, raw } => {
-                if key == STYLE_KEY {
+                if let Some(parts) = user_parts.get_mut(&key) {
                     if !content.trim().is_empty() {
-                        user_style_parts.push(content.trim().to_owned());
+                        parts.push(content.trim().to_owned());
                     }
                 } else if key == SUBJECT_KEY {
                     if !content.trim().is_empty() {
@@ -212,12 +236,16 @@ pub fn compose_styled_prompt(style_text: &str, user_prompt: &str) -> String {
         blocks.push(format!("{prose_key}: {subject}"));
     }
 
-    let mut style_content = String::from(style);
-    for part in &user_style_parts {
-        style_content.push_str(", ");
-        style_content.push_str(part);
+    for (key, text) in selected {
+        let mut content = text.to_owned();
+        if let Some(parts) = user_parts.get(key) {
+            for part in parts {
+                content.push_str(", ");
+                content.push_str(part);
+            }
+        }
+        blocks.push(format!("{key}: {content}"));
     }
-    blocks.push(format!("{STYLE_KEY}: {style_content}"));
 
     blocks.extend(sibling_directives);
 
@@ -263,8 +291,12 @@ mod tests {
                 .get("expected")
                 .and_then(Value::as_str)
                 .expect("fixture expected is a string");
+            let directives = case
+                .get("directives")
+                .map(|value| serde_json::from_value(value.clone()).expect("directive fixture"))
+                .unwrap_or_default();
             assert_eq!(
-                compose_styled_prompt(style_text, user_prompt),
+                compose_prompt_with_directives(style_text, user_prompt, &directives),
                 expected,
                 "golden fixture mismatch: {name}"
             );

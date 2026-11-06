@@ -51,6 +51,7 @@ export function ImageGenerationSettings({
   activeProject,
   createLoraImportJob,
   models,
+  appearance,
   styleAxisAvailable,
   styleId,
   setStyleId,
@@ -177,6 +178,7 @@ export function ImageGenerationSettings({
                 resets to pass-through. Hidden for booru-tag models, whose convention the catalog's prose
                 entries do not fit. NB: distinct from Krea's numeric "text style" (textStyleGain). */}
             <StyleAxisRow
+              appearance={appearance}
               available={styleAxisAvailable}
               groups={STYLE_GROUPS}
               styleId={styleId}

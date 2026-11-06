@@ -83,9 +83,10 @@ export function parseDirectiveLines(text) {
  * preset-folded) prompt. Returns the composed string, or the untouched `userPrompt` when
  * `styleText` is empty/undefined.
  */
-export function composeStyledPrompt({ styleText, userPrompt } = {}) {
+export function composeStyledPrompt({ styleText, userPrompt, directives = {} } = {}) {
   const style = typeof styleText === "string" ? styleText.trim() : "";
-  if (!style) {
+  const selected = new Map([[STYLE_KEY, style], ...["Camera", "Film", "Look", "Lighting"].map((key) => [key, String(directives[key] ?? "").trim()])].filter(([, text]) => text));
+  if (!selected.size) {
     return userPrompt;
   }
 
@@ -98,14 +99,14 @@ export function composeStyledPrompt({ styleText, userPrompt } = {}) {
   // The user's own Style content (may be several lines) merges into our Style block; their own
   // Subject content folds into the prose that becomes our Subject block (in line order, so the
   // label is never doubled); every other directive line is preserved verbatim as a sibling.
-  const userStyleParts = [];
+  const userParts = new Map([...selected.keys()].map((key) => [key, []]));
   const siblingDirectives = [];
   const proseLines = [];
   for (const line of parsed) {
     if (line.type === "directive") {
-      if (line.key === STYLE_KEY) {
+      if (selected.has(line.key)) {
         if (line.content.trim()) {
-          userStyleParts.push(line.content.trim());
+          userParts.get(line.key).push(line.content.trim());
         }
       } else if (line.key === SUBJECT_KEY) {
         if (line.content.trim()) {
@@ -127,8 +128,9 @@ export function composeStyledPrompt({ styleText, userPrompt } = {}) {
     blocks.push(`${proseKey}: ${subject}`);
   }
 
-  const styleContent = [style, ...userStyleParts].join(", ");
-  blocks.push(`${STYLE_KEY}: ${styleContent}`);
+  for (const [key, text] of selected) {
+    blocks.push(`${key}: ${[text, ...userParts.get(key)].join(", ")}`);
+  }
 
   for (const sibling of siblingDirectives) {
     blocks.push(sibling);

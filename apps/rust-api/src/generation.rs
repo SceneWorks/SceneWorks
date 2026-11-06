@@ -2545,6 +2545,18 @@ pub(crate) async fn create_video_job(
     // job-create instead of 2–3× (sc-8819, F-017).
     let catalogs = JobCatalogSnapshot::default();
     apply_recipe_preset_to_video_payload(&state, &payload, &mut job_payload, &catalogs).await?;
+    if let Some(selection) = payload.appearance.as_ref() {
+        crate::styles::apply_appearance_to_payload(
+            &state,
+            &payload.model,
+            selection,
+            None,
+            payload.preset_prompt_resolved_client_side.unwrap_or(false),
+            &mut job_payload,
+        )
+        .await?;
+    }
+
     // Resolve the model manifest entry here so the GPU worker never re-parses
     // builtin/user.models.jsonc itself — Rust owns manifest parsing/merging
     // (story 1653). An unknown model resolves to {}, matching the worker's

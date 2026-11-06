@@ -44,6 +44,7 @@ export function VideoGenerationSettings({
   activeProject,
   createLoraImportJob,
   models,
+  appearance,
   styleAxisAvailable,
   styleId,
   setStyleId,
@@ -175,6 +176,7 @@ export function VideoGenerationSettings({
                 presets — mirrors the Image Studio. The catalog wraps the outgoing prompt
                 (Subject:/Style:); "None" resets. */}
             <StyleAxisRow
+              appearance={appearance}
               available={styleAxisAvailable}
               groups={STYLE_GROUPS}
               styleId={styleId}

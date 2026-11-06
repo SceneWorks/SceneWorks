@@ -232,11 +232,11 @@ describe("composeStyledPrompt golden fixtures (cross-language parity with the Ru
     expect(cases.length).toBeGreaterThanOrEqual(20);
   });
 
-  for (const { name, styleText, userPrompt, expected } of cases) {
+  for (const { name, styleText, userPrompt, directives, expected } of cases) {
     it(name, () => {
       // A null styleText in the fixtures models "no style selected" (undefined in the app).
       const resolvedStyleText = styleText === null ? undefined : styleText;
-      expect(composeStyledPrompt({ styleText: resolvedStyleText, userPrompt })).toBe(expected);
+      expect(composeStyledPrompt({ styleText: resolvedStyleText, userPrompt, directives })).toBe(expected);
     });
   }
 });

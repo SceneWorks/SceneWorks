@@ -275,4 +275,37 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
       expect(pills.length).toBeGreaterThan(1);
     });
   });
+  it("Appearance selections preview and submit exactly once, including multiple Looks", async () => {
+    await renderStudio();
+    await typePrompt("Subject: a fox\nCamera: 50mm\nAction: running");
+    async function recipe(label, name) {
+      await act(async () => container.querySelector(`button[aria-label="${label}"]`).click());
+      const option = [...container.querySelectorAll(".appearance-option")].find((item) => item.querySelector("strong")?.textContent === name);
+      expect(option).toBeTruthy();
+      await act(async () => option.querySelector("input").click());
+      if (label === "Looks") await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Done").click());
+    }
+    await recipe("Camera", "Disposable");
+    await recipe("Film", "Kodak Portra 400");
+    await recipe("Looks", "Warm golden");
+    await recipe("Looks", "Matte faded film");
+    await recipe("Lighting", "Golden hour");
+    const shown = previewText();
+    expect(shown).toContain("Subject: a fox");
+    expect(shown).toContain("Action: running");
+    expect(shown.match(/^Camera:/gm)).toHaveLength(1);
+    expect(shown).toContain(", 50mm");
+    expect(shown).toContain("Film:");
+    expect(shown).toContain("Look:");
+    expect(shown).toContain("Lighting:");
+    expect(shown).not.toContain("Style:");
+    const submittedPrompt = await submitAndReadPayloadPrompt();
+    expect(submittedPrompt).toBe(shown);
+    const payload = createImageJob.mock.calls.at(-1)[0];
+    expect(payload.appearance.looks).toHaveLength(2);
+    expect(payload.advanced.appearancePrompt).toBe("Subject: a fox\nCamera: 50mm\nAction: running");
+    expect(payload.advanced.appearance).toEqual(payload.appearance);
+    expect(payload.presetPromptResolvedClientSide).toBe(true);
+  });
+
 });

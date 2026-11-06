@@ -103,7 +103,7 @@ describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
       sendStructured: false,
       styleText: STYLE_TEXT,
     });
-    expect(styled).toEqual({
+    expect(styled).toMatchObject({
       prompt: composeStyledPrompt({ styleText: STYLE_TEXT, userPrompt: "a fox in the snow" }),
       styleApplied: true,
       structuredInjected: false,
@@ -112,7 +112,7 @@ describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
       promptToSend: "a fox in the snow",
       sendStructured: false,
       styleText: null,
-    })).toEqual({ prompt: "a fox in the snow", styleApplied: false, structuredInjected: false });
+    })).toMatchObject({ prompt: "a fox in the snow", styleApplied: false, structuredInjected: false });
   });
 
   it("the prompt-only composer preserves valid and invalid structured-caption semantics", () => {
@@ -124,14 +124,14 @@ describe("buildImageJobRequest — Style Catalog fold (sc-13130)", () => {
       promptToSend: caption,
       sendStructured: true,
       styleText: STYLE_TEXT,
-    })).toEqual({ prompt: expected, styleApplied: true, structuredInjected: true });
+    })).toMatchObject({ prompt: expected, styleApplied: true, structuredInjected: true });
 
     const invalidCaption = '{"scene":"snow"}';
     expect(composeImageJobPrompt({
       promptToSend: invalidCaption,
       sendStructured: true,
       styleText: STYLE_TEXT,
-    })).toEqual({ prompt: invalidCaption, styleApplied: false, structuredInjected: false });
+    })).toMatchObject({ prompt: invalidCaption, styleApplied: false, structuredInjected: false });
   });
 
   it("no style selected → prompt is the untouched user prompt (identity)", () => {
@@ -295,5 +295,44 @@ describe("buildImageJobRequest — Style Catalog recipe round-trip (sc-13132)", 
     ).prompt;
     expect(doubleWrapped).not.toBe(composed);
     expect(doubleWrapped).toContain(`Style: ${STYLE_TEXT}, ${STYLE_TEXT}`);
+  });
+});
+
+
+describe("appearance request and recipe round trip", () => {
+  it("combines MOSS negatives and keeps raw inputs separate from the outgoing recipe", () => {
+    const appearance = { film: "film-kodak-tri-x-400", looks: ["look-moody-dark"] };
+    const state = baseState({ model: "moss_image_base", appearance, negativePrompt: "bad anatomy", styleText: null });
+    const request = buildImageJobRequest(state);
+    expect(request.prompt).toContain("Description: a fox in the snow");
+    expect(request.prompt).toContain("Film:");
+    expect(request.prompt).toContain("Look:");
+    expect(request.negativePrompt).toContain("bad anatomy, chromatic color");
+    expect(request.advanced.appearancePrompt).toBe("a fox in the snow");
+    expect(request.advanced.appearanceNegativePrompt).toBe("bad anatomy");
+    expect(request.appearance).toEqual(appearance);
+    const repeated = buildImageJobRequest({ ...state, promptToSend: request.advanced.appearancePrompt, negativePrompt: request.advanced.appearanceNegativePrompt, appearance: request.advanced.appearance });
+    expect(repeated.prompt).toBe(request.prompt);
+    expect(repeated.negativePrompt).toBe(request.negativePrompt);
+    const inert = buildImageJobRequest({ ...state, negativePrompt: "", appearanceNegativeEnabled: false });
+    expect(inert.negativePrompt).toBe("");
+  });
+});
+
+
+describe("MOSS native batch appearance replay", () => {
+  it("keeps batch metadata raw while composing every outgoing row", () => {
+    const state = baseState({ model: "moss_image_base", mode: "edit_image", promptToSend: "a fox", submitIntent: "a fox",
+      referenceAssetIds: ["source"], mossPromptBatch: ["a fox", "a cat"], mossImageAdvanced: { output: "images" },
+      appearance: { film: "film-kodak-portra-400", looks: ["look-moody-dark"] }, styleText: STYLE_TEXT, styleId: "style" });
+    const request = buildImageJobRequest(state);
+    expect(request.prompts).toHaveLength(2);
+    expect(request.prompt).toBe(request.prompts[0]);
+    expect(request.prompts[1]).toContain("Description: a cat");
+    expect(request.prompts.every((text) => text.includes("Film:") && text.includes("Look:") && text.includes("Style:"))).toBe(true);
+    expect(request.advanced.promptBatch).toEqual(request.prompts);
+    expect(request.advanced.appearancePromptBatch).toEqual(["a fox", "a cat"]);
+    const replay = buildImageJobRequest({ ...state, mossPromptBatch: request.advanced.appearancePromptBatch });
+    expect(replay.prompts).toEqual(request.prompts);
   });
 });

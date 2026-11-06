@@ -582,6 +582,8 @@ impl AdvancedKeySource {
 /// smuggled under an allow-listed scalar key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvancedShape {
+    /// Public catalog recipe IDs, without arbitrary nested metadata.
+    Appearance,
     /// String, number or bool. Path-shaped strings are dropped (see [`is_path_shaped`]).
     Scalar,
     /// The structured-prompt recipe (`apps/web/src/ideogramCaption.js`), reduced to its scalar
@@ -837,6 +839,10 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         AdvancedShape::Scalar,
         "Authored control-lock strength.",
     ),
+    allow("appearance", AdvancedShape::Appearance, "Selected public Camera/Film/Look/Lighting catalog IDs."),
+    allow("appearancePromptBatch", AdvancedShape::PromptBatch, "Raw pre-appearance native batch, distinct from the worker-owned effective promptBatch."),
+    allow("appearancePrompt", AdvancedShape::Scalar, "Raw pre-appearance prose, for composition exactly once on replay."),
+    allow("appearanceNegativePrompt", AdvancedShape::Scalar, "Authored negative text before recipe contributions."),
     allow(
         "styleId",
         AdvancedShape::Scalar,
@@ -2368,6 +2374,7 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
         let sanitized = match rule.shape {
             AdvancedShape::Scalar => sanitize_scalar(key, value),
             AdvancedShape::StructuredPrompt => sanitize_structured_prompt(value),
+            AdvancedShape::Appearance => sanitize_appearance(value),
             AdvancedShape::Poses => sanitize_poses(value),
             AdvancedShape::Phases => sanitize_phases(value),
             AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
@@ -2533,6 +2540,8 @@ fn sanitize_h3_veda_settings(value: &Value) -> Option<Value> {
 /// Exempt from the PATH check only. They are still bounded and control-stripped by
 /// [`shareable_prose`], because on the parse side they are a stranger's strings.
 const PROSE_KEYS: &[&str] = &[
+    "appearancePrompt",
+    "appearanceNegativePrompt",
     "stylePrompt",
     "intent",
     "runtimePrompt",
@@ -2542,6 +2551,21 @@ const PROSE_KEYS: &[&str] = &[
     // the exact silent-loss failure this epic's lint exists to prevent.
     "systemMessage",
 ];
+
+fn sanitize_appearance(value: &Value) -> Option<Value> {
+    let mut selection: crate::appearance::AppearanceSelection =
+        serde_json::from_value(value.clone()).ok()?;
+    selection.camera = selection.camera.as_deref().and_then(shareable_label);
+    selection.film = selection.film.as_deref().and_then(shareable_label);
+    selection.lighting = selection.lighting.as_deref().and_then(shareable_label);
+    selection.looks = selection
+        .looks
+        .iter()
+        .filter_map(|id| shareable_label(id))
+        .take(32)
+        .collect();
+    serde_json::to_value(selection).ok()
+}
 
 fn sanitize_scalar(key: &str, value: &Value) -> Option<Value> {
     match value {
@@ -3403,7 +3427,14 @@ mod tests {
         assert!(!sanitized.contains_key("sampler"));
         assert_eq!(
             PROSE_KEYS,
-            ["stylePrompt", "intent", "runtimePrompt", "systemMessage"]
+            [
+                "appearancePrompt",
+                "appearanceNegativePrompt",
+                "stylePrompt",
+                "intent",
+                "runtimePrompt",
+                "systemMessage"
+            ]
         );
     }
 
