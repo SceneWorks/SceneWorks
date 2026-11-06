@@ -3994,13 +3994,15 @@ fn client_sampler_fields_cannot_suppress_the_imported_krea_execution_fact() {
 #[cfg(native_lane)]
 #[test]
 fn imported_krea_records_the_sampler_it_explicitly_executes() {
-    let req = request(json!({
-        "projectId": "p",
-        "model": "kreamania_v4_int8",
-        "advanced": { "sampler": "not-the-runtime-sampler" }
-    }));
-    let raw = krea_imported_raw_settings(&req, 8, false, 0, None);
-    assert_eq!(raw.get("resolvedSampler"), Some(&json!("euler")));
+    for (advanced, expected) in [(json!({}), "euler"), (json!({"sampler":"heun"}), "heun")] {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "kreamania_v4_int8",
+            "advanced": advanced
+        }));
+        let raw = krea_imported_raw_settings(&req, 8, false, 0, None);
+        assert_eq!(raw.get("resolvedSampler"), Some(&json!(expected)));
+    }
 }
 
 /// Turning the setting off writes the file SceneWorks writes today, to the byte.
@@ -13410,11 +13412,11 @@ fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default is 52"
     );
 
-    // Guidance: CFG off under the turbo (distilled) descriptor → None, NOT the Raw 1.0.
+    // Guidance: Turbo retains its CFG-off default zero, while Raw defaults to one.
     assert_eq!(
         resolve_guidance(&req, &turbo),
-        None,
-        "candle turbo-on-Raw forwards no guidance (CFG off)",
+        Some(0.0),
+        "candle turbo-on-Raw retains its CFG-off guidance default",
     );
     assert_eq!(
         resolve_guidance(&req, &raw),
@@ -13422,11 +13424,11 @@ fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default guidance is 1.0",
     );
 
-    // Negative prompt: NOT forwarded under turbo (distilled, no negative branch); the Raw path forwards it.
+    // Both providers retain negative conditioning for explicit experimental CFG. Admission gates CFG-off requests.
     assert_eq!(
         resolve_negative_prompt(&req, &turbo),
-        None,
-        "candle turbo-on-Raw must not forward the negative prompt (CFG off)",
+        Some("blurry, low quality".to_owned()),
+        "candle turbo-on-Raw can forward negative conditioning for experimental CFG",
     );
     assert_eq!(
         resolve_negative_prompt(&req, &raw),
@@ -29402,13 +29404,14 @@ fn checkpoint_negative_prompt_uses_provider_capabilities() {
         json!({"projectId":"p", "model":"kreamanai_v2", "prompt":"p",
         "negativePrompt":"  blur  "}),
     );
-    assert!(!descriptor.capabilities.supports_negative_prompt);
-    assert_eq!(checkpoint_plan_negative_prompt(&req, &descriptor), None);
-    descriptor.capabilities.supports_negative_prompt = true;
+    assert!(descriptor.capabilities.supports_negative_prompt);
     assert_eq!(
         checkpoint_plan_negative_prompt(&req, &descriptor).as_deref(),
         Some("blur")
     );
+    descriptor.capabilities.supports_negative_prompt = false;
+    assert_eq!(checkpoint_plan_negative_prompt(&req, &descriptor), None);
+    descriptor.capabilities.supports_negative_prompt = true;
     let mut blank = req;
     blank.negative_prompt = " \n ".into();
     assert_eq!(checkpoint_plan_negative_prompt(&blank, &descriptor), None);
@@ -30887,6 +30890,7 @@ fn stub_raw_settings_drops_a_forged_prefix_kv_cache() {
     assert_eq!(raw["sampler"], "euler");
 }
 
+#[cfg(native_lane)]
 #[test]
 fn explicit_sampling_prototype_preserves_experimental_values_without_defaults() {
     let empty = super::sampling::explicit_sampling_request(&request(json!({"projectId":"p"})));

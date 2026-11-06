@@ -845,6 +845,28 @@ pub(crate) fn validate_recipe_preset_defaults(value: Option<&Value>) -> Result<(
             ));
         }
     }
+    for key in ["guidanceScale", "trueCfgScale", "schedulerShift"] {
+        let Some(value) = object.get(key).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        if value.as_str().is_some_and(|text| text.trim().is_empty()) {
+            continue;
+        }
+        let number = value
+            .as_f64()
+            .or_else(|| value.as_str()?.trim().parse().ok());
+        let valid = number.is_some_and(|number| {
+            number.is_finite()
+                && (number as f32).is_finite()
+                && (key != "schedulerShift" || (number as f32) > 0.0)
+        });
+        if !valid {
+            return Err(ApiError::bad_request(format!(
+                "Recipe preset {key} must be a finite native float{}",
+                if key == "schedulerShift" { " > 0" } else { "" }
+            )));
+        }
+    }
     for (key, min, max) in RECIPE_PRESET_DEFAULT_RANGES {
         if let Some(number) = recipe_preset_default_number(object, key) {
             if number < *min || number > *max {
@@ -861,9 +883,6 @@ pub(crate) fn validate_recipe_preset_defaults(value: Option<&Value>) -> Result<(
 // inclusive range each must fall in. Ranges are deliberately generous so valid
 // model-specific values are never rejected — they only catch clearly bad input.
 const RECIPE_PRESET_DEFAULT_RANGES: &[(&str, f64, f64)] = &[
-    ("guidanceScale", 0.0, 60.0),
-    ("schedulerShift", 0.0, 20.0),
-    ("trueCfgScale", 0.0, 30.0),
     ("ipAdapterScale", 0.0, 2.0),
     ("controlnetScale", 0.0, 4.0),
     ("upscaleFactor", 1.0, 8.0),

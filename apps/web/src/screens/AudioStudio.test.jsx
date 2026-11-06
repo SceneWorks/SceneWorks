@@ -2261,7 +2261,7 @@ describe("AudioStudio YuE lyrics-to-song (sc-19385)", () => {
     await setValue(container.querySelector(".settings-field-tier select"), "q8");
     await click(container.querySelector(".advanced-section-toggle"));
     await setValue(advancedField("Seed").querySelector("input"), "11");
-    await setValue(advancedField("Guidance scale").querySelector("input"), "1.75");
+    await setValue(advancedField("Guidance scale").querySelector("input"), "1.01");
     await setValue(advancedField("Max tokens per section").querySelector("input"), "1500");
     await setValue(advancedField("Repetition penalty").querySelector("input"), "1.25");
     await setValue(advancedField("Output limiter").querySelector("select"), "rescale");
@@ -2279,7 +2279,7 @@ describe("AudioStudio YuE lyrics-to-song (sc-19385)", () => {
       maxNewTokensPerSegment: 1500,
       repetitionPenalty: 1.25,
       guidanceEnabled: true,
-      guidance: 1.75,
+      guidance: 1.01,
       quantTier: "q8",
       outputLimiter: "rescale",
     });

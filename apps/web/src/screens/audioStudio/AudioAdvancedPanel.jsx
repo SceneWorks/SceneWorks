@@ -81,8 +81,8 @@ export function AudioAdvancedPanel({
                 ) : null}
                 {/* YuE song knobs (sc-19385, R5). Defaults are upstream's published values: guidance on
                     (1.5 first section / 1.2 after), 3000 tokens per section, repetition penalty 1.1.
-                    Cleared ⇒ omitted ⇒ the model default. A guidance scale must be > 1 (the model
-                    reads ≤ 1 as "off"), so the switch — not a 0 scale — turns guidance off. */}
+                    Cleared ⇒ omitted ⇒ the model default. The native segmented-song provider reads
+                    scales 0–1 as guidance off; the switch also explicitly disables guidance. */}
                 {songModel ? (
                   <>
                     <label className="checkline">
@@ -97,10 +97,10 @@ export function AudioAdvancedPanel({
                       Guidance scale
                       <input
                         disabled={!guidanceEnabled}
-                        min="1.05"
+                        min="0"
                         onChange={(event) => setSongGuidance(event.target.value)}
                         placeholder="1.5 → 1.2 (default)"
-                        step="0.05"
+                        step="any"
                         type="number"
                         value={songGuidance}
                       />
@@ -124,7 +124,7 @@ export function AudioAdvancedPanel({
                         min="0.05"
                         onChange={(event) => setRepetitionPenalty(event.target.value)}
                         placeholder="1.1 (default)"
-                        step="0.05"
+                        step="any"
                         type="number"
                         value={repetitionPenalty}
                       />

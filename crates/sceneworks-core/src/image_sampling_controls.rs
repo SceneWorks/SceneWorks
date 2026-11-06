@@ -198,9 +198,8 @@ pub fn effective_guidance(advanced: &JsonObject, model_manifest_entry: &JsonObje
         })
 }
 
-/// Does classifier-free guidance run at this guidance? Exactly 1.0 is CFG off (the engines'
-/// `uses_cfg` test).
-fn cfg_off(guidance: Option<f64>, entry: &JsonObject) -> bool {
+/// Whether guidance equals the model’s declared CFG-off value (one when undeclared).
+pub fn cfg_off(guidance: Option<f64>, entry: &JsonObject) -> bool {
     guidance
         == Some(
             image_block(entry)
