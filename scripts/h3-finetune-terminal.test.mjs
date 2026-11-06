@@ -785,7 +785,7 @@ test('CPU bridge provisions its pinned private interpreter before model assets a
 test('asset staging is folded into the terminal delivery and runs the reduced 25/backend inventory',async()=>{
   const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8'),callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');
   const choices=/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/.exec(router)[1].split(',').map(v=>v.trim());
-  assert.deepEqual(choices,['standard','source','provision','readiness','campaign','diagnostic-candle-1b','h3-import-mlx','h3-import-cuda','h3-import-both','h3-admission-proof','h3-ui-proof','h3-terminal-mlx','h3-terminal-cuda']);
+  assert.deepEqual(choices,['standard','source','provision','readiness','campaign','diagnostic-candle-1b','h3-import-mlx','h3-import-cuda','h3-import-both','h3-admission-proof','h3-ui-proof','h3-terminal-mlx','h3-terminal-cuda','h3-cuda-memory']);
   for(const value of ['h3-stage-mlx','h3-stage-cuda'])assert.equal(choices.filter(v=>v===value).length,0,`${value} selector removed`);
   assert.doesNotMatch(router,/\n  h3-stage:\n/);assert.doesNotMatch(router,/h3-assets-stage-/);
   const caller=workflowJob(router,'h3-terminal');assert.ok(caller.includes('campaign_request: ${{ inputs.campaign_run_id }}'));
@@ -825,7 +825,7 @@ test('bootstrap request branches before the first plan read and skips restaging 
   for(const token of ['external plan_path is required when request.bootstrap is absent','stageRequested && !bootstrapPrepared','binding.status="bootstrap-prepared"','H3_OUTPUT_EFFECTIVE','H3_INFERENCE_SHA'])assert.ok(ensureSlice.includes(token),token);
   assert.doesNotMatch(ensureSlice,/prepareIdentityControls\(/,'bootstrap path must not redo identity controls');
   const choices=/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/.exec(router)[1].split(',').map(v=>v.trim());
-  assert.equal(choices.length,13);assert.doesNotMatch(router,/\n  h3-bootstrap:\n/);
+  assert.equal(new Set(choices).size,choices.length);assert.ok(choices.includes('h3-cuda-memory'));assert.doesNotMatch(router,/\n  h3-bootstrap:\n/);
   assert.match(callee,/timeout-minutes: 1440/);assert.match(callee,/budgetSeconds:86400/);
   assert.match(callee,/H3_OUTPUT_EFFECTIVE/);
 });

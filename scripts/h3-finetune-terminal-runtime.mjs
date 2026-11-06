@@ -334,6 +334,20 @@ export function privateEnvironment(runDir,runtime,token) {
   if(runtime.backend==='mlx')env.SCENEWORKS_MLX_REQUIRED='1';
   else Object.assign(env,{SCENEWORKS_CANDLE_REQUIRED:'1',SCENEWORKS_CANDLE_UNSUPPORTED_MODE:'enforce'});
   if(runtime.memoryCap){assert.equal(runtime.memoryCap.kind,runtime.backend==='cuda'?'cuda-vram-gb':'mlx-memory-gb');assert.ok(Number.isFinite(runtime.memoryCap.value)&&runtime.memoryCap.value>0);env[runtime.backend==='cuda'?'SCENEWORKS_CUDA_VRAM_CAP_GB':'SCENEWORKS_MLX_MEMORY_CAP_GB']=String(runtime.memoryCap.value);}
+  // SW-6925 explicit validation controls only; never inherit arbitrary proof controls from the host.
+  if(runtime.cudaProofEnvironment!==undefined){
+    assert.equal(runtime.backend,'cuda');
+    const controls=runtime.cudaProofEnvironment;
+    assert.ok(controls&&typeof controls==='object'&&!Array.isArray(controls));
+    for(const [key,value] of Object.entries(controls)){
+      if(key==='SCENEWORKS_CUDA_PROOF_POOL_BYTES')assert.match(value,/^[1-9][0-9]*$/);
+      else if(key==='SCENEWORKS_H3_VEDA_FORCE_DENSE')assert.equal(value,'1');
+      else if(key==='SCENEWORKS_H3_ATTENTION_ROUTE')assert.equal(value,'materialized');
+      else throw new Error(`unsupported explicit CUDA validation control ${key}`);
+      env[key]=value;
+    }
+    env.RUST_LOG='info,sceneworks=debug,candle_gen_minimax_h3=debug';
+  }
   return env;
 }
 async function confinedTaskSource(p,value,{allowRoot=false}={}) {
@@ -387,6 +401,11 @@ export class OwnedService {
     const runner=this.deps.runProcess??runProcess;
     const command=['cargo','build','--locked',...campaignProfileArgs(),'--manifest-path',path.join(this.swRoot,'Cargo.toml'),'-p','sceneworks-rust-api','--bin','sceneworks-rust-api'];
     if(this.c.backend==='cuda')command.push('--features','sceneworks-rust-api/backend-candle');
+    if(this.c.runtime.cudaProofFeatures!==undefined){
+      assert.equal(this.c.backend,'cuda');
+      assert.deepEqual(this.c.runtime.cudaProofFeatures,['sceneworks-rust-api/h3-memory-proof']);
+      command.push('--features',...this.c.runtime.cudaProofFeatures);
+    }
     const platform=runPlatform(this.deps),layout=serviceBuildLayout(this.p,this.c,platform),buildRoot=layout.buildRoot,receipt=path.join(buildRoot,'build.json');
     const target=layout.target;
     const configuration={command,flags:Object.fromEntries(['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','RUSTUP_TOOLCHAIN'].map(k=>[k,process.env[k]??null])),proof_kind:this.fake?'unit_fake':'campaign_native'};
