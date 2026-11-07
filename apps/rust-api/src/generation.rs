@@ -1130,7 +1130,6 @@ async fn vector_replay_raster_source(
         Ok(Some((raster, binding)))
     })
     .await
-    .map_err(Into::into)
 }
 
 async fn vector_replay_source(
@@ -1177,7 +1176,6 @@ async fn vector_replay_source(
         }))
     })
     .await
-    .map_err(Into::into)
 }
 
 async fn enqueue_replayed_vector_raster_child(
@@ -1369,6 +1367,55 @@ async fn create_vector_prompt_workflow_internal(
     relation: VectorWorkflowReplayRelation<'_>,
 ) -> Result<JobSnapshot, ApiError> {
     let replay_source = vector_replay_source(&state, relation).await?;
+    if replay_source.is_some() {
+        // Keep the original byte identity, while rechecking whether today's server still permits
+        // the same logical stages. A removed/disabled model cannot be revived by its old carrier.
+        let current_raster = crate::models::find_model_by_id(&state, &payload.raster_model)
+            .await?
+            .ok_or_else(|| {
+                ApiError::bad_request("Recorded raster model is no longer registered")
+            })?;
+        if current_raster.get("type").and_then(Value::as_str) != Some("image")
+            || current_raster.get("usable").and_then(Value::as_bool) == Some(false)
+            || !current_raster
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .is_some_and(|capabilities| {
+                    capabilities
+                        .iter()
+                        .any(|capability| capability.as_str() == Some("text_to_image"))
+                })
+        {
+            return Err(typed_vector_workflow_error(
+                "vector_workflow_raster_unsupported",
+                "Recorded raster model is no longer authorized for text_to_image.",
+            ));
+        }
+        let current_vector = crate::models::find_model_by_id(&state, &payload.vector_model)
+            .await?
+            .ok_or_else(|| {
+                ApiError::bad_request("Recorded vector model is no longer registered")
+            })?;
+        validate_vector_model_manifest(
+            &payload.vector_model,
+            VectorMode::ImageToSvg,
+            &current_vector,
+        )?;
+        if current_vector.get("usable").and_then(Value::as_bool) == Some(false) {
+            return Err(typed_vector_workflow_error(
+                "vector_workflow_vector_unclaimable",
+                "Recorded vector model is no longer usable.",
+            ));
+        }
+        for current in [&current_raster, &current_vector] {
+            if let Some(entry) = current.as_object() {
+                crate::models::ensure_inherited_component_licenses_acknowledged(
+                    &state, entry, false,
+                )
+                .await?;
+            }
+        }
+    }
     let raster_request: ImageJobRequest = serde_json::from_value(json!({
         "projectId": payload.project_id,
         "projectName": payload.project_name,

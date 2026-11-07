@@ -956,6 +956,8 @@ async fn verify_training_primary_path(
     Ok(())
 }
 
+// The slot capture receives one explicit value for each independent source policy dimension.
+#[allow(clippy::too_many_arguments)]
 async fn capture_model_slot(
     state: &AppState,
     job_type: &JobType,
@@ -1561,7 +1563,7 @@ async fn resolve_dynamic_hf_revision_with_client(
     {
         return Err(incomplete("custom model reference is invalid"));
     }
-    let mut url = reqwest::Url::parse(&base_url)
+    let mut url = reqwest::Url::parse(base_url)
         .map_err(|error| incomplete(format!("Hugging Face endpoint is invalid: {error}")))?;
     {
         let mut parts = url
@@ -1793,11 +1795,8 @@ async fn capture_conversion_borrow_member(
         vec!["root"]
     };
     let allowed = |claim: &PortableSourceClaim| {
-        let Some((claim_repo, revision, tier)) =
-            sceneworks_core::portable_sources::parse_flux2_convert_base_claim_id(&claim.source_id)
-        else {
-            return None;
-        };
+        let (claim_repo, revision, tier) =
+            sceneworks_core::portable_sources::parse_flux2_convert_base_claim_id(&claim.source_id)?;
         let PortableSourceProvenance::PinnedRepo {
             repository,
             revision: provenance_revision,

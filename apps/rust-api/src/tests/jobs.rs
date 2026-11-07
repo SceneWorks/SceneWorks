@@ -776,6 +776,9 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
         original["payload"]["workflow"]["vectorStage"]["sampling"]["seed"],
         original_vector_seed
     );
+    // The original immutable revision and file ledger are already frozen in the parent and
+    // child. A replay must not depend on a second publisher metadata request.
+    metadata_server.abort();
 
     let (status, replay) = request(
         app.clone(),
@@ -824,7 +827,6 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
     assert_eq!(drift["context"]["stage"], "raster");
     let (_, after) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(after.as_array().expect("jobs").len(), 4);
-    metadata_server.abort();
 }
 
 #[tokio::test]
@@ -892,7 +894,7 @@ async fn vector_parent_without_linked_child_replays_its_frozen_raster_after_cata
         ),
     )
     .expect("catalog HEAD drifts");
-    let replay_app = create_app(settings).expect("fresh catalog app creates");
+    let replay_app = create_app(settings.clone()).expect("fresh catalog app creates");
     let (status, replay) = request(
         replay_app.clone(),
         "POST",
@@ -917,6 +919,24 @@ async fn vector_parent_without_linked_child_replays_its_frozen_raster_after_cata
     .await;
     assert_eq!(child["type"], "image_generate");
     assert_eq!(child["payload"]["modelManifestEntry"]["id"], "flux_schnell");
+    let mut removed: Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("manifest reads"))
+            .expect("manifest JSON");
+    removed["models"]
+        .as_array_mut()
+        .expect("model array")
+        .retain(|model| model["id"] != "starvector_test");
+    std::fs::write(&manifest_path, removed.to_string())
+        .expect("remove current vector registration");
+    let blocked_app = create_app(settings).expect("fresh policy app creates");
+    let (status, blocked) = request(
+        blocked_app,
+        "POST",
+        &format!("/api/v1/jobs/{original_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{blocked}");
     metadata_server.abort();
 }
 
@@ -1741,6 +1761,35 @@ async fn raw_image_detail_rejects_unregistered_adapter_locator() {
 }
 
 #[tokio::test]
+async fn raw_job_rejects_unregistered_model_even_with_client_source_carrier() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type":"image_detail",
+            "requestedGpu":"auto",
+            "payload":{
+                "model":"unregistered_model",
+                "sourceAssetId":"asset-1",
+                "modelManifestEntry":{
+                    "id":"unregistered_model",
+                    "modelPath":temp_dir.path().join("client/weights.safetensors")
+                }
+            }
+        }),
+    )
+    .await;
+    assert!(status.is_client_error(), "{body}");
+    assert!(
+        !body.to_string().contains("client/weights.safetensors"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn generic_jobs_route_still_serves_non_generation_types() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
@@ -2289,6 +2338,180 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
     }
 }
 
+#[tokio::test]
+async fn imported_model_replay_accepts_same_worker_bytes_under_another_root() {
+    use sceneworks_core::contracts::WorkerCapability;
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableJobBinding, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_imported_image_model_manifests(temp_dir.path());
+    let settings = test_settings(&temp_dir);
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    let (_, project) = create_project(app.clone(), &"Cross-root import replay").await;
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId":project["id"], "mode":"text_to_image", "prompt":"a fox",
+            "model":"imported_krea", "count":1
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id");
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let binding_json: String = connection
+        .query_row(
+            "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .expect("private binding exists");
+    let frozen: PortableJobBinding = serde_json::from_str(&binding_json).expect("binding parses");
+    let route = frozen.routes.values().next().expect("frozen route");
+    let member = &route.models[0].members[0];
+    let worker_root = temp_dir.path().join("other-worker/models/imported_krea");
+    std::fs::create_dir_all(&worker_root).expect("worker root creates");
+    let worker_file = worker_root.join(&member.files[0].relative_path);
+    std::fs::write(&worker_file, b"fixture").expect("worker copy writes");
+    let files = vec![PortableArtifactFile {
+        relative_path: member.files[0].relative_path.clone(),
+        size_bytes: 7,
+        sha256: format!(
+            "sha256:{}",
+            sceneworks_core::hashing::sha256_bytes(b"fixture")
+        ),
+    }];
+    assert_eq!(files, member.files, "worker bytes match frozen ledger");
+    let ledger = portable_file_ledger_sha256(&files).expect("worker ledger hashes");
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "model",
+        "imported_krea",
+        None,
+        &ledger,
+    )
+    .expect("logical source key");
+    let claim = PortableSourceClaim::new(
+        source_id,
+        PortableSourceProvenance::OperatorOverride,
+        files.clone(),
+    )
+    .expect("worker claim");
+    let gpu_id = if route.backend == "mlx" {
+        "mlx"
+    } else {
+        "cuda:0"
+    };
+    let mut capabilities = vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::ImageGenerate,
+        WorkerCapability::ImageEdit,
+    ];
+    if route.backend == "candle" {
+        capabilities.push(WorkerCapability::Unknown("candle".into()));
+    }
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "other-root-worker".into(),
+                gpu_id: gpu_id.into(),
+                gpu_name: None,
+                capabilities,
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some(&route.platform),
+            Some(std::slice::from_ref(&claim)),
+        )
+        .expect("worker registers exact bytes");
+    let api_file = temp_dir
+        .path()
+        .join("data/models/imports/imported_krea/model.safetensors");
+    std::fs::remove_file(&api_file).expect("API host source disappears");
+    let (status, replay) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "exact worker copy: {replay}");
+    assert!(!replay
+        .to_string()
+        .contains(&worker_root.display().to_string()));
+
+    let changed = PortableSourceClaim::new(
+        claim.source_id.clone(),
+        PortableSourceProvenance::OperatorOverride,
+        vec![PortableArtifactFile {
+            relative_path: files[0].relative_path.clone(),
+            size_bytes: 11,
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_bytes(b"substituted")
+            ),
+        }],
+    )
+    .expect("substitute claim");
+    state
+        .jobs_store
+        .heartbeat_worker_with_portable_sources(
+            sceneworks_core::jobs_store::WorkerHeartbeat {
+                worker_id: "other-root-worker".into(),
+                status: sceneworks_core::contracts::WorkerStatus::Idle,
+                current_job_id: None,
+                loaded_models: vec![],
+                utilization: None,
+                status_reason: None,
+            },
+            Some(&[changed]),
+        )
+        .expect("worker publishes substitute");
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "substituted worker: {refused}"
+    );
+    state
+        .jobs_store
+        .heartbeat_worker_with_portable_sources(
+            sceneworks_core::jobs_store::WorkerHeartbeat {
+                worker_id: "other-root-worker".into(),
+                status: sceneworks_core::contracts::WorkerStatus::Idle,
+                current_job_id: None,
+                loaded_models: vec![],
+                utilization: None,
+                status_reason: None,
+            },
+            Some(&[]),
+        )
+        .expect("worker clears source claim");
+    let (status, missing) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "missing worker: {missing}");
+    let (status, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(jobs.as_array().map(Vec::len), Some(2));
+}
+
 #[cfg(not(target_os = "macos"))]
 fn write_shipped_image_model_manifests(root: &std::path::Path) {
     let manifest_dir = root.join("config/manifests");
@@ -2463,6 +2686,12 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{edited_source}");
+
+    let mut physical_source = request_convert(&conversion_root.join("model-physical"));
+    physical_source["payload"]["sourceFile"] = json!("/tmp/foreign/checkpoint.safetensors");
+    let (status, rejected) = request(app.clone(), "POST", "/api/v1/jobs", physical_source).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert!(!rejected.to_string().contains("/tmp/foreign"));
 
     for (output_dir, expected) in [
         (conversion_root.join("nested/model-2"), "direct child"),

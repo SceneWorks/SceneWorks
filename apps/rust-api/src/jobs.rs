@@ -97,16 +97,16 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    if matches!(payload.job_type, JobType::ImageDetail) {
-        // Raw callers never mint the private carrier, including resolved text-encoder paths.
-        for key in [
-            "modelManifestEntry",
-            "baseModelManifestEntry",
-            "modelManifestEntries",
-            "modelProvenance",
-        ] {
-            payload.payload.remove(key);
-        }
+    // The raw queue endpoint accepts authored IDs/options, never source metadata. Every carrier
+    // below is resolved by the server after validation; a caller-supplied path or download must
+    // not short-circuit the catalog lookup in ensure_runtime_model_sources.
+    for key in [
+        "modelManifestEntry",
+        "baseModelManifestEntry",
+        "modelManifestEntries",
+        "modelProvenance",
+    ] {
+        payload.payload.remove(key);
     }
     validate_raw_job_payload(
         &state,
@@ -1352,6 +1352,32 @@ async fn validate_and_canonicalize_merged_generation_payload(
         }
     }
     if frozen_portable_binding.is_some() {
+        let license_acknowledged = merged
+            .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        for entry in [
+            merged.get("modelManifestEntry"),
+            merged.get("baseModelManifestEntry"),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(
+            merged
+                .get("modelManifestEntries")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        ) {
+            if let Some(entry) = entry.as_object() {
+                crate::models::ensure_inherited_component_licenses_acknowledged(
+                    state,
+                    entry,
+                    license_acknowledged,
+                )
+                .await?;
+            }
+        }
         // The persisted carrier was minted by the server at the original admission. Preserve its
         // revision and logical slots across a mutable catalog/HF HEAD change. The frozen replay
         // validator below checks authored choices and re-verifies the exact bound sources against
@@ -1410,10 +1436,10 @@ async fn validate_and_canonicalize_merged_generation_payload(
             if portable_replay_matches_frozen(
                 expected,
                 actual,
-                !retry && requested_gpu_override.is_some(),
+                true,
             )? => {}
         (Some(_), _) => return Err(ApiError::bad_request(
-            "The model source changed since this job was admitted. Bind the original bytes on this host before retrying.",
+            "The model source changed since this job was admitted. Restore the original source bytes before replaying.",
         )),
         (None, Some(_)) => return Err(ApiError::bad_request(
             "This historical job has no portable source binding. Upgrade its manifest before retrying.",
@@ -1428,12 +1454,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
     ))
 }
 
-/// A duplicate may narrow an admitted Auto job to an already frozen worker route. It still
-/// carries the original envelope; only the requested GPU limits which worker can claim it.
+/// Replay validation may find only a subset of the original frozen routes currently available.
+/// Every accepted route must retain the original bytes and authored intent; the persisted job
+/// continues carrying the original envelope so later worker availability can recover.
 fn portable_replay_matches_frozen(
     frozen: &Value,
     candidate: &Value,
-    narrow_route: bool,
+    allow_route_subset: bool,
 ) -> Result<bool, ApiError> {
     use sceneworks_core::model_artifacts::portable_binding::PortableJobBinding;
     let frozen: PortableJobBinding = serde_json::from_value(frozen.clone())
@@ -1448,7 +1475,7 @@ fn portable_replay_matches_frozen(
     candidate.validate().map_err(|error| {
         ApiError::bad_request(format!("Invalid replay source binding: {error}"))
     })?;
-    if !narrow_route {
+    if !allow_route_subset {
         return Ok(frozen == candidate);
     }
     Ok(frozen.authored_options == candidate.authored_options

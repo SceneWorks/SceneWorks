@@ -1,7 +1,9 @@
 //! Portable admission routes follow the same request predicates as worker claim.
 
 use sceneworks_core::contracts::{JobType, JsonObject};
-use sceneworks_core::jobs_store::{native_route_claims_request, NON_GPU_JOB_TYPES};
+use sceneworks_core::jobs_store::{
+    native_route_claims_request, CANDLE_NATIVE_CONVERTERS, NATIVE_CONVERTERS, NON_GPU_JOB_TYPES,
+};
 use sceneworks_core::model_artifacts::ArtifactMemberRole;
 use serde_json::Value;
 
@@ -806,6 +808,63 @@ pub(crate) fn eligible_portable_routes(
     if entries.is_empty() {
         return Ok(Vec::new());
     }
+    if *job_type == JobType::ModelConvert {
+        if !matches!(requested_gpu, "auto" | "cpu") {
+            return Err(ApiError::bad_request(
+                "Model conversion is claimed by a CPU utility worker; requestedGpu must be auto or cpu",
+            ));
+        }
+        let converter = payload
+            .get("converter")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !NATIVE_CONVERTERS.contains(&converter) {
+            return Err(ApiError::bad_request(
+                "Model conversion has no native converter for the selected source",
+            ));
+        }
+        if !native_route_claims_request("cpu", job_type, payload).map_err(ApiError::internal)? {
+            return Err(ApiError::bad_request(
+                "No CPU utility worker route can claim this conversion request",
+            ));
+        }
+        // The utility worker reports backend `cpu` at claim even when its in-process converter
+        // uses MLX or Candle. Only the two Candle-native converters run off macOS.
+        let platforms: &[&str] = if CANDLE_NATIVE_CONVERTERS.contains(&converter) {
+            &["macos", "linux", "windows"]
+        } else {
+            &["macos"]
+        };
+        let routes = platforms
+            .iter()
+            .filter(|platform| {
+                entries.iter().all(|(_, entry)| {
+                    entry
+                        .get("downloads")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .any(|download| {
+                            download
+                                .get("platforms")
+                                .and_then(Value::as_array)
+                                .is_none_or(|allowed| {
+                                    allowed
+                                        .iter()
+                                        .any(|value| value.as_str() == Some(*platform))
+                                })
+                        })
+                })
+            })
+            .map(|platform| ("cpu".to_owned(), (*platform).to_owned()))
+            .collect::<Vec<_>>();
+        if routes.is_empty() {
+            return Err(ApiError::bad_request(
+                "No native conversion route can claim the selected source",
+            ));
+        }
+        return Ok(routes);
+    }
     if NON_GPU_JOB_TYPES.contains(&job_type.as_str()) {
         return Ok(["macos", "linux", "windows"]
             .into_iter()
@@ -886,7 +945,7 @@ fn entries_support_route(
                 download
                     .get("platforms")
                     .and_then(Value::as_array)
-                    .map_or(true, |platforms| {
+                    .is_none_or(|platforms| {
                         platforms
                             .iter()
                             .any(|value| value.as_str() == Some(platform))
@@ -939,6 +998,27 @@ mod tests {
             "sourceFile":"checkpoint.safetensors", "baseRepo":"other/klein",
             "baseSubdir":"q4"
         });
+        assert_eq!(
+            eligible_portable_routes(
+                &JobType::ModelConvert,
+                klein.as_object().unwrap(),
+                &entries,
+                "auto",
+            )
+            .unwrap(),
+            [
+                ("cpu".to_owned(), "macos".to_owned()),
+                ("cpu".to_owned(), "linux".to_owned()),
+                ("cpu".to_owned(), "windows".to_owned()),
+            ],
+        );
+        assert!(eligible_portable_routes(
+            &JobType::ModelConvert,
+            klein.as_object().unwrap(),
+            &entries,
+            "mlx",
+        )
+        .is_err());
         let rows = selected_route_source_rows(
             &JobType::ModelConvert,
             klein.as_object().unwrap(),
@@ -959,6 +1039,16 @@ mod tests {
             "sourceFile":"checkpoint.safetensors", "baseRepo":"other/ltx",
             "upscalerFile":"custom-upscaler.safetensors"
         });
+        assert_eq!(
+            eligible_portable_routes(
+                &JobType::ModelConvert,
+                ltx.as_object().unwrap(),
+                &entries,
+                "auto",
+            )
+            .unwrap(),
+            [("cpu".to_owned(), "macos".to_owned())],
+        );
         let rows = selected_route_source_rows(
             &JobType::ModelConvert,
             ltx.as_object().unwrap(),

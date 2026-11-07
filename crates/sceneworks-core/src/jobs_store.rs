@@ -3295,22 +3295,20 @@ impl JobsStore {
         // overlapping claims would race and one would fail. IMMEDIATE serializes claimers.
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let worker = self.get_worker_on_connection(&transaction, worker_id)?;
-        let route_key = if portable_binding_version == 1
-            && worker.platform.as_deref() == portable_platform
-            && portable_platform.is_some()
-            && match portable_backend {
-                Some("mlx") => worker.gpu_id.eq_ignore_ascii_case("mlx"),
-                Some("candle") => worker_is_candle(&worker),
-                Some("cpu") => worker.gpu_id.eq_ignore_ascii_case("cpu"),
-                _ => false,
-            } {
-            Some(format!(
-                "{}:{}",
-                portable_backend.expect("matched above"),
-                portable_platform.expect("matched above")
-            ))
-        } else {
-            None
+        let route_key = match (portable_backend, portable_platform) {
+            (Some(backend), Some(platform))
+                if portable_binding_version == 1
+                    && worker.platform.as_deref() == Some(platform)
+                    && match backend {
+                        "mlx" => worker.gpu_id.eq_ignore_ascii_case("mlx"),
+                        "candle" => worker_is_candle(&worker),
+                        "cpu" => worker.gpu_id.eq_ignore_ascii_case("cpu"),
+                        _ => false,
+                    } =>
+            {
+                Some(format!("{backend}:{platform}"))
+            }
+            _ => None,
         };
         let worker_claims_raw: Option<String> = transaction.query_row(
             "select portable_source_claims_json from workers where id = ?1",

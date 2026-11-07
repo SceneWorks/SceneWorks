@@ -33,15 +33,18 @@ use sceneworks_core::model_artifacts::external_library::{
     ModelAvailability, ModelResolution,
 };
 use sceneworks_core::model_artifacts::local_preference::{
-    ActiveLocalArtifacts, LocalArtifactOverlayEntry,
+    hub_cache_member_destination, prefer_portable_snapshots, ActiveLocalArtifacts,
+    LocalArtifactOverlayEntry,
 };
 use sceneworks_core::model_artifacts::portable_binding::{
-    enumerate_portable_array_slots, LocalArtifactFile, LocalArtifactMember, PortableArtifactMember,
-    PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
+    enumerate_portable_array_slots, LocalArtifactFile, LocalArtifactMember, PortableArtifactFile,
+    PortableArtifactMember, PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
 };
 use sceneworks_core::model_artifacts::resolved_cache::{ResolvedCacheLease, ResolvedCacheStore};
-use sceneworks_core::model_artifacts::ArtifactMemberRole;
 use sceneworks_core::model_artifacts::ModelArtifactResolver;
+use sceneworks_core::model_artifacts::{
+    ArtifactIdentity, ArtifactMemberRole, ArtifactSourceLibrary,
+};
 use sceneworks_core::portable_sources::{
     portable_aux_source_shape, required_portable_aux_source_ids, PortableAuxSourceShape,
 };
@@ -57,6 +60,7 @@ pub(crate) struct RuntimeSourceGuard {
     /// Worker-only request copy. Every user-supplied binding hint is removed before dispatch;
     /// a verified route may replace it with its frozen tier and later with pinned local paths.
     dispatch_payload: JsonObject,
+    portable_scope: Option<ActiveLocalArtifacts>,
     _portable_snapshot: Option<PortableAttemptSnapshot>,
     resolutions: Vec<ModelResolution>,
     sessions: Vec<ExternalSourceSession>,
@@ -119,7 +123,19 @@ impl RuntimeSourceGuard {
         // the API sends it without model carriers (the identical exemption on that side).
         let model_free_trigger_only_caption = matches!(job_type, JobType::TrainingCaption)
             && payload.get("mode").and_then(serde_json::Value::as_str) == Some("triggerOnly");
-        if explicit_download || model_free_dry_run || model_free_trigger_only_caption {
+        let model_free_catalog_analysis = matches!(job_type, JobType::CatalogAnalysis)
+            && [
+                "structuredAnalysisEnabled",
+                "visionAnalysisEnabled",
+                "semanticEmbeddingsEnabled",
+            ]
+            .iter()
+            .all(|key| payload.get(*key).and_then(serde_json::Value::as_bool) == Some(false));
+        if explicit_download
+            || model_free_dry_run
+            || model_free_trigger_only_caption
+            || model_free_catalog_analysis
+        {
             if binding.is_some() {
                 return Err(WorkerError::InvalidPayload(
                     "a model-free operation cannot carry a model source binding".to_owned(),
@@ -320,7 +336,7 @@ impl RuntimeSourceGuard {
         // locally, take the leases behind exactly those, and re-resolve every model that did not
         // get its ENTIRE closure served. This is the only layer that can see every model a job
         // loads, and therefore the only layer that can answer the coverage question at all.
-        let (local_scope, cache_leases) =
+        let (mut local_scope, cache_leases) =
             select_local_tier(settings, &configured_library, &mut plans);
 
         // sc-19706 — the PRODUCER trigger, recorded here and fired only on success. Read AFTER
@@ -438,10 +454,10 @@ impl RuntimeSourceGuard {
             plan.remove("__portableAuxPaths");
         }
         let mut portable_snapshot = None;
+        let mut portable_scope = None;
         if let Some(binding) = binding {
             verify_portable_route(binding, job_type, payload, settings, &plans)?;
-            rebind_revision_primary_paths(binding, payload, settings, &mut dispatch_payload)?;
-            portable_snapshot = prepare_portable_snapshot(
+            let prepared = prepare_portable_snapshot(
                 binding,
                 job_type,
                 payload,
@@ -509,6 +525,7 @@ impl RuntimeSourceGuard {
         }
         Ok(Self {
             dispatch_payload,
+            portable_scope,
             _portable_snapshot: portable_snapshot,
             resolutions,
             sessions,
@@ -538,6 +555,7 @@ impl RuntimeSourceGuard {
         }
         Self {
             dispatch_payload,
+            portable_scope: None,
             _portable_snapshot: None,
             resolutions: Vec::new(),
             sessions: Vec::new(),
@@ -558,6 +576,7 @@ impl RuntimeSourceGuard {
                 .map_err(|error| WorkerError::Io(std::io::Error::other(error.to_string())))?;
         }
         // Stop serving local paths before the leases protecting them are released.
+        self.portable_scope = None;
         self.local_scope = None;
         for lease in self.cache_leases.drain(..) {
             // The promotion boundary for an artifact that just served a real load. Its own
@@ -621,6 +640,11 @@ impl RuntimeSourceGuard {
 #[derive(Debug)]
 struct PortableAttemptSnapshot {
     _lease: FileLock,
+}
+
+struct PreparedPortableSnapshot {
+    snapshot: PortableAttemptSnapshot,
+    overlays: Vec<LocalArtifactOverlayEntry>,
 }
 
 const PORTABLE_CACHE_MAX_ENTRIES: usize = 8;
@@ -761,7 +785,7 @@ fn prepare_portable_snapshot(
     payload: &JsonObject,
     settings: &Settings,
     dispatch_payload: &mut JsonObject,
-) -> WorkerResult<Option<PortableAttemptSnapshot>> {
+) -> WorkerResult<Option<PreparedPortableSnapshot>> {
     let model_slots = payload_model_slots(payload);
     let selected_aux = route
         .models
@@ -772,21 +796,10 @@ fn prepare_portable_snapshot(
                 .find(|(slot, _)| slot == &model.slot)
                 .map(|(_, entry)| *entry)
                 .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
-            required_portable_aux_source_ids(job_type, payload, entry, &route.backend)
-                .map_err(invalid_binding)
+            selected_portable_aux_ids(job_type, payload, entry, &route.backend)
         })
         .collect::<WorkerResult<Vec<_>>>()?;
-    if !route.models.iter().zip(&selected_aux).any(|(model, ids)| {
-        model.members.iter().any(|member| {
-            matches!(
-                member.source,
-                PortableSourceIdentity::Digest { .. } | PortableSourceIdentity::WorkerClaim { .. }
-            ) || member
-                .component_id
-                .as_ref()
-                .is_some_and(|id| ids.contains(id))
-        })
-    }) {
+    if route.models.is_empty() {
         return Ok(None);
     }
     // A supported route may itself exceed the retention target. It remains leased while active;
@@ -832,42 +845,38 @@ fn prepare_portable_snapshot(
                 .component_id
                 .as_ref()
                 .is_some_and(|id| required_ids.contains(id));
-            if !matches!(
-                member.source,
-                PortableSourceIdentity::Digest { .. } | PortableSourceIdentity::WorkerClaim { .. }
-            ) && !is_selected_aux
-            {
-                continue;
-            }
             let revision_snapshot =
                 if let PortableSourceIdentity::Revision { identity } = &member.source {
-                    Some(
-                        sceneworks_core::hf_home::model_source_library(&settings.data_dir)
-                            .discover_snapshot(&identity.repository, Some(&identity.revision))
-                            .map_err(|error| invalid_binding(error.to_string()))?
-                            .1,
-                    )
+                    Some(discover_frozen_member_snapshot(
+                        settings,
+                        identity,
+                        &member.files,
+                    )?)
                 } else {
                     None
                 };
             let selected = if let Some(snapshot) = &revision_snapshot {
-                let id = member
-                    .component_id
-                    .as_deref()
-                    .ok_or_else(|| invalid_binding("selected auxiliary has no id"))?;
-                match portable_aux_source_shape(id, entry)
-                    .ok_or_else(|| invalid_binding("selected auxiliary has no loader shape"))?
-                {
-                    PortableAuxSourceShape::File => {
-                        if member.files.len() != 1 {
-                            return Err(invalid_binding(
-                                "file-shaped auxiliary has multiple files",
-                            ));
+                if !is_selected_aux {
+                    snapshot.clone()
+                } else {
+                    let id = member
+                        .component_id
+                        .as_deref()
+                        .ok_or_else(|| invalid_binding("selected auxiliary has no id"))?;
+                    match portable_aux_source_shape(id, entry)
+                        .ok_or_else(|| invalid_binding("selected auxiliary has no loader shape"))?
+                    {
+                        PortableAuxSourceShape::File => {
+                            if member.files.len() != 1 {
+                                return Err(invalid_binding(
+                                    "file-shaped auxiliary has multiple files",
+                                ));
+                            }
+                            snapshot.join(&member.files[0].relative_path)
                         }
-                        snapshot.join(&member.files[0].relative_path)
-                    }
-                    PortableAuxSourceShape::Directory => {
-                        snapshot.join(common_file_parent(&member.files)?)
+                        PortableAuxSourceShape::Directory => {
+                            snapshot.join(common_file_parent(&member.files)?)
+                        }
                     }
                 }
             } else {
@@ -893,7 +902,19 @@ fn prepare_portable_snapshot(
                     ));
                 }
             }
-            let target_root = staging.join(format!("model{model_index}/member{member_index}"));
+            let target_root = if let PortableSourceIdentity::Revision { identity } = &member.source
+            {
+                staging.join("hf").join(
+                    hub_cache_member_destination(
+                        &identity.repository,
+                        &identity.revision,
+                        Path::new(""),
+                    )
+                    .map_err(|error| invalid_binding(error.to_string()))?,
+                )
+            } else {
+                staging.join(format!("model{model_index}/member{member_index}"))
+            };
             if needs_copy {
                 create_private_tree(&target_root)?;
                 for file in &member.files {
@@ -908,9 +929,12 @@ fn prepare_portable_snapshot(
                         &source,
                         &allowed_roots,
                     )
-                    .map_err(|error| invalid_binding(error.to_string()))?;
+                    .map_err(|_| invalid_binding("frozen source is outside an authorized root"))?;
                     let target = target_root.join(&file.relative_path);
                     create_private_tree(target.parent().expect("portable file has a parent"))?;
+                    if revision_snapshot.is_some() && target.exists() {
+                        continue;
+                    }
                     let mut input = File::open(&source).map_err(WorkerError::Io)?;
                     let mut output = OpenOptions::new()
                         .write(true)
@@ -965,19 +989,49 @@ fn prepare_portable_snapshot(
                 .collect(),
         };
         let captured = PortableArtifactMember::capture(&mapped, &allowed_roots)
-            .map_err(|error| invalid_binding(error.to_string()))?;
+            .map_err(|_| invalid_binding("private snapshot verification failed"))?;
         if captured != *member {
             return Err(invalid_binding(
                 "private snapshot differs from admitted bytes",
             ));
         }
         let selected = target_root.join(selected_relative);
-        rewrite_loader_locator(dispatch_payload, slot, member, &selected, *is_selected_aux)?;
+        if *is_selected_aux || !matches!(member.source, PortableSourceIdentity::Revision { .. }) {
+            rewrite_loader_locator(dispatch_payload, slot, member, &selected, *is_selected_aux)?;
+        }
     }
     freeze_private_snapshot(&published)?;
+    let mut by_source: std::collections::BTreeMap<(String, String), LocalArtifactOverlayEntry> =
+        std::collections::BTreeMap::new();
+    for member in route.models.iter().flat_map(|model| &model.members) {
+        let PortableSourceIdentity::Revision { identity } = &member.source else {
+            continue;
+        };
+        let key = (identity.repository.clone(), identity.revision.clone());
+        let root = published.join("hf").join(
+            hub_cache_member_destination(&identity.repository, &identity.revision, Path::new(""))
+                .map_err(|error| invalid_binding(error.to_string()))?,
+        );
+        let entry = by_source
+            .entry(key)
+            .or_insert_with(|| LocalArtifactOverlayEntry {
+                repository: identity.repository.clone(),
+                revision: identity.revision.clone(),
+                snapshot_root: root,
+                files: Vec::new(),
+            });
+        entry
+            .files
+            .extend(member.files.iter().map(|file| file.relative_path.clone()));
+    }
+    let mut overlays = by_source.into_values().collect::<Vec<_>>();
+    for entry in &mut overlays {
+        entry.files.sort();
+        entry.files.dedup();
+    }
     std::fs::write(parent.join(".last-used"), b"").map_err(WorkerError::Io)?;
     prune_portable_snapshots(&parent, settings)?;
-    Ok(Some(snapshot))
+    Ok(Some(PreparedPortableSnapshot { snapshot, overlays }))
 }
 
 fn common_file_parent(
@@ -1528,13 +1582,7 @@ fn verify_portable_route(
         ));
     }
     for (model, (_, entry)) in route.models.iter().zip(slots) {
-        let required = sceneworks_core::portable_sources::required_portable_aux_source_ids(
-            job_type,
-            payload,
-            entry,
-            &route.backend,
-        )
-        .map_err(invalid_binding)?;
+        let required = selected_portable_aux_ids(job_type, payload, entry, &route.backend)?;
         for source_id in &required {
             let admitted = model
                 .members
@@ -3190,6 +3238,11 @@ mod tests {
 
     #[test]
     fn portable_binding_rebinds_training_plan_path_to_verified_worker_copy() {
+        assert_eq!(
+            crate::portable_trainer_engine_id_for("sdxl_lora", "sdxl"),
+            Some("sdxl"),
+            "the cross-host training fixture must select a real native trainer"
+        );
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("worker");
         let source = data.join("models/imports/base/model.safetensors");
@@ -3200,18 +3253,18 @@ mod tests {
             std::env::consts::OS,
             vec![local_binding(
                 "baseModelManifestEntry",
-                "base",
+                "sdxl",
                 &source,
                 None,
             )],
         )
         .unwrap();
         let payload = json!({
-            "baseModelManifestEntry":{"id":"base", "downloads":[], "paths":{"model":source}},
+            "baseModelManifestEntry":{"id":"sdxl", "downloads":[], "paths":{"model":source}},
             "plan":{
                 "schemaVersion":1, "planVersion":1, "jobId":"job-1",
-                "target":{"targetId":"base_lora", "kernel":"test", "family":"test",
-                    "modality":"image", "outputKind":"lora", "baseModel":"base",
+                "target":{"targetId":"base_lora", "kernel":"sdxl_lora", "family":"sdxl",
+                    "modality":"image", "outputKind":"lora", "baseModel":"sdxl",
                     "baseModelPath":"/other-host/models/base"},
                 "dataset":{"datasetId":"ds", "datasetVersion":1,
                     "rootPath":"/other-host/dataset", "items":[]},
@@ -3221,7 +3274,7 @@ mod tests {
                 "output":{"loraId":"lora", "outputDir":"/other-host/output",
                     "fileName":"lora.safetensors", "format":"safetensors", "triggerWords":[]},
                 "provenance":{"datasetId":"ds", "datasetVersion":1, "targetId":"base_lora",
-                    "baseModel":"base", "configSnapshot":{}, "outputLoraId":"lora",
+                    "baseModel":"sdxl", "configSnapshot":{}, "outputLoraId":"lora",
                     "sourceJobId":"job-1", "createdAt":"2026-11-07T00:00:00Z"}
             }
         })
@@ -3836,8 +3889,27 @@ mod tests {
             let selected = guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
                 .as_str()
                 .unwrap();
-            assert!(Path::new(selected).starts_with(&library));
+            assert!(
+                Path::new(selected).starts_with(temp.path().join("data/models/portable-attempts"))
+            );
             assert_ne!(selected, "/api-host/models/q4");
+            assert_eq!(
+                std::fs::read(Path::new(selected).join("a.safetensors")).unwrap(),
+                b"weights"
+            );
+            std::fs::write(
+                library
+                    .join("models--guardfx--glob/snapshots")
+                    .join(REV_A)
+                    .join("q4/a.safetensors"),
+                b"changed",
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(Path::new(selected).join("a.safetensors")).unwrap(),
+                b"weights",
+                "loader must keep the verified copy after original HF bytes change"
+            );
         });
     }
 
