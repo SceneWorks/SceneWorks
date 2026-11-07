@@ -68,6 +68,13 @@ pub(crate) fn selected_route_source_rows(
         .is_some_and(|id| !id.trim().is_empty());
     let character_reference =
         payload.get("mode").and_then(Value::as_str) == Some("character_image") && has_reference;
+    if advanced
+        .and_then(|value| value.get("usePid"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err("selected PiD decoder sources are not yet bound".to_owned());
+    }
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
         let plan: sceneworks_core::training::TrainingPlan = serde_json::from_value(
             payload
@@ -147,6 +154,9 @@ pub(crate) fn selected_route_source_rows(
             .ok_or("model entry lacks id")?;
         if matches!(id, "instantid_realvisxl" | "pulid_flux_dev") {
             return Err(format!("{id} identity provider sources are not yet bound"));
+        }
+        if id == "kolors" && has_reference {
+            return Err("Kolors IP-Adapter source is not yet bound".to_owned());
         }
         let add_component = |rows: &mut Vec<SelectedRouteSource>,
                              component_id: &str,
