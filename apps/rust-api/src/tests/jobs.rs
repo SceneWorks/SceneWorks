@@ -2512,6 +2512,110 @@ async fn imported_model_replay_accepts_same_worker_bytes_under_another_root() {
     assert_eq!(jobs.as_array().map(Vec::len), Some(2));
 }
 
+#[tokio::test]
+async fn fresh_admission_requires_one_capable_worker_with_both_operator_sources() {
+    use sceneworks_core::contracts::{JobType, WorkerCapability};
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        PortableArtifactFile, PortableSourceClaim, PortableSourceProvenance,
+    };
+
+    let (base_url, metadata_server) = vector_workflow_metadata_server().await;
+    let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (_, state) = create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let payload = json!({
+        "model":"instantid_realvisxl", "mode":"character_image",
+        "referenceAssetId":"reference-asset",
+        "modelManifestEntry":{
+            "id":"instantid_realvisxl", "type":"image", "family":"sdxl",
+            "capabilities":["character_image"],
+            "downloads":[{"provider":"huggingface","repo":"SceneWorks/realvisxl-mlx",
+                "revision":"e40202d63baef826c7df95a639a811698c1178d2",
+                "variant":"bf16","files":["bf16/*"]}]
+        }
+    });
+    let payload = payload.as_object().expect("payload object");
+    let claims = ["instantid_mlx", "instantid_controlnet"].map(|source_id| {
+        PortableSourceClaim::new(
+            source_id,
+            PortableSourceProvenance::OperatorOverride,
+            vec![PortableArtifactFile {
+                relative_path: "weights.safetensors".into(),
+                size_bytes: 7,
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_bytes(b"fixture")
+                ),
+            }],
+        )
+        .expect("source claim")
+    });
+    let register =
+        |worker_id: &str, capabilities: Vec<WorkerCapability>, claims: &[PortableSourceClaim]| {
+            state
+                .jobs_store
+                .register_worker_with_portable_sources(
+                    RegisterWorker {
+                        worker_id: worker_id.into(),
+                        gpu_id: "mlx".into(),
+                        gpu_name: None,
+                        capabilities,
+                        loaded_models: vec![],
+                        utilization: None,
+                    },
+                    Some("macos"),
+                    Some(claims),
+                )
+                .expect("worker registers");
+        };
+    let capable = || vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate];
+    register("split-a", capable(), &claims[..1]);
+    register("split-b", capable(), &claims[1..]);
+    assert!(
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &JobType::ImageGenerate,
+            payload,
+            "mlx",
+        )
+        .await
+        .is_err(),
+        "split workers cannot create one source closure"
+    );
+    register("incapable", vec![WorkerCapability::Gpu], &claims);
+    assert!(
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &JobType::ImageGenerate,
+            payload,
+            "mlx",
+        )
+        .await
+        .is_err(),
+        "a worker missing image capability cannot authorize admission"
+    );
+    register("complete", capable(), &claims);
+    let binding = crate::portable_admission::capture_portable_model_binding(
+        &state,
+        &JobType::ImageGenerate,
+        payload,
+        "mlx",
+    )
+    .await
+    .expect("complete worker admits")
+    .expect("model binding");
+    let route = binding.select_route("mlx", "macos").expect("MLX route");
+    for source_id in ["instantid_mlx", "instantid_controlnet"] {
+        assert!(route.models[0].members.iter().any(|member| {
+            matches!(&member.source,
+                sceneworks_core::model_artifacts::portable_binding::PortableSourceIdentity::WorkerClaim {source_id: id, ..}
+                if id == source_id)
+        }), "{source_id} is frozen");
+    }
+    metadata_server.abort();
+}
+
 #[cfg(not(target_os = "macos"))]
 fn write_shipped_image_model_manifests(root: &std::path::Path) {
     let manifest_dir = root.join("config/manifests");

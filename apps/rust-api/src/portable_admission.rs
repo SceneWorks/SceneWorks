@@ -810,46 +810,13 @@ async fn capture_portable_model_binding_inner(
                 .filter(|source_id| claims.iter().any(|claim| claim.source_id == *source_id))
                 .count()
         };
-        let conversion_tier_rank = |claims: &[PortableSourceClaim]| {
-            selected_sources
-                .iter()
-                .filter_map(|source| match &source.source {
-                    SelectedSourceLocation::ConversionBorrow {
-                        repo,
-                        preferred_subdir,
-                    } => Some((repo.as_str(), preferred_subdir.as_deref())),
-                    _ => None,
-                })
-                .map(|(repo, preferred)| {
-                    let mut tiers = preferred
-                        .filter(|tier| !tier.is_empty())
-                        .map(|tier| vec![tier])
-                        .unwrap_or_else(|| vec!["root"]);
-                    if preferred.is_some() {
-                        for fallback in ["bf16", "q8", "q4"] {
-                            if !tiers.contains(&fallback) {
-                                tiers.push(fallback);
-                            }
-                        }
-                    }
-                    claims
-                        .iter()
-                        .filter_map(|claim| {
-                            let (claim_repo, _, tier) = sceneworks_core::portable_sources::
-                                parse_flux2_convert_base_claim_id(&claim.source_id)?;
-                            (claim_repo == repo)
-                                .then(|| tiers.iter().position(|candidate| *candidate == tier))
-                                .flatten()
-                        })
-                        .min()
-                        .unwrap_or(usize::MAX / 2)
-                })
-                .sum::<usize>()
-        };
         claim_sets.sort_by(|left, right| {
             preferred_count(right)
                 .cmp(&preferred_count(left))
-                .then_with(|| conversion_tier_rank(left).cmp(&conversion_tier_rank(right)))
+                .then_with(|| {
+                    conversion_claim_tier_rank(&selected_sources, left)
+                        .cmp(&conversion_claim_tier_rank(&selected_sources, right))
+                })
         });
         let mut selected_route = None;
         for source_claims in &claim_sets {
@@ -915,6 +882,48 @@ async fn capture_portable_model_binding_inner(
     PortableJobBinding::new(authored_options, routes)
         .map(Some)
         .map_err(|error| incomplete(error.to_string()))
+}
+
+fn conversion_claim_tier_rank(
+    selected_sources: &[SelectedRouteSource],
+    claims: &[PortableSourceClaim],
+) -> usize {
+    selected_sources
+        .iter()
+        .filter_map(|source| match &source.source {
+            SelectedSourceLocation::ConversionBorrow {
+                repo,
+                preferred_subdir,
+            } => Some((repo.as_str(), preferred_subdir.as_deref())),
+            _ => None,
+        })
+        .map(|(repo, preferred)| {
+            let mut tiers = preferred
+                .filter(|tier| !tier.is_empty())
+                .map(|tier| vec![tier])
+                .unwrap_or_else(|| vec!["root"]);
+            if preferred.is_some() {
+                for fallback in ["bf16", "q8", "q4"] {
+                    if !tiers.contains(&fallback) {
+                        tiers.push(fallback);
+                    }
+                }
+            }
+            claims
+                .iter()
+                .filter_map(|claim| {
+                    let (claim_repo, _, tier) =
+                        sceneworks_core::portable_sources::parse_flux2_convert_base_claim_id(
+                            &claim.source_id,
+                        )?;
+                    (claim_repo == repo)
+                        .then(|| tiers.iter().position(|candidate| *candidate == tier))
+                        .flatten()
+                })
+                .min()
+                .unwrap_or(usize::MAX / 2)
+        })
+        .sum::<usize>()
 }
 
 fn incomplete(message: impl Into<String>) -> ApiError {
@@ -2674,6 +2683,49 @@ fn capture_selected_request_overlays(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn conversion_claims_prefer_authored_tier_across_workers() {
+        let repo = "fixture/convert-base";
+        let revision = "a".repeat(40);
+        let row = SelectedRouteSource {
+            model_slot: "modelManifestEntries/0".into(),
+            component_id: "flux2_convert_base".into(),
+            role: ArtifactMemberRole::RequiredComponent,
+            source: SelectedSourceLocation::ConversionBorrow {
+                repo: repo.into(),
+                preferred_subdir: Some("bf16".into()),
+            },
+            selected_tier: None,
+        };
+        let claim = |tier: &str| {
+            PortableSourceClaim::new(
+                sceneworks_core::portable_sources::flux2_convert_base_claim_id(
+                    repo, &revision, tier,
+                )
+                .expect("source ID"),
+                PortableSourceProvenance::PinnedRepo {
+                    repository: repo.into(),
+                    revision: revision.clone(),
+                },
+                vec![PortableArtifactFile {
+                    relative_path: "vae/weights.safetensors".into(),
+                    size_bytes: 7,
+                    sha256: format!(
+                        "sha256:{}",
+                        sceneworks_core::hashing::sha256_bytes(b"fixture")
+                    ),
+                }],
+            )
+            .expect("source claim")
+        };
+        let q4_worker = vec![claim("q4")];
+        let bf16_worker = vec![claim("bf16")];
+        assert!(
+            conversion_claim_tier_rank(&[row.clone()], &bf16_worker)
+                < conversion_claim_tier_rank(&[row], &q4_worker)
+        );
+    }
 
     #[test]
     fn registered_single_file_digest_claim_uses_content_hash_and_exact_ledger() {
