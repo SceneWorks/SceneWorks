@@ -1044,4 +1044,65 @@ mod tests {
             ["advanced/phases/0/loras/0", "loras/0"]
         );
     }
+
+    #[tokio::test]
+    async fn pinned_tree_expands_pages_and_hashes_non_lfs_bytes() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let path = request.split_whitespace().nth(1).unwrap();
+                let (body, link) = if path.contains("/resolve/") {
+                    ("cfg".to_owned(), None)
+                } else if path.contains("cursor=next") {
+                    (
+                        serde_json::json!([{
+                            "type": "file", "path": "q4/model.safetensors", "size": 5,
+                            "lfs": {"oid": "a".repeat(64)}
+                        }])
+                        .to_string(),
+                        None,
+                    )
+                } else {
+                    (
+                        serde_json::json!([{"type": "file", "path": "config.json", "size": 3}]).to_string(),
+                        Some(format!("Link: <http://{address}/api/models/owner/model/tree/{}?cursor=next>; rel=\"next\"\r\n", "a".repeat(40))),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
+                    body.len(), link.unwrap_or_default(), body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let files = resolve_pinned_hf_files(
+            &client,
+            &format!("http://{address}"),
+            None,
+            "owner/model",
+            &"a".repeat(40),
+            &["config.json".to_owned(), "q4/*.safetensors".to_owned()],
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].relative_path, PathBuf::from("config.json"));
+        assert_eq!(
+            files[0].sha256,
+            format!("sha256:{}", crate::hashing::sha256_bytes(b"cfg"))
+        );
+        assert_eq!(
+            files[1].relative_path,
+            PathBuf::from("q4/model.safetensors")
+        );
+        assert_eq!(files[1].sha256, format!("sha256:{}", "a".repeat(64)));
+    }
 }
