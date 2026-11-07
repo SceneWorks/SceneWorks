@@ -27,6 +27,15 @@ export function ltxIcLoraRequired(model, mode) {
     ["extend_clip", "video_bridge", "replace_person"].includes(mode);
 }
 
+// Candle's native video tier picker needs a shipped Windows/Linux variant ladder. LTX 2.3
+// still uses its separate legacy quantization control; LTX 2.5 has the native tier ladder.
+export function candleVideoTierPickerAvailable(model) {
+  return model?.type === "video" && !model?.importedSource &&
+    !(model?.family === "ltx-video" && model?.loraCompatibility?.generation === "2.3") &&
+    model?.downloads?.some((download) => download.variant &&
+      download.platforms?.some((platform) => platform === "windows" || platform === "linux")) === true;
+}
+
 // Platform support is supplied by the catalog projection of typed routes and feature facts.
 // Readiness switches keep all gates inert until capabilities arrive.
 export const MAC_NOT_AVAILABLE_LABEL = "Not available on Mac (MLX only)";

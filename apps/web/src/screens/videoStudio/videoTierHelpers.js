@@ -43,19 +43,6 @@ export const LTX25_AUTO_DURATION_MAX_SECONDS = 15;
 
 export const LTX25_TEMPORAL_UPSAMPLE_MAX_ROUNDS = 2;
 
-// Keep this list to native Candle engines that publish a real Model Manager variant matrix. The
-// picker only enables entries whose individual install is complete (`installedTiers`); in particular,
-// adding SCAIL-2 here never fabricates q4/q8 for a dense-only or partial local snapshot.
-export const candleTierModelIds = new Set([
-  "wan_2_2",
-  "wan_2_2_t2v_14b",
-  "wan_2_2_i2v_14b",
-  "scail2_14b",
-  "minimax_h3",
-  "minimax_h3_ref",
-  ltx25VideoModelId,
-]);
-
 // sc-20969 terminal acceptance admits exactly SCAIL-2's shipped q4/q8/bf16 Candle packages. Keep
 // this execution allowlist literal and local so an unrelated future catalog tier cannot become
 // runnable merely by appearing in the manifest. MLX continues to use the complete installed tier set.

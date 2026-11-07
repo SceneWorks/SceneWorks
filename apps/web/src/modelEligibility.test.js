@@ -12,6 +12,7 @@ import {
   audioModelServesMode,
   audioModelUsable,
   characterModelUsable,
+  candleVideoTierPickerAvailable,
   documentModelUsable,
   generationModelsForType,
   downloadOffersFor,
@@ -51,6 +52,15 @@ it("requires IC-LoRA only for the shipped LTX generations and their clip modes",
   const ltx = fallbackModels.find((model) => model.id === "ltx_2_3");
   expect(ltxIcLoraRequired(ltx, "text_to_video")).toBe(false);
   expect(ltxIcLoraRequired({ ...ltx, importedSource: { ownershipMode: "managed" } }, "video_bridge")).toBe(false);
+});
+
+it("derives the seven native Candle video tier pickers from shipped variant ladders", () => {
+  expect(fallbackModels.filter(candleVideoTierPickerAvailable).map((model) => model.id).sort()).toEqual([
+    "ltx_2_5", "minimax_h3", "minimax_h3_ref", "scail2_14b",
+    "wan_2_2", "wan_2_2_i2v_14b", "wan_2_2_t2v_14b",
+  ]);
+  const ltx25 = fallbackModels.find((model) => model.id === "ltx_2_5");
+  expect(candleVideoTierPickerAvailable({ ...ltx25, importedSource: { ownershipMode: "managed" } })).toBe(false);
 });
 
 describe("modelEligibility predicates", () => {

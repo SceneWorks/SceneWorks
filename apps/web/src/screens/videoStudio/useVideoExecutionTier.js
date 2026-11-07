@@ -1,4 +1,5 @@
-import { candleTierModelIds, SCAIL2_CANDLE_PRODUCT_TIERS, TIER_SCREEN, videoExecutionTierModel, unavailableRecipeTierMessage } from "./videoTierHelpers.js";
+import { SCAIL2_CANDLE_PRODUCT_TIERS, TIER_SCREEN, videoExecutionTierModel, unavailableRecipeTierMessage } from "./videoTierHelpers.js";
+import { candleVideoTierPickerAvailable } from "../../modelEligibility.js";
 import { useCallback, useEffect, useMemo } from "react";
 import { useQuantTierPicker } from "../../components/generationStudio.jsx";
 import { SCAIL2_MODEL_ID } from "../../videoStudioValidation.js";
@@ -36,7 +37,7 @@ export function useVideoExecutionTier({
   // Candle worker would otherwise be ignored and silently replaced by its default tier.
   const nativeTierLane =
     activeBackend === "mlx" ||
-    (activeBackend === "candle" && candleTierModelIds.has(selectedModel?.id));
+    (activeBackend === "candle" && candleVideoTierPickerAvailable(selectedModel));
 
   const scail2CandleTierLane =
     activeBackend === "candle" && selectedModel?.id === SCAIL2_MODEL_ID;

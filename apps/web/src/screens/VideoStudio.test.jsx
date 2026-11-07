@@ -768,6 +768,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     name: "SCAIL-2",
     type: "video",
     family: "scail2",
+    downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
     capabilities: ["animate_character", "replace_person"],
     defaults: { duration: 5, resolution: "832x480", fps: 16 },
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
@@ -791,6 +792,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     name: "Wan 2.2",
     type: "video",
     family: "wan-video",
+    downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
     capabilities: ["image_to_video", "text_to_video", "replace_person"],
     defaults: { duration: 5, resolution: "832x480", fps: 16 },
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
@@ -1483,6 +1485,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     id: "scail2_14b",
     name: "SCAIL-2",
     family: "scail2",
+    downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
     adapter: "scail2",
     capabilities: ["animate_character"],
   });
@@ -1591,6 +1594,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       id: "wan_2_2",
       name: "Wan2.2",
       family: "wan-video",
+      downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
       adapter: "wan_video",
     };
     const context = baseContext({ videoModels: [wan], macCapabilities: null });
@@ -1611,6 +1615,8 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       id: "ltx_2_5",
       name: "LTX-2.5",
       family: "ltx-video",
+      loraCompatibility: { generation: "2.5" },
+      downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
       adapter: "ltx_video",
       defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
       limits: { steps: [8, 30] },
@@ -1649,6 +1655,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       id: "scail2_14b",
       name: "SCAIL-2",
       family: "scail2",
+      downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
       adapter: "scail2",
     };
     const context = baseContext({ videoModels: [scail], macCapabilities: null });
@@ -1670,6 +1677,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       id: "scail2_14b",
       name: "SCAIL-2",
       family: "scail2",
+      downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
       adapter: "scail2",
     };
     const context = baseContext({ videoModels: [scail], macCapabilities: null });
@@ -2067,6 +2075,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       id: "scail2_14b",
       name: "SCAIL-2",
       family: "scail2",
+      downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
       adapter: "scail2",
     };
     const context = baseContext({ videoModels: [scail], macCapabilities: MAC_CAPS });
