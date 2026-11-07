@@ -1081,7 +1081,22 @@ pub(super) async fn generate_instantid_stream(
     )?;
 
     let (controlnet, ip_adapter, scrfd_path, arcface_path) =
-        ensure_instantid_weights(api, settings, job).await?;
+        if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+            let bound = |id| {
+                crate::portable_aux_sources::bound_aux_path(&request.advanced, id).ok_or_else(
+                    || WorkerError::InvalidPayload(format!("missing bound {id} source")),
+                )
+            };
+            let bundle = bound("instantid_mlx")?;
+            (
+                WeightsSource::Dir(bound("instantid_controlnet")?),
+                bundle.join(INSTANTID_IP_ADAPTER_FILE),
+                bundle.join(INSTANTID_SCRFD_FILE),
+                bundle.join(INSTANTID_ARCFACE_FILE),
+            )
+        } else {
+            ensure_instantid_weights(api, settings, job).await?
+        };
 
     // User style/character LoRAs (sc-6038). InstantID is a stock SDXL (RealVisXL) UNet, so SDXL
     // adapters apply on top of IdentityNet + the identity IP-Adapter — and the manifest advertises
@@ -1153,7 +1168,23 @@ pub(super) async fn generate_instantid_stream(
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
     // branch; identity/angle modes don't need it).
     let openpose = if pose_set {
-        Some(ensure_instantid_openpose(api, settings, job).await?)
+        Some(
+            if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+                WeightsSource::Dir(
+                    crate::portable_aux_sources::bound_aux_path(
+                        &request.advanced,
+                        "instantid_openpose",
+                    )
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "missing bound InstantID OpenPose source".to_owned(),
+                        )
+                    })?,
+                )
+            } else {
+                ensure_instantid_openpose(api, settings, job).await?
+            },
+        )
     } else {
         None
     };

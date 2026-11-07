@@ -29,6 +29,61 @@ pub struct ShippedAuxiliarySource {
 
 pub const SHIPPED_AUXILIARY_SOURCES: &[ShippedAuxiliarySource] = &[
     ShippedAuxiliarySource {
+        source_id: "instantid_mlx",
+        repo: "SceneWorks/instantid-mlx",
+        revision: "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+        files: &[
+            "ip-adapter.safetensors",
+            "scrfd_10g.safetensors",
+            "arcface_iresnet100.safetensors",
+        ],
+    },
+    ShippedAuxiliarySource {
+        source_id: "instantid_controlnet",
+        repo: "InstantX/InstantID",
+        revision: "57b32dfee076092ad2930c71fd6d439c2c3b1820",
+        files: &[
+            "ControlNetModel/config.json",
+            "ControlNetModel/diffusion_pytorch_model.safetensors",
+        ],
+    },
+    ShippedAuxiliarySource {
+        source_id: "instantid_openpose",
+        repo: "xinsir/controlnet-openpose-sdxl-1.0",
+        revision: "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+        files: &["config.json", "diffusion_pytorch_model.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "pulid_adapter",
+        repo: "guozinan/PuLID",
+        revision: "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+        files: &["pulid_flux_v0.9.1.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "pulid_eva",
+        repo: "SceneWorks/pulid-flux-mlx",
+        revision: "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+        files: &["eva02_clip_l_336.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "pulid_bisenet",
+        repo: "SceneWorks/pulid-flux-mlx",
+        revision: "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+        files: &["bisenet_parsing.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "pulid_scrfd",
+        repo: "SceneWorks/instantid-mlx",
+        revision: "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+        files: &["scrfd_10g.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "pulid_arcface",
+        repo: "SceneWorks/instantid-mlx",
+        revision: "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+        files: &["arcface_iresnet100.safetensors"],
+    },
+    ShippedAuxiliarySource {
         source_id: "flux_ip_adapter",
         repo: "XLabs-AI/flux-ip-adapter",
         revision: "18f6940238ab5dc3744df7a8e30315892279d5f9",

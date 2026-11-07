@@ -16,6 +16,12 @@ pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<Porta
         | "sdxl_detail_tile_control"
         | "flux_ip_adapter"
         | "sdxl_ip_adapter"
+        | "pulid_adapter"
+        | "pulid_eva"
+        | "pulid_bisenet"
+        | "pulid_scrfd"
+        | "pulid_arcface"
+        | "pid_checkpoint"
         | "veda_predictor" => Some(File),
         "depth_anything_v2_small"
         | "flux_ip_encoder"
@@ -25,6 +31,11 @@ pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<Porta
         | "repa_teacher"
         | "ltx_amoral_gemma_3_12b"
         | "ltx_training_text_encoder" => Some(Directory),
+        "instantid_mlx"
+        | "instantid_controlnet"
+        | "instantid_openpose"
+        | "pid_gemma"
+        | "kolors_ip_adapter" => Some(Directory),
         _ => entry
             .pointer("/decoders/byBackend")
             .and_then(Value::as_object)
@@ -57,6 +68,38 @@ pub fn required_portable_aux_source_ids(
     let character_reference =
         payload.get("mode").and_then(Value::as_str) == Some("character_image") && has_ref;
     if primary_model && matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        if id == "instantid_realvisxl" {
+            ids.extend(["instantid_mlx", "instantid_controlnet"].map(str::to_owned));
+            if advanced
+                .and_then(|value| value.get("poses"))
+                .and_then(Value::as_array)
+                .is_some_and(|poses| !poses.is_empty())
+            {
+                ids.push("instantid_openpose".to_owned());
+            }
+        }
+        if id == "pulid_flux_dev" {
+            ids.extend(
+                [
+                    "pulid_adapter",
+                    "pulid_eva",
+                    "pulid_bisenet",
+                    "pulid_scrfd",
+                    "pulid_arcface",
+                ]
+                .map(str::to_owned),
+            );
+        }
+        if id == "kolors" && has_ref {
+            ids.push("kolors_ip_adapter".to_owned());
+        }
+        if advanced
+            .and_then(|value| value.get("usePid"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            ids.extend(["pid_checkpoint", "pid_gemma"].map(str::to_owned));
+        }
         if character_reference && matches!(id, "flux_dev" | "flux_schnell") {
             ids.extend(["flux_ip_adapter", "flux_ip_encoder"].map(str::to_owned));
         }
@@ -94,10 +137,11 @@ pub fn required_portable_aux_source_ids(
         {
             ids.push("prompt_upsampler".to_owned());
         }
-        if advanced
-            .and_then(|value| value.get("poses"))
-            .and_then(Value::as_array)
-            .is_some_and(|poses| !poses.is_empty())
+        if id != "instantid_realvisxl"
+            && advanced
+                .and_then(|value| value.get("poses"))
+                .and_then(Value::as_array)
+                .is_some_and(|poses| !poses.is_empty())
         {
             ids.push("strict_control".to_owned());
             if advanced

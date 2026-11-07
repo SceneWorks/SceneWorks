@@ -274,6 +274,21 @@ pub(super) fn resolve_pid_weights(
     let Some(backbone) = pid_backbone_for(model) else {
         return Ok(None);
     };
+    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        let checkpoint =
+            crate::portable_aux_sources::bound_aux_path(&request.advanced, "pid_checkpoint")
+                .ok_or_else(|| {
+                    crate::WorkerError::InvalidPayload("missing bound PiD checkpoint".to_owned())
+                })?;
+        let gemma = crate::portable_aux_sources::bound_aux_path(&request.advanced, "pid_gemma")
+            .ok_or_else(|| {
+                crate::WorkerError::InvalidPayload("missing bound PiD Gemma".to_owned())
+            })?;
+        return Ok(Some(gen_core::PidWeights {
+            checkpoint: WeightsSource::File(checkpoint),
+            gemma: WeightsSource::Dir(gemma),
+        }));
+    }
     let (default_repo, default_2kto4k_file) = match backbone {
         "qwenimage" => (PID_QWENIMAGE_REPO, PID_QWENIMAGE_FILE),
         "flux" => (PID_FLUX_REPO, PID_FLUX_FILE),

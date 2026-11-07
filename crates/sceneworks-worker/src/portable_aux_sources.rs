@@ -20,6 +20,32 @@ pub(crate) fn has_bound_aux_paths(advanced: &JsonObject) -> bool {
     advanced.get("__portableAuxPaths").is_some()
 }
 
+/// The native PuLID providers take a single face directory although the three selected
+/// face files belong to two independently authenticated repositories. Compose only from
+/// worker-leased immutable paths and keep this temporary directory alive through generation.
+pub(crate) fn bound_pulid_weights(
+    advanced: &JsonObject,
+) -> crate::WorkerResult<(PathBuf, PathBuf, PathBuf, tempfile::TempDir)> {
+    let required = |id| {
+        bound_aux_path(advanced, id)
+            .ok_or_else(|| crate::WorkerError::InvalidPayload(format!("missing bound {id} source")))
+    };
+    let adapter = required("pulid_adapter")?;
+    let eva = required("pulid_eva")?;
+    let bisenet = required("pulid_bisenet")?;
+    let scrfd = required("pulid_scrfd")?;
+    let arcface = required("pulid_arcface")?;
+    let staged = tempfile::tempdir()?;
+    for (source, file) in [
+        (&bisenet, "bisenet_parsing.safetensors"),
+        (&scrfd, "scrfd_10g.safetensors"),
+        (&arcface, "arcface_iresnet100.safetensors"),
+    ] {
+        std::fs::copy(source, staged.path().join(file))?;
+    }
+    Ok((adapter, eva, staged.path().to_path_buf(), staged))
+}
+
 /// Effective path plus whether the loader selected an authorized operator override.
 /// The caller hashes the exact file/dir closure and records pinned-repo provenance otherwise.
 pub(crate) fn resolve_selected_aux_source(
@@ -29,6 +55,119 @@ pub(crate) fn resolve_selected_aux_source(
 ) -> Option<(PathBuf, bool)> {
     let snapshot = |repo| crate::model_jobs::huggingface_snapshot_dir(data_dir, repo);
     match source_id {
+        "instantid_mlx" => {
+            let files = [
+                "ip-adapter.safetensors",
+                "scrfd_10g.safetensors",
+                "arcface_iresnet100.safetensors",
+            ];
+            if let Some(dir) = std::env::var_os("SCENEWORKS_INSTANTID_WEIGHTS")
+                .map(PathBuf::from)
+                .filter(|dir| files.iter().all(|file| dir.join(file).is_file()))
+            {
+                return Some((dir, true));
+            }
+            if let Some(dir) = snapshot("SceneWorks/instantid-mlx")
+                .filter(|dir| files.iter().all(|file| dir.join(file).is_file()))
+            {
+                return Some((dir, false));
+            }
+            let dir = data_dir.join("cache/instantid-mlx");
+            files
+                .iter()
+                .all(|file| dir.join(file).is_file())
+                .then_some((dir, false))
+        }
+        "instantid_controlnet" => {
+            if let Some(dir) = std::env::var_os("SCENEWORKS_INSTANTID_CONTROLNET")
+                .map(PathBuf::from)
+                .filter(|dir| {
+                    dir.join("config.json").is_file()
+                        && dir.join("diffusion_pytorch_model.safetensors").is_file()
+                })
+            {
+                return Some((dir, true));
+            }
+            if let Some(dir) = snapshot("InstantX/InstantID")
+                .map(|dir| dir.join("ControlNetModel"))
+                .filter(|dir| {
+                    dir.join("config.json").is_file()
+                        && dir.join("diffusion_pytorch_model.safetensors").is_file()
+                })
+            {
+                return Some((dir, false));
+            }
+            let dir = data_dir.join("cache/instantid-controlnet");
+            (dir.join("config.json").is_file()
+                && dir.join("diffusion_pytorch_model.safetensors").is_file())
+            .then_some((dir, false))
+        }
+        "instantid_openpose" => {
+            if let Some(dir) = std::env::var_os("SCENEWORKS_INSTANTID_OPENPOSE")
+                .map(PathBuf::from)
+                .filter(|dir| {
+                    dir.join("config.json").is_file()
+                        && dir.join("diffusion_pytorch_model.safetensors").is_file()
+                })
+            {
+                return Some((dir, true));
+            }
+            if let Some(dir) = snapshot("xinsir/controlnet-openpose-sdxl-1.0").filter(|dir| {
+                dir.join("config.json").is_file()
+                    && dir.join("diffusion_pytorch_model.safetensors").is_file()
+            }) {
+                return Some((dir, false));
+            }
+            let dir = data_dir.join("cache/instantid-openpose");
+            (dir.join("config.json").is_file()
+                && dir.join("diffusion_pytorch_model.safetensors").is_file())
+            .then_some((dir, false))
+        }
+        "pulid_adapter" | "pulid_eva" | "pulid_bisenet" | "pulid_scrfd" | "pulid_arcface" => {
+            let (repo, file) = match source_id {
+                "pulid_adapter" => ("guozinan/PuLID", "pulid_flux_v0.9.1.safetensors"),
+                "pulid_eva" => ("SceneWorks/pulid-flux-mlx", "eva02_clip_l_336.safetensors"),
+                "pulid_bisenet" => ("SceneWorks/pulid-flux-mlx", "bisenet_parsing.safetensors"),
+                "pulid_scrfd" => ("SceneWorks/instantid-mlx", "scrfd_10g.safetensors"),
+                _ => ("SceneWorks/instantid-mlx", "arcface_iresnet100.safetensors"),
+            };
+            // The three-variable MLX preset is valid only as a complete group.
+            let preset = std::env::var_os("PULID_FLUX_WEIGHTS")
+                .map(PathBuf::from)
+                .zip(std::env::var_os("PULID_EVA_WEIGHTS").map(PathBuf::from))
+                .zip(std::env::var_os("PULID_FACE_WEIGHTS_DIR").map(PathBuf::from))
+                .filter(|((adapter, eva), face)| {
+                    adapter.is_file() && eva.is_file() && face.is_dir()
+                });
+            if let Some(((adapter, eva), face)) = preset {
+                let selected = match source_id {
+                    "pulid_adapter" => adapter,
+                    "pulid_eva" => eva,
+                    _ => face.join(file),
+                };
+                if selected.is_file() {
+                    return Some((selected, true));
+                }
+            }
+            if let Some(dir) = std::env::var_os("SCENEWORKS_PULID_WEIGHTS")
+                .map(PathBuf::from)
+                .filter(|dir| dir.join(file).is_file())
+            {
+                return Some((dir.join(file), true));
+            }
+            if let Some(path) = snapshot(repo)
+                .map(|dir| dir.join(file))
+                .filter(|path| path.is_file())
+            {
+                return Some((path, false));
+            }
+            let dir = data_dir.join(if cfg!(target_os = "macos") {
+                "cache/pulid-flux-mlx"
+            } else {
+                "cache/pulid-flux"
+            });
+            dir.join(file).is_file().then_some((dir.join(file), false))
+        }
         #[cfg(native_lane)]
         "ltx_training_gemma_override" => {
             crate::video_jobs::ltx::ltx_gemma_env_override().map(|path| (path, true))

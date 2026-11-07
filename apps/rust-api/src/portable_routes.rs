@@ -13,6 +13,12 @@ pub(crate) enum SelectedSourceLocation {
     LocalPath(String),
     /// Admission resolves the request-selected repository HEAD to an immutable revision.
     DynamicHfRepo(String),
+    /// A server-shipped mutable ref is resolved to a commit before the route is frozen.
+    DynamicHfRef {
+        repo: &'static str,
+        reference: &'static str,
+        files: &'static [&'static str],
+    },
     /// An operator Gemma override wins when a registered worker advertises it; otherwise
     /// admission binds the exact selected LTX bundle's pinned sibling Gemma download.
     OperatorOverrideOrManifest {
@@ -155,11 +161,43 @@ pub(crate) fn selected_route_source_rows(
             .get("id")
             .and_then(Value::as_str)
             .ok_or("model entry lacks id")?;
-        if matches!(id, "instantid_realvisxl" | "pulid_flux_dev") {
-            return Err(format!("{id} identity provider sources are not yet bound"));
+        if id == "instantid_realvisxl" {
+            push_operator_source(&mut rows, slot, "instantid_mlx");
+            push_operator_source(&mut rows, slot, "instantid_controlnet");
+            if advanced
+                .and_then(|value| value.get("poses"))
+                .and_then(Value::as_array)
+                .is_some_and(|poses| !poses.is_empty())
+            {
+                push_operator_source(&mut rows, slot, "instantid_openpose");
+            }
+        }
+        if id == "pulid_flux_dev" {
+            for source_id in [
+                "pulid_adapter",
+                "pulid_eva",
+                "pulid_bisenet",
+                "pulid_scrfd",
+                "pulid_arcface",
+            ] {
+                push_operator_source(&mut rows, slot, source_id);
+            }
         }
         if id == "kolors" && has_reference {
-            return Err("Kolors IP-Adapter source is not yet bound".to_owned());
+            rows.push(SelectedRouteSource {
+                model_slot: slot.clone(),
+                component_id: "kolors_ip_adapter".to_owned(),
+                role: ArtifactMemberRole::OptionalComponent,
+                source: SelectedSourceLocation::DynamicHfRef {
+                    repo: "Kwai-Kolors/Kolors-IP-Adapter-Plus",
+                    reference: "refs/pr/4",
+                    files: &[
+                        "ip_adapter_plus_general.safetensors",
+                        "image_encoder/model.safetensors",
+                    ],
+                },
+                selected_tier: None,
+            });
         }
         let add_component = |rows: &mut Vec<SelectedRouteSource>,
                              component_id: &str,

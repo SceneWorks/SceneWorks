@@ -405,7 +405,19 @@ pub(super) async fn generate_pulid_flux_stream(
         project_path,
     )?;
 
-    let weights = ensure_pulid_weights(api, settings, job).await?;
+    let mut _portable_face_lease = None;
+    let weights = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        let (adapter, eva, face_dir, lease) =
+            crate::portable_aux_sources::bound_pulid_weights(&request.advanced)?;
+        _portable_face_lease = Some(lease);
+        PulidWeights {
+            adapter,
+            eva,
+            face_dir,
+        }
+    } else {
+        ensure_pulid_weights(api, settings, job).await?
+    };
     // Feed the engine's weight seam from the resolved cache paths on the `LoadSpec` (the `pulid_flux`
     // loader resolves the PuLID adapter + EVA + face stack from `LoadSpec::identity`, sc-8827). The
     // paths ride the spec into the spawned load task — no process-global env mutation (the old
