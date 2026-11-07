@@ -1867,7 +1867,7 @@ export function implementationVerdict({
     }
     return {
       implementation: "implemented",
-      source: `config/manifests/builtin.models.jsonc#models/${model.id}/${backend}/calibrations`,
+      source: `config/manifests/registry/evidence.json#${model.id}/${backend}/calibrations`,
       parameters: JSON.parse(parameters[0]),
     };
   }
@@ -1896,7 +1896,7 @@ export function implementationVerdict({
   ) {
     return {
       implementation: "implemented",
-      source: `config/manifests/builtin.models.jsonc#models/${declaredModel.id}/${backend}/memoryStrategyCapabilities/${rung}`,
+      source: `config/manifests/registry/evidence.json#${declaredModel.id}/${backend}/memoryStrategyCapabilities/${rung}`,
       parameters: staticCapability.parameters,
     };
   }
@@ -1936,7 +1936,7 @@ export function implementationVerdict({
       source:
         backend === "mlx"
           ? "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
-          : `config/manifests/builtin.models.jsonc#models/${model.id}/candle`,
+          : `config/manifests/registry/evidence.json#${model.id}/candle`,
       parameters: { phaseOrder: ["conditioning", "denoise", "decode"] },
     };
   }
@@ -1969,9 +1969,9 @@ export function implementationVerdict({
     if (manifestRung && declaresRung) {
       return {
         implementation: "implemented",
-        // The DATA read here is the manifest's own `turboFit` block, not the worker's gate: cite
-        // where the declaration lives (sc-22513).
-        source: `config/manifests/builtin.models.jsonc#models/${model.id}/candle/turboFit`,
+        // The DATA read here is the registry evidence store's `turboFit` block, not the
+        // worker's gate: cite where the declaration lives (sc-22513).
+        source: `config/manifests/registry/evidence.json#${model.id}/candle/turboFit`,
         parameters: {
           manifestRung,
           formula:
