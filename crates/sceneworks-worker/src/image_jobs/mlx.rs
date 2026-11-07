@@ -983,6 +983,90 @@ pub(super) async fn generate_stream_using(
     // Keep the exact selected spec across the cache callback. Cache warm policy may change
     // residency, not the artifact/precision identity; reference demand is repriced on every fit.
     let reference_pricing_spec = flux3_references.as_ref().map(|_| spec.clone());
+    // MLX's legacy schedule uses MLX arithmetic (linspace/exp/div) whose rounding is observable.
+    // Compile on the very same serialized owner thread that will load and execute this generator,
+    // before submitting the cache access. Only pure base T2I migrates in this item; IP/Control/PuLID
+    // retain their actual conditioned route until SW-6936.
+    let base_flux = request.mode == "text_to_image"
+        && matches!(engine_id, "flux1_schnell" | "flux1_dev")
+        && identity_init.is_none()
+        && edit_refs.is_empty()
+        && ideogram_edit_mask.is_none()
+        && flux3_references.is_none()
+        && spec.ip_adapter.is_none();
+    let render_plans = if base_flux {
+        if hires_fix.is_some() {
+            return Err(WorkerError::InvalidPayload(
+                "FLUX.1 base rendering does not support Hires.fix refinement".to_owned(),
+            ));
+        }
+        let planning_spec = spec.clone();
+        let planning_seeds = seeds.clone();
+        let planning_prompt = prompt.clone();
+        let planning_negative = negative_prompt.clone();
+        let planning_sampler = sampler.clone();
+        let planning_scheduler = scheduler.clone();
+        let planning_guidance_method = guidance_method.clone();
+        let planning_enhance = enhance.clone();
+        let planning_batch = native_batch.clone();
+        crate::generator_cache::GeneratorCacheHandle::global()
+            .prepare_on_owner(move || {
+                let planning_cancel = gen_core::CancelFlag::new();
+                let planning_surface = LaneRgbaSurface {
+                    output_channels: rgba_output_channels,
+                    controls: lane_controls,
+                    prompt_batch: planning_batch.as_ref(),
+                    ..Default::default()
+                };
+                let planning_work = if planning_batch.is_some() {
+                    vec![(planning_seeds[0], "")]
+                } else {
+                    planning_seeds
+                        .iter()
+                        .map(|seed| (*seed, planning_prompt.as_str()))
+                        .collect()
+                };
+                planning_work
+                    .into_iter()
+                    .map(|(seed, item_prompt)| {
+                        let candidate = super::render::build_render_request(
+                            item_prompt,
+                            width,
+                            height,
+                            seed,
+                            steps,
+                            guidance,
+                            planning_negative.clone(),
+                            None,
+                            &[],
+                            None,
+                            true_cfg,
+                            planning_sampler.as_deref(),
+                            planning_scheduler.as_deref(),
+                            scheduler_shift,
+                            planning_guidance_method.as_deref(),
+                            use_pid,
+                            text_style_gain,
+                            None,
+                            &planning_enhance,
+                            gen_core::PromptEnhancementSink::default(),
+                            gen_core::PreviewSink::default(),
+                            &planning_surface,
+                            &planning_cancel,
+                        )?;
+                        super::render::compile_render_plan(
+                            crate::inference_runtime::media(),
+                            engine_id,
+                            &planning_spec,
+                            &candidate,
+                        )
+                    })
+                    .collect::<WorkerResult<Vec<_>>>()
+            })
+            .await?
+    } else {
+        Vec::new()
+    };
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
         job.id.clone(),
         engine_id,
@@ -1102,6 +1186,7 @@ pub(super) async fn generate_stream_using(
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 prompt_batch: Some(batch),
+                                render_plan: render_plans.first().and_then(Option::as_ref),
                             },
                             &cancel,
                             on_progress,
@@ -1122,7 +1207,7 @@ pub(super) async fn generate_stream_using(
             drive_gen_items_scored_reported(
                 tx,
                 seeds,
-                move |_index, seed, preview, prompt_enhancement, on_progress| {
+                move |index, seed, preview, prompt_enhancement, on_progress| {
                     let memory_evaluation =
                         if let Some(reference_spec) = reference_pricing_spec.as_ref() {
                             crate::mlx_fit_gate::evaluate_request_with_reference_spec(
@@ -1193,6 +1278,7 @@ pub(super) async fn generate_stream_using(
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 prompt_batch: None,
+                                render_plan: render_plans.get(index).and_then(Option::as_ref),
                             },
                             &cancel,
                             on_progress,

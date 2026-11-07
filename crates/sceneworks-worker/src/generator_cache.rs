@@ -12,6 +12,8 @@ use gen_core::{
 #[cfg(any(native_lane, test))]
 use crate::cache_thread::CacheThread;
 use crate::cache_thread::{self, CacheAccess, CacheJob, Fingerprint, SeamMessages};
+#[cfg(any(native_lane, test))]
+use crate::WorkerError;
 use crate::WorkerResult;
 
 /// The generator cache is a single-resident [`crate::cache_thread::CacheThread`] keyed by
@@ -598,6 +600,49 @@ impl GeneratorCacheHandle {
             worker: generator_worker().clone(),
             evict_transform: true,
         }
+    }
+
+    /// Run a weights-free request compiler on the same serialized owner thread that subsequently
+    /// loads and drives the generator. MLX schedule construction uses MLX arithmetic whose exact
+    /// rounding is part of the existing image path; moving it to a Tokio caller changes both
+    /// thread ownership and class-(a) numerical behavior. This command does not touch the resident
+    /// cache entry and completes before the caller submits the load command.
+    #[cfg(any(native_lane, test))]
+    pub(crate) async fn prepare_on_owner<R>(
+        &self,
+        prepare: impl FnOnce() -> WorkerResult<R> + Send + 'static,
+    ) -> WorkerResult<R>
+    where
+        R: Send + 'static,
+    {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let progress_context = crate::load_progress::Context::capture();
+        let job: GeneratorJob = Box::new(move |cache| {
+            if reply_tx.is_closed() {
+                return;
+            }
+            let _progress = progress_context.install();
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(prepare)) {
+                Ok(result) => result,
+                Err(panic) => {
+                    if cache.evict().is_some() {
+                        cache_thread::release_backend_cache_after_evict();
+                    }
+                    Err(WorkerError::Engine(format!(
+                        "{}: {}",
+                        GENERATOR_SEAM_MESSAGES.panic_reset,
+                        cache_thread::panic_message(panic.as_ref())
+                    )))
+                }
+            };
+            let _ = reply_tx.send(result);
+        });
+        self.worker
+            .send(job)
+            .map_err(|_| WorkerError::Engine(GENERATOR_SEAM_MESSAGES.worker_stopped.into()))?;
+        reply_rx
+            .await
+            .map_err(|_| WorkerError::Engine(GENERATOR_SEAM_MESSAGES.worker_dropped.into()))?
     }
     #[cfg(all(test, native_lane))]
     pub(crate) fn isolated() -> (Self, thread::JoinHandle<()>) {
@@ -3519,6 +3564,67 @@ mod tests {
             tracing::dispatcher::with_default(&dispatch, || run_generator_cache_worker(rx, None))
         });
         (tx, capture, worker)
+    }
+
+    /// The plan compiler must run on the generator's actual OS owner, ahead of a cold load and
+    /// again ahead of warm reuse. A separate Tokio worker would change MLX schedule arithmetic.
+    #[tokio::test]
+    async fn preparation_uses_the_same_owner_before_cold_and_warm_access() {
+        let (tx, _capture, worker) = start_capturing_cache_worker();
+        let cache = GeneratorCacheHandle {
+            worker: tx.clone(),
+            evict_transform: false,
+        };
+        let weights = tempfile::tempdir().expect("weights tempdir");
+        let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let sequence = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for expected in 1..=2 {
+            let marker = std::sync::Arc::clone(&sequence);
+            let owner = cache
+                .prepare_on_owner(move || {
+                    marker.store(expected, std::sync::atomic::Ordering::SeqCst);
+                    Ok(thread::current().id())
+                })
+                .await
+                .expect("plan compiled on cache owner");
+            let load_marker = std::sync::Arc::clone(&sequence);
+            let run_marker = std::sync::Arc::clone(&sequence);
+            let state = with_cached_generator_for_request_using_cache(
+                cache.clone(),
+                "sc3724_stub",
+                spec.clone(),
+                "stub load",
+                move |_id, spec| {
+                    assert_eq!(thread::current().id(), owner);
+                    assert_eq!(load_marker.load(std::sync::atomic::Ordering::SeqCst), 1);
+                    staging_stub_load(spec)
+                },
+                move |_, state, _, warm_policy, _, _| {
+                    assert_eq!(thread::current().id(), owner);
+                    assert_eq!(
+                        run_marker.load(std::sync::atomic::Ordering::SeqCst),
+                        expected
+                    );
+                    warm_policy.decline(
+                        crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                    );
+                    Ok(state)
+                },
+            )
+            .await
+            .expect("cache access completes");
+            assert_eq!(
+                state,
+                if expected == 1 {
+                    MemoryCacheState::Cold
+                } else {
+                    MemoryCacheState::Warm
+                }
+            );
+        }
+        drop(cache);
+        drop(tx);
+        worker.join().expect("cache owner exits");
     }
 
     /// A stub that attests the staged-residency lifecycle, which is what makes a warm switch

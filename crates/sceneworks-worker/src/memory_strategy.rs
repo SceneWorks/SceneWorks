@@ -242,7 +242,7 @@ pub fn generate_with_scope(
         request,
         context,
         on_progress,
-        |generator, request, on_progress| generator.generate(request, on_progress),
+        |generator, request, _, on_progress| generator.generate(request, on_progress),
     )
 }
 
@@ -261,7 +261,28 @@ pub fn generate_with_scope_report(
         request,
         context,
         on_progress,
-        |generator, request, on_progress| generator.generate_with_report(request, on_progress),
+        |generator, request, _, on_progress| generator.generate_with_report(request, on_progress),
+    )
+}
+
+/// Drive a pre-load FLUX.1 plan through the same admitted request scope as ordinary generation.
+/// The runner receives the actual scope, so its phase events belong to the real request lifecycle;
+/// this worker remains the single owner of `configure_request` and terminal `finish`.
+pub fn generate_with_scope_report_planned(
+    generator: &dyn gen_core::Generator,
+    request: &mut gen_core::GenerationRequest,
+    plan: &gen_core::RenderPlan,
+    context: Option<&gen_core::MemoryRunContext>,
+    on_progress: &mut dyn FnMut(gen_core::Progress),
+) -> gen_core::Result<gen_core::GenerationReport> {
+    run_with_scope(
+        generator,
+        request,
+        context,
+        on_progress,
+        |generator, request, scope, on_progress| {
+            generator.generate_planned(request, plan, scope, on_progress)
+        },
     )
 }
 
@@ -273,6 +294,7 @@ fn run_with_scope<T>(
     run: impl FnOnce(
         &dyn gen_core::Generator,
         &gen_core::GenerationRequest,
+        Option<&mut dyn gen_core::MemoryRequestScope>,
         &mut dyn FnMut(gen_core::Progress),
     ) -> gen_core::Result<T>,
 ) -> gen_core::Result<T> {
@@ -311,7 +333,7 @@ fn run_with_scope<T>(
         );
     }
     let Some(context) = context else {
-        return run(generator, request, on_progress);
+        return run(generator, request, None, on_progress);
     };
     if let gen_core::MemorySafetyDecision::Reject { reason } =
         generator.memory_strategy_safety_check(context)
@@ -362,7 +384,10 @@ fn run_with_scope<T>(
         window_component = component,
         "Provider scope configuration completed; fields describe the actual request handed to generate, not a requested scenario label"
     );
-    let result = run(generator, request, on_progress);
+    let result = match scope.as_mut() {
+        Some(scope) => run(generator, request, Some(scope.as_mut()), on_progress),
+        None => run(generator, request, None, on_progress),
+    };
     if let Some(scope) = scope.as_mut() {
         let outcome = match &result {
             Ok(_) => gen_core::MemoryRunOutcome::Complete,
@@ -2271,6 +2296,7 @@ mod tests {
     struct LifecycleRecord {
         configure_calls: usize,
         finish_calls: Vec<MemoryRunOutcome>,
+        phase_events: Vec<(bool, MemoryPhase)>,
     }
 
     struct MockScope {
@@ -2291,11 +2317,17 @@ mod tests {
             }
         }
 
-        fn enter_phase(&mut self, _phase: MemoryPhase) -> gen_core::Result<()> {
+        fn enter_phase(&mut self, phase: MemoryPhase) -> gen_core::Result<()> {
+            self.record.lock().unwrap().phase_events.push((true, phase));
             Ok(())
         }
 
-        fn leave_phase(&mut self, _phase: MemoryPhase) -> gen_core::Result<()> {
+        fn leave_phase(&mut self, phase: MemoryPhase) -> gen_core::Result<()> {
+            self.record
+                .lock()
+                .unwrap()
+                .phase_events
+                .push((false, phase));
             Ok(())
         }
 
@@ -2392,6 +2424,22 @@ mod tests {
                 MockGenerate::Error => Err(gen_core::Error::Unsupported("render failed".into())),
             }
         }
+
+        fn generate_planned(
+            &self,
+            request: &gen_core::GenerationRequest,
+            _plan: &gen_core::RenderPlan,
+            mut scope: Option<&mut dyn MemoryRequestScope>,
+            on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationReport> {
+            let scope = scope
+                .as_mut()
+                .expect("planned path receives the admitted scope");
+            scope.enter_phase(MemoryPhase::Denoise)?;
+            let output = self.generate(request, on_progress)?;
+            scope.leave_phase(MemoryPhase::Denoise)?;
+            Ok(gen_core::GenerationReport::from_output(output))
+        }
     }
 
     fn run_context() -> MemoryRunContext {
@@ -2455,6 +2503,50 @@ mod tests {
         let record = generator.record.lock().unwrap();
         assert_eq!(record.configure_calls, 1);
         assert_eq!(record.finish_calls, vec![expected]);
+    }
+
+    #[test]
+    fn planned_generation_borrows_the_real_scope_and_finishes_it_once() {
+        let generator = MockGenerator::new(MockGenerate::Complete, false);
+        let mut request = gen_core::GenerationRequest {
+            prompt: "a fox".into(),
+            width: 64,
+            height: 64,
+            count: 1,
+            seed: Some(7),
+            steps: Some(1),
+            ..Default::default()
+        };
+        let plan = gen_core::RenderPlan::base_image(
+            gen_core::Generator::descriptor(&generator),
+            &request,
+            gen_core::render::PackedImagePass {
+                pixel_stride: 16,
+                token_width: 64,
+                sampler: "euler",
+                guidance: 3.5,
+                sigmas: vec![1.0, 0.0],
+                executed_steps: 1,
+                capture_sigma: 0.0,
+            },
+        )
+        .expect("weights-free plan");
+        let report = generate_with_scope_report_planned(
+            &generator,
+            &mut request,
+            &plan,
+            Some(&run_context()),
+            &mut |_| {},
+        )
+        .expect("planned render completes");
+        assert!(report.output.is_some());
+        let record = generator.record.lock().unwrap();
+        assert_eq!(record.configure_calls, 1);
+        assert_eq!(
+            record.phase_events,
+            vec![(true, MemoryPhase::Denoise), (false, MemoryPhase::Denoise)]
+        );
+        assert_eq!(record.finish_calls, vec![MemoryRunOutcome::Complete]);
     }
 
     /// A request scope that does what every shipped scope does (`candle-gen`/`mlx-gen`
