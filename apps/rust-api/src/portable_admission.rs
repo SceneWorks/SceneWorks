@@ -1115,7 +1115,7 @@ async fn capture_download_member(
         .unwrap_or("default");
     let identity = ArtifactIdentity::pinned(repo, revision, variant)
         .map_err(|error| incomplete(error.to_string()))?;
-    let selectors = download
+    let mut selectors = download
         .get("files")
         .and_then(Value::as_array)
         .ok_or_else(|| incomplete(format!("{repo} has no file selectors")))?
@@ -1127,6 +1127,12 @@ async fn capture_download_member(
                 .ok_or_else(|| incomplete(format!("{repo} has an invalid file selector")))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if selectors.is_empty() {
+        // The model catalog's legacy `files: []` means the selected pinned snapshot as a whole.
+        // Resolve that wildcard now; an empty portable closure would leave loader-visible bytes
+        // outside the frozen identity.
+        selectors.push("*".to_owned());
+    }
     let files = resolve_trusted_pinned_files(state, repo, revision, &selectors).await?;
     if let Some(local) = capture_receipted_local_files(state, repo, revision, variant, &selectors)?
     {
