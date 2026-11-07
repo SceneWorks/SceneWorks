@@ -180,8 +180,8 @@ pub(crate) fn resolve_selected_aux_source(
                 .get("baseModelPath")?
                 .as_str()?;
             let path = crate::video_jobs::ltx::resolve_bundled_ltx_gemma_dir(Path::new(model_dir))?;
-            let overridden =
-                std::env::var_os("LTX_GEMMA_DIR").is_some_and(|value| path == PathBuf::from(value));
+            let overridden = std::env::var_os("LTX_GEMMA_DIR")
+                .is_some_and(|value| path.as_os_str() == value.as_os_str());
             Some((path, overridden))
         }
         "ltx_amoral_gemma_3_12b" => {
@@ -193,7 +193,7 @@ pub(crate) fn resolve_selected_aux_source(
             {
                 let path = crate::video_jobs::ltx::resolve_ltx_uncensored_enhancer_dir(data_dir)?;
                 let overridden = std::env::var_os("LTX_UNCENSORED_GEMMA_DIR")
-                    .is_some_and(|value| path == PathBuf::from(value));
+                    .is_some_and(|value| path.as_os_str() == value.as_os_str());
                 Some((path, overridden))
             }
         }
