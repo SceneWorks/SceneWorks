@@ -3238,7 +3238,22 @@ impl TrainerLoadInputs {
         // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto
         // the trainer `LoadSpec` so a self-contained install trains without a separate gemma download
         // (sc-9989).
-        let text_encoder = training_text_encoder(engine_id, &weights_dir);
+        let text_encoder =
+            if engine_id == "ltx_2_3" && plan.extra.contains_key("__portableAuxPaths") {
+                let path = plan
+                    .extra
+                    .get("__portableAuxPaths")
+                    .and_then(|paths| paths.get("ltx_training_text_encoder"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "portable LTX training text encoder is not bound".to_owned(),
+                        )
+                    })?;
+                Some(WeightsSource::Dir(PathBuf::from(path)))
+            } else {
+                training_text_encoder(engine_id, &weights_dir)
+            };
         // Caller-staged model components (epic 13657, sc-13682): the base model's pinned
         // `coRequisite` downloads the trainer's engine consumes — SDXL's CLIP-L/bigG tokenizers +
         // fp16-fix VAE on candle, Iris' Qwen3-VL text encoder. A missing one fails the job with an

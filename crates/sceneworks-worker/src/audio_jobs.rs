@@ -1611,7 +1611,18 @@ async fn run_audio_synthesis_with(
     // removed), so this attach is the sole offline Cover source. An absent snapshot stages nothing; the
     // engine then surfaces the actionable Cover-needs-`sft_cover` error on the request that needs it.
     if request.edit_mode.as_deref() == Some("cover") {
-        if let Some(source) = crate::model_jobs::resolve_optional_component(
+        let bound = job
+            .payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .filter(|advanced| crate::portable_aux_sources::has_bound_aux_paths(advanced));
+        if let Some(advanced) = bound {
+            let path = crate::portable_aux_sources::bound_aux_path(advanced, "sft_cover")
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("portable ACE Cover source is not bound".to_owned())
+                })?;
+            components.insert("sft_cover".to_string(), WeightsSource::Dir(path));
+        } else if let Some(source) = crate::model_jobs::resolve_optional_component(
             &request.model_manifest_entry,
             "sft_cover",
             settings,

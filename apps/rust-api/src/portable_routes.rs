@@ -13,6 +13,12 @@ pub(crate) enum SelectedSourceLocation {
     LocalPath(String),
     /// Admission resolves the request-selected repository HEAD to an immutable revision.
     DynamicHfRepo(String),
+    /// An operator Gemma override wins when a registered worker advertises it; otherwise
+    /// admission binds the exact selected LTX bundle's pinned sibling Gemma download.
+    OperatorOverrideOrManifest {
+        source_id: &'static str,
+        default: Value,
+    },
     /// A worker-advertised exact digest closure, never an unpinned API download.
     OperatorCachedRepo(&'static str),
 }
@@ -74,7 +80,34 @@ pub(crate) fn selected_route_source_rows(
                 )
             })?;
         if plan.target.base_model == "ltx_2_3" {
-            push_operator_source(&mut rows, training_slot, "ltx_training_text_encoder");
+            let base_entry = entries
+                .iter()
+                .find(|(slot, _)| slot == training_slot)
+                .map(|(_, entry)| *entry)
+                .expect("slot was selected from entries");
+            let gemma = base_entry
+                .get("downloads")
+                .and_then(Value::as_array)
+                .and_then(|downloads| {
+                    downloads.iter().find(|download| {
+                        download.get("repo").and_then(Value::as_str)
+                            == Some("SceneWorks/ltx-2.3-mlx")
+                            && download.get("files").and_then(Value::as_array).is_some_and(
+                                |files| files.iter().any(|file| file.as_str() == Some("gemma/*")),
+                            )
+                    })
+                })
+                .ok_or("LTX training base lacks pinned sibling Gemma declaration")?;
+            rows.push(SelectedRouteSource {
+                model_slot: training_slot.to_owned(),
+                component_id: "ltx_training_text_encoder".to_owned(),
+                role: ArtifactMemberRole::RequiredComponent,
+                source: SelectedSourceLocation::OperatorOverrideOrManifest {
+                    source_id: "ltx_training_gemma_override",
+                    default: gemma.clone(),
+                },
+                selected_tier: None,
+            });
         }
         if sceneworks_core::training::iris::is_iris_training_kernel(&plan.target.kernel) {
             let options = sceneworks_core::training::iris::iris_options(&plan.config)
@@ -350,12 +383,13 @@ pub(crate) fn eligible_portable_routes(
         }
         let claims =
             native_route_claims_request(backend, job_type, payload).map_err(ApiError::internal)?;
-        if !claims || !entries_support_backend(entries, backend) {
+        if !claims {
             continue;
         }
         routes.extend(
             platforms
                 .iter()
+                .filter(|platform| entries_support_route(entries, backend, platform))
                 .map(|platform| (backend.to_owned(), (*platform).to_owned())),
         );
     }
@@ -367,11 +401,35 @@ pub(crate) fn eligible_portable_routes(
     Ok(routes)
 }
 
-fn entries_support_backend(entries: &[(String, &Value)], backend: &str) -> bool {
+fn entries_support_route(entries: &[(String, &Value)], backend: &str, platform: &str) -> bool {
     entries.iter().all(|(_, entry)| {
         let Some(id) = entry.get("id").and_then(Value::as_str) else {
             return false;
         };
+        let downloads: Vec<&Value> = ["downloads", "conditionalComponents"]
+            .into_iter()
+            .filter_map(|field| entry.get(field).and_then(Value::as_array))
+            .flatten()
+            .collect();
+        let downloads_support_platform = downloads.is_empty()
+            || downloads.iter().any(|download| {
+                download
+                    .get("platforms")
+                    .and_then(Value::as_array)
+                    .map_or(true, |platforms| {
+                        platforms
+                            .iter()
+                            .any(|value| value.as_str() == Some(platform))
+                    })
+            });
+        if !downloads_support_platform {
+            return false;
+        }
+        if entry.get("componentOnly").and_then(Value::as_bool) == Some(true)
+            && entry.get("type").and_then(Value::as_str) == Some("utility")
+        {
+            return !downloads.is_empty();
+        }
         if let Some(spec) = sceneworks_core::registry::builtin_model_spec(id) {
             return spec.routes.contains_key(backend);
         }
@@ -593,5 +651,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rows[0].component_id, "sdxl_detail_tile_control");
+    }
+
+    #[test]
+    fn component_only_utility_entries_are_route_neutral_but_platform_bound() {
+        let entry = json!({"id":"person_detector","type":"utility","componentOnly":true,"downloads":[{"provider":"huggingface","repo":"example/person","revision":"0123456789012345678901234567890123456789","files":["model.safetensors"],"platforms":["linux"]}]});
+        let entries = [("modelManifestEntries/0".to_owned(), &entry)];
+        assert!(entries_support_route(&entries, "candle", "linux"));
+        assert!(!entries_support_route(&entries, "mlx", "macos"));
     }
 }

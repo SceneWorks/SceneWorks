@@ -74,6 +74,7 @@ pub mod moss_image;
 pub mod moss_image_advanced;
 pub mod observability;
 pub mod payload_util;
+pub mod portable_sources;
 pub mod preview_support;
 pub mod process;
 pub mod project_store;

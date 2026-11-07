@@ -565,7 +565,7 @@ pub(super) fn ltx_gemma_override_path(raw: Option<std::ffi::OsString>) -> Option
 
 /// [`ltx_gemma_override_path`] applied to the live `$LTX_GEMMA_DIR`.
 #[cfg(native_lane)]
-fn ltx_gemma_env_override() -> Option<PathBuf> {
+pub(crate) fn ltx_gemma_env_override() -> Option<PathBuf> {
     ltx_gemma_override_path(std::env::var_os("LTX_GEMMA_DIR"))
 }
 
@@ -1794,7 +1794,11 @@ pub(super) async fn generate_ltx(
     let (use_uncensored_enhancer, uncensored_enhancer_dir) = resolve_ltx_text_encoder_for_model(
         &request.model,
         &request.advanced,
-        resolve_ltx_uncensored_enhancer_dir(&settings.data_dir),
+        if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+            crate::portable_aux_sources::bound_aux_path(&request.advanced, "ltx_amoral_gemma_3_12b")
+        } else {
+            resolve_ltx_uncensored_enhancer_dir(&settings.data_dir)
+        },
     )?;
     let enhance_prompt = advanced::bool(&request.advanced, "enhancePrompt");
     let video_mode = advanced::bool(&request.advanced, "noAudio").then(|| "no_audio".to_owned());

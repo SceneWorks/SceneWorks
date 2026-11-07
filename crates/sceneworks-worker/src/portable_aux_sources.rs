@@ -6,6 +6,20 @@ use std::path::{Path, PathBuf};
 use sceneworks_core::contracts::JsonObject;
 use serde_json::Value;
 
+/// Only the verified dispatch clone carries this private map. The worker guard removes every
+/// client-supplied copy before adding immutable leased paths for the selected route.
+pub(crate) fn bound_aux_path(advanced: &JsonObject, source_id: &str) -> Option<PathBuf> {
+    advanced
+        .get("__portableAuxPaths")?
+        .get(source_id)?
+        .as_str()
+        .map(PathBuf::from)
+}
+
+pub(crate) fn has_bound_aux_paths(advanced: &JsonObject) -> bool {
+    advanced.get("__portableAuxPaths").is_some()
+}
+
 /// Effective path plus whether the loader selected an authorized operator override.
 /// The caller hashes the exact file/dir closure and records pinned-repo provenance otherwise.
 pub(crate) fn resolve_selected_aux_source(
@@ -15,6 +29,11 @@ pub(crate) fn resolve_selected_aux_source(
 ) -> Option<(PathBuf, bool)> {
     let snapshot = |repo| crate::model_jobs::huggingface_snapshot_dir(data_dir, repo);
     match source_id {
+        #[cfg(native_lane)]
+        "ltx_training_gemma_override" => {
+            crate::video_jobs::ltx::ltx_gemma_env_override().map(|path| (path, true))
+        }
+        #[cfg(native_lane)]
         "ltx_training_text_encoder" => {
             let model_dir = payload
                 .get("plan")?

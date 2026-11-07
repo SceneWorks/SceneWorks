@@ -182,6 +182,23 @@ async fn ensure_sdxl_ipadapter_weights(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<(PathBuf, PathBuf)> {
+    if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
+        if crate::portable_aux_sources::has_bound_aux_paths(advanced) {
+            let adapter = crate::portable_aux_sources::bound_aux_path(advanced, "sdxl_ip_adapter")
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "portable SDXL IP-Adapter source is not bound".to_owned(),
+                    )
+                })?;
+            let encoder = crate::portable_aux_sources::bound_aux_path(advanced, "sdxl_ip_encoder")
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "portable SDXL image encoder is not bound".to_owned(),
+                    )
+                })?;
+            return Ok((adapter, encoder));
+        }
+    }
     // Env override: a directory laid out like the h94 repo (or its HF snapshot), pre-staged for local
     // validation (`SCENEWORKS_IPADAPTER_SDXL`).
     if let Ok(root) = std::env::var("SCENEWORKS_IPADAPTER_SDXL") {
