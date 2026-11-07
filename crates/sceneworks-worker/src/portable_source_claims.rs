@@ -159,6 +159,8 @@ fn registered_digest_source_claims(
     }
     let mut claims = Vec::new();
     let manifests = settings.config_dir.join("manifests");
+    let checkpoint_plans =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
     for model in catalog_records(&manifests.join("user.models.jsonc"), "models") {
         let Some(id) = model.get("id").and_then(serde_json::Value::as_str) else {
             continue;
@@ -180,11 +182,38 @@ fn registered_digest_source_claims(
                 if let Some(files) = files {
                     append_registered_claim_files(&mut claims, "model", id, None, files.clone());
                     append_registered_claim_files(&mut claims, "control", id, None, files.clone());
-                    append_registered_claim_files(&mut claims, "component", id, Some(&key), files);
+                    append_registered_claim_files(
+                        &mut claims,
+                        "component",
+                        id,
+                        Some(&key),
+                        files.clone(),
+                    );
+                    append_registered_model_bytes(&mut claims, id, &files);
                 }
             }
             for claim in claims.drain(..) {
                 publish(claim);
+            }
+        }
+        if let Some(checkpoint_id) = model
+            .pointer("/importPlan/checkpointId")
+            .and_then(serde_json::Value::as_str)
+        {
+            // Only the trusted plan store may expose a linked library layer. It verifies the
+            // approved root, compiled plan, and source bytes before availability is advertised.
+            if let Ok(resolved) = checkpoint_plans.resolve(checkpoint_id) {
+                for layer in resolved.layers {
+                    if let Ok(files) = capture_registered_files(&layer.path) {
+                        // The same bytes may have another linked root ID or filename on a
+                        // different host. The private plan binds each logical layer; availability
+                        // advertises canonical file content for this registered model ID.
+                        append_registered_model_bytes(&mut claims, id, &files);
+                    }
+                }
+                for claim in claims.drain(..) {
+                    publish(claim);
+                }
             }
         }
     }
@@ -329,6 +358,90 @@ fn append_registered_claim_files(
     {
         claims.push(claim);
     }
+}
+
+fn append_registered_model_bytes(
+    claims: &mut Vec<PortableSourceClaim>,
+    model_id: &str,
+    files: &[PortableArtifactFile],
+) {
+    for file in files {
+        append_registered_claim_files(
+            claims,
+            "model-bytes",
+            model_id,
+            None,
+            vec![PortableArtifactFile {
+                relative_path: PathBuf::from("artifact"),
+                size_bytes: file.size_bytes,
+                sha256: file.sha256.clone(),
+            }],
+        );
+    }
+}
+
+/// Resolve one frozen plan layer by exact bytes from this worker's registered model sources.
+/// The API host's root ID, plan ID and filename never participate; all candidates came from the
+/// worker catalog's authorized locators or its own verified checkpoint plan.
+pub(crate) fn registered_model_content_path(
+    settings: &Settings,
+    model_id: &str,
+    expected: &PortableArtifactFile,
+) -> WorkerResult<Option<PathBuf>> {
+    if expected.relative_path != Path::new("artifact") {
+        return Ok(None);
+    }
+    let records = catalog_records(
+        &settings.config_dir.join("manifests/user.models.jsonc"),
+        "models",
+    );
+    let matching = records
+        .iter()
+        .filter(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(model_id))
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Ok(None);
+    }
+    let model = matching[0];
+    let mut candidates = Vec::new();
+    for (_, raw) in registered_model_locators(model) {
+        let Ok(path) = crate::paths::normalize_app_managed_model_entry_path(
+            settings,
+            &raw,
+            "registered model source",
+        ) else {
+            continue;
+        };
+        candidates.push(path);
+    }
+    if let Some(checkpoint_id) = model
+        .pointer("/importPlan/checkpointId")
+        .and_then(serde_json::Value::as_str)
+    {
+        let store =
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+        if let Ok(resolved) = store.resolve(checkpoint_id) {
+            candidates.extend(resolved.layers.into_iter().map(|layer| layer.path));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    for selected in candidates {
+        let Ok(files) = capture_registered_files(&selected) else {
+            continue;
+        };
+        for file in files {
+            if file.size_bytes == expected.size_bytes && file.sha256 == expected.sha256 {
+                let path = if selected.is_file() {
+                    selected.clone()
+                } else {
+                    selected.join(&file.relative_path)
+                };
+                return Ok(Some(path));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn flux2_conversion_source_claims(
@@ -569,6 +682,56 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn registered_model_bytes_rebind_across_filename_and_refuse_substitution() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let data = temp.path().join("worker");
+        let worker_file = data.join("models/renamed-worker.safetensors");
+        std::fs::create_dir_all(worker_file.parent().unwrap()).unwrap();
+        std::fs::write(&worker_file, b"same plan layer bytes").unwrap();
+        let mut settings = Settings::for_test(data);
+        settings.config_dir = temp.path().join("config");
+        let manifest = settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({"models":[{"id":"linked-model", "modelPath":worker_file}]}))
+                .unwrap(),
+        )
+        .unwrap();
+        let sha256 = format!("sha256:{:x}", Sha256::digest(b"same plan layer bytes"));
+        let expected = PortableArtifactFile {
+            relative_path: PathBuf::from("artifact"),
+            size_bytes: b"same plan layer bytes".len() as u64,
+            sha256,
+        };
+        assert_eq!(
+            registered_model_content_path(&settings, "linked-model", &expected)
+                .unwrap()
+                .as_deref(),
+            Some(worker_file.as_path())
+        );
+        let claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "model-bytes",
+            "linked-model",
+            None,
+            &sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&[
+                expected.clone(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(static_source_claims(&settings)
+            .iter()
+            .any(|claim| claim.source_id == claim_id && claim.files == vec![expected.clone()]));
+        std::fs::write(&worker_file, b"substituted plan layer").unwrap();
+        assert!(
+            registered_model_content_path(&settings, "linked-model", &expected)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn incremental_claim_publication_preserves_progress_across_heartbeat_ack() {
         let make = |source_id| {
             PortableSourceClaim::new(
@@ -618,7 +781,7 @@ mod tests {
         .unwrap();
         let mut published = Vec::new();
         registered_digest_source_claims(&settings, |claim| published.push(claim));
-        assert_eq!(published.len(), 3); // valid model, control, and locator aliases
+        assert_eq!(published.len(), 4); // model, control, locator alias, generic content
         assert!(published
             .iter()
             .all(|claim| claim.source_id.starts_with("registered_digest:")));

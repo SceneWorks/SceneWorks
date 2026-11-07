@@ -156,8 +156,18 @@ async fn run_utility_job_inner(
         .map_err(|error| ("Model source unavailable.", error))?;
         let mut dispatch_job = job.clone();
         dispatch_job.payload = source_guard.dispatch_payload().clone();
-        let dispatch_result =
-            dispatch_utility_job(api, settings, http_client, &dispatch_job, &shutdown).await;
+        let mut dispatch_settings = settings.clone();
+        // The typed paths belong to the source guard's verified, immutable attempt snapshot.
+        // The guard below outlives this dispatch, retaining its exclusive lease through load.
+        dispatch_settings.verified_plan_layers = source_guard.plan_layers();
+        let dispatch_result = dispatch_utility_job(
+            api,
+            &dispatch_settings,
+            http_client,
+            &dispatch_job,
+            &shutdown,
+        )
+        .await;
         // Success releases the operation-owned source sessions; failure re-probes the exact bound
         // sources so a mid-load disconnect surfaces as the typed unavailable condition instead of
         // a raw loader error (sc-19708). An error with the source still present stays verbatim.

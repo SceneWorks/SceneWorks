@@ -56,6 +56,10 @@ pub struct Settings {
     /// `0` means no additional per-job ceiling. Other job families retain their existing
     /// backend budget policy; the shared setting alone is not proof of native admission.
     pub gpu_memory_limit_bytes: u64,
+    /// Job-local, guard-authenticated layer paths in the leased private source snapshot. Never
+    /// populated from environment or a serialized job payload.
+    pub(crate) verified_plan_layers:
+        Option<std::sync::Arc<crate::external_library_runtime::VerifiedPlanLayers>>,
 }
 
 impl fmt::Debug for Settings {
@@ -153,6 +157,7 @@ impl Settings {
             backend_candle_enabled: false,
             external_model_roots: Vec::new(),
             gpu_memory_limit_bytes: 0,
+            verified_plan_layers: None,
         }
     }
 
@@ -226,6 +231,7 @@ impl Settings {
                 cfg!(feature = "backend-candle"),
             ),
             gpu_memory_limit_bytes: env_u64_any(&["SCENEWORKS_GPU_MEMORY_LIMIT_BYTES"], 0)?,
+            verified_plan_layers: None,
             external_model_roots: sceneworks_core::external_roots::external_model_roots_from_env(),
         })
     }

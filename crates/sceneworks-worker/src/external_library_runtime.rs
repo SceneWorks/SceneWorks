@@ -38,7 +38,8 @@ use sceneworks_core::model_artifacts::local_preference::{
 };
 use sceneworks_core::model_artifacts::portable_binding::{
     enumerate_portable_array_slots, LocalArtifactFile, LocalArtifactMember, PortableArtifactFile,
-    PortableArtifactMember, PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
+    PortableArtifactMember, PortableCheckpointPlan, PortableModelBinding, PortableRouteBinding,
+    PortableSourceIdentity,
 };
 use sceneworks_core::model_artifacts::resolved_cache::{ResolvedCacheLease, ResolvedCacheStore};
 use sceneworks_core::model_artifacts::ModelArtifactResolver;
@@ -62,6 +63,7 @@ pub(crate) struct RuntimeSourceGuard {
     dispatch_payload: JsonObject,
     portable_scope: Option<ActiveLocalArtifacts>,
     _portable_snapshot: Option<PortableAttemptSnapshot>,
+    plan_layers: Option<std::sync::Arc<VerifiedPlanLayers>>,
     resolutions: Vec<ModelResolution>,
     sessions: Vec<ExternalSourceSession>,
     /// The ONE process-wide local-tier preference scope for this job, holding exactly the
@@ -459,6 +461,7 @@ impl RuntimeSourceGuard {
         }
         let mut portable_snapshot = None;
         let mut portable_scope = None;
+        let mut plan_layers = None;
         if let Some(binding) = binding {
             verify_portable_route(binding, job_type, payload, settings, &plans)?;
             let prepared = prepare_portable_snapshot(
@@ -477,6 +480,7 @@ impl RuntimeSourceGuard {
                         })?);
                 }
                 portable_snapshot = Some(prepared.snapshot);
+                plan_layers = prepared.plan_layers;
             }
             rebind_revision_primary_paths(binding, payload, settings, &mut dispatch_payload)?;
             rewrite_training_plan_source(binding, settings, &mut dispatch_payload)?;
@@ -531,6 +535,7 @@ impl RuntimeSourceGuard {
             dispatch_payload,
             portable_scope,
             _portable_snapshot: portable_snapshot,
+            plan_layers,
             resolutions,
             sessions,
             local_scope,
@@ -561,6 +566,7 @@ impl RuntimeSourceGuard {
             dispatch_payload,
             portable_scope: None,
             _portable_snapshot: None,
+            plan_layers: None,
             resolutions: Vec::new(),
             sessions: Vec::new(),
             local_scope: None,
@@ -571,6 +577,10 @@ impl RuntimeSourceGuard {
 
     pub(crate) fn dispatch_payload(&self) -> &JsonObject {
         &self.dispatch_payload
+    }
+
+    pub(crate) fn plan_layers(&self) -> Option<std::sync::Arc<VerifiedPlanLayers>> {
+        self.plan_layers.clone()
     }
 
     pub(crate) fn finish_success(mut self) -> WorkerResult<()> {
@@ -643,12 +653,158 @@ impl RuntimeSourceGuard {
 /// lock remains held through dispatch, including loader reads, and prevents cooperative eviction.
 #[derive(Debug)]
 struct PortableAttemptSnapshot {
-    _lease: FileLock,
+    _lease: std::sync::Arc<FileLock>,
 }
 
 struct PreparedPortableSnapshot {
     snapshot: PortableAttemptSnapshot,
     overlays: Vec<LocalArtifactOverlayEntry>,
+    plan_layers: Option<std::sync::Arc<VerifiedPlanLayers>>,
+}
+
+/// In-process handoff from the byte guard to checkpoint-plan loaders. Paths point into the
+/// guard's immutable, leased attempt bundle; they never enter a job payload or public carrier.
+/// The guard builds this only after copy-then-verify, and keeps the lease until dispatch ends.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedPlanLayers {
+    by_checkpoint: std::collections::BTreeMap<String, std::collections::BTreeMap<String, PathBuf>>,
+    plans: std::collections::BTreeMap<String, PortableCheckpointPlan>,
+    lease: std::sync::Arc<FileLock>,
+}
+
+impl VerifiedPlanLayers {
+    fn new(lease: std::sync::Arc<FileLock>) -> Self {
+        Self {
+            by_checkpoint: Default::default(),
+            plans: Default::default(),
+            lease,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(lease: std::sync::Arc<FileLock>) -> Self {
+        Self::new(lease)
+    }
+
+    pub(crate) fn lease(&self) -> std::sync::Arc<FileLock> {
+        self.lease.clone()
+    }
+
+    pub(crate) fn add_plan(
+        &mut self,
+        checkpoint_id: &str,
+        plan: PortableCheckpointPlan,
+    ) -> WorkerResult<()> {
+        plan.validate()
+            .map_err(|error| invalid_binding(error.to_string()))?;
+        if self.plans.insert(checkpoint_id.to_owned(), plan).is_some() {
+            return Err(invalid_binding("duplicate private checkpoint plan"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolve_checkpoint(
+        &self,
+        checkpoint_id: &str,
+        check: &dyn Fn() -> io::Result<()>,
+    ) -> Result<
+        sceneworks_core::checkpoint_plan_store::ResolvedCheckpointV1,
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanError,
+    > {
+        use sceneworks_core::checkpoint_import::{
+            CheckpointCatalogRecordV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+        };
+        use sceneworks_core::checkpoint_plan_store::{
+            CheckpointPlanError, ResolvedCheckpointV1, ResolvedLayerV1,
+        };
+        let refuse = |reason: &str| CheckpointPlanError::PlanTampered {
+            checkpoint_id: checkpoint_id.to_owned(),
+            reason: reason.to_owned(),
+        };
+        check().map_err(|_| refuse("checkpoint plan load was interrupted"))?;
+        let portable = self
+            .plans
+            .get(checkpoint_id)
+            .ok_or_else(|| refuse("the guard did not lease this checkpoint plan"))?;
+        portable
+            .validate()
+            .map_err(|_| refuse("portable checkpoint plan is invalid"))?;
+        let paths = self
+            .by_checkpoint
+            .get(checkpoint_id)
+            .ok_or_else(|| refuse("checkpoint plan layers are absent"))?;
+        if paths.len() != portable.layers.len() {
+            return Err(refuse(
+                "private plan layer set differs from the frozen plan",
+            ));
+        }
+        let layers = portable
+            .layers
+            .iter()
+            .map(|layer| {
+                let digest = layer
+                    .sha256
+                    .strip_prefix("sha256:")
+                    .ok_or_else(|| refuse("checkpoint layer digest is invalid"))?;
+                Ok(ImportLayerV1 {
+                    layer_id: layer.layer_id.clone(),
+                    role: layer.role.clone(),
+                    target_path: layer.target_path.clone(),
+                    container: layer.container,
+                    source: SourceLocatorV1::linked("portable", "artifact", digest)
+                        .map_err(|_| refuse("checkpoint layer locator is invalid"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, CheckpointPlanError>>()?;
+        let mut plan = ImportPlanV1::new("portable", &portable.family, layers)
+            .map_err(|_| refuse("checkpoint plan structure is invalid"))?;
+        plan.context = portable.context.clone();
+        if plan
+            .semantic_digest()
+            .map_err(|_| refuse("checkpoint plan digest is invalid"))?
+            != portable.semantic_digest
+        {
+            return Err(refuse(
+                "checkpoint plan semantics differ from the frozen plan",
+            ));
+        }
+        let record = CheckpointCatalogRecordV1::from_plan(checkpoint_id, &plan)
+            .map_err(|_| refuse("checkpoint catalog projection is invalid"))?;
+        let mut resolved_layers = Vec::with_capacity(plan.layers.len());
+        for layer in &plan.layers {
+            check().map_err(|_| refuse("checkpoint plan load was interrupted"))?;
+            let path = paths
+                .get(&layer.layer_id)
+                .ok_or_else(|| refuse("private checkpoint layer is missing"))?;
+            resolved_layers.push(ResolvedLayerV1 {
+                layer: layer.clone(),
+                path: path.clone(),
+                rehashed: false,
+            });
+        }
+        Ok(ResolvedCheckpointV1 {
+            checkpoint_id: checkpoint_id.to_owned(),
+            record,
+            plan,
+            layers: resolved_layers,
+        })
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        checkpoint_id: &str,
+        layer_id: &str,
+        path: PathBuf,
+    ) -> WorkerResult<()> {
+        let layers = self
+            .by_checkpoint
+            .entry(checkpoint_id.to_owned())
+            .or_default();
+        if layers.insert(layer_id.to_owned(), path).is_some() {
+            return Err(invalid_binding("duplicate private checkpoint plan layer"));
+        }
+        Ok(())
+    }
 }
 
 const PORTABLE_CACHE_MAX_ENTRIES: usize = 8;
@@ -819,8 +975,12 @@ fn prepare_portable_snapshot(
     ensure_private_directory(&cache_root)?;
     create_private_directory(&parent)?;
     ensure_private_directory(&parent)?;
-    let lease = FileLock::open_exclusive(&parent.join(".lease")).map_err(WorkerError::Io)?;
-    let snapshot = PortableAttemptSnapshot { _lease: lease };
+    let lease = std::sync::Arc::new(
+        FileLock::open_exclusive(&parent.join(".lease")).map_err(WorkerError::Io)?,
+    );
+    let snapshot = PortableAttemptSnapshot {
+        _lease: lease.clone(),
+    };
     // A crashed first materialization leaves only a uniquely named staging tree; it never
     // becomes a load candidate. The route lock makes cleanup exclusive with another writer.
     for entry in std::fs::read_dir(&parent).map_err(WorkerError::Io)? {
@@ -845,6 +1005,12 @@ fn prepare_portable_snapshot(
             .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
         let required_ids = &selected_aux[model_index];
         for (member_index, member) in model.members.iter().enumerate() {
+            let plan_layer = selected_checkpoint_plan_layer(member, model, entry, settings)?;
+            if plan_layer.is_some() && member.files.len() != 1 {
+                return Err(invalid_binding(
+                    "checkpoint plan layer is not one frozen file",
+                ));
+            }
             let is_selected_aux = member
                 .component_id
                 .as_ref()
@@ -883,10 +1049,14 @@ fn prepare_portable_snapshot(
                         }
                     }
                 }
+            } else if let Some(layer) = &plan_layer {
+                layer.source_path.clone()
             } else {
                 selected_local_artifact_path(member, &model.slot, entry, payload, settings)?
             };
-            if matches!(member.source, PortableSourceIdentity::WorkerClaim { .. }) {
+            if matches!(member.source, PortableSourceIdentity::WorkerClaim { .. })
+                || plan_layer.is_some()
+            {
                 allowed_roots.push(selected.parent().unwrap_or(&selected).to_path_buf());
             }
             let selected_is_file = selected.is_file();
@@ -916,9 +1086,23 @@ fn prepare_portable_snapshot(
                     )
                     .map_err(|error| invalid_binding(error.to_string()))?,
                 )
+            } else if let Some(layer) = &plan_layer {
+                staging
+                    .join(format!("model{model_index}/checkpoint-plan"))
+                    .join(layer.target_path.parent().unwrap_or(Path::new("")))
             } else {
                 staging.join(format!("model{model_index}/member{member_index}"))
             };
+            let plan_target_name = plan_layer
+                .as_ref()
+                .map(|layer| {
+                    layer
+                        .target_path
+                        .file_name()
+                        .map(PathBuf::from)
+                        .ok_or_else(|| invalid_binding("checkpoint plan layer has no target file"))
+                })
+                .transpose()?;
             if needs_copy {
                 create_private_tree(&target_root)?;
                 for file in &member.files {
@@ -934,7 +1118,8 @@ fn prepare_portable_snapshot(
                         &allowed_roots,
                     )
                     .map_err(|_| invalid_binding("frozen source is outside an authorized root"))?;
-                    let target = target_root.join(&file.relative_path);
+                    let target = target_root
+                        .join(plan_target_name.as_deref().unwrap_or(&file.relative_path));
                     create_private_tree(target.parent().expect("portable file has a parent"))?;
                     if revision_snapshot.is_some() && target.exists() {
                         continue;
@@ -957,6 +1142,8 @@ fn prepare_portable_snapshot(
                         .strip_prefix(snapshot)
                         .expect("selected revision source is inside snapshot")
                         .to_path_buf()
+                } else if let Some(target_name) = &plan_target_name {
+                    target_name.clone()
                 } else if selected_is_file {
                     member.files[0].relative_path.clone()
                 } else {
@@ -967,6 +1154,7 @@ fn prepare_portable_snapshot(
                     .strip_prefix(&staging)
                     .expect("target is beneath staging")
                     .to_path_buf(),
+                plan_layer.map(|layer| (layer.checkpoint_id, layer.layer_id)),
             ));
         }
     }
@@ -976,7 +1164,22 @@ fn prepare_portable_snapshot(
     private_tree_bytes(&published)?;
     // Copy-then-verify closes the race where the original changes after the first source check.
     // The loader receives only these verified, private paths, never the original locator.
-    for (slot, member, selected_relative, is_selected_aux, relative_root) in &rewrites {
+    let mut verified_plan_layers = VerifiedPlanLayers::new(lease);
+    for model in &route.models {
+        if let Some(plan) = &model.checkpoint_plan {
+            let entry = model_slots
+                .iter()
+                .find(|(slot, _)| slot == &model.slot)
+                .map(|(_, entry)| *entry)
+                .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
+            let checkpoint_id = entry
+                .pointer("/importPlan/checkpointId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid_binding("checkpoint plan has no job checkpoint ID"))?;
+            verified_plan_layers.add_plan(checkpoint_id, plan.clone())?;
+        }
+    }
+    for (slot, member, selected_relative, is_selected_aux, relative_root, plan_layer) in &rewrites {
         let target_root = published.join(relative_root);
         let mapped = LocalArtifactMember {
             role: member.role.clone(),
@@ -988,7 +1191,11 @@ fn prepare_portable_snapshot(
                 .iter()
                 .map(|file| LocalArtifactFile {
                     relative_path: file.relative_path.clone(),
-                    path: target_root.join(&file.relative_path),
+                    path: if plan_layer.is_some() {
+                        target_root.join(selected_relative)
+                    } else {
+                        target_root.join(&file.relative_path)
+                    },
                 })
                 .collect(),
         };
@@ -1000,7 +1207,11 @@ fn prepare_portable_snapshot(
             ));
         }
         let selected = target_root.join(selected_relative);
-        if *is_selected_aux || !matches!(member.source, PortableSourceIdentity::Revision { .. }) {
+        if let Some((checkpoint_id, layer_id)) = plan_layer {
+            verified_plan_layers.insert(checkpoint_id, layer_id, selected)?;
+        } else if *is_selected_aux
+            || !matches!(member.source, PortableSourceIdentity::Revision { .. })
+        {
             rewrite_loader_locator(dispatch_payload, slot, member, &selected, *is_selected_aux)?;
         }
     }
@@ -1035,7 +1246,13 @@ fn prepare_portable_snapshot(
     }
     std::fs::write(parent.join(".last-used"), b"").map_err(WorkerError::Io)?;
     prune_portable_snapshots(&parent, settings)?;
-    Ok(Some(PreparedPortableSnapshot { snapshot, overlays }))
+    let plan_layers =
+        (!verified_plan_layers.plans.is_empty()).then(|| std::sync::Arc::new(verified_plan_layers));
+    Ok(Some(PreparedPortableSnapshot {
+        snapshot,
+        overlays,
+        plan_layers,
+    }))
 }
 
 fn common_file_parent(
@@ -1781,8 +1998,13 @@ fn verify_portable_binding(
                     .collect()
             }
             PortableSourceIdentity::Digest { .. } | PortableSourceIdentity::WorkerClaim { .. } => {
-                let selected =
-                    selected_local_artifact_path(member, &binding.slot, entry, payload, settings)?;
+                let selected = if let Some(layer) =
+                    selected_checkpoint_plan_layer(member, binding, entry, settings)?
+                {
+                    layer.source_path
+                } else {
+                    selected_local_artifact_path(member, &binding.slot, entry, payload, settings)?
+                };
                 let is_file = selected.is_file();
                 if !is_file && !selected.is_dir() {
                     return Err(invalid_binding(
@@ -1859,9 +2081,15 @@ fn verify_portable_binding(
     }
     let mut allowed_roots = crate::paths::allowed_model_roots(settings)?;
     for member in &binding.members {
-        if matches!(member.source, PortableSourceIdentity::WorkerClaim { .. }) {
-            let selected =
-                selected_local_artifact_path(member, &binding.slot, entry, payload, settings)?;
+        let plan_layer = selected_checkpoint_plan_layer(member, binding, entry, settings)?;
+        if matches!(member.source, PortableSourceIdentity::WorkerClaim { .. })
+            || plan_layer.is_some()
+        {
+            let selected = if let Some(layer) = plan_layer {
+                layer.source_path
+            } else {
+                selected_local_artifact_path(member, &binding.slot, entry, payload, settings)?
+            };
             allowed_roots.push(selected.parent().unwrap_or(&selected).to_path_buf());
         }
     }
@@ -2207,6 +2435,75 @@ fn selected_local_artifact_path(
     }
     .ok_or_else(|| invalid_binding("the admitted local artifact has no worker locator"))?;
     crate::paths::normalize_app_managed_model_entry_path(settings, &raw, "portable model binding")
+}
+
+struct SelectedCheckpointPlanLayer {
+    checkpoint_id: String,
+    layer_id: String,
+    target_path: PathBuf,
+    source_path: PathBuf,
+}
+
+fn checkpoint_plan_layer_id<'a>(
+    member: &'a PortableArtifactMember,
+    model_slot: &str,
+) -> Option<&'a str> {
+    member
+        .component_id
+        .as_deref()?
+        .strip_prefix(&format!("{model_slot}/importPlan/layers/"))
+        .filter(|id| !id.is_empty())
+}
+
+fn selected_checkpoint_plan_layer(
+    member: &PortableArtifactMember,
+    model: &PortableModelBinding,
+    entry: &serde_json::Value,
+    settings: &Settings,
+) -> WorkerResult<Option<SelectedCheckpointPlanLayer>> {
+    let Some(plan) = &model.checkpoint_plan else {
+        return Ok(None);
+    };
+    let layer_id = if member.role == ArtifactMemberRole::Primary {
+        plan.primary_layer_id.as_deref()
+    } else {
+        checkpoint_plan_layer_id(member, &model.slot)
+    };
+    let Some(layer_id) = layer_id else {
+        return Ok(None);
+    };
+    let layer = plan
+        .layers
+        .iter()
+        .find(|layer| layer.layer_id == layer_id)
+        .ok_or_else(|| invalid_binding("frozen checkpoint layer is absent from semantic plan"))?;
+    let checkpoint_id = entry
+        .pointer("/importPlan/checkpointId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_binding("checkpoint plan layer has no job checkpoint ID"))?;
+    let [expected] = member.files.as_slice() else {
+        return Err(invalid_binding(
+            "checkpoint plan layer must freeze one file",
+        ));
+    };
+    let model_id = entry
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_binding("checkpoint plan layer has no model ID"))?;
+    // Registered content claims are model-scoped, so an independently imported worker copy may
+    // have another root ID, plan ID or filename. Match the frozen bytes on this host.
+    let source_path =
+        crate::portable_source_claims::registered_model_content_path(settings, model_id, expected)?
+            .ok_or_else(|| invalid_binding("worker checkpoint plan layer bytes are unavailable"))?;
+    let target = layer.target_path.as_str();
+    sceneworks_core::checkpoint_plan_store::portable_relative_path_parts(target)
+        .map_err(|_| invalid_binding("checkpoint plan layer target is invalid"))?;
+    Ok(Some(SelectedCheckpointPlanLayer {
+        checkpoint_id: checkpoint_id.to_owned(),
+        layer_id: layer_id.to_owned(),
+        target_path: PathBuf::from(target),
+        source_path,
+    }))
 }
 
 fn portable_component_locator_key<'a>(model_slot: &str, component_id: &'a str) -> &'a str {
