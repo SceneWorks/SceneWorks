@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const PORTABLE_MODEL_BINDING_VERSION: u32 = 1;
+pub const PORTABLE_MODEL_BINDING_VERSION: u32 = 2;
 const MAX_NON_LFS_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_HF_TREE_PAGES: usize = 10_000;
 
@@ -384,6 +384,23 @@ pub fn registered_digest_member_claim_id(
     if !matches!(member.source, PortableSourceIdentity::Digest { .. }) {
         return Err(error("registered digest claim requires a Digest member"));
     }
+    if let Some(plan) = &model.checkpoint_plan {
+        let is_layer =
+            (member.role == ArtifactMemberRole::Primary && plan.primary_layer_id.is_some())
+                || member.component_id.as_deref().is_some_and(|id| {
+                    id.starts_with(&format!("{}/importPlan/layers/", model.slot))
+                });
+        if is_layer {
+            let ledger = portable_file_ledger_sha256(&member.files)?;
+            return crate::portable_sources::registered_digest_claim_id(
+                "model-bytes",
+                &model.model_id,
+                None,
+                &ledger,
+            )
+            .map_err(error);
+        }
+    }
     let (kind, logical_id, component_id) = match member.role {
         ArtifactMemberRole::Primary => ("model", model.model_id.as_str(), None),
         ArtifactMemberRole::Lora | ArtifactMemberRole::Control => {
@@ -463,6 +480,30 @@ pub struct PortableModelBinding {
     /// The options themselves stay in that request; this binds them without copying secrets.
     pub authored_options_sha256: String,
     pub members: Vec<PortableArtifactMember>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_plan: Option<PortableCheckpointPlan>,
+}
+
+/// Loader semantics of a trusted checkpoint plan, without its host-specific plan id,
+/// root id, install id, source locator, or physical path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PortableCheckpointPlan {
+    pub semantic_digest: String,
+    pub family: String,
+    pub primary_layer_id: Option<String>,
+    pub layers: Vec<PortableCheckpointLayer>,
+    pub context: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PortableCheckpointLayer {
+    pub layer_id: String,
+    pub role: String,
+    pub target_path: String,
+    pub container: crate::checkpoint_import::CheckpointContainerV1,
+    pub sha256: String,
 }
 
 /// One worker route can execute a job containing several model entries. All selected sources,
@@ -687,7 +728,184 @@ pub struct LocalArtifactMember {
     pub files: Vec<LocalArtifactFile>,
 }
 
+impl PortableCheckpointPlan {
+    pub fn from_import_plan(
+        plan: &crate::checkpoint_import::ImportPlanV1,
+        primary_layer_id: Option<String>,
+    ) -> Result<Self, ArtifactContractError> {
+        plan.validate().map_err(|cause| error(cause.to_string()))?;
+        let layers = plan
+            .layers
+            .iter()
+            .map(|layer| {
+                Ok(PortableCheckpointLayer {
+                    layer_id: layer.layer_id.clone(),
+                    role: layer.role.clone(),
+                    target_path: layer.target_path.clone(),
+                    container: layer.container,
+                    sha256: format!(
+                        "sha256:{}",
+                        layer
+                            .source
+                            .content_digest()
+                            .map_err(|cause| error(cause.to_string()))?
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>, ArtifactContractError>>()?;
+        let portable = Self {
+            semantic_digest: plan
+                .semantic_digest()
+                .map_err(|cause| error(cause.to_string()))?,
+            family: plan.family.clone(),
+            primary_layer_id,
+            layers,
+            context: plan.context.clone(),
+        };
+        portable.validate()?;
+        Ok(portable)
+    }
+
+    pub fn validate(&self) -> Result<(), ArtifactContractError> {
+        validate_sha256(&self.semantic_digest)?;
+        validate_logical_name("checkpoint family", &self.family)?;
+        if self.layers.is_empty() {
+            return Err(error("portable checkpoint plan has no layers"));
+        }
+        fn reject_host_locators(value: &Value) -> Result<(), ArtifactContractError> {
+            match value {
+                Value::Object(fields) => {
+                    for (key, value) in fields {
+                        if [
+                            "token",
+                            "password",
+                            "secret",
+                            "credential",
+                            "absolutePath",
+                            "rootPath",
+                            "localPath",
+                        ]
+                        .iter()
+                        .any(|forbidden| key.eq_ignore_ascii_case(forbidden))
+                        {
+                            return Err(error("portable checkpoint context contains a private locator or credential"));
+                        }
+                        reject_host_locators(value)?;
+                    }
+                }
+                Value::Array(values) => {
+                    for value in values {
+                        reject_host_locators(value)?;
+                    }
+                }
+                Value::String(value)
+                    if value.starts_with('/')
+                        || value.starts_with('\\')
+                        || (value.len() > 1 && value.as_bytes()[1] == b':') =>
+                {
+                    return Err(error(
+                        "portable checkpoint context contains an absolute path",
+                    ));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        reject_host_locators(&Value::Object(self.context.clone().into_iter().collect()))?;
+        let mut import_layers = Vec::with_capacity(self.layers.len());
+        for layer in &self.layers {
+            let raw = layer
+                .sha256
+                .strip_prefix("sha256:")
+                .ok_or_else(|| error("checkpoint layer digest has no sha256 prefix"))?;
+            validate_sha256(&layer.sha256)?;
+            import_layers.push(crate::checkpoint_import::ImportLayerV1 {
+                layer_id: layer.layer_id.clone(),
+                role: layer.role.clone(),
+                target_path: layer.target_path.clone(),
+                container: layer.container,
+                source: crate::checkpoint_import::SourceLocatorV1::linked(
+                    "portable", "artifact", raw,
+                )
+                .map_err(|cause| error(cause.to_string()))?,
+            });
+        }
+        let mut reconstructed =
+            crate::checkpoint_import::ImportPlanV1::new("portable", &self.family, import_layers)
+                .map_err(|cause| error(cause.to_string()))?;
+        reconstructed.context = self.context.clone();
+        let digest = reconstructed
+            .semantic_digest()
+            .map_err(|cause| error(cause.to_string()))?;
+        if digest != self.semantic_digest {
+            return Err(error(
+                "portable checkpoint semantic digest differs from frozen plan",
+            ));
+        }
+        if let Some(primary) = &self.primary_layer_id {
+            if !self.layers.iter().any(|layer| &layer.layer_id == primary) {
+                return Err(error("portable checkpoint primary layer is absent"));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_against(
+        &self,
+        slot: &str,
+        members: &[PortableArtifactMember],
+    ) -> Result<(), ArtifactContractError> {
+        self.validate()?;
+        let prefix = format!("{slot}/importPlan/layers/");
+        for layer in &self.layers {
+            let member = if self.primary_layer_id.as_deref() == Some(&layer.layer_id) {
+                members
+                    .iter()
+                    .find(|member| member.role == ArtifactMemberRole::Primary)
+            } else {
+                let id = format!("{prefix}{}", layer.layer_id);
+                members.iter().find(|member| {
+                    member.role == ArtifactMemberRole::RequiredComponent
+                        && member.component_id.as_deref() == Some(&id)
+                })
+            }
+            .ok_or_else(|| error("checkpoint layer has no frozen artifact member"))?;
+            if member.files.len() != 1
+                || member.files[0].relative_path != Path::new("artifact")
+                || member.files[0].sha256 != layer.sha256
+                || member.source
+                    != (PortableSourceIdentity::Digest {
+                        sha256: layer.sha256.clone(),
+                    })
+            {
+                return Err(error("checkpoint layer differs from frozen artifact bytes"));
+            }
+        }
+        for member in members {
+            if let Some(layer_id) = member
+                .component_id
+                .as_deref()
+                .and_then(|id| id.strip_prefix(&prefix))
+            {
+                if !self.layers.iter().any(|layer| layer.layer_id == layer_id) {
+                    return Err(error("frozen checkpoint artifact has no plan layer"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl PortableModelBinding {
+    pub fn with_checkpoint_plan(
+        mut self,
+        checkpoint_plan: PortableCheckpointPlan,
+    ) -> Result<Self, ArtifactContractError> {
+        self.checkpoint_plan = Some(checkpoint_plan);
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn new(
         slot: impl Into<String>,
         model_id: impl Into<String>,
@@ -713,6 +931,7 @@ impl PortableModelBinding {
             tier,
             authored_options_sha256: authored_options_sha256.into(),
             members,
+            checkpoint_plan: None,
         };
         binding.validate()?;
         Ok(binding)
@@ -766,6 +985,9 @@ impl PortableModelBinding {
             .expect("primary count checked");
         if primary.tier != self.tier {
             return Err(error("portable primary tier does not match selected tier"));
+        }
+        if let Some(plan) = &self.checkpoint_plan {
+            plan.validate_against(&self.slot, &self.members)?;
         }
         Ok(())
     }
@@ -1100,6 +1322,75 @@ fn error(message: impl Into<String>) -> ArtifactContractError {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn checkpoint_plan_freezes_semantics_without_host_locator() {
+        use crate::checkpoint_import::{
+            CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+        };
+        let sha = "a".repeat(64);
+        let make_plan = |root_id: &str| {
+            let mut plan = ImportPlanV1::new(
+                format!("plan-{root_id}"),
+                "h3",
+                vec![ImportLayerV1 {
+                    layer_id: "artifact:transformer/model.safetensors".into(),
+                    role: "transformer".into(),
+                    target_path: "transformer/model.safetensors".into(),
+                    container: CheckpointContainerV1::Safetensors,
+                    source: SourceLocatorV1::linked(root_id, "host/model.safetensors", &sha)
+                        .unwrap(),
+                }],
+            )
+            .unwrap();
+            plan.context
+                .insert("partition".into(), serde_json::json!({"kind":"video"}));
+            plan
+        };
+        let first = PortableCheckpointPlan::from_import_plan(
+            &make_plan("root-one"),
+            Some("artifact:transformer/model.safetensors".into()),
+        )
+        .unwrap();
+        let second = PortableCheckpointPlan::from_import_plan(
+            &make_plan("root-two"),
+            Some("artifact:transformer/model.safetensors".into()),
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        let serialized = serde_json::to_string(&first).unwrap();
+        assert!(!serialized.contains("root-one"));
+        assert!(!serialized.contains("host/model"));
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Digest {
+                sha256: format!("sha256:{sha}"),
+            },
+            tier: None,
+            files: vec![PortableArtifactFile {
+                relative_path: "artifact".into(),
+                size_bytes: 4,
+                sha256: format!("sha256:{sha}"),
+            }],
+        };
+        let binding = PortableModelBinding::new(
+            "modelManifestEntry",
+            "model",
+            "mlx",
+            "local",
+            None,
+            canonical_authored_options_sha256(&serde_json::json!({})).unwrap(),
+            vec![member],
+        )
+        .unwrap()
+        .with_checkpoint_plan(first.clone())
+        .unwrap();
+        assert!(binding.validate().is_ok());
+        let mut changed = first;
+        changed.layers[0].target_path = "other/model.safetensors".into();
+        assert!(binding.with_checkpoint_plan(changed).is_err());
+    }
 
     #[test]
     fn registered_component_claim_id_is_stable_across_payload_slots() {

@@ -15,8 +15,8 @@ use sceneworks_core::model_artifacts::artifact_selection::{
 use sceneworks_core::model_artifacts::portable_binding::{
     canonical_authored_options_sha256, enumerate_portable_array_slots, portable_closure_sha256,
     registered_digest_member_claim_id, resolve_pinned_hf_files, PortableArtifactFile,
-    PortableArtifactMember, PortableJobBinding, PortableModelBinding, PortableRouteBinding,
-    PortableSourceClaim, PortableSourceIdentity, PortableSourceProvenance,
+    PortableArtifactMember, PortableCheckpointPlan, PortableJobBinding, PortableModelBinding,
+    PortableRouteBinding, PortableSourceClaim, PortableSourceIdentity, PortableSourceProvenance,
 };
 use sceneworks_core::model_artifacts::{
     confine_artifact_path, ArtifactIdentity, ArtifactMemberRole, ModelArtifactResolver,
@@ -489,16 +489,34 @@ pub(crate) async fn derive_vector_raster_child_binding(
         if raster.model_id != recorded_model {
             return Err(incomplete("vector parent raster identity changed"));
         }
-        let model = PortableModelBinding::new(
+        let members = raster
+            .members
+            .iter()
+            .cloned()
+            .map(|mut member| {
+                if let Some(id) = member.component_id.as_mut() {
+                    if let Some(suffix) = id.strip_prefix("modelManifestEntries/0/") {
+                        *id = format!("modelManifestEntry/{suffix}");
+                    }
+                }
+                member
+            })
+            .collect();
+        let mut model = PortableModelBinding::new(
             "modelManifestEntry",
             &raster.model_id,
             &backend,
             &raster.variant,
             raster.tier.clone(),
             &authored_hash,
-            raster.members.clone(),
+            members,
         )
         .map_err(|error| incomplete(error.to_string()))?;
+        if let Some(plan) = &raster.checkpoint_plan {
+            model = model
+                .with_checkpoint_plan(plan.clone())
+                .map_err(|error| incomplete(error.to_string()))?;
+        }
         let route = PortableRouteBinding::new(&backend, &platform, vec![model])
             .map_err(|error| incomplete(error.to_string()))?;
         routes.insert(key, route);
@@ -1333,7 +1351,7 @@ async fn capture_model_slot(
             .map_err(|error| incomplete(error.to_string()))?;
         members.push(member);
     }
-    PortableModelBinding::new(
+    let binding = PortableModelBinding::new(
         slot,
         model_id,
         backend,
@@ -1342,7 +1360,41 @@ async fn capture_model_slot(
         authored_hash,
         members,
     )
-    .map_err(|error| incomplete(error.to_string()))
+    .map_err(|error| incomplete(error.to_string()))?;
+    let Some(checkpoint_id) = entry
+        .pointer("/importPlan/checkpointId")
+        .and_then(Value::as_str)
+    else {
+        return Ok(binding);
+    };
+    let resolved =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&state.settings.data_dir)
+            .resolve(checkpoint_id)
+            .map_err(|error| {
+                incomplete(format!("imported checkpoint plan is unavailable: {error}"))
+            })?;
+    let prefix = format!("{slot}/importPlan/layers/");
+    let missing = resolved
+        .plan
+        .layers
+        .iter()
+        .filter(|layer| {
+            !binding.members.iter().any(|member| {
+                member.component_id.as_deref()
+                    == Some(format!("{prefix}{}", layer.layer_id).as_str())
+            })
+        })
+        .map(|layer| layer.layer_id.clone())
+        .collect::<Vec<_>>();
+    if missing.len() > 1 {
+        return Err(incomplete("checkpoint plan has missing frozen layers"));
+    }
+    let checkpoint_plan =
+        PortableCheckpointPlan::from_import_plan(&resolved.plan, missing.into_iter().next())
+            .map_err(|error| incomplete(error.to_string()))?;
+    binding
+        .with_checkpoint_plan(checkpoint_plan)
+        .map_err(|error| incomplete(error.to_string()))
 }
 
 fn matches_pinned_closure(
@@ -2278,7 +2330,15 @@ fn capture_local_model_entry(
     }
     let mut members = Vec::new();
     for (index, (key, path)) in locators.into_iter().enumerate() {
-        let files = capture_local_source_files(&path, &allowed_roots)?;
+        let mut files = capture_local_source_files(&path, &allowed_roots)?;
+        if key.starts_with("importPlan/layers/") {
+            if files.len() != 1 {
+                return Err(incomplete("checkpoint plan layer is not one exact file"));
+            }
+            // The worker can own identical bytes under another filename. The private plan's
+            // targetPath supplies the loader layout; this logical claim names only the bytes.
+            files[0].relative_path = PathBuf::from("artifact");
+        }
         let digest =
             portable_closure_sha256(&files).map_err(|error| incomplete(error.to_string()))?;
         let member = PortableArtifactMember {
