@@ -1632,16 +1632,13 @@ test("receipt-backed bespoke Candle staged coverage is visible and census-fenced
     "plain kolors Candle staged stays Missing — no borrowed bespoke evidence",
   );
 
-  // The census fence: a worker-censused provider without a generator lane map fails generation
-  // closed instead of silently publishing a delivered lane as Missing.
-  assert.throws(
-    () =>
-      parseCandleBespokeStagedLanes(
-        'const CANDLE_BESPOKE_REQUEST_PROVIDERS: &[&str] = &["candle_new_provider"];',
-      ),
-    /unmapped=candle_new_provider/,
-  );
-  assert.throws(() => parseCandleBespokeStagedLanes("// nothing here"), /could not derive/);
+  // A new typed composed route contributes its exact coordinates without a second hand map.
+  const added = parseCandleBespokeStagedLanes(JSON.stringify({
+    schemaVersion: 1,
+    declaredRoutes: [{ backend: "candle", provider: "candle_new_provider", modelId: "kolors", tiers: ["q4"], modes: ["text_to_image"], loadProfiles: ["single_control"] }],
+  }));
+  assert.deepEqual([...added], ["kolors:control:text_to_image:q4"]);
+  assert.throws(() => parseCandleBespokeStagedLanes("// nothing here"), /Unexpected token/);
 });
 
 test("the staged column tells structural truth apart from undelivered work (sc-20799)", async () => {
@@ -2683,6 +2680,7 @@ test("no lane advertises a tier that nothing routes", async () => {
   const models = new Map((manifest.models ?? manifest).map((model) => [model.id, model]));
   const routeLaneTiers = parseRouteRegistryLaneTiers(
     await readFile("crates/sceneworks-worker/src/memory_route_registry.rs", "utf8"),
+    await readFile("config/manifests/registry/memory-route-policy.json", "utf8"),
   );
   // MLX is macOS-only by construction; Candle is the off-Mac lane. `platforms` selection itself is
   // the shipped rule (`model_artifacts/artifact_selection.rs`) — a row with no `platforms` key
@@ -2761,6 +2759,7 @@ test("every tier a route rule declares, and a download ships, survives onto the 
   const models = new Map((manifest.models ?? manifest).map((model) => [model.id, model]));
   const routeLaneTiers = parseRouteRegistryLaneTiers(
     await readFile("crates/sceneworks-worker/src/memory_route_registry.rs", "utf8"),
+    await readFile("config/manifests/registry/memory-route-policy.json", "utf8"),
   );
   const checked = new Set();
   for (const model of matrix.models) {

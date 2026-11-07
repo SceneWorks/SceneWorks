@@ -10,6 +10,8 @@ mod exceptions;
 mod hf_repo_id;
 #[path = "src/jsonc.rs"]
 mod jsonc;
+#[path = "src/registry/memory_route_policy.rs"]
+mod memory_route_policy;
 #[path = "src/registry/policy.rs"]
 mod policy;
 #[path = "src/registry/spec.rs"]
@@ -37,6 +39,9 @@ fn build_registry() {
     let evidence_json = read("manifests/registry/evidence.json");
     let route_policy_json = read("manifests/registry/route-policy.json");
     let route_policy = policy::parse(&route_policy_json).expect("invalid router product policy");
+    let memory_route_policy =
+        memory_route_policy::parse(&read("manifests/registry/memory-route-policy.json"))
+            .expect("invalid memory route product policy");
     let preview_json =
         jsonc::strip_jsonc_comments(&read("manifests/builtin.preview-support.jsonc"));
     jsonc::reject_duplicate_keys(&preview_json).expect("duplicate preview feature key");
@@ -81,6 +86,47 @@ fn build_registry() {
         ],
     )
     .expect("invalid static model registry");
+    for rule in &memory_route_policy.declared_routes {
+        let known_provider = specs.values().any(|spec| {
+            spec.routes
+                .get(&rule.backend)
+                .is_some_and(|route| route.id == rule.provider)
+                || spec.evidence.get(&rule.backend).is_some_and(|evidence| {
+                    evidence
+                        .memory_strategy_contract
+                        .as_ref()
+                        .is_some_and(|contract| {
+                            contract.get("provider").and_then(serde_json::Value::as_str)
+                                == Some(rule.provider.as_str())
+                                || contract
+                                    .get("implementations")
+                                    .and_then(serde_json::Value::as_array)
+                                    .is_some_and(|implementations| {
+                                        implementations.iter().any(|implementation| {
+                                            implementation
+                                                .get("runtimeProvider")
+                                                .and_then(serde_json::Value::as_str)
+                                                == Some(rule.provider.as_str())
+                                        })
+                                    })
+                        })
+                })
+        });
+        if !known_provider {
+            let linked_model = rule.model_id.as_ref().and_then(|id| specs.get(id));
+            assert!(
+                linked_model.is_some_and(|spec| spec.routes.contains_key(&rule.backend)),
+                "memory route provider {} has no typed native/evidence owner on {}",
+                rule.provider,
+                rule.backend
+            );
+        }
+    }
+    std::fs::write(
+        PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("memory-route-policy.json"),
+        serde_json::to_vec(&memory_route_policy).expect("serialize typed memory route policy"),
+    )
+    .expect("write typed memory route policy");
     let preview: serde_json::Value =
         serde_json::from_str(&preview_json).expect("validated preview feature export");
     let legacy_preview: std::collections::BTreeMap<_, _> = preview["models"]

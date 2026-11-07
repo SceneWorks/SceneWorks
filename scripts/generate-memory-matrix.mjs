@@ -1204,10 +1204,14 @@ export function backendScopes(model, routedBackends) {
  * rule at all and routes three tiers, and `lens` is `Q4_ONLY` on MLX while advertising three. So
  * this may only keep a tier the `platforms` test would have dropped; it may never drop one.
  */
-export function parseRouteRegistryLaneTiers(registrySource) {
-  const table = registrySource.match(/const RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/);
+export function parseRouteRegistryLaneTiers(registrySource, policySource) {
+  const table = registrySource.match(/const LEGACY_RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/);
   if (!table) {
-    throw new Error("memory-matrix: could not locate RULES in memory_route_registry.rs");
+    throw new Error("memory-matrix: could not locate LEGACY_RULES in memory_route_registry.rs");
+  }
+  const policy = JSON.parse(policySource);
+  if (policy.schemaVersion !== 1 || !Array.isArray(policy.declaredRoutes)) {
+    throw new Error("memory-matrix: invalid typed memory route policy");
   }
   // Scoped to `impl MemoryRouteTier`: several enums in this file declare a `pub const ALL`, and an
   // unanchored match would resolve `ALL_TIERS` to whichever one happened to come first.
@@ -1253,7 +1257,16 @@ export function parseRouteRegistryLaneTiers(registrySource) {
     for (const tier of resolved) set.add(tier);
     lanes.set(key, set);
   }
-  if (seen === 0) throw new Error("memory-matrix: RULES parsed to zero memory-route rules");
+  if (seen === 0) throw new Error("memory-matrix: LEGACY_RULES parsed to zero memory-route rules");
+  for (const row of policy.declaredRoutes) {
+    const key = `${row.backend}:${row.provider}`;
+    const set = lanes.get(key) ?? new Set();
+    for (const tier of row.tiers) {
+      if (!KNOWN_TIERS.has(tier)) throw new Error(`memory-matrix: unknown typed route tier ${tier}`);
+      set.add(tier);
+    }
+    lanes.set(key, set);
+  }
   return lanes;
 }
 
@@ -1621,68 +1634,26 @@ function geometryFor(model, backend) {
  * providers with NO manifest declaration row, on purpose: a `staged_residency` row carrying
  * `requestContexts` on the host model would make `declared_candle_request_strategy_contract`
  * treat the base lane's manifest as "relevant" and terminally refuse crossed coordinates, changing
- * runtime behavior a visibility fix must not touch. The worker census const
- * (`memory_route_registry.rs#CANDLE_BESPOKE_REQUEST_PROVIDERS`) is the source of truth for WHICH
- * providers carry this authority; this map binds each to the exact catalog coordinates its lane
- * serves (from the provider's RULES entry + `declared_candle_bespoke_request` shape arm), and
- * `parseCandleBespokeStagedLanes` fails generation when the two drift — a delivered lane without a
- * coordinate map must red the build, never publish as `Missing` (sc-20799).
+ * runtime behavior a visibility fix must not touch. The typed memory-route policy owns the exact
+ * composed-provider model, tier, mode, and load-profile coordinates; the worker checks its own
+ * request-local shape arms against those same rows.
  */
-const CANDLE_BESPOKE_REQUEST_LANE_COORDINATES = new Map([
-  [
-    "candle_kolors_ipadapter",
-    {
-      modelId: "kolors",
-      overlays: ["identity"],
-      modes: ["character_image"],
-      tiers: ["bf16", "q4", "q8"],
-    },
-  ],
-  [
-    "candle_kolors_control",
-    {
-      modelId: "kolors",
-      overlays: ["control"],
-      modes: ["text_to_image", "style_variations", "character_image"],
-      tiers: ["bf16", "q4", "q8"],
-    },
-  ],
-]);
 
 /** `model.id:overlay:mode:tier` coordinates with receipt-backed bespoke Candle staged coverage. */
-export function parseCandleBespokeStagedLanes(registrySource) {
-  const match = registrySource.match(
-    /const\s+CANDLE_BESPOKE_REQUEST_PROVIDERS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/,
-  );
-  if (!match) {
-    throw new Error(
-      "memory-matrix: could not derive CANDLE_BESPOKE_REQUEST_PROVIDERS from memory_route_registry.rs",
-    );
-  }
-  const providers = [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
-  if (providers.length === 0) {
-    throw new Error("memory-matrix: CANDLE_BESPOKE_REQUEST_PROVIDERS parsed to zero providers");
-  }
-  const mapped = new Set(CANDLE_BESPOKE_REQUEST_LANE_COORDINATES.keys());
-  const unmapped = providers.filter((provider) => !mapped.has(provider)).sort();
-  const stale = [...mapped].filter((provider) => !providers.includes(provider)).sort();
-  if (unmapped.length || stale.length) {
-    throw new Error(
-      "memory-matrix: candle bespoke request lanes disagree with the worker census " +
-        `(censused but unmapped=${unmapped.join(",") || "none"}; ` +
-        `mapped but no longer censused=${stale.join(",") || "none"}). ` +
-        "A delivered receipt-backed lane without a coordinate map would publish as Missing (sc-20799).",
-    );
+export function parseCandleBespokeStagedLanes(policySource) {
+  const policy = JSON.parse(policySource);
+  const bespoke = policy.declaredRoutes?.filter((row) => row.backend === "candle" && row.modelId);
+  if (!Array.isArray(bespoke) || bespoke.length === 0) {
+    throw new Error("memory-matrix: typed memory route policy has no Candle bespoke providers");
   }
   const lanes = new Set();
-  for (const provider of providers) {
-    const lane = CANDLE_BESPOKE_REQUEST_LANE_COORDINATES.get(provider);
-    for (const overlay of lane.overlays) {
-      for (const mode of lane.modes) {
-        for (const tier of lane.tiers) {
-          lanes.add(`${lane.modelId}:${overlay}:${mode}:${tier}`);
-        }
-      }
+  const overlayForProfile = (profile) =>
+    profile === "identity" || profile === "ip_adapter" || profile === "lora_ip_adapter" ||
+    profile === "ip_adapter_pid" || profile === "lora_ip_adapter_pid" ? "identity" :
+    profile.includes("control") ? "control" : profile.includes("lora") ? "lora" : "none";
+  for (const row of bespoke) {
+    for (const profile of row.loadProfiles) for (const mode of row.modes) for (const tier of row.tiers) {
+      lanes.add(`${row.modelId}:${overlayForProfile(profile)}:${mode}:${tier}`);
     }
   }
   return lanes;
@@ -2661,10 +2632,9 @@ export const SOURCE_PATHS = Object.freeze({
   videoRouteKreaRealtime: "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
   videoRouteCandle: "crates/sceneworks-worker/src/video_jobs/candle.rs",
   mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-  // sc-20799: in SOURCE_PATHS because it DECIDES the implementation verdict —
-  // `CANDLE_BESPOKE_REQUEST_PROVIDERS` is where bespoke Candle staged coverage is declared, and a
-  // source that changes a cell but sits outside the fingerprint is a provenance hole.
+  // The worker source owns request-local shape predicates; typed policy owns route coordinates.
   memoryRouteRegistry: "crates/sceneworks-worker/src/memory_route_registry.rs",
+  memoryRoutePolicy: "config/manifests/registry/memory-route-policy.json",
   instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
   // ── The MEMORY axis: the anchor store, its currency declarations, and the derivation ─────────
   //
@@ -2868,10 +2838,10 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     routingMlx: bodies.routingMlx,
   });
   const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
-  const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRouteRegistry);
+  const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRoutePolicy);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
   revisionBodies.instantId = backendTierOverridesRevisionBody(backendTierOverrides);
-  const routeLaneTiers = parseRouteRegistryLaneTiers(bodies.memoryRouteRegistry);
+  const routeLaneTiers = parseRouteRegistryLaneTiers(bodies.memoryRouteRegistry, bodies.memoryRoutePolicy);
   assertOutOfMatrixEntriesAreStillUnroutable(manifest.models, (model) =>
     resolveRoute(model, routes, videoRoutes, backendScopes(model, routedBackends)),
   );

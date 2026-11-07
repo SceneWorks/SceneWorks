@@ -7,6 +7,10 @@ use serde_json::{Map, Value};
 
 mod spec;
 pub use spec::{ModelSpec, RoutePolicy};
+#[allow(dead_code)]
+// Build-time parser validates the serialized policy; runtime reads that projection.
+mod memory_route_policy;
+pub use memory_route_policy::DeclaredMemoryRoute;
 mod exceptions;
 pub use exceptions::{approved_backend_exceptions, ApprovedBackendException};
 mod trainer_routes;
@@ -24,6 +28,14 @@ static BUILTINS: LazyLock<BTreeMap<String, ModelSpec>> = LazyLock::new(|| {
     )))
     .expect("validated build-time ModelSpec registry")
 });
+static MEMORY_ROUTE_POLICY: LazyLock<memory_route_policy::MemoryRoutePolicyDocument> =
+    LazyLock::new(|| {
+        serde_json::from_str(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/memory-route-policy.json"
+        )))
+        .expect("validated build-time memory route policy")
+    });
 static LEGACY_PREVIEW: LazyLock<BTreeMap<String, BTreeMap<String, bool>>> = LazyLock::new(|| {
     serde_json::from_str(include_str!(concat!(
         env!("OUT_DIR"),
@@ -39,6 +51,11 @@ pub fn builtin_model_spec(id: &str) -> Option<&'static ModelSpec> {
 /// All build-validated builtin specs in stable model-id order.
 pub fn builtin_model_specs() -> impl Iterator<Item = &'static ModelSpec> {
     BUILTINS.values()
+}
+
+/// Declaration-owned load selectors, checked against native routes and memory evidence at build.
+pub fn declared_memory_routes() -> &'static [DeclaredMemoryRoute] {
+    &MEMORY_ROUTE_POLICY.declared_routes
 }
 
 /// The preview feature export includes registered builtins and historical job aliases that have

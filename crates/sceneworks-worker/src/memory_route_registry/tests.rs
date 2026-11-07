@@ -1,5 +1,157 @@
 use super::*;
 
+fn declared_rule(backend: MemoryRouteBackend, provider: &str) -> &'static MemoryRouteRule {
+    all_rules()
+        .find(|rule| rule.backend == backend && rule.provider == provider && !rule.legacy_shaping)
+        .unwrap_or_else(|| panic!("missing declared memory route {backend:?}/{provider}"))
+}
+
+/// Freeze both target-lane witness populations before changing the memory-route authority.
+/// The Candle facts also contain request-strategy witnesses derived from manifest declarations;
+/// those are deliberately joined separately from the legacy/deferred rule population.
+#[test]
+fn memory_route_witnesses_match_frozen_engine_facts_on_both_backends() {
+    let builtin_models = sceneworks_core::registry::builtin_model_specs()
+        .map(|spec| spec.project(None))
+        .collect::<Vec<_>>();
+    let request_strategy = declared_candle_request_strategy_route_witnesses(&builtin_models)
+        .expect("shipped Candle request strategy declarations");
+
+    for (backend, frozen) in [
+        (
+            MemoryRouteBackend::Mlx,
+            include_str!("../../../../config/engine-capabilities/capabilities.mlx.json"),
+        ),
+        (
+            MemoryRouteBackend::Candle,
+            include_str!("../../../../config/engine-capabilities/capabilities.candle.json"),
+        ),
+    ] {
+        let expected: Value = serde_json::from_str(frozen).expect("checked-in engine facts parse");
+        let expected = expected["memoryRouteWitnesses"]
+            .as_array()
+            .expect("checked-in route witnesses")
+            .iter()
+            .map(|row| {
+                (
+                    row["provider"].as_str().unwrap().to_owned(),
+                    row["tier"].as_str().unwrap().to_owned(),
+                    row["mode"].as_str().unwrap().to_owned(),
+                    row["overlay"].as_str().unwrap().to_owned(),
+                    row["loadProfile"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut actual = deferred_route_witnesses()
+            .into_iter()
+            .filter(|row| row.backend == backend)
+            .map(|row| {
+                (
+                    row.provider.to_owned(),
+                    row.tier.as_str().to_owned(),
+                    row.mode.as_str().to_owned(),
+                    row.overlay.as_str().to_owned(),
+                    row.load_profile.as_str().to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if backend == MemoryRouteBackend::Candle {
+            actual.extend(request_strategy.iter().map(|row| {
+                (
+                    row.provider.clone(),
+                    row.tier.as_str().to_owned(),
+                    row.mode.as_str().to_owned(),
+                    row.overlay.as_str().to_owned(),
+                    row.load_profile.as_str().to_owned(),
+                )
+            }));
+        }
+        if actual != expected {
+            let extra = actual.difference(&expected).take(8).collect::<Vec<_>>();
+            let missing = expected.difference(&actual).take(8).collect::<Vec<_>>();
+            panic!(
+                "{} memory-route witnesses differ: actual {}, frozen {}, extra {extra:?}, missing {missing:?}",
+                backend.as_str(),
+                actual.len(),
+                expected.len()
+            );
+        }
+    }
+}
+
+/// Independent pre-migration load-shape outcomes. The route witnesses alone cannot prove that
+/// the legacy shaper still distinguishes source layout or the Sequential selection.
+#[test]
+fn frozen_legacy_load_shape_outcomes_preserve_source_and_sequential_policy() {
+    for (backend, provider, source_is_file, sequential, expected) in [
+        (
+            MemoryRouteBackend::Mlx,
+            "qwen_image",
+            false,
+            false,
+            LoadShape::DeferredMaterialization,
+        ),
+        (
+            MemoryRouteBackend::Mlx,
+            "qwen_image",
+            true,
+            false,
+            LoadShape::EagerMaterialization,
+        ),
+        (
+            MemoryRouteBackend::Candle,
+            "qwen_image",
+            false,
+            false,
+            LoadShape::DeferredMaterialization,
+        ),
+        (
+            MemoryRouteBackend::Candle,
+            "qwen_image",
+            true,
+            false,
+            LoadShape::EagerMaterialization,
+        ),
+        (
+            MemoryRouteBackend::Mlx,
+            "z_image_turbo",
+            true,
+            true,
+            LoadShape::DeferredMaterialization,
+        ),
+        (
+            MemoryRouteBackend::Mlx,
+            "z_image_turbo",
+            true,
+            false,
+            LoadShape::EagerMaterialization,
+        ),
+        (
+            MemoryRouteBackend::Candle,
+            "sana_1600m",
+            false,
+            true,
+            LoadShape::EagerMaterialization,
+        ),
+    ] {
+        let mut load = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain);
+        if source_is_file {
+            load.weights = WeightsSource::File("fixture.safetensors".into());
+        }
+        let shaped = apply_registered_load_shape(
+            backend,
+            provider,
+            MemoryRouteMode::TextToImage,
+            load,
+            sequential,
+        );
+        assert_eq!(
+            shaped.load_shape, expected,
+            "{backend:?}/{provider}/file={source_is_file}/sequential={sequential}"
+        );
+    }
+}
+
 /// sc-26241: the FP8R package is a route tier named by identity on every reader — the
 /// resolved tier key, the load spec's quant, and back — never folded into bf16 or q8.
 #[test]
@@ -538,18 +690,10 @@ fn mage_mlx_production_load_shape_is_deferred_and_sequential_for_the_resident_se
 }
 
 fn shipped_model(id: &str) -> JsonObject<String, Value> {
-    let manifest: Value =
-        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
-            .expect("builtin model manifest parses")
-            .clone();
-    manifest["models"]
-        .as_array()
-        .expect("models array")
-        .iter()
-        .find(|model| model["id"].as_str() == Some(id))
-        .and_then(Value::as_object)
+    sceneworks_core::registry::builtin_model_spec(id)
+        .map(|spec| spec.project(None))
+        .and_then(|model| model.as_object().cloned())
         .unwrap_or_else(|| panic!("missing shipped model {id}"))
-        .clone()
 }
 
 #[test]
@@ -920,13 +1064,11 @@ fn krea_raw_declaration_is_exact_true_cfg_generation_authority() {
             );
         }
     }
-    let shipped: Value =
-        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
-            .expect("builtin model manifest parses")
-            .clone();
-    let models = shipped["models"].as_array().expect("models array");
+    let models = sceneworks_core::registry::builtin_model_specs()
+        .map(|spec| spec.project(None))
+        .collect::<Vec<_>>();
     assert!(
-        declared_mlx_deferred_routes(models).contains("krea_2_raw"),
+        declared_mlx_deferred_routes(&models).contains("krea_2_raw"),
         "the typed manifest population, not a source-text mirror, must discover Raw"
     );
     let mut without_btr = manifest.clone();
@@ -1335,7 +1477,7 @@ fn krea_turbo_and_edit_request_contexts_are_declaration_owned_and_fail_closed() 
                 },
             )
         };
-    for profile in PLAIN_LORA_PID {
+    for profile in declared_rule(MemoryRouteBackend::Mlx, "krea_2_turbo").load_profiles {
         let applied = evaluate(
             "krea_2_turbo",
             *profile,
@@ -3725,22 +3867,18 @@ fn shipped_sensenova_candle_routes_load_resident_and_eager() {
         "a spliced declaration is SEEN — the shipped blocks' NotEvaluated is a real absence",
     );
     assert!(
-        !RULES
-            .iter()
-            .any(|rule| rule.backend == MemoryRouteBackend::Candle
-                && rule.provider.starts_with("sensenova_u1_8b")),
+        !all_rules().any(|rule| rule.backend == MemoryRouteBackend::Candle
+            && rule.provider.starts_with("sensenova_u1_8b")),
         "no SenseNova Candle route rule: the second reason the adapter's shape is the worker's",
     );
 }
 
 #[test]
 fn shipped_candle_population_is_manifest_derived_and_mode_exact() {
-    let manifest: Value =
-        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
-            .expect("builtin model manifest parses")
-            .clone();
-    let routes =
-        declared_candle_deferred_routes(manifest["models"].as_array().expect("models array"));
+    let models = sceneworks_core::registry::builtin_model_specs()
+        .map(|spec| spec.project(None))
+        .collect::<Vec<_>>();
+    let routes = declared_candle_deferred_routes(&models);
     for expected in [
         ("z_image", "z_image"),
         ("z_image", "z_image_control"),
@@ -4584,12 +4722,10 @@ fn the_new_mlx_sana_rows_never_shape_a_resident_load_deferred() {
         }
         // ...and the rows are declaration-owned, so nothing else can claim they are legacy.
         assert!(
-            RULES
-                .iter()
-                .any(|rule| rule.backend == MemoryRouteBackend::Mlx
-                    && rule.provider == provider
-                    && !rule.legacy_shaping
-                    && rule.requires_sequential_selection),
+            all_rules().any(|rule| rule.backend == MemoryRouteBackend::Mlx
+                && rule.provider == provider
+                && !rule.legacy_shaping
+                && rule.requires_sequential_selection),
             "{provider} must have a declaration-owned, sequential-only MLX row"
         );
     }
@@ -4670,7 +4806,7 @@ fn witness_has_no_wildcard_coordinates() {
 #[test]
 fn finite_witness_is_the_typed_rule_cross_product() {
     let witnesses = deferred_route_witnesses();
-    for rule in RULES {
+    for rule in all_rules() {
         for tier in MemoryRouteTier::ALL {
             for mode in MemoryRouteMode::ALL {
                 for load_profile in MemoryRouteLoadProfile::ALL {
@@ -5410,14 +5546,11 @@ fn candle_request_strategy_declaration_is_exact_and_does_not_change_load_shape()
 
 #[test]
 fn shipped_candle_request_strategy_population_is_manifest_derived_and_complete() {
-    let manifest: Value =
-        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
-            .expect("builtin model manifest parses")
-            .clone();
-    let witnesses = declared_candle_request_strategy_route_witnesses(
-        manifest["models"].as_array().expect("models array"),
-    )
-    .expect("request-strategy declarations are typed");
+    let models = sceneworks_core::registry::builtin_model_specs()
+        .map(|spec| spec.project(None))
+        .collect::<Vec<_>>();
+    let witnesses = declared_candle_request_strategy_route_witnesses(&models)
+        .expect("request-strategy declarations are typed");
     let providers = witnesses
         .iter()
         .map(|witness| witness.provider.as_str())
@@ -5430,9 +5563,7 @@ fn shipped_candle_request_strategy_population_is_manifest_derived_and_complete()
     // (it is two separate traversals, and `runtimeProvider` may rename a row's provider), it
     // still fails loudly if a provider silently appears or vanishes, and it no longer forces
     // unrelated declaration work to touch this assertion.
-    let declared_providers = manifest["models"]
-        .as_array()
-        .expect("models array")
+    let declared_providers = models
         .iter()
         .filter_map(|model| {
             let contract = model.get("candle")?.get("memoryStrategyContract")?;
@@ -5470,7 +5601,7 @@ fn shipped_candle_request_strategy_population_is_manifest_derived_and_complete()
     // lists) — overlay is derived from the load profile and gated by `overlays`, it is NOT an
     // independent fourth axis.
     let mut expected_coordinates = std::collections::BTreeSet::new();
-    for model in manifest["models"].as_array().expect("models array") {
+    for model in &models {
         let Some(contract) = model
             .get("candle")
             .and_then(|candle| candle.get("memoryStrategyContract"))
@@ -6681,8 +6812,9 @@ fn kolors_bespoke_authority_binds_exact_provider_tier_mode_profile_and_reference
             ));
         }
 
-        for mode in KOLORS_CANDLE_CONTROL_MODES {
-            for profile in KOLORS_CANDLE_CONTROL_PROFILES {
+        let control_rule = declared_rule(MemoryRouteBackend::Candle, "candle_kolors_control");
+        for mode in control_rule.modes {
+            for profile in control_rule.load_profiles {
                 let load = spec(tier, *profile);
                 let use_pid = matches!(
                     profile,
@@ -6773,15 +6905,21 @@ fn kolors_bespoke_authority_binds_exact_provider_tier_mode_profile_and_reference
     ));
 }
 
-/// SC-20799: the census const, the shape arms, and the RULES table stay in lockstep. Every
-/// censused provider must have at least one admitting coordinate (so dropping one from the
-/// const, its shape arm, or its RULES entry reds here), and a provider outside the census can
-/// never admit — the census is what `scripts/generate-memory-matrix.mjs` reads to publish
-/// receipt-backed bespoke coverage, so this sweep is what keeps that page truthful.
+/// The typed policy's composed-provider links, shape arms, and route selectors stay in lockstep.
+/// Every linked provider needs an admitting coordinate, and an unlinked provider cannot admit.
 #[test]
 fn candle_bespoke_request_census_matches_the_shape_arms_and_rules() {
-    for provider in CANDLE_BESPOKE_REQUEST_PROVIDERS {
-        let (mode, profile, reference_count) = match *provider {
+    let bespoke = sceneworks_core::registry::declared_memory_routes()
+        .iter()
+        .filter(|row| row.backend == "candle" && row.model_id.is_some())
+        .collect::<Vec<_>>();
+    assert!(
+        !bespoke.is_empty(),
+        "no composed Candle provider was projected"
+    );
+    for row in bespoke {
+        let provider = row.provider.as_str();
+        let (mode, profile, reference_count) = match provider {
             "candle_kolors_ipadapter" => (
                 MemoryRouteMode::CharacterImage,
                 MemoryRouteLoadProfile::IpAdapter,
@@ -6839,7 +6977,7 @@ fn qwen_image_2_1_public_modes_map_onto_the_providers_one_memory_mode() {
         .iter()
         .copied()
     {
-        for mode in QWEN_IMAGE_2_1_MODES {
+        for mode in declared_rule(MemoryRouteBackend::Mlx, id).modes {
             for reference_count in 0..=QWEN_IMAGE_2_1_MAX_REFERENCES {
                 let context = MemoryRouteRequestContext {
                     mode: *mode,

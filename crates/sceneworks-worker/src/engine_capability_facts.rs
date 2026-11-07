@@ -1017,18 +1017,12 @@ pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, S
         .map_err(|error| error.to_string())?;
     let mut memory_contracts = memory_contract_facts_from_registry(&contract_registry)?;
     let route_witnesses = crate::memory_route_registry::deferred_route_witnesses();
-    let builtin_models = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, contents)| sceneworks_core::jsonc::strip_jsonc_comments(contents))
-        .ok_or_else(|| "builtin.models.jsonc is not embedded".to_owned())?;
-    let builtin_manifest: serde_json::Value = serde_json::from_str(&builtin_models)
-        .map_err(|error| format!("builtin.models.jsonc is malformed: {error}"))?;
+    let builtin_models = sceneworks_core::registry::builtin_model_specs()
+        .map(|spec| spec.project(None))
+        .collect::<Vec<_>>();
     let declared_request_strategy_witnesses =
         crate::memory_route_registry::declared_candle_request_strategy_route_witnesses(
-            builtin_manifest["models"]
-                .as_array()
-                .ok_or_else(|| "builtin.models.jsonc has no models array".to_owned())?,
+            &builtin_models,
         )?;
     for entry in &mut facts {
         entry.memory_contracts = memory_contracts.remove(&entry.backend).ok_or_else(|| {
@@ -1178,27 +1172,11 @@ pub fn collect_runtime_descriptor_facts() -> Result<RuntimeDescriptorFacts, Stri
 
 #[cfg(native_lane)]
 fn collect_video_model_mappings(backend: &str) -> Result<Vec<VideoModelMapping>, String> {
-    let (_, source) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .ok_or_else(|| "builtin.models.jsonc is not embedded".to_owned())?;
-    let manifest: serde_json::Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(source))
-            .map_err(|error| format!("parse embedded builtin.models.jsonc: {error}"))?;
-    let models = manifest
-        .get("models")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "builtin.models.jsonc has no models array".to_owned())?;
     let mut mappings = Vec::new();
-    for model in models
-        .iter()
-        .filter(|model| model.get("type").and_then(serde_json::Value::as_str) == Some("video"))
+    for model in sceneworks_core::registry::builtin_model_specs()
+        .filter(|spec| spec.product.model_type == "video")
     {
-        let model_id = model
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| "shipped video manifest row has no id".to_owned())?;
+        let model_id = model.product.id.as_str();
         for mode in sceneworks_core::jobs_store::video_ui_modes() {
             if !sceneworks_core::jobs_store::video_backend_mode_supported(backend, model_id, mode)?
             {

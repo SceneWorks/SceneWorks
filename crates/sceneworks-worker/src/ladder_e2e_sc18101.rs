@@ -165,13 +165,10 @@ fn quant_for_tier(tier: &str) -> Option<gen_core::Quant> {
 /// route registry. This deliberately parses the shipped manifest through the same typed helper as
 /// production; no Rust-source text or hand-maintained provider mirror participates.
 fn deferred_materialization_routes() -> std::collections::BTreeSet<String> {
-    let manifest: Value =
-        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
-            .expect("builtin model manifest parses")
-            .clone();
-    crate::memory_route_registry::declared_mlx_deferred_routes(
-        manifest["models"].as_array().expect("models array"),
-    )
+    let models = sceneworks_core::registry::builtin_model_specs()
+        .map(|spec| spec.project(None))
+        .collect::<Vec<_>>();
+    crate::memory_route_registry::declared_mlx_deferred_routes(&models)
 }
 
 /// The resolved-artifact provenance for a subject, derived from the shipped binding that names its
