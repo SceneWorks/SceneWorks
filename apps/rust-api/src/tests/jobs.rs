@@ -2723,11 +2723,16 @@ async fn imported_model_replay_refuses_when_worker_claim_disappears() {
         "API bytes remain present"
     );
     for operation in ["retry", "duplicate"] {
+        let body = if operation == "duplicate" {
+            json!({"payloadChanges":{}})
+        } else {
+            json!({})
+        };
         let (status, refused) = request(
             app.clone(),
             "POST",
             &format!("/api/v1/jobs/{job_id}/{operation}"),
-            json!({}),
+            body,
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{operation}: {refused}");
