@@ -20,6 +20,14 @@ const STATIC_SOURCE_IDS: &[&str] = &[
     "sdxl_ip_adapter",
     "sdxl_ip_encoder",
     "depth_anything_v2_small",
+    "instantid_mlx",
+    "instantid_controlnet",
+    "instantid_openpose",
+    "pulid_adapter",
+    "pulid_eva",
+    "pulid_bisenet",
+    "pulid_scrfd",
+    "pulid_arcface",
 ];
 
 pub(crate) fn static_source_claims(settings: &Settings) -> Vec<PortableSourceClaim> {
