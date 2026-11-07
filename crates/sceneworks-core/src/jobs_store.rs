@@ -4387,6 +4387,7 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
 fn row_to_worker(row: &Row<'_>) -> rusqlite::Result<WorkerSnapshot> {
     Ok(WorkerSnapshot {
         id: row.get("id")?,
+        platform: None,
         gpu_id: row.get("gpu_id")?,
         gpu_name: row.get("gpu_name")?,
         status: parse_string_enum(&row.get::<_, String>("status")?),

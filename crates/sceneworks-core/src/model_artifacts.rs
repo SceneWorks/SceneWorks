@@ -11,6 +11,7 @@ pub mod artifact_selection;
 pub mod external_library;
 #[path = "model_artifacts/local_preference.rs"]
 pub mod local_preference;
+pub mod portable_binding;
 #[path = "model_artifacts/promotion.rs"]
 pub mod promotion;
 #[path = "model_artifacts/provenance.rs"]
