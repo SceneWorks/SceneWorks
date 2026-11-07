@@ -19,11 +19,17 @@ pub(crate) enum SelectedSourceLocation {
         reference: &'static str,
         files: &'static [&'static str],
     },
-    /// Existing PiD repo/file overrides are authored values, frozen to a commit at admission.
+    /// Request-selected repository files are frozen to a commit at admission.
     DynamicHfFiles {
         repo: String,
         reference: String,
         files: Vec<String>,
+    },
+    /// A converter borrows the same dense subtrees from any installed FLUX.2 tier.
+    /// Admission normalizes and verifies the published per-tier ledgers.
+    ConversionBorrow {
+        repo: String,
+        preferred_subdir: Option<String>,
     },
     /// An operator Gemma override wins when a registered worker advertises it; otherwise
     /// admission binds the exact selected LTX bundle's pinned sibling Gemma download.
@@ -94,6 +100,57 @@ pub(crate) fn selected_route_source_rows(
     _platform: &str,
 ) -> Result<Vec<SelectedRouteSource>, String> {
     let mut rows = Vec::new();
+    if *job_type == JobType::ModelConvert {
+        let slot = entries
+            .first()
+            .map(|(slot, _)| slot.clone())
+            .ok_or("conversion lacks a model source carrier")?;
+        match payload.get("converter").and_then(Value::as_str) {
+            Some("flux2_klein_diffusers") => {
+                let repo = payload
+                    .get("baseRepo")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or("FLUX.2 conversion lacks baseRepo")?;
+                rows.push(SelectedRouteSource {
+                    model_slot: slot,
+                    component_id: "flux2_convert_base".to_owned(),
+                    role: ArtifactMemberRole::RequiredComponent,
+                    source: SelectedSourceLocation::ConversionBorrow {
+                        repo: repo.to_owned(),
+                        preferred_subdir: payload
+                            .get("baseSubdir")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    },
+                    selected_tier: None,
+                });
+            }
+            Some("ltx_video") => {
+                let repo = payload
+                    .get("baseRepo")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or("LTX conversion lacks baseRepo")?;
+                let file = payload
+                    .get("upscalerFile")
+                    .and_then(Value::as_str)
+                    .unwrap_or("ltx-2.3-spatial-upscaler-x2-1.1.safetensors");
+                rows.push(SelectedRouteSource {
+                    model_slot: slot,
+                    component_id: "ltx_convert_upscaler".to_owned(),
+                    role: ArtifactMemberRole::RequiredComponent,
+                    source: SelectedSourceLocation::DynamicHfFiles {
+                        repo: repo.to_owned(),
+                        reference: "main".to_owned(),
+                        files: vec![file.to_owned()],
+                    },
+                    selected_tier: None,
+                });
+            }
+            _ => {}
+        }
+    }
     let advanced = payload.get("advanced").and_then(Value::as_object);
     let has_reference = payload
         .get("referenceAssetId")
@@ -872,6 +929,51 @@ fn entries_support_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversion_freezes_borrowed_base_or_exact_upscaler_source() {
+        let entry = serde_json::json!({"id":"model_convert:community/source","downloads":[{"provider":"huggingface","repo":"community/source"}]});
+        let entries = [("modelManifestEntries/0".to_owned(), &entry)];
+        let klein = serde_json::json!({
+            "converter":"flux2_klein_diffusers", "sourceRepo":"community/source",
+            "sourceFile":"checkpoint.safetensors", "baseRepo":"other/klein",
+            "baseSubdir":"q4"
+        });
+        let rows = selected_route_source_rows(
+            &JobType::ModelConvert,
+            klein.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model_slot, "modelManifestEntries/0");
+        assert_eq!(rows[0].component_id, "flux2_convert_base");
+        assert!(
+            matches!(&rows[0].source, SelectedSourceLocation::ConversionBorrow { repo, preferred_subdir }
+            if repo == "other/klein" && preferred_subdir.as_deref() == Some("q4"))
+        );
+        let ltx = serde_json::json!({
+            "converter":"ltx_video", "sourceRepo":"community/eros",
+            "sourceFile":"checkpoint.safetensors", "baseRepo":"other/ltx",
+            "upscalerFile":"custom-upscaler.safetensors"
+        });
+        let rows = selected_route_source_rows(
+            &JobType::ModelConvert,
+            ltx.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].component_id, "ltx_convert_upscaler");
+        assert!(
+            matches!(&rows[0].source, SelectedSourceLocation::DynamicHfFiles {repo,reference,files}
+            if repo == "other/ltx" && reference == "main" && files == &["custom-upscaler.safetensors"])
+        );
+    }
     use serde_json::json;
 
     #[test]

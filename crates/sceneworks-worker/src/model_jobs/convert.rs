@@ -704,6 +704,24 @@ fn unknown_converter_error(model_id: &str, converter: &str) -> ConvertPlanError 
 /// construction inside the 350-line job body; here each becomes an `Err(ConvertPlanError)` value and
 /// the caller performs the SINGLE `fail_job`. Still async because the LTX arm may fetch the upscaler
 /// (`ensure_ltx_upscaler_cached`), and real infra errors (`?`) propagate as the outer `WorkerError`.
+fn bound_convert_aux_source(
+    payload: &serde_json::Map<String, Value>,
+    source_id: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    let advanced = payload.get("advanced").and_then(Value::as_object);
+    if !advanced.is_some_and(crate::portable_aux_sources::has_bound_aux_paths) {
+        return Ok(None);
+    }
+    advanced
+        .and_then(|value| crate::portable_aux_sources::bound_aux_path(value, source_id))
+        .map(Some)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "portable conversion lacks verified {source_id} source"
+            ))
+        })
+}
+
 async fn resolve_convert_plan(
     api: &ApiClient,
     settings: &Settings,
@@ -736,8 +754,13 @@ async fn resolve_convert_plan(
                     detail: format!("Expected {source_file_name} in {source_repo}."),
                 }));
             }
-            let Some(base_snapshot) = huggingface_snapshot_dir(&settings.data_dir, &base_repo)
-            else {
+            let bound = bound_convert_aux_source(&job.payload, "flux2_convert_base")?;
+            let base_snapshot = if let Some(bound) = bound {
+                Some(bound)
+            } else {
+                huggingface_snapshot_dir(&settings.data_dir, &base_repo)
+            };
+            let Some(base_snapshot) = base_snapshot else {
                 return Ok(Err(ConvertPlanError {
                     message: "Base FLUX.2-klein model is not installed.",
                     detail: format!(
@@ -750,7 +773,11 @@ async fn resolve_convert_plan(
             // VAE/text-encoder/tokenizer are dense and identical across tiers, so the manifest's
             // `convertBaseSubdir` names the preferred tier and any installed tier serves. A base with a
             // plain root diffusers layout (no `baseSubdir`) borrows from the snapshot root (sc-14978).
-            let base_subdir = optional_payload_string(&job.payload, "baseSubdir");
+            let base_subdir = if job.payload.get("advanced").and_then(Value::as_object).is_some_and(crate::portable_aux_sources::has_bound_aux_paths) {
+                None
+            } else {
+                optional_payload_string(&job.payload, "baseSubdir")
+            };
             let Some(base_dir) = resolve_flux2_klein_base_dir(&base_snapshot, base_subdir) else {
                 return Ok(Err(ConvertPlanError {
                     message: "Base FLUX.2-klein model is installed but incomplete.",
@@ -778,10 +805,14 @@ async fn resolve_convert_plan(
             let upscaler_file = optional_payload_string(&job.payload, "upscalerFile")
                 .unwrap_or(LTX_SPATIAL_UPSCALER_FILE)
                 .to_owned();
-            let Some(upscaler_dir) =
+            let bound = bound_convert_aux_source(&job.payload, "ltx_convert_upscaler")?;
+            let upscaler_dir = if let Some(bound) = bound {
+                bound.join(&upscaler_file).is_file().then_some(bound)
+            } else {
                 ensure_ltx_upscaler_cached(api, settings, job, &upscaler_repo, &upscaler_file)
                     .await?
-            else {
+            };
+            let Some(upscaler_dir) = upscaler_dir else {
                 return Ok(Err(ConvertPlanError {
                     message: "LTX-2.3 spatial upscaler is unavailable.",
                     detail: format!(
@@ -958,6 +989,41 @@ async fn resolve_convert_plan(
         }
     };
     Ok(Ok(plan))
+}
+
+#[cfg(test)]
+mod portable_conversion_source_tests {
+    use super::*;
+
+    #[test]
+    fn bound_converter_source_refuses_omission_without_legacy_fallback() {
+        let legacy = serde_json::json!({"baseRepo":"owner/base"});
+        assert!(bound_convert_aux_source(legacy.as_object().unwrap(), "flux2_convert_base")
+            .unwrap()
+            .is_none());
+        let bound = serde_json::json!({"advanced":{"__portableAuxPaths":{"flux2_convert_base":"/leased/borrowed"}}});
+        assert_eq!(
+            bound_convert_aux_source(bound.as_object().unwrap(), "flux2_convert_base")
+                .unwrap(),
+            Some(PathBuf::from("/leased/borrowed"))
+        );
+        assert!(bound_convert_aux_source(bound.as_object().unwrap(), "ltx_convert_upscaler")
+            .is_err());
+    }
+
+    #[test]
+    fn bound_flux2_directory_is_a_complete_borrowed_root() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["tokenizer", "text_encoder", "vae"] {
+            std::fs::create_dir(root.path().join(name)).unwrap();
+        }
+        assert_eq!(
+            resolve_flux2_klein_base_dir(root.path(), None),
+            Some(root.path().to_path_buf())
+        );
+        std::fs::remove_dir(root.path().join("vae")).unwrap();
+        assert!(resolve_flux2_klein_base_dir(root.path(), None).is_none());
+    }
 }
 
 /// Convert a model's native checkpoint into the local MLX format on macOS/Apple Silicon, fully

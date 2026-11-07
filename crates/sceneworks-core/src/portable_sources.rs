@@ -130,7 +130,9 @@ pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<Porta
         | "ltx_amoral_gemma_3_12b"
         | "ltx_training_text_encoder"
         | "iris_depth_parent"
-        | "iris_parent_backbone" => Some(Directory),
+        | "iris_parent_backbone"
+        | "flux2_convert_base"
+        | "ltx_convert_upscaler" => Some(Directory),
         "instantid_mlx"
         | "instantid_controlnet"
         | "instantid_openpose"
@@ -253,6 +255,13 @@ pub fn required_portable_aux_source_ids(
     let primary_model = payload.get("model").and_then(Value::as_str) == Some(id);
     let advanced = payload.get("advanced").and_then(Value::as_object);
     let mut ids = Vec::new();
+    if *job_type == JobType::ModelConvert {
+        match payload.get("converter").and_then(Value::as_str) {
+            Some("flux2_klein_diffusers") => ids.push("flux2_convert_base".to_owned()),
+            Some("ltx_video") => ids.push("ltx_convert_upscaler".to_owned()),
+            _ => {}
+        }
+    }
     let has_ref = payload
         .get("referenceAssetId")
         .and_then(Value::as_str)
@@ -456,6 +465,31 @@ pub fn required_portable_aux_source_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversion_requires_exact_selected_auxiliary_and_directory_shape() {
+        let entry = serde_json::json!({"id":"model_convert:community/source"});
+        for (converter, expected) in [
+            ("flux2_klein_diffusers", "flux2_convert_base"),
+            ("ltx_video", "ltx_convert_upscaler"),
+        ] {
+            let payload = serde_json::json!({"converter":converter});
+            assert_eq!(
+                required_portable_aux_source_ids(
+                    &JobType::ModelConvert,
+                    payload.as_object().unwrap(),
+                    &entry,
+                    "mlx"
+                )
+                .unwrap(),
+                vec![expected]
+            );
+            assert_eq!(
+                portable_aux_source_shape(expected, &entry),
+                Some(PortableAuxSourceShape::Directory)
+            );
+        }
+    }
     use serde_json::json;
 
     #[test]
