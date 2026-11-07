@@ -621,10 +621,21 @@ async fn capture_model_slot(
 /// Resolve a mutable, user-selected repository to a publisher commit once, at admission.
 /// The worker sees only the immutable revision and exact file ledger in its frozen route.
 async fn resolve_dynamic_hf_revision(state: &AppState, repo: &str) -> Result<String, ApiError> {
-    let repo = sceneworks_core::hf_repo_id::namespaced(repo)
-        .map_err(|error| incomplete(format!("custom model repository is invalid: {error}")))?;
     let base_url = std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
         .unwrap_or_else(|_| "https://huggingface.co".to_owned());
+    let token = huggingface_token(state)?;
+    resolve_dynamic_hf_revision_with_client(&state.http_client, &base_url, token.as_deref(), repo)
+        .await
+}
+
+async fn resolve_dynamic_hf_revision_with_client(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: Option<&str>,
+    repo: &str,
+) -> Result<String, ApiError> {
+    let repo = sceneworks_core::hf_repo_id::namespaced(repo)
+        .map_err(|error| incomplete(format!("custom model repository is invalid: {error}")))?;
     let mut url = reqwest::Url::parse(&base_url)
         .map_err(|error| incomplete(format!("Hugging Face endpoint is invalid: {error}")))?;
     {
@@ -638,8 +649,8 @@ async fn resolve_dynamic_hf_revision(state: &AppState, repo: &str) -> Result<Str
         }
         parts.push("revision").push("main");
     }
-    let mut request = state.http_client.get(url);
-    if let Some(token) = huggingface_token(state)? {
+    let mut request = client.get(url);
+    if let Some(token) = token {
         request = request.bearer_auth(token);
     }
     let mut response = request
@@ -1489,5 +1500,84 @@ mod tests {
             &JobType::CatalogAnalysis,
             no_models.as_object().unwrap()
         ));
+    }
+
+    #[tokio::test]
+    async fn mutable_custom_repo_head_is_frozen_to_each_immutable_file_closure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let first = "a".repeat(40);
+        let second = "b".repeat(40);
+        let first_for_server = first.clone();
+        let second_for_server = second.clone();
+        let server = tokio::spawn(async move {
+            for request_number in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let count = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..count]);
+                let revision = if request_number < 2 {
+                    &first_for_server
+                } else {
+                    &second_for_server
+                };
+                let body = if request.contains("/revision/main") {
+                    serde_json::json!({"sha":revision}).to_string()
+                } else {
+                    assert!(request.contains(&format!("/tree/{revision}")));
+                    let oid = if request_number < 2 {
+                        "1".repeat(64)
+                    } else {
+                        "2".repeat(64)
+                    };
+                    serde_json::json!([{
+                        "path":"diffusion_pytorch_model.safetensors",
+                        "size":4,
+                        "lfs":{"oid":oid}
+                    }])
+                    .to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = reqwest::Client::new();
+        let first_revision =
+            resolve_dynamic_hf_revision_with_client(&client, &base, None, "owner/control")
+                .await
+                .unwrap();
+        let first_files = resolve_pinned_hf_files(
+            &client,
+            &base,
+            None,
+            "owner/control",
+            &first_revision,
+            &["*".to_owned()],
+        )
+        .await
+        .unwrap();
+        let second_revision =
+            resolve_dynamic_hf_revision_with_client(&client, &base, None, "owner/control")
+                .await
+                .unwrap();
+        let second_files = resolve_pinned_hf_files(
+            &client,
+            &base,
+            None,
+            "owner/control",
+            &second_revision,
+            &["*".to_owned()],
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(first_revision, first);
+        assert_eq!(second_revision, second);
+        assert_ne!(first_files, second_files);
     }
 }
