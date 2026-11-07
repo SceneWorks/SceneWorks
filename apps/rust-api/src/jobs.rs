@@ -3008,6 +3008,12 @@ pub(crate) async fn register_trained_base_checkpoint(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("Training manifest entry requires an id"))?
         .to_owned();
+    let source_model_id = job
+        .payload
+        .pointer("/plan/target/baseModel")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| ApiError::internal("Training plan requires a base model identity"))?;
     validate_lora_id_component(&model_id)?;
     let (output_dir, manifest_path) = resolve_finetune_output_location(state, &model_id);
 
@@ -3046,6 +3052,13 @@ pub(crate) async fn register_trained_base_checkpoint(
                 export.display()
             ))
         })?;
+        sceneworks_worker::write_produced_artifact_receipt(
+            &export,
+            &job.id,
+            source_model_id,
+            &model_id,
+        )
+        .map_err(|error| ApiError::internal(format!("Could not attest Iris export: {error}")))?;
         let upsert_id = model_id.clone();
         mutate_manifest_entries(state, &manifest_path, "models", move |entries| {
             let created_at = entries
@@ -3099,6 +3112,13 @@ pub(crate) async fn register_trained_base_checkpoint(
             output_dir.display()
         ))
     })?;
+    sceneworks_worker::write_produced_artifact_receipt(
+        &output_dir,
+        &job.id,
+        source_model_id,
+        &model_id,
+    )
+    .map_err(|error| ApiError::internal(format!("Could not attest trained checkpoint: {error}")))?;
 
     let model_type = manifest_entry
         .get("type")

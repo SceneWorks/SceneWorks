@@ -1279,6 +1279,10 @@ pub(crate) async fn run_model_convert_job(
     if plan_is_ltx {
         provision_ltx_eros_gemma(api, settings, job).await?;
     }
+    // A completed conversion is a local derivative. Stamp the producer and exact output bytes
+    // before reporting success, so later training/generation admission never trusts a marker or
+    // mutable catalog path as its identity.
+    write_produced_artifact_receipt(&final_dir, &job.id, &source_repo, &model_id)?;
     let calibration_opt_in = job
         .payload
         .get("memoryCalibrationProvenanceRequired")

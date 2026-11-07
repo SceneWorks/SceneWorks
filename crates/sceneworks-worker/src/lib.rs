@@ -409,6 +409,9 @@ mod converted_install;
 mod model_jobs;
 mod portable_aux_sources;
 pub use model_jobs::recover_stranded_model_conversions;
+pub use model_jobs::{
+    verify_produced_artifact_receipt, write_produced_artifact_receipt, ProducedArtifactReceipt,
+};
 // The convert pre-flight the rust-api calls before queueing a `model_convert` job, so a convert
 // requested against a still-downloading source is refused at the request boundary instead of failing
 // in the worker (see `convert_source_state`).
