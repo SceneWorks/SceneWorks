@@ -3454,11 +3454,11 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
         .expect("pinned metadata listener");
     let address = listener.local_addr().expect("listener address");
     let metadata = axum::Router::new().fallback(|| async {
-        Json(json!([{
+        axum::Json(json!([{
             "type": "file",
-            "path": "bf16/weights.safetensors",
+            "path": "bf16/transformer/weights.safetensors",
             "size": 1,
-            "lfs": { "oid": "1111111111111111111111111111111111111111111111111111111111111111" }
+            "lfs": { "oid": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881" }
         }]))
     });
     let metadata_server = tokio::spawn(async move {
@@ -3467,17 +3467,25 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
             .expect("pinned metadata server");
     });
     let endpoint = format!("http://{address}");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let hub = temp_dir.path().join("hub");
+    let hub_string = hub.display().to_string();
     let _env = HfCacheEnvGuard::set(&[
-        ("HF_HUB_CACHE", ""),
+        ("HF_HUB_CACHE", &hub_string),
         ("HUGGINGFACE_HUB_CACHE", ""),
         ("HF_HOME", ""),
         ("SCENEWORKS_HUGGINGFACE_BASE_URL", &endpoint),
     ]);
-    let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
+    let repo_root = huggingface_repo_cache_path(&settings.data_dir, "SceneWorks/z-image-turbo-mlx")
+        .expect("pinned publisher cache root");
+    let bf16 = repo_root.join("snapshots/bb2bc9893b3c49ae96c813350775f791a2e8bc80/bf16");
+    std::fs::create_dir_all(bf16.join("transformer")).expect("dense backbone");
+    std::fs::create_dir_all(bf16.join("text_encoder")).expect("text encoder");
+    std::fs::create_dir_all(bf16.join("vae")).expect("vae");
+    std::fs::write(bf16.join("transformer/weights.safetensors"), b"x")
+        .expect("pinned fixture bytes");
     let app = create_app(settings.clone()).expect("app creates");
-    // A real run requires the base model installed (story 1419 guardrail).
-    seed_installed_base_model(&settings.data_dir);
     let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
         &"Training Project",
@@ -3528,7 +3536,7 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED, "{job}");
     assert_eq!(job["type"], "lora_train");
     assert_eq!(job["status"], "queued");
     assert_eq!(job["payload"]["dryRun"], false);
