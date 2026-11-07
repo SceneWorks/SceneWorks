@@ -980,6 +980,26 @@ async fn capture_model_slot(
     let variant;
     let tier;
     if downloads.is_empty() {
+        if frozen_model.is_none() {
+            let registered = crate::models::resolve_model_manifest_entry(state, model_id).await?;
+            if registered.as_object().is_none_or(JsonObject::is_empty)
+                || [
+                    "downloads",
+                    "conditionalComponents",
+                    "paths",
+                    "modelPath",
+                    "installedPath",
+                    "components",
+                    "importPlan",
+                ]
+                .into_iter()
+                .any(|key| entry.get(key) != registered.get(key))
+            {
+                return Err(incomplete(format!(
+                    "{slot} local source differs from server model registration"
+                )));
+            }
+        }
         let mut local = capture_local_model_entry(state, entry, slot)?;
         if let Some(training) = &training {
             let selected = capture_local_source_files(&training.path, &allowed_local_roots(state))?;
