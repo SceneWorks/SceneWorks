@@ -16,6 +16,8 @@ from types import SimpleNamespace
 CAMPAIGN_SECONDS = 590 * 60  # Leave ten minutes of the workflow for final upload.
 CLEANUP_SECONDS = 60
 GPU_UUIDS = ("GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0", "GPU-e4b79931-7be6-f216-460a-f5405cfafffe")
+ORIGINAL_RUNTIME = {"sceneworks": "c8815c7cd46feba2f82562a315d1a44a6c88a9e8",
+                    "inference": "2ff0353820e370d004305ae99a035ab38b93de30"}
 
 
 def validated_plan(env):
@@ -52,13 +54,15 @@ def validated_plan(env):
             raise ValueError("positive integer pool and reserve required")
     if matched:
         if (index != 0 or plan.get("matchedResidentControlAuthorized") is not True
-                or plan.get("inference") != "2ff0353820e370d004305ae99a035ab38b93de30"
+                or not re.fullmatch(r"[a-f0-9]{40}", str(plan.get("inference", "")))
+                or env.get("H3_CONTROLLER_AUTHORIZED_PAIR") != f"{plan['sceneworks']}:{plan['inference']}"
+                or env.get("H3_TERMINAL_AUTHORIZED_PAIR") != ":".join(ORIGINAL_RUNTIME[key] for key in ["sceneworks", "inference"])
                 or type(plan.get("timeoutSeconds")) is not int
                 or not 60 <= plan["timeoutSeconds"] <= 7200
                 or plan["poolBytes"] != 92 * 1024**3
                 or plan["externalReserveBytes"] != 3 * 1024**3
                 or "additionalSparse24" in plan):
-            raise ValueError("single matched Resident control requires exact GPU0/M4/92+3 policy")
+            raise ValueError("single matched Resident control requires current controller, immutable CGPU/M4 runtime, exact GPU0/92+3 policy")
     elif plan["poolBytes"] + plan["externalReserveBytes"] != 24 * 1024**3 or plan["externalReserveBytes"] < 2 * 1024**3:
         raise ValueError("plan pool and external reserve must preserve the 24GiB envelope")
     return plan
@@ -104,6 +108,11 @@ def supervise(sw_root, inference_root, output, env, *, claim, execute, job_type,
                "deadlineSeconds": seconds, "cleanupReserveSeconds": CLEANUP_SECONDS,
                "minimumClaimFreeBytes": policy.child_gpu_cap_bytes + policy.gpu_free_reserve_bytes,
                "minimumClaimScope": "matched Resident95 control" if plan.get("mode") else "capped pair minimum; workstation provider admission remains authoritative"}
+    if plan.get("mode"):
+        receipt["controllerSourcePair"] = receipt.pop("sourcePair")
+        receipt["runtimeSourcePair"] = dict(ORIGINAL_RUNTIME)
+        receipt["leaseImplementationSource"] = {"repository": "SceneWorks/inference", "revision": plan["inference"],
+                                                 "meaning": "current controller lease/owned cleanup, not the compiled model runtime"}
     try:
         print(f"Waiting for existing physical GPU{index} UUID lease; original deadline {seconds}s", flush=True)
         with claim("candle-cuda", policy, lease_output, env,

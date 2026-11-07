@@ -4,6 +4,7 @@ import { copyFile,mkdir,readFile,realpath,stat,writeFile } from 'node:fs/promise
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { lockedInferenceRevision } from './select-windows-cargo-cache.mjs';
 import { fileSha256 } from './lib/file-sha256.mjs';
 import { StockService,stageModels,validatePlan,anchorRequest,campaignCudaEnvironment,validateAnchorDevice,validatePoolEvidence,collectDecodedMediaDiagnostics } from './h3-cuda-memory-terminal.mjs';
 import { ProcessObservations,assertQueuedMatchesSubmitted,bindCompletedMedia,hardware } from './h3-finetune-terminal-runtime.mjs';
@@ -23,16 +24,124 @@ export const ORIGINAL=Object.freeze({
   stagedSha256:'a58d6f7e2d2655a5537b5f7deac02fb95694d5e0a1ec1d47161a14801223d6dd',
   anchors:Object.freeze({'workstation-veda':'f060da00e0d14b5ba58237274587228ab11ffd7549bd5d72179ca510098a6c36','24gib-veda-sparse':'45a7fdd93c48e2c0c61b97a4a811b2915f289142a6e38320d608936a827cb8f7'}),
 });
-const CONTROLLER_ONLY=new Set([
-  'docs/design/minimax-h3-cuda-low-vram-plan.md','docs/testing/sw-f329-cuda-memory-terminal.md',
-  'scripts/h3-cuda-memory-terminal.mjs','scripts/h3-cuda-memory-terminal.test.mjs',
-  'scripts/h3-residency-component-evidence.mjs','scripts/h3-residency-component-evidence.test.mjs',
-  'scripts/h3-matched-resident-control.mjs','scripts/h3-matched-resident-control.test.mjs',
-  'scripts/h3-cuda-memory-lease.py','scripts/h3-cuda-memory-lease.test.py','.github/workflows/h3-cuda-memory-terminal.yml',
+// This is the reviewed JS execution/import closure, NOT the compiled runtime
+// tree. Cargo/Rust/UI changes at controller HEAD are never compiled or launched.
+export const COMMON_CONTROLLER_FILES=Object.freeze([
+  'scripts/ci/h3-import-native-proof.mjs',
+  'scripts/h3-finetune-terminal-api.mjs','scripts/h3-finetune-terminal-cases.mjs',
+  'scripts/h3-finetune-terminal-reduced.mjs','scripts/h3-finetune-terminal-runtime.mjs',
+  'scripts/h3-finetune-terminal-stage.mjs','scripts/h3-finetune-terminal.mjs',
+  'scripts/lib/file-sha256.mjs','scripts/lib/h3-campaign-build-profile.mjs',
+  'scripts/lib/h3-owned-processes.mjs','scripts/lib/h3-peer-lane.mjs',
+  'scripts/lib/rust-facade-source.mjs','scripts/lib/rust-source-slices.mjs',
+  'scripts/lib/windows-verbatim-path.mjs','scripts/scan-inference-provenance.mjs',
+  'scripts/select-windows-cargo-cache.mjs','docs/testing/sc-26691-h3-cases.json',
 ]);
-export function validateControllerOnlyChanges(paths){
-  assert.ok(paths.every(file=>CONTROLLER_ONLY.has(file)),'retained binary compiled-source closure changed');
-  return paths;
+export const MANUAL_CONTROLLER_FILES=Object.freeze([
+  'scripts/h3-cuda-memory-terminal.mjs','scripts/h3-matched-resident-control.mjs',
+]);
+const MANUAL_IMPORTS={
+  'scripts/h3-cuda-memory-terminal.mjs':[
+    'node:assert/strict','node:crypto','node:fs/promises','node:path','node:url','node:util','node:child_process',
+    './lib/file-sha256.mjs','./scan-inference-provenance.mjs','./lib/rust-source-slices.mjs',
+    './lib/rust-facade-source.mjs','./h3-finetune-terminal-runtime.mjs','./ci/h3-import-native-proof.mjs',
+    './h3-finetune-terminal-api.mjs','./h3-finetune-terminal.mjs',
+  ],
+  'scripts/h3-matched-resident-control.mjs':[
+    'node:assert/strict','node:fs/promises','node:path','node:child_process','node:util',
+    './select-windows-cargo-cache.mjs','./lib/file-sha256.mjs','./h3-cuda-memory-terminal.mjs',
+    './h3-finetune-terminal-runtime.mjs','./h3-finetune-terminal-api.mjs','./h3-finetune-terminal.mjs',
+  ],
+};
+export const RUNTIME_TREES=Object.freeze({sceneworks:'229377ce79cf9c3ec0660b2346af13807ee11664',
+  inference:'75d392586953d990cf346c7b82f69f7ef246b133',config:'f70f28c989d3b5fe018d8bbd863d19ca11aa7847',
+  lock:'d3dc83f19044ad80b3924f2d321f6480fd7afaa5'});
+
+export function validateManualImports(file,source){
+  // A deliberately bounded assertion for these two reviewed modules, not a
+  // generic JavaScript parser. All imports must retain their literal single-line
+  // declaration form; new re-exports/require/loaders need another source review.
+  const lines=source.split(/\r?\n/).filter(line=>/^\s*import\b/.test(line));
+  const imports=lines.map(line=>{const match=/^import .+ from ['"]([^'"]+)['"];?$/.exec(line);assert.ok(match,'literal reviewed imports required');return match[1];});
+  assert.deepEqual(imports,MANUAL_IMPORTS[file],'manual controller import closure changed');
+  assert.doesNotMatch(source,/^\s*export\s+.*\bfrom\s*['"]|\brequire\s*\(/m,'no unreviewed re-export/require execution');
+  const dynamic=[...source.matchAll(/\bimport\s*\(([^)]*)\)/g)].map(match=>match[1]);
+  assert.deepEqual(dynamic,file===MANUAL_CONTROLLER_FILES[0]?["'./h3-matched-resident-control.mjs'"]:[], 'only the explicit matched-mode dynamic import is reachable');
+  return {file,staticImports:imports,dynamicImports:dynamic};
+}
+
+export function validateControllerClosure(entries,{controllerHead,expectedHead}){
+  assert.equal(controllerHead,expectedHead,'controller must be the authorized current HEAD');
+  assert.match(controllerHead,/^[a-f0-9]{40}$/);
+  assert.deepEqual(entries.map(row=>row.path).sort(),[...COMMON_CONTROLLER_FILES,...MANUAL_CONTROLLER_FILES].sort(),'complete reviewed controller closure required');
+  for(const row of entries){
+    assert.equal(row.afterMode,'100644','regular Git source blobs only');
+    assert.match(row.afterBlob,/^[a-f0-9]{40}$/);assert.equal(row.actualBlob,row.afterBlob,'controller working bytes differ from authorized Git source');
+    assert.match(row.actualSha256,/^[a-f0-9]{64}$/);
+    if(COMMON_CONTROLLER_FILES.includes(row.path)){
+      assert.equal(row.beforeMode,row.afterMode);assert.equal(row.beforeBlob,row.afterBlob,'common harness/data differs from original CGPU');
+    }else{
+      assert.ok(MANUAL_CONTROLLER_FILES.includes(row.path));
+      if(row.path===MANUAL_CONTROLLER_FILES[1]){assert.equal(row.beforeBlob,null,'new manual driver has no historical compiled claim');assert.equal(row.beforeMode,null);}
+      else{assert.equal(row.beforeMode,'100644');assert.match(row.beforeBlob,/^[a-f0-9]{40}$/);}
+    }
+  }
+  return {kind:'reviewed-js-execution-import-closure/v1',controllerHead,baseline:ORIGINAL.sceneworks,entries,
+    scope:'17 unchanged common JS/data blobs plus2 exact current reviewed manual modules; NOT whole-controller compiled-source equivalence'};
+}
+
+export function validateSourceBindings(value){
+  assert.equal(value.kind,'separate-controller-and-immutable-runtime/v1');
+  for(const revision of Object.values(value.controllerSourcePair))assert.match(revision,/^[a-f0-9]{40}$/);
+  assert.deepEqual(Object.keys(value.controllerSourcePair).sort(),['inference','sceneworks']);
+  assert.equal(value.controllerCargoPin,value.controllerSourcePair.inference);
+  assert.deepEqual(value.runtimeSourcePair,{sceneworks:ORIGINAL.sceneworks,inference:ORIGINAL.inference});
+  assert.equal(value.runtimeCargoPin,ORIGINAL.inference);
+  assert.deepEqual(value.runtimeTrees,RUNTIME_TREES);
+  assert.equal(value.controllerClosure.controllerHead,value.controllerSourcePair.sceneworks);
+  validateControllerClosure(value.controllerClosure.entries,{controllerHead:value.controllerClosure.controllerHead,expectedHead:value.controllerSourcePair.sceneworks});
+  assert.equal(value.noCurrentRuntimeBuild,true);
+  return value;
+}
+
+async function git(root,args){return (await exec('git',args,{cwd:root})).stdout.trim();}
+async function treeEntry(root,revision,file,{optional=false}={}){
+  const line=await git(root,['ls-tree',revision,'--',file]);
+  if(optional&&!line)return {mode:null,blob:null};
+  const match=/^(100644) blob ([a-f0-9]{40})\t(.+)$/.exec(line);
+  assert.ok(match&&match[3]===file,'expected regular exact source path: '+file);
+  return {mode:match[1],blob:match[2]};
+}
+
+export async function verifySourceBindings(p,controllerRoot,inferenceRoot,runtimeRoot,runtimeInferenceRoot,output){
+  await sourcePair({...p,output},controllerRoot,inferenceRoot);
+  const originalPlan={...p,output,sceneworks:ORIGINAL.sceneworks,inference:ORIGINAL.inference};
+  await sourcePair(originalPlan,runtimeRoot,runtimeInferenceRoot);
+  const roots=await Promise.all([controllerRoot,inferenceRoot,runtimeRoot,runtimeInferenceRoot].map(value=>realpath(value)));
+  assert.equal(new Set(roots.map(value=>value.toLowerCase())).size,4,'controller and immutable runtime require four separate exact checkouts');
+  const entries=[];
+  for(const file of [...COMMON_CONTROLLER_FILES,...MANUAL_CONTROLLER_FILES]){
+    const before=await treeEntry(controllerRoot,ORIGINAL.sceneworks,file,{optional:file===MANUAL_CONTROLLER_FILES[1]});
+    const after=await treeEntry(controllerRoot,p.sceneworks,file);
+    const actual=await realpath(path.join(controllerRoot,file));
+    const relative=path.relative(roots[0],actual);assert.ok(relative&&!relative.startsWith('..')&&!path.isAbsolute(relative),'controller source escapes checkout');
+    entries.push({path:file,beforeMode:before.mode,beforeBlob:before.blob,afterMode:after.mode,afterBlob:after.blob,
+      actualBlob:await git(controllerRoot,['hash-object','--path',file,actual]),actualSha256:await fileSha256(actual)});
+  }
+  const imports=[];
+  for(const file of MANUAL_CONTROLLER_FILES)imports.push(validateManualImports(file,await readFile(path.join(controllerRoot,file),'utf8')));
+  const controllerClosure=validateControllerClosure(entries,{controllerHead:await git(controllerRoot,['rev-parse','HEAD']),expectedHead:p.sceneworks});
+  controllerClosure.manualImportAssertions=imports;
+  return validateSourceBindings({kind:'separate-controller-and-immutable-runtime/v1',
+    controllerSourcePair:{sceneworks:p.sceneworks,inference:p.inference},
+    controllerCargoPin:lockedInferenceRevision(await readFile(path.join(controllerRoot,'Cargo.lock'),'utf8')),
+    runtimeSourcePair:{sceneworks:ORIGINAL.sceneworks,inference:ORIGINAL.inference},
+    runtimeCargoPin:lockedInferenceRevision(await readFile(path.join(runtimeRoot,'Cargo.lock'),'utf8')),
+    runtimeTrees:{sceneworks:await git(runtimeRoot,['rev-parse','HEAD^{tree}']),inference:await git(runtimeInferenceRoot,['rev-parse','HEAD^{tree}']),
+      config:await git(runtimeRoot,['rev-parse','HEAD:config']),lock:await git(runtimeRoot,['rev-parse','HEAD:Cargo.lock'])},
+    controllerClosure,noCurrentRuntimeBuild:true,
+    checkoutRoles:{controller:roots[0],controllerLeaseEngine:roots[1],runtimeConfiguration:roots[2],runtimeEngineSource:roots[3]},
+    meaning:'Current manual JS controller and current-engine lease only; original CGPU/M4 compiled EXE/config/source reused. Current Cargo/Rust/UI are neither compiled nor launched.'});
 }
 export function validateStagedMatch(previous,current){
   const identities=files=>files.map(({role,repo,revision,relative,bytes,sha256})=>({role,repo,revision,relative,bytes,sha256})).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
@@ -67,7 +176,8 @@ export function validateCompleteControl(record){
   assert.equal(record.kind,'matched-resident-control');assert.equal(record.completed,true);assert.equal(record.ownedShutdownCompleted,true);
   for(const key of ['error','shutdownError','observationError','binaryError'])assert.equal(record[key],undefined,'partial control is not completed evidence');
   assert.equal(record.runtimeSourcePair.sceneworks,ORIGINAL.sceneworks);assert.equal(record.runtimeSourcePair.inference,ORIGINAL.inference);
-  assert.match(record.controllerSourcePair.sceneworks,/^[a-f0-9]{40}$/);assert.equal(record.controllerSourcePair.inference,ORIGINAL.inference);
+  assert.match(record.controllerSourcePair.sceneworks,/^[a-f0-9]{40}$/);assert.match(record.controllerSourcePair.inference,/^[a-f0-9]{40}$/);
+  validateSourceBindings(record.sourceBindings);assert.deepEqual(record.sourceBindings.controllerSourcePair,record.controllerSourcePair);assert.deepEqual(record.sourceBindings.runtimeSourcePair,record.runtimeSourcePair);
   assert.equal(record.binarySha256,ORIGINAL.binarySha256);assert.equal(record.job.status,'completed');assert.equal(record.media.length,1);
   assert.match(record.job.id,/^job_/);assert.match(record.media[0].sha256,/^[a-f0-9]{64}$/);
   assert.ok(typeof record.media[0].av==='string'&&record.media[0].av.length>0);
@@ -94,7 +204,7 @@ class ImmutableOriginalService extends StockService{
     this.buildIdentity=await originalBuild();this.binary=ORIGINAL.binary;this.binaryHash=ORIGINAL.binarySha256;
     await copyFile(path.join(ORIGINAL.root,'workstation-veda/service-build.json'),path.join(this.dir,'service-build.json'));
     await copyFile(path.join(ORIGINAL.root,'workstation-veda/service-build.log'),path.join(this.dir,'service-build.log'));
-    await save(path.join(this.dir,'prebuilt-reuse.json'),{kind:'immutable-original-build-reuse',runtimeSourcePair:{sceneworks:ORIGINAL.sceneworks,inference:ORIGINAL.inference},controllerSourcePair:this.controllerSourcePair,originalBuildReceiptSha256:ORIGINAL.buildReceiptSha256,binarySha256:this.binaryHash,meaning:'Original CGPU/M4 build reused read-only; no Cargo executed or new-head compile claimed'});
+    await save(path.join(this.dir,'prebuilt-reuse.json'),{kind:'immutable-original-build-reuse',runtimeSourcePair:{sceneworks:ORIGINAL.sceneworks,inference:ORIGINAL.inference},controllerSourcePair:this.controllerSourcePair,sourceBindings:this.sourceBindings,originalBuildReceiptSha256:ORIGINAL.buildReceiptSha256,binarySha256:this.binaryHash,meaning:'Original CGPU/M4 build reused read-only; no Cargo executed or new-head compile claimed'});
   }
 }
 const CUDA_DLLS=['cudart64_12.dll','nvrtc64_120_0.dll','curand64_10.dll','cublas64_12.dll','cublasLt64_12.dll'];
@@ -113,17 +223,20 @@ export async function runMatchedResidentControl(p,controllerRoot,inferenceRoot,o
   validatePlan(p);assert.equal(p.mode,'matched-resident-control');assert.equal(process.platform,'win32');
   assert.equal(process.env.GITHUB_ACTIONS,'true');assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch');assert.equal(process.env.GITHUB_SHA,p.sceneworks);assert.equal(process.env.RUNNER_NAME,p.expectedRunner);
   campaignCudaEnvironment(p,process.env);assert.ok(path.resolve(output).toLowerCase().startsWith('d:\\codex\\work\\'));
-  // The separate checkout supplies the original runtime configuration and registry.
+  assert.equal(process.env.H3_CONTROLLER_AUTHORIZED_PAIR,`${p.sceneworks}:${p.inference}`);
+  assert.equal(process.env.H3_TERMINAL_AUTHORIZED_PAIR,`${ORIGINAL.sceneworks}:${ORIGINAL.inference}`);
+  assert.equal(process.execArgv.length,0,'no unreviewed Node loaders/flags');
+  for(const key of ['NODE_OPTIONS','NODE_PATH'])assert.ok(!process.env[key],'no external Node loaders/module search roots');
+  // Fixed sibling checkouts cannot be overridden by the request or environment.
   const runtimeRoot=path.join(path.dirname(controllerRoot),'runtime-sceneworks');
-  assert.equal((await exec('git',['rev-parse','HEAD'],{cwd:controllerRoot})).stdout.trim(),p.sceneworks);
-  assert.equal((await exec('git',['status','--porcelain'],{cwd:controllerRoot})).stdout.trim(),'');
-  const changed=(await exec('git',['diff','--name-only','--no-renames',ORIGINAL.sceneworks,p.sceneworks],{cwd:controllerRoot})).stdout.trim().split('\n').filter(Boolean);
-  validateControllerOnlyChanges(changed);
-  await mkdir(output);const runtimePlan={...p,output,sceneworks:ORIGINAL.sceneworks};
-  await sourcePair(runtimePlan,runtimeRoot,inferenceRoot);await originalBuild();
+  const runtimeInferenceRoot=path.join(path.dirname(controllerRoot),'runtime-inference');
+  await mkdir(output);
+  const bindings=await verifySourceBindings(p,controllerRoot,inferenceRoot,runtimeRoot,runtimeInferenceRoot,output);
+  const runtimePlan={...p,output,sceneworks:ORIGINAL.sceneworks,inference:ORIGINAL.inference};
+  await originalBuild();
   const license=await verifiedOriginal('services/workstation-veda/config/license-acknowledgments.json',ORIGINAL.licenseSha256);runtimePlan.licenseAcknowledgmentsPath=license;
   assert.equal(await fileSha256(p.requestPath),p.requestSha256);const request=anchorRequest(await load(p.requestPath),42,0);
-  await save(path.join(output,'source-identity.json'),{kind:'matched-resident-control',controllerSourcePair:{sceneworks:p.sceneworks,inference:p.inference},runtimeSourcePair:{sceneworks:ORIGINAL.sceneworks,inference:ORIGINAL.inference},changedControllerOnlyPaths:changed,originalBinarySha256:ORIGINAL.binarySha256,originalBuildReceiptSha256:ORIGINAL.buildReceiptSha256,historicalLoadedDllHashes:'not recorded; new loaded-module hashes below are not retroactive historical attestations'});
+  await save(path.join(output,'source-identity.json'),{kind:'matched-resident-control',...bindings,originalBinarySha256:ORIGINAL.binarySha256,originalBuildReceiptSha256:ORIGINAL.buildReceiptSha256,historicalLoadedDllHashes:'not recorded; new loaded-module hashes below are not retroactive historical attestations'});
   const staged=await stageModels(runtimePlan,output);
   const oldStaged=await load(await verifiedOriginal('staged-models.json',ORIGINAL.stagedSha256));
   validateStagedMatch(oldStaged.files,staged.files);
@@ -134,8 +247,8 @@ export async function runMatchedResidentControl(p,controllerRoot,inferenceRoot,o
   for(const key of ['SCENEWORKS_GPU_MEMORY_LIMIT_BYTES','SCENEWORKS_CUDA_VRAM_CAP_GB','SCENEWORKS_CUDA_PROOF_POOL_BYTES','SCENEWORKS_H3_VEDA_FORCE_DENSE','SCENEWORKS_H3_ATTENTION_ROUTE'])delete process.env[key];
   const dir=path.join(output,'matched-resident-control');await mkdir(dir);
   const c={id:'matched-resident-control',backend:'cuda',timeoutSeconds:p.timeoutSeconds,loadHostBudgetBytes:p.hostBudgetBytes,loadDeviceBudgetBytes:95*GIB,declaredSourceBindings:[{family:'h3',model:{modelId:'minimax_h3',baseModel:'minimax_h3'}}],runtime:matchedRuntime()};
-  const service=new ImmutableOriginalService(runtimePlan,c,runtimeRoot,inferenceRoot,dir,{hardDeadlineMs:Date.now()+(p.timeoutSeconds+900)*1000});service.staged=staged;service.controllerSourcePair={sceneworks:p.sceneworks,inference:p.inference};
-  const record={kind:'matched-resident-control',completed:false,controllerSourcePair:service.controllerSourcePair,runtimeSourcePair:{sceneworks:ORIGINAL.sceneworks,inference:ORIGINAL.inference},binarySha256:ORIGINAL.binarySha256,settings:request,scope:'One observational Resident/pool control; not feature/campaign/24GiB-fit or final-media numerical acceptance'};
+  const service=new ImmutableOriginalService(runtimePlan,c,runtimeRoot,runtimeInferenceRoot,dir,{hardDeadlineMs:Date.now()+(p.timeoutSeconds+900)*1000});service.staged=staged;service.sourceBindings=bindings;service.controllerSourcePair={sceneworks:p.sceneworks,inference:p.inference};
+  const record={kind:'matched-resident-control',completed:false,sourceBindings:bindings,controllerSourcePair:service.controllerSourcePair,runtimeSourcePair:{sceneworks:ORIGINAL.sceneworks,inference:ORIGINAL.inference},binarySha256:ORIGINAL.binarySha256,settings:request,scope:'One observational Resident/pool control; not feature/campaign/24GiB-fit or final-media numerical acceptance'};
   let observer;
   try{
     await service.initialize();record.libraries=await libraryEvidence(service.worker.pid);
@@ -173,6 +286,6 @@ export async function runMatchedResidentControl(p,controllerRoot,inferenceRoot,o
     comparisons.push({originalAnchor:id,originalReceiptSha256:digest,originalMediaSha256:media.sha256,newMediaSha256:record.media[0].sha256,metrics,interpretation:'Observational only; no E5/feature/media-equality acceptance threshold'});
     assert.equal(await fileSha256(oldFile),media.sha256);
   }
-  await sourcePair(runtimePlan,runtimeRoot,inferenceRoot);
-  await save(path.join(output,'matched-resident-control.json'),{kind:'matched-resident-control',executionValidated:true,controllerSourcePair:record.controllerSourcePair,runtimeSourcePair:record.runtimeSourcePair,jobId:record.job.id,comparisons,scope:record.scope,cleanupProof:'Separate existing physical-GPU lease receipt must additionally verify post_execution_verified'});
+  assert.deepEqual(await verifySourceBindings(p,controllerRoot,inferenceRoot,runtimeRoot,runtimeInferenceRoot,output),bindings,'source bindings changed during control');
+  await save(path.join(output,'matched-resident-control.json'),{kind:'matched-resident-control',executionValidated:true,sourceBindings:bindings,controllerSourcePair:record.controllerSourcePair,runtimeSourcePair:record.runtimeSourcePair,jobId:record.job.id,comparisons,scope:record.scope,cleanupProof:'Separate existing physical-GPU lease receipt must additionally verify post_execution_verified'});
 }

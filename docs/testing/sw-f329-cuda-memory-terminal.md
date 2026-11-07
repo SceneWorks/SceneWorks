@@ -313,8 +313,7 @@ feature acceptance, or a new final-pixel tolerance. Its output and artifact scop
 is `matched-resident-control`; the original failed aggregate remains unchanged.
 
 This mode requires `matchedResidentControlAuthorized: true`, physical GPU0 with
-its full canonical UUID, seed 42, the original request digest, inference M4
-`2ff0353820e370d004305ae99a035ab38b93de30`, admission 95 GiB,
+its full canonical UUID, seed 42, the original request digest, admission 95 GiB,
 pool 92 GiB and outside reserve 3 GiB. Omit campaign-only fields
 `additionalSparse24`, `additionalSparse24Reason`, `retainedWorkstation`,
 `primitiveProof` and `materializingProof`. Other common source, request, runner,
@@ -329,12 +328,33 @@ SHA256`a5e83b704d67b999b1919d7308654d42dc9e1bc2de66347c67b0f07242f9b621`
 and original build receipt
 SHA256`8ac02a48dd1e1c5c1b523dd45684c6704658402808b357804ef46ca7758a3343`.
 There is no general prebuilt API, Cargo invocation, old run-ID/cache-key reuse or
-write to that target. A separate exact CGPU checkout supplies runtime registry
-and configuration; new source records distinguish controllerSourcePair from
-the original CGPU/M4 runtimeSourcePair. The original frozen license acknowledgment
+write to that target. The plan's `sceneworks` and `inference` identify the actual
+current controller and its current Cargo pin. Both are checked as a permanent
+source pair. Separate fixed `runtime-sceneworks` (CGPU) and `runtime-inference`
+(M4 `2ff0353820e370d004305ae99a035ab38b93de30`) checkouts bind the old runtime's
+HEADs, trees, config tree and Cargo lock/pin. Only those runtime roots reach the
+service wrapper; the current controller's Rust/Cargo/UI are never built or launched.
+New receipts distinguish `controllerSourcePair` from `runtimeSourcePair` and record
+the current inference checkout as the implementation of the lease/owned cleanup.
+The original frozen license acknowledgment
 and complete staged-source collection are independently bound. Current loaded
 CUDA/MSVC DLL versions and hashes are recorded; historical loaded-DLL hashes
 were not recorded and are not inferred from the executable hash.
+
+The controller proof covers the actual JS import/execution closure: sixteen
+common harness modules and their eager casebook JSON retain the original CGPU Git
+blobs and modes. Only the terminal entry and explicit matched-control driver are
+current reviewed manual modules, bound to the authorized controller HEAD with
+literal import assertions. It makes no whole-controller compiled-tree equivalence
+claim and excludes unrelated current Rust/Cargo/UI because none are build/runtime
+inputs here. Unexpected imports, Node loaders, source/pin/tree drift, or incomplete
+source receipts refuse the control. The runtime pair and current controller pair
+have distinct workflow authority values; neither is relabeled as the other.
+
+Prepared plans retain both `stationary_pair_authorized` and
+`matchedResidentControlAuthorized` as `false` until the coordinator separately
+decides to execute this conditional diagnostic. Local preparation does not grant
+execution authority.
 
 Success of this diagnostic's execution requires actual normal Veda, Resident,
 windowNone, zero streamed-block transfers, complete native video/audio/content,

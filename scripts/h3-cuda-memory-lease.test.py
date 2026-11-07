@@ -158,21 +158,30 @@ class LaunchTests(unittest.TestCase):
         plan.pop('additionalSparse24')
         plan.update(mode='matched-resident-control', matchedResidentControlAuthorized=True,
                     timeoutSeconds=7200,
-                    inference='2ff0353820e370d004305ae99a035ab38b93de30',
+                    inference='b' * 40,
                     physicalGpuIndex=0, physicalGpuUuid=lease.GPU_UUIDS[0],
                     poolBytes=92 * GIB, externalReserveBytes=3 * GIB)
         env.update(SCENEWORKS_GPU_ID='0', CUDA_VISIBLE_DEVICES=lease.GPU_UUIDS[0])
         env['SW_F329_PLAN'] = json.dumps(plan)
+        env['H3_CONTROLLER_AUTHORIZED_PAIR'] = plan['sceneworks'] + ':' + plan['inference']
+        env['H3_TERMINAL_AUTHORIZED_PAIR'] = ':'.join(lease.ORIGINAL_RUNTIME[key] for key in ['sceneworks', 'inference'])
         with tempfile.TemporaryDirectory() as temp:
             receipt, events = self.campaign(Path(temp) / 'out', env=env)
             self.assertEqual(receipt['minimumClaimFreeBytes'], 95 * GIB)
             self.assertEqual(receipt['scope'], 'matched-resident-control')
+            self.assertEqual(receipt['controllerSourcePair']['inference'], 'b' * 40)
+            self.assertEqual(receipt['runtimeSourcePair'], lease.ORIGINAL_RUNTIME)
+            self.assertNotIn('sourcePair', receipt)
+            self.assertEqual(receipt['leaseImplementationSource']['revision'], 'b' * 40)
             self.assertEqual(events[-3:], ['reap-owned', 'close-job', 'release-check'])
         for change in [{'poolBytes': 21 * GIB}, {'externalReserveBytes': 2 * GIB},
                        {'mode': 'unknown'}, {'matchedResidentControlAuthorized': False},
-                       {'inference': 'b' * 40}, {'additionalSparse24': True}]:
+                       {'inference': 'c' * 40}, {'additionalSparse24': True}]:
             with self.subTest(change=change), self.assertRaises(ValueError):
                 lease.validated_plan({**env, 'SW_F329_PLAN': json.dumps({**plan, **change})})
+        for key in ['H3_CONTROLLER_AUTHORIZED_PAIR', 'H3_TERMINAL_AUTHORIZED_PAIR']:
+            with self.subTest(authority=key), self.assertRaises(ValueError):
+                lease.validated_plan({**env, key: 'wrong-pair'})
 
 
 if __name__ == "__main__":

@@ -113,11 +113,10 @@ export function validatePlan(p){
   if(matched){
     assert.equal(p.matchedResidentControlAuthorized,true,'one explicit conditional control authorization required');
     assert.equal(p.physicalGpuIndex,0);assert.equal(p.seed,42);
-    assert.equal(p.inference,'2ff0353820e370d004305ae99a035ab38b93de30');
     assert.equal(p.requestSha256,'b5b5ba095203fab1eddb9ba1793162959328e16ee34a0ca6e19d44e2325bce23');
     assert.equal(path.win32.resolve(p.licenseAcknowledgmentsPath),path.win32.resolve('D:/Codex/work/sw-f329-acceptance-42243645213-1/services/workstation-veda/config/license-acknowledgments.json'),'control must reuse the original frozen acknowledgment');
     assert.equal(p.poolBytes,92*GIB);assert.equal(p.externalReserveBytes,3*GIB);assert.equal(p.workstationDeviceBytes,95*GIB);
-    for(const key of ['retainedWorkstation','additionalSparse24','additionalSparse24Reason','primitiveProof','materializingProof','binaryPath','prebuilt','runtimeSourcePair','runtimeSceneworksRoot'])assert.equal(p[key],undefined,'single control has fixed original runtime/build and cannot claim campaign proofs');
+    for(const key of ['retainedWorkstation','additionalSparse24','additionalSparse24Reason','primitiveProof','materializingProof','binaryPath','prebuilt','runtimeSourcePair','runtimeSceneworksRoot','runtimeInferenceRoot','controllerSourcePair'])assert.equal(p[key],undefined,'single control has fixed original runtime/build and cannot claim campaign proofs');
   }else{
     assert.equal(p.additionalSparse24,true,'normal sparse24GiB anchor is required for resident/window Veda equivalence');
     assert.ok(typeof p.additionalSparse24Reason==='string'&&p.additionalSparse24Reason.trim(),'focused additional sparse render requires the concrete evidence gap');

@@ -22,7 +22,8 @@ jobs:
     timeout-minutes: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' && 180 || fromJSON(inputs.plan).additionalSparse24 == true && 600 || 360 }}
     env:
       SW_F329_PLAN: ${{ inputs.plan }}
-      H3_TERMINAL_AUTHORIZED_PAIR: ${{ format('{0}:{1}', fromJSON(inputs.plan).mode == 'matched-resident-control' && 'c8815c7cd46feba2f82562a315d1a44a6c88a9e8' || fromJSON(inputs.plan).sceneworks, fromJSON(inputs.plan).inference) }}
+      H3_CONTROLLER_AUTHORIZED_PAIR: ${{ format('{0}:{1}', fromJSON(inputs.plan).sceneworks, fromJSON(inputs.plan).inference) }}
+      H3_TERMINAL_AUTHORIZED_PAIR: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' && 'c8815c7cd46feba2f82562a315d1a44a6c88a9e8:2ff0353820e370d004305ae99a035ab38b93de30' || format('{0}:{1}', fromJSON(inputs.plan).sceneworks, fromJSON(inputs.plan).inference) }}
       CARGO_BUILD_JOBS: '4'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CUDA_COMPUTE_CAP: '120'
@@ -48,6 +49,14 @@ jobs:
           path: runtime-sceneworks
           fetch-depth: 1
           persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        if: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' }}
+        with:
+          repository: SceneWorks/inference
+          ref: 2ff0353820e370d004305ae99a035ab38b93de30
+          path: runtime-inference
+          fetch-depth: 0
+          persist-credentials: false
       - name: Require final source pair and private Windows output roots before setup
         shell: powershell
         run: |
@@ -61,6 +70,12 @@ jobs:
           if ((git -C sceneworks rev-parse HEAD) -ne $p.sceneworks -or (git -C inference rev-parse HEAD) -ne $p.inference) { throw 'checkout source mismatch' }
           git -C inference fetch --no-tags origin main
           if ($LASTEXITCODE -ne 0) { throw 'cannot verify inference main' }
+          if ($p.mode -eq 'matched-resident-control') {
+            git -C sceneworks fetch --no-tags origin c8815c7cd46feba2f82562a315d1a44a6c88a9e8
+            if ($LASTEXITCODE -ne 0) { throw 'cannot verify original common JS closure' }
+            git -C runtime-inference fetch --no-tags origin main
+            if ($LASTEXITCODE -ne 0) { throw 'cannot verify immutable runtime inference ancestry' }
+          }
           $scope = if ($p.mode -eq 'matched-resident-control') { 'matched-resident-control' } else { 'acceptance' }
           $root = "D:\Codex\work\sw-f329-$scope-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $root) { throw 'refusing to overwrite prior acceptance output' }
