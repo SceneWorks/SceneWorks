@@ -374,6 +374,56 @@ pub fn enumerate_portable_array_slots<'a>(
     result
 }
 
+/// The same logical, file-ledger keyed Digest claim must be checked at admission and claim.
+/// Adapter IDs come from the canonical job payload; slot paths alone are not catalog identities.
+pub fn registered_digest_member_claim_id(
+    model: &PortableModelBinding,
+    member: &PortableArtifactMember,
+    payload: &Value,
+) -> Result<String, ArtifactContractError> {
+    if !matches!(member.source, PortableSourceIdentity::Digest { .. }) {
+        return Err(error("registered digest claim requires a Digest member"));
+    }
+    let (kind, logical_id, component_id) = match member.role {
+        ArtifactMemberRole::Primary => ("model", model.model_id.as_str(), None),
+        ArtifactMemberRole::Lora | ArtifactMemberRole::Control => {
+            let slot = member
+                .component_id
+                .as_deref()
+                .ok_or_else(|| error("adapter has no frozen slot"))?;
+            let record = enumerate_portable_array_slots(payload, &["loras", "lokrs", "controls"])
+                .into_iter()
+                .find(|(record_slot, _)| record_slot == slot)
+                .map(|(_, record)| record)
+                .ok_or_else(|| error("adapter slot is no longer selected"))?;
+            let id = record
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| error("adapter has no registered logical id"))?;
+            let kind = if member.role == ArtifactMemberRole::Lora {
+                "lora"
+            } else {
+                "control"
+            };
+            (kind, id, None)
+        }
+        _ => (
+            "component",
+            model.model_id.as_str(),
+            Some(
+                member
+                    .component_id
+                    .as_deref()
+                    .ok_or_else(|| error("component has no frozen id"))?,
+            ),
+        ),
+    };
+    let ledger = portable_file_ledger_sha256(&member.files)?;
+    crate::portable_sources::registered_digest_claim_id(kind, logical_id, component_id, &ledger)
+        .map_err(error)
+}
+
 fn canonical_json(value: &Value) -> Value {
     match value {
         Value::Object(fields) => {

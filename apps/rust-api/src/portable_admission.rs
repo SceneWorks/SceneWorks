@@ -14,7 +14,7 @@ use sceneworks_core::model_artifacts::artifact_selection::{
 };
 use sceneworks_core::model_artifacts::portable_binding::{
     canonical_authored_options_sha256, enumerate_portable_array_slots, portable_closure_sha256,
-    portable_file_ledger_sha256, resolve_pinned_hf_files, PortableArtifactFile,
+    registered_digest_member_claim_id, resolve_pinned_hf_files, PortableArtifactFile,
     PortableArtifactMember, PortableJobBinding, PortableModelBinding, PortableRouteBinding,
     PortableSourceClaim, PortableSourceIdentity, PortableSourceProvenance,
 };
@@ -25,6 +25,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+
+#[cfg(test)]
+use sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256;
 
 const MAX_PINNED_METADATA_CACHE_ENTRIES: usize = 256;
 static PINNED_METADATA_CACHE: OnceLock<Mutex<BTreeMap<String, Vec<PortableArtifactFile>>>> =
@@ -498,57 +501,12 @@ fn replay_route_claims_match(
     claims: &[PortableSourceClaim],
 ) -> Result<(), ApiError> {
     let value = Value::Object(payload.clone());
-    let records = enumerate_portable_array_slots(&value, &["loras", "lokrs", "controls"]);
     for model in &route.models {
         for member in &model.members {
             match &member.source {
                 PortableSourceIdentity::Digest { sha256 } => {
-                    let (kind, logical_id, component_id) = match member.role {
-                        ArtifactMemberRole::Primary => ("model", model.model_id.as_str(), None),
-                        ArtifactMemberRole::Lora | ArtifactMemberRole::Control => {
-                            let slot = member
-                                .component_id
-                                .as_deref()
-                                .ok_or_else(|| incomplete("adapter has no frozen slot"))?;
-                            let record = records
-                                .iter()
-                                .find(|(record_slot, _)| record_slot == slot)
-                                .map(|(_, record)| *record)
-                                .ok_or_else(|| incomplete("adapter slot is no longer selected"))?;
-                            let id = record
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .filter(|id| !id.is_empty())
-                                .ok_or_else(|| {
-                                    incomplete("adapter has no registered logical id")
-                                })?;
-                            let kind = if member.role == ArtifactMemberRole::Lora {
-                                "lora"
-                            } else {
-                                "control"
-                            };
-                            (kind, id, None)
-                        }
-                        _ => (
-                            "component",
-                            model.model_id.as_str(),
-                            Some(
-                                member
-                                    .component_id
-                                    .as_deref()
-                                    .ok_or_else(|| incomplete("component has no frozen id"))?,
-                            ),
-                        ),
-                    };
-                    let ledger = portable_file_ledger_sha256(&member.files)
+                    let source_id = registered_digest_member_claim_id(model, member, &value)
                         .map_err(|error| incomplete(error.to_string()))?;
-                    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
-                        kind,
-                        logical_id,
-                        component_id,
-                        &ledger,
-                    )
-                    .map_err(incomplete)?;
                     if !claims.iter().any(|claim| {
                         claim.source_id == source_id
                             && claim.provenance == PortableSourceProvenance::OperatorOverride
@@ -863,6 +821,39 @@ async fn capture_portable_model_binding_inner(
             }
             let route = PortableRouteBinding::new(&backend, &platform, models)
                 .map_err(|error| incomplete(error.to_string()))?;
+            let has_digest = route
+                .models
+                .iter()
+                .flat_map(|model| &model.members)
+                .any(|member| matches!(member.source, PortableSourceIdentity::Digest { .. }));
+            if has_digest {
+                let proof_sets = if uses_worker_claims {
+                    vec![source_claims.clone()]
+                } else {
+                    state
+                        .jobs_store
+                        .portable_source_claim_sets_for_job_route(
+                            &backend,
+                            &platform,
+                            requested_gpu,
+                            state.settings.worker_timeout_seconds,
+                            job_type,
+                            payload,
+                        )
+                        .map_err(|error| {
+                            incomplete(format!("worker source claims are unavailable: {error}"))
+                        })?
+                };
+                if !proof_sets
+                    .iter()
+                    .any(|claims| replay_route_claims_match(&route, payload, claims).is_ok())
+                {
+                    last_route_error = Some(incomplete(format!(
+                        "no eligible worker advertises the complete local source closure for {backend}:{platform}"
+                    )));
+                    continue;
+                }
+            }
             selected_route = Some(route);
             break;
         }

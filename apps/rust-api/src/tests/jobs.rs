@@ -2250,7 +2250,7 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_imported_image_model_manifests(temp_dir.path());
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).expect("app creates");
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Imported image replay").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -2259,6 +2259,7 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
         ("text_to_image", Value::Null),
         ("edit_image", json!("source-asset")),
     ] {
+        register_imported_krea_worker(&state, true);
         let mut body = json!({
             "projectId": project_id,
             "mode": mode,
@@ -2312,6 +2313,20 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
             assert!(replay["payload"]["modelManifestEntry"]["paths"]["model"].is_null());
             assert!(!replay.to_string().contains("attacker"));
         }
+        state
+            .jobs_store
+            .heartbeat_worker_with_portable_sources(
+                sceneworks_core::jobs_store::WorkerHeartbeat {
+                    worker_id: "registered-krea-worker".into(),
+                    status: sceneworks_core::contracts::WorkerStatus::Idle,
+                    current_job_id: None,
+                    loaded_models: vec![],
+                    utilization: None,
+                    status_reason: None,
+                },
+                Some(&[]),
+            )
+            .expect("worker clears source claim before local substitution checks");
         let checkpoint = temp_dir
             .path()
             .join("data/models/imports/imported_krea/model.safetensors");
@@ -2351,6 +2366,7 @@ async fn imported_model_replay_accepts_same_worker_bytes_under_another_root() {
     write_imported_image_model_manifests(temp_dir.path());
     let settings = test_settings(&temp_dir);
     let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    register_imported_krea_worker(&state, true);
     let (_, project) = create_project(app.clone(), &"Cross-root import replay").await;
     let (status, original) = request(
         app.clone(),
@@ -2373,6 +2389,20 @@ async fn imported_model_replay_accepts_same_worker_bytes_under_another_root() {
         )
         .expect("private binding exists");
     let frozen: PortableJobBinding = serde_json::from_str(&binding_json).expect("binding parses");
+    state
+        .jobs_store
+        .heartbeat_worker_with_portable_sources(
+            sceneworks_core::jobs_store::WorkerHeartbeat {
+                worker_id: "registered-krea-worker".into(),
+                status: sceneworks_core::contracts::WorkerStatus::Idle,
+                current_job_id: None,
+                loaded_models: vec![],
+                utilization: None,
+                status_reason: None,
+            },
+            Some(&[]),
+        )
+        .expect("initial worker clears its source claim");
     let route = frozen.routes.values().next().expect("frozen route");
     let member = &route.models[0].members[0];
     let worker_root = temp_dir.path().join("other-worker/models/imported_krea");
@@ -2614,6 +2644,93 @@ async fn fresh_admission_requires_one_capable_worker_with_both_operator_sources(
         }), "{source_id} is frozen");
     }
     metadata_server.abort();
+}
+
+#[tokio::test]
+async fn fresh_imported_model_admission_requires_matching_worker_bytes() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_imported_image_model_manifests(temp_dir.path());
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let (_, project) = create_project(app.clone(), "Fresh import source proof").await;
+    let payload = json!({
+        "projectId":project["id"], "mode":"text_to_image", "prompt":"a fox",
+        "model":"imported_krea", "count":1
+    });
+    let (status, missing) =
+        request(app.clone(), "POST", "/api/v1/image/jobs", payload.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "no worker owns the local bytes: {missing}"
+    );
+    register_imported_krea_worker(&state, false);
+    let (status, substituted) =
+        request(app.clone(), "POST", "/api/v1/image/jobs", payload.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "worker bytes differ: {substituted}"
+    );
+    register_imported_krea_worker(&state, true);
+    let (status, admitted) = request(app, "POST", "/api/v1/image/jobs", payload).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "matching worker bytes: {admitted}"
+    );
+}
+
+fn register_imported_krea_worker(state: &crate::AppState, exact: bool) {
+    use sceneworks_core::contracts::WorkerCapability;
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+
+    let bytes: &[u8] = if exact { b"fixture" } else { b"changed" };
+    let files = vec![PortableArtifactFile {
+        relative_path: "model.safetensors".into(),
+        size_bytes: bytes.len() as u64,
+        sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(bytes)),
+    }];
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "model",
+        "imported_krea",
+        None,
+        &portable_file_ledger_sha256(&files).expect("ledger hash"),
+    )
+    .expect("source ID");
+    let claim =
+        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+            .expect("worker claim");
+    let mut capabilities = vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::ImageGenerate,
+        WorkerCapability::ImageEdit,
+    ];
+    let gpu_id = if cfg!(target_os = "macos") {
+        "mlx"
+    } else {
+        capabilities.push(WorkerCapability::Unknown("candle".into()));
+        "cuda:0"
+    };
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "registered-krea-worker".into(),
+                gpu_id: gpu_id.into(),
+                gpu_name: None,
+                capabilities,
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some(std::env::consts::OS),
+            Some(&[claim]),
+        )
+        .expect("worker registers source bytes");
 }
 
 #[cfg(not(target_os = "macos"))]

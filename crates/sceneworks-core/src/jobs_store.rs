@@ -5824,21 +5824,53 @@ fn candidate_matches_portable_worker_sources(
     let route = binding
         .select_route(backend, platform)
         .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
-    Ok(route
+    let has_digest = route
         .models
         .iter()
         .flat_map(|model| &model.members)
-        .all(|member| {
-            if !matches!(
-                &member.source,
-                crate::model_artifacts::portable_binding::PortableSourceIdentity::WorkerClaim { .. }
-            ) {
-                return true;
+        .any(|member| {
+            matches!(
+                member.source,
+                crate::model_artifacts::portable_binding::PortableSourceIdentity::Digest { .. }
+            )
+        });
+    let payload = if has_digest {
+        let raw: String = connection.query_row(
+            "select payload_json from jobs where id = ?1",
+            params![job_id],
+            |row| row.get(0),
+        )?;
+        serde_json::from_str(&raw)?
+    } else {
+        Value::Null
+    };
+    Ok(route.models.iter().all(|model| {
+        model.members.iter().all(|member| {
+            use crate::model_artifacts::portable_binding::{
+                portable_closure_sha256, registered_digest_member_claim_id, PortableSourceIdentity,
+                PortableSourceProvenance,
+            };
+            match &member.source {
+                PortableSourceIdentity::Revision { .. } => true,
+                PortableSourceIdentity::WorkerClaim { .. } => worker_claims
+                    .iter()
+                    .any(|claim| claim.matches_worker_claim_member(member).is_ok()),
+                PortableSourceIdentity::Digest { sha256 } => {
+                    let Ok(source_id) = registered_digest_member_claim_id(model, member, &payload)
+                    else {
+                        return false;
+                    };
+                    worker_claims.iter().any(|claim| {
+                        claim.source_id == source_id
+                            && claim.provenance == PortableSourceProvenance::OperatorOverride
+                            && claim.files == member.files
+                            && portable_closure_sha256(&claim.files).ok().as_deref()
+                                == Some(sha256.as_str())
+                    })
+                }
             }
-            worker_claims
-                .iter()
-                .any(|claim| claim.matches_worker_claim_member(member).is_ok())
-        }))
+        })
+    }))
 }
 
 fn choose_claimable_candidate(

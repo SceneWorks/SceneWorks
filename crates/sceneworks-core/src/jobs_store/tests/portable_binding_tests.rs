@@ -64,6 +64,86 @@ fn binding() -> Value {
 }
 
 #[test]
+fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
+    use crate::model_artifacts::portable_binding::{
+        portable_closure_sha256, registered_digest_member_claim_id,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let original: PortableJobBinding = serde_json::from_value(binding()).unwrap();
+    let mut routes = original.routes.clone();
+    let route = routes.values_mut().next().unwrap();
+    let model = &mut route.models[0];
+    model.members[0].source = PortableSourceIdentity::Digest {
+        sha256: portable_closure_sha256(&model.members[0].files).unwrap(),
+    };
+    let digest_claim = PortableSourceClaim::new(
+        registered_digest_member_claim_id(
+            model,
+            &model.members[0],
+            &Value::Object(request().payload),
+        )
+        .unwrap(),
+        PortableSourceProvenance::OperatorOverride,
+        model.members[0].files.clone(),
+    )
+    .unwrap();
+    let auxiliary_claim = PortableSourceClaim::new(
+        "aux/encoder",
+        PortableSourceProvenance::OperatorOverride,
+        vec![PortableArtifactFile {
+            relative_path: "encoder.safetensors".into(),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "b".repeat(64)),
+        }],
+    )
+    .unwrap();
+    model.members.push(PortableArtifactMember {
+        role: crate::model_artifacts::ArtifactMemberRole::RequiredComponent,
+        component_id: Some("encoder".into()),
+        source: PortableSourceIdentity::WorkerClaim {
+            source_id: auxiliary_claim.source_id.clone(),
+            provenance: auxiliary_claim.provenance.clone(),
+            closure_sha256: auxiliary_claim.closure_sha256.clone(),
+        },
+        tier: None,
+        files: auxiliary_claim.files.clone(),
+    });
+    let frozen =
+        serde_json::to_value(PortableJobBinding::new(original.authored_options, routes).unwrap())
+            .unwrap();
+    let job = store
+        .create_job_with_portable_binding(request(), None, None, Some(&frozen))
+        .unwrap();
+    let connection = store.open_connection().unwrap();
+    let route = Some(("cpu", std::env::consts::OS));
+    assert!(!candidate_matches_portable_worker_sources(&connection, &job.id, route, &[]).unwrap());
+    assert!(!candidate_matches_portable_worker_sources(
+        &connection,
+        &job.id,
+        route,
+        &[digest_claim.clone()]
+    )
+    .unwrap());
+    assert!(!candidate_matches_portable_worker_sources(
+        &connection,
+        &job.id,
+        route,
+        &[auxiliary_claim.clone()]
+    )
+    .unwrap());
+    assert!(candidate_matches_portable_worker_sources(
+        &connection,
+        &job.id,
+        route,
+        &[digest_claim, auxiliary_claim]
+    )
+    .unwrap());
+}
+
+#[test]
 fn portable_binding_is_private_atomic_and_gates_old_workers() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("jobs.db");
