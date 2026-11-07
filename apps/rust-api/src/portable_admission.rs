@@ -410,6 +410,7 @@ async fn capture_portable_model_binding_inner(
             matches!(
                 &source.source,
                 SelectedSourceLocation::OperatorCachedRepo(_)
+                    | SelectedSourceLocation::PreferredWorkerClaim { .. }
                     | SelectedSourceLocation::OperatorOverrideOrManifest { .. }
             )
         }) {
@@ -805,6 +806,33 @@ async fn capture_model_slot(
                 )
                 .await?
             }
+            SelectedSourceLocation::PreferredWorkerClaim {
+                preferred_id,
+                fallback_id,
+            } => {
+                let selected_id = select_preferred_source_id(
+                    frozen_model,
+                    &source.role,
+                    &source.component_id,
+                    preferred_id,
+                    fallback_id,
+                    source_claims,
+                )?;
+                let claims = frozen_worker_claims(
+                    frozen_model,
+                    &source.role,
+                    &source.component_id,
+                    source_claims,
+                )?;
+                capture_worker_source_member(
+                    state,
+                    &selected_id,
+                    source.role.clone(),
+                    source.component_id.clone(),
+                    &claims,
+                )
+                .await?
+            }
             SelectedSourceLocation::DynamicHfRepo(repo) => {
                 let revision = match frozen_revision_for_source(
                     frozen_model,
@@ -1079,6 +1107,31 @@ fn frozen_worker_claims(
         )));
     }
     Ok(matching)
+}
+
+fn select_preferred_source_id(
+    frozen_model: Option<&PortableModelBinding>,
+    role: &ArtifactMemberRole,
+    component_id: &str,
+    preferred_id: &str,
+    fallback_id: &str,
+    claims: &[PortableSourceClaim],
+) -> Result<String, ApiError> {
+    let frozen_source = frozen_source_member(frozen_model, role, component_id)?;
+    match frozen_source.map(|member| &member.source) {
+        Some(PortableSourceIdentity::WorkerClaim { source_id, .. })
+            if source_id == preferred_id || source_id == fallback_id =>
+        {
+            Ok(source_id.clone())
+        }
+        Some(_) => Err(incomplete(format!(
+            "replay source {component_id} changed preferred identity"
+        ))),
+        None if claims.iter().any(|claim| claim.source_id == preferred_id) => {
+            Ok(preferred_id.to_owned())
+        }
+        None => Ok(fallback_id.to_owned()),
+    }
 }
 
 /// Resolve a mutable, user-selected repository to a publisher commit once, at admission.
