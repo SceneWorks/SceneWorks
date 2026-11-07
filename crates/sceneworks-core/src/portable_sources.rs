@@ -9,6 +9,39 @@ pub enum PortableAuxSourceShape {
     Directory,
 }
 
+/// Private worker claim key for a FLUX.2 conversion base selected from this worker's installed
+/// repository and concrete tier. The provenance and file ledger still carry the byte identity.
+pub fn flux2_convert_base_claim_id(
+    repo: &str,
+    revision: &str,
+    tier: &str,
+) -> Result<String, String> {
+    crate::hf_repo_id::parse(repo).map_err(str::to_owned)?;
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("FLUX.2 conversion base revision is not immutable".to_owned());
+    }
+    if tier.is_empty()
+        || matches!(tier, "." | "..")
+        || !tier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err("unsupported FLUX.2 conversion base tier".to_owned());
+    }
+    Ok(format!("flux2_convert_base:{repo}:{revision}:{tier}"))
+}
+
+pub fn parse_flux2_convert_base_claim_id(source_id: &str) -> Option<(&str, &str, &str)> {
+    let value = source_id.strip_prefix("flux2_convert_base:")?;
+    let (repo_revision, tier) = value.rsplit_once(':')?;
+    let (repo, revision) = repo_revision.rsplit_once(':')?;
+    (flux2_convert_base_claim_id(repo, revision, tier)
+        .ok()
+        .as_deref()
+        == Some(source_id))
+    .then_some((repo, revision, tier))
+}
+
 /// Caller-staged trainer components at the pinned native provider registry. The manifest owns
 /// repo/revision/files; this is the backend descriptor's required-component ID projection.
 pub fn trainer_required_component_ids(base_model: &str, backend: &str) -> &'static [&'static str] {
@@ -491,6 +524,18 @@ mod tests {
         }
     }
     use serde_json::json;
+
+    #[test]
+    fn flux2_conversion_claim_key_preserves_custom_tier_and_revision() {
+        let revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let key = flux2_convert_base_claim_id("guardfx/borrow", revision, "custom-q5").unwrap();
+        assert_eq!(
+            parse_flux2_convert_base_claim_id(&key),
+            Some(("guardfx/borrow", revision, "custom-q5"))
+        );
+        assert!(flux2_convert_base_claim_id("guardfx/borrow", revision, "../q4").is_err());
+        assert!(flux2_convert_base_claim_id("guardfx/borrow", "main", "q4").is_err());
+    }
 
     #[test]
     fn identity_and_pid_sources_match_selected_native_routes() {
