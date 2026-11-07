@@ -55,6 +55,16 @@ pub fn project_builtin_memory_evidence(model: &mut Value) -> Result<(), String> 
     let Some(evidence) = builtin_memory_evidence(&id) else {
         return Ok(());
     };
+    project_memory_evidence(model, evidence)
+}
+
+/// Project a build-validated evidence record carried by the compiled ModelSpec.
+pub(crate) fn project_memory_evidence(model: &mut Value, evidence: &Value) -> Result<(), String> {
+    let id = model
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "model projection has no id".to_owned())?
+        .to_owned();
     let evidence = evidence
         .as_object()
         .ok_or_else(|| format!("{id} evidence is not an object"))?;

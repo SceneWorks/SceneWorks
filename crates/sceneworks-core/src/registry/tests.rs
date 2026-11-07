@@ -1,6 +1,9 @@
 use super::*;
 use serde_json::json;
-const PRODUCTS: &str = include_str!("../../../../config/manifests/registry/products.json");
+const PRODUCTS: &str = include_str!("../../../../config/manifests/builtin.models.jsonc");
+fn product_json() -> String {
+    crate::jsonc::strip_jsonc_comments(PRODUCTS)
+}
 const EVIDENCE: &str = include_str!("../../../../config/manifests/registry/evidence.json");
 const MLX: &str =
     include_str!("../../../../config/engine-capabilities/runtime/capabilities.mlx.json");
@@ -113,7 +116,7 @@ fn both_shipping_routes_and_the_v1_compatibility_projection_are_preserved() {
         crate::builtin_manifests::builtin_model_entry("flux_schnell"),
         legacy.as_object()
     );
-    assert!(builtin_model_spec("flux_dev").is_none());
+    assert!(builtin_model_spec("flux_dev").is_some());
 }
 
 #[test]
@@ -140,7 +143,7 @@ fn descriptor_contents_change_the_spec_while_provenance_does_not() {
     let mut mlx: Value = serde_json::from_str(MLX).unwrap();
     let build = |mlx: &Value| {
         assemble::assemble(
-            PRODUCTS,
+            &product_json(),
             EVIDENCE,
             &[("mlx", &mlx.to_string()), ("candle", CANDLE)],
         )
@@ -167,21 +170,22 @@ fn descriptor_contents_change_the_spec_while_provenance_does_not() {
     let spec = &changed["flux_schnell"];
     assert!(!spec.routes["mlx"].supports_preview);
     assert!(spec.routes["candle"].supports_preview);
-    assert!(!spec
-        .product
-        .limits
-        .samplers
+    assert!(!spec.product.fields["limits"]["samplers"]
+        .as_array()
+        .unwrap()
         .iter()
         .any(|menu| menu == "heun"));
     let mut evidence: Value = serde_json::from_str(EVIDENCE).unwrap();
     evidence["flux_schnell"]["candle"]["calibrations"][0]["provider"] = json!("other");
-    assert!(assemble::assemble(
-        PRODUCTS,
-        &evidence.to_string(),
-        &[("mlx", MLX), ("candle", CANDLE)]
-    )
-    .unwrap_err()
-    .contains("mismatched evidence provider"));
+    assert!(
+        assemble::assemble(
+            &product_json(),
+            &evidence.to_string(),
+            &[("mlx", MLX), ("candle", CANDLE)]
+        )
+        .is_ok(),
+        "existing calibration identities are evidence, not a primary-route alias"
+    );
 }
 
 #[test]
@@ -213,12 +217,96 @@ fn user_menus_only_narrow_native_product_choices_and_reconcile_defaults() {
 
 #[test]
 fn mutable_distribution_revision_cannot_enter_the_static_catalog() {
-    let mut products: Value = serde_json::from_str(PRODUCTS).unwrap();
-    products[0]["downloads"][0]["revision"] = json!("main");
+    let mut products: Value = serde_json::from_str(&product_json()).unwrap();
+    let flux = products["models"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|row| row["id"] == "flux_schnell")
+        .unwrap();
+    flux["downloads"][0]["revision"] = json!("main");
     let result = assemble::assemble(
         &products.to_string(),
         EVIDENCE,
         &[("mlx", MLX), ("candle", CANDLE)],
     );
-    assert!(result.unwrap_err().contains("immutable download"));
+    assert!(result.unwrap_err().contains("valid download"));
+}
+
+#[test]
+fn all_frozen_builtin_rows_have_exact_typed_product_and_evidence_projection() {
+    let effective = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+    let rows = effective["models"].as_array().unwrap();
+    assert_eq!(rows.len(), 143);
+    assert_eq!(super::BUILTINS.len(), rows.len());
+    for row in rows {
+        let id = row["id"].as_str().unwrap();
+        let spec = builtin_model_spec(id).unwrap_or_else(|| panic!("missing typed spec for {id}"));
+        let projected = spec.project(None);
+        if projected != *row {
+            let fields: Vec<_> = row
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|field| row[*field] != projected[*field])
+                .collect();
+            let candle: Vec<_> = row["candle"]
+                .as_object()
+                .into_iter()
+                .flat_map(|fields| fields.keys())
+                .filter(|field| row["candle"][*field] != projected["candle"][*field])
+                .collect();
+            panic!("{id}: public product/evidence drift in {fields:?}, candle {candle:?}");
+        }
+    }
+}
+
+#[test]
+fn compiled_spec_evidence_is_the_projection_authority() {
+    let mut spec = builtin_model_spec("flux_schnell").unwrap().clone();
+    spec.evidence.get_mut("candle").unwrap().min_memory_gb = Some(99);
+    assert_eq!(spec.project(None)["candle"]["minMemoryGb"], 99);
+    let footprint = spec.download_evidence[0]["footprint"]
+        .as_object_mut()
+        .unwrap();
+    footprint.insert("residentMemoryBytes".to_owned(), json!(12345));
+    let projected = spec.project(None);
+    assert!(projected["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|download| download["footprint"]["residentMemoryBytes"] == 12345));
+}
+
+#[test]
+fn all_public_generator_and_provider_families_have_native_projections() {
+    let models = &super::BUILTINS;
+    let count = |model_type: &str, has_route: fn(&ModelSpec) -> bool| {
+        models
+            .values()
+            .filter(|spec| spec.product.model_type == model_type && has_route(spec))
+            .count()
+    };
+    assert_eq!(count("image", |spec| !spec.routes.is_empty()), 59);
+    assert_eq!(count("video", |spec| !spec.video_routes.is_empty()), 13);
+    assert_eq!(count("audio", |spec| !spec.provider_routes.is_empty()), 15);
+    assert_eq!(count("vector", |spec| !spec.provider_routes.is_empty()), 2);
+    assert_eq!(
+        models["starvector_1b"].provider_routes["mlx"][0].id,
+        "mlx-starvector-1b"
+    );
+    assert_eq!(
+        models["starvector_1b"].provider_routes["candle"][0].id,
+        "candle-starvector-1b"
+    );
+    assert_eq!(
+        models["ltx_2_5"].video_routes["mlx"]
+            .iter()
+            .map(|route| route.mode.as_str())
+            .collect::<Vec<_>>(),
+        models["ltx_2_5"].video_routes["candle"]
+            .iter()
+            .map(|route| route.mode.as_str())
+            .collect::<Vec<_>>(),
+    );
 }

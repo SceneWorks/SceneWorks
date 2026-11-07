@@ -1,5 +1,5 @@
-//! Static model registry. The compatibility projection gives the product catalog and job
-//! resolver one authority for converted builtins while legacy manifest consumers migrate.
+//! Static model registry. Every shipped builtin projects from the validated product manifest,
+//! native descriptor export, and evidence store. Host-specific bindings are added by consumers.
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
@@ -33,16 +33,30 @@ impl ModelSpec {
     /// static spec. Credentials, install observations and physical bindings are added by their host.
     pub fn project(&self, user: Option<&Value>) -> Value {
         let mut model = serde_json::to_value(&self.product).expect("serializable product model");
-        for (backend, evidence) in &self.evidence {
-            let fields = serde_json::to_value(evidence).expect("serializable backend evidence");
-            let mut lane = model[backend].as_object().cloned().unwrap_or_default();
-            lane.extend(fields.as_object().expect("evidence object").clone());
-            model[backend] = Value::Object(lane);
-        }
         if let Some(user) = user.and_then(Value::as_object) {
             self.apply_author_choices(&mut model, user);
         }
-        project_builtin_memory_evidence(&mut model)
+        let mut facts = Map::new();
+        for (backend, evidence) in &self.evidence {
+            facts.insert(
+                backend.clone(),
+                serde_json::to_value(evidence).expect("serializable backend evidence"),
+            );
+        }
+        if !self.model_evidence.is_empty() {
+            facts.insert(
+                "model".to_owned(),
+                Value::Object(self.model_evidence.clone()),
+            );
+        }
+        if !self.download_evidence.is_empty() {
+            facts.insert(
+                "downloads".to_owned(),
+                serde_json::to_value(&self.download_evidence)
+                    .expect("serializable download evidence"),
+            );
+        }
+        evidence::project_memory_evidence(&mut model, &Value::Object(facts))
             .expect("build-validated static model evidence projection");
         model
     }
@@ -117,7 +131,14 @@ impl ModelSpec {
                 model["defaults"]["steps"] = steps.into();
             }
         }
-        if self.product.image.supports_guidance {
+        if self
+            .product
+            .fields
+            .get("image")
+            .and_then(|image| image.get("supportsGuidance"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
             if let Some(guidance) = defaults.get("guidanceScale").and_then(Value::as_f64) {
                 if guidance >= 0.0 {
                     model["defaults"]["guidanceScale"] = guidance.into();

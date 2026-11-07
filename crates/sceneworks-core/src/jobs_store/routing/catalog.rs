@@ -125,10 +125,10 @@ pub fn model_mac_support(
 /// the API replaces this provisional verdict with exact provider-derived support during catalog
 /// projection; the family argument is intentionally insufficient here.
 pub(crate) fn image_model_mac_support(model: &str, _family: Option<&str>) -> ModelMacSupport {
-    let registered = crate::registry::builtin_model_spec(model);
-    let native = registered.and_then(|spec| spec.routes.get("mlx"));
-    let supported =
-        registered.map_or_else(|| MLX_ROUTED_MODELS.contains(&model), |_| native.is_some());
+    let native = crate::registry::builtin_model_spec(model).and_then(|spec| spec.routes.get("mlx"));
+    // Composite identity adapters do not have a modelMappings generator of their own. The
+    // admission probe below remains authoritative for those shipped models.
+    let supported = native.is_some() || MLX_ROUTED_MODELS.contains(&model);
     if !supported {
         // A family token is not enough to choose an imported loader: source shape is mandatory.
         // Catalog projection applies exact provider facts once it has the full manifest entry.
@@ -192,11 +192,9 @@ pub(crate) fn image_model_mac_support(model: &str, _family: Option<&str>) -> Mod
         reason: None,
         features: ModelMacFeatures {
             pose,
-            // Product admission probes include supplemental adapters. A registered provider must
-            // also advertise native reference conditioning for that input to be offered.
-            reference: reference
-                && native
-                    .is_none_or(|route| route.conditioning.iter().any(|axis| axis == "reference")),
+            // Product admission probes include supplemental reference adapters that are not
+            // declared by the primary generator descriptor.
+            reference,
             edit,
             // Third-party LyCORIS applies on every MLX provider now (epic 3641).
             lycoris: true,
@@ -403,20 +401,16 @@ pub struct ModelCandleFeatures {
 /// static Candle route. Legacy video models expose per-mode verdicts in `features.video_modes`;
 /// other legacy rows keep their original supported/empty-features projection.
 pub fn model_candle_support(model_id: &str, model_type: &str) -> ModelCandleSupport {
-    if let Some(spec) = crate::registry::builtin_model_spec(model_id) {
-        let supported = spec.routes.contains_key("candle");
-        return ModelCandleSupport {
-            supported,
-            reason: (!supported).then(|| {
-                UnsupportedReason::new(
-                    Some(model_id),
-                    "model",
-                    "No Candle route is registered for this model.",
-                    None,
-                )
-            }),
-            features: ModelCandleFeatures::default(),
-        };
+    if model_type == "image" {
+        if let Some(spec) = crate::registry::builtin_model_spec(model_id) {
+            if spec.routes.contains_key("candle") {
+                return ModelCandleSupport {
+                    supported: true,
+                    reason: None,
+                    features: ModelCandleFeatures::default(),
+                };
+            }
+        }
     }
     match model_type {
         "video" => video_model_candle_support(model_id),

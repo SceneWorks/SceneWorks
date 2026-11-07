@@ -56,7 +56,7 @@ fn build_registry() {
         panic!("invalid effective builtin memory evidence: {error}");
     }
     let specs = assemble::assemble(
-        &read("manifests/registry/products.json"),
+        &product_json,
         &evidence_json,
         &[
             (
