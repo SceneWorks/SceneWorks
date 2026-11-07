@@ -34,7 +34,130 @@ pub(super) fn public_job_snapshot(mut job: JobSnapshot) -> JobSnapshot {
         redact_selected_text_encoder_paths_in_map(&mut job.result, &selected_paths);
         redact_selected_text_encoder_paths_in_btree_map(&mut job.extra, &selected_paths);
     }
+    redact_manifest_locators_from_job_payload(&mut job.payload);
+    redact_manifest_locators_from_job_payload(&mut job.result);
+    for map in [&mut job.payload, &mut job.result] {
+        map.remove("portableModelBinding");
+        map.remove("portableJobBinding");
+        for value in map.values_mut() {
+            redact_private_binding_markers(value);
+        }
+    }
+    job.extra.remove("portableModelBinding");
+    job.extra.remove("portableJobBinding");
+    for value in job.extra.values_mut() {
+        redact_private_binding_markers(value);
+    }
     job
+}
+
+pub(super) fn redact_private_binding_markers(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.remove("portableModelBinding");
+            fields.remove("portableJobBinding");
+            for child in fields.values_mut() {
+                redact_private_binding_markers(child);
+            }
+        }
+        Value::Array(entries) => {
+            for entry in entries {
+                redact_private_binding_markers(entry);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Worker-local model paths are never part of the public job contract. Keep logical model ids,
+/// component roles, revisions and relative file names while dropping physical install hints from
+/// every resolved model carrier, including companions and trained checkpoint entries.
+fn redact_manifest_locators_from_job_payload(payload: &mut JsonObject) {
+    payload.remove("modelPath");
+    payload.remove("installedPath");
+    payload.remove("sourcePath");
+    for (key, value) in payload {
+        redact_nested_manifest_carriers(key, value);
+    }
+}
+
+fn redact_nested_manifest_carriers(key: &str, value: &mut Value) {
+    if matches!(
+        key,
+        "modelManifestEntry"
+            | "baseModelManifestEntry"
+            | "modelManifestEntries"
+            | "loras"
+            | "adapters"
+            | "controls"
+            | "advanced"
+    ) {
+        redact_manifest_locators(value);
+        return;
+    }
+    match value {
+        Value::Object(fields) => {
+            for (key, child) in fields {
+                redact_nested_manifest_carriers(key, child);
+            }
+        }
+        Value::Array(entries) => {
+            for entry in entries {
+                redact_nested_manifest_carriers("", entry);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_manifest_locators(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.retain(|key, value| {
+                if matches!(
+                    key.as_str(),
+                    "paths"
+                        | "modelPath"
+                        | "installedPath"
+                        | "sourcePath"
+                        | "resolvedTextEncoder"
+                        | "installationRoot"
+                        | "cacheRoot"
+                ) {
+                    return false;
+                }
+                if key.eq_ignore_ascii_case("path") || key.eq_ignore_ascii_case("directory") {
+                    return !value.as_str().is_some_and(is_physical_path);
+                }
+                if (key.ends_with("Path") || key.ends_with("Dir") || key.ends_with("Root"))
+                    && value.as_str().is_some_and(is_physical_path)
+                {
+                    return false;
+                }
+                true
+            });
+            for child in fields.values_mut() {
+                redact_manifest_locators(child);
+            }
+        }
+        Value::Array(entries) => {
+            for entry in entries {
+                redact_manifest_locators(entry);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_physical_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("\\\\")
+        || value.starts_with("file://")
+        || (value.as_bytes().get(1) == Some(&b':')
+            && value
+                .as_bytes()
+                .get(2)
+                .is_some_and(|separator| matches!(separator, b'/' | b'\\')))
 }
 
 #[derive(Clone, Debug)]
@@ -517,5 +640,114 @@ pub(super) fn redact_private_job_metadata_from_event(event: &str, value: &mut Va
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod portable_redaction_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn public_job_keeps_logical_identity_but_removes_all_manifest_and_adapter_locators() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = sceneworks_core::jobs_store::JobsStore::new(temp.path().join("jobs.db"));
+        store.initialize().unwrap();
+        let payload = json!({
+            "model":"trained_iris",
+            "modelManifestEntry":{
+                "id":"trained_iris", "modelPath":"/private/trained.safetensors",
+                "installedPath":"C:\\Models\\trained", "paths":{"model":"/private/trained"},
+                "source":{"provider":"local","path":"/private/source"},
+                "components":[{"componentId":"text_encoder","role":"required","path":"/private/encoder"}],
+                "downloads":[{"repo":"owner/model","revision":"a".repeat(40),"files":["q4/weights.safetensors"]}]
+            },
+            "baseModelManifestEntry":{"id":"builtin_base","paths":{"model":"${HF_CACHE}/base"}},
+            "modelManifestEntries":[{"id":"comfy_base","components":[{"componentId":"vae","path":"D:\\Comfy\\vae.safetensors","files":["vae.safetensors"]}]}],
+            "upscale":{"modelManifestEntry":{"id":"iris_restore","modelPath":"/private/restorer.safetensors"}},
+            "loras":[{"id":"adapter","installedPath":"/private/adapter.safetensors"}]
+        });
+        let raw = store
+            .create_job(sceneworks_core::jobs_store::CreateJob {
+                job_type: JobType::ImageGenerate,
+                project_id: None,
+                project_name: None,
+                payload: payload.as_object().unwrap().clone(),
+                requested_gpu: "auto".into(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            })
+            .unwrap();
+        let mut raw_with_echo = raw.clone();
+        raw_with_echo.result.insert(
+            "nested".into(),
+            json!({"portableModelBinding":{"secret":"must-not-leak"}}),
+        );
+        let public = public_job_snapshot(raw_with_echo);
+        let encoded = serde_json::to_string(&public.payload).unwrap();
+        for private in ["/private", "C:\\\\Models", "D:\\\\Comfy", "${HF_CACHE}"] {
+            assert!(!encoded.contains(private), "leaked {private}: {encoded}");
+        }
+        assert!(!serde_json::to_string(&public)
+            .unwrap()
+            .contains("must-not-leak"));
+        assert_eq!(public.payload["modelManifestEntry"]["id"], "trained_iris");
+        assert_eq!(
+            public.payload["modelManifestEntry"]["components"][0]["componentId"],
+            "text_encoder"
+        );
+        assert_eq!(
+            public.payload["modelManifestEntry"]["downloads"][0]["files"][0],
+            "q4/weights.safetensors"
+        );
+        assert_eq!(
+            public.payload["baseModelManifestEntry"]["id"],
+            "builtin_base"
+        );
+        assert_eq!(
+            public.payload["modelManifestEntries"][0]["components"][0]["files"][0],
+            "vae.safetensors"
+        );
+        assert_eq!(public.payload["loras"][0]["id"], "adapter");
+        assert_eq!(
+            public.payload["upscale"]["modelManifestEntry"]["id"],
+            "iris_restore"
+        );
+        assert_eq!(
+            raw.payload["modelManifestEntry"]["modelPath"],
+            "/private/trained.safetensors"
+        );
+        let share = sceneworks_core::workflow_share::build_workflow_share_from(
+            &sceneworks_core::workflow_share::WorkflowAssetFacts {
+                mode: "text_to_image".into(),
+                model: "trained_iris".into(),
+                prompt: "a lighthouse".into(),
+                negative_prompt: String::new(),
+                seed: 7,
+                width: Some(512),
+                height: Some(512),
+            },
+            &raw.payload,
+        );
+        let shared = serde_json::to_string(&share).unwrap();
+        assert_eq!(share.model, "trained_iris");
+        assert!(!shared.contains("/private") && !shared.contains("Comfy"));
+        assert!(!shared.contains("portableModelBinding"));
+        let mut receipt = json!({
+            "model":"trained_iris",
+            "rawAdapterSettings":{"portableModelBinding":{"secret":"must-not-leak"}},
+            "modelProvenance":{"modelId":"trained_iris"}
+        });
+        redact_private_binding_markers(&mut receipt);
+        assert_eq!(receipt["model"], "trained_iris");
+        assert_eq!(receipt["modelProvenance"]["modelId"], "trained_iris");
+        assert!(!serde_json::to_string(&receipt)
+            .unwrap()
+            .contains("must-not-leak"));
+        let mut event = serde_json::to_value(raw).unwrap();
+        redact_private_job_metadata_from_event("job.updated", &mut event);
+        assert!(!serde_json::to_string(&event).unwrap().contains("/private"));
     }
 }

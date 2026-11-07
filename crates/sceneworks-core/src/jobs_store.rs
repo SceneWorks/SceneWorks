@@ -691,6 +691,7 @@ impl JobsStore {
             ",
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
+        ensure_column(&transaction, "workers", "platform", "text")?;
         // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
         // Only the API's validated-plan handoff may freeze this write-once column.
         ensure_column(&transaction, "jobs", "model_provenance_json", "text")?;
@@ -1195,6 +1196,11 @@ impl JobsStore {
         binding: Option<&Value>,
     ) -> JobsStoreResult<()> {
         if let Some(binding) = binding {
+            let typed: crate::model_artifacts::portable_binding::PortableJobBinding =
+                serde_json::from_value(binding.clone())?;
+            typed
+                .validate()
+                .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
             connection.execute(
                 "update jobs set portable_model_binding_json = ?1 where id = ?2",
                 params![dumps(binding)?, job_id],
@@ -1265,10 +1271,20 @@ impl JobsStore {
         id: String,
         request: CreateJob,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_id_and_portable_binding(id, request, None)
+    }
+
+    pub fn create_job_with_id_and_portable_binding(
+        &self,
+        id: String,
+        request: CreateJob,
+        portable_binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.create_job_on_connection(&transaction, request, Some(id), None)?;
+        Self::write_portable_binding(&transaction, &job.id, portable_binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2423,6 +2439,14 @@ impl JobsStore {
     }
 
     pub fn register_worker(&self, request: RegisterWorker) -> JobsStoreResult<WorkerSnapshot> {
+        self.register_worker_with_platform(request, None)
+    }
+
+    pub fn register_worker_with_platform(
+        &self,
+        request: RegisterWorker,
+        platform: Option<&str>,
+    ) -> JobsStoreResult<WorkerSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2431,8 +2455,8 @@ impl JobsStore {
             "
             insert into workers (
               id, gpu_id, gpu_name, status, current_job_id, capabilities_json,
-              loaded_models_json, utilization_json, registered_at, last_seen_at
-            ) values (?1, ?2, ?3, 'idle', null, ?4, ?5, ?6, ?7, ?7)
+              loaded_models_json, utilization_json, platform, registered_at, last_seen_at
+            ) values (?1, ?2, ?3, 'idle', null, ?4, ?5, ?6, ?7, ?8, ?8)
             on conflict(id) do update set
               gpu_id = excluded.gpu_id,
               gpu_name = excluded.gpu_name,
@@ -2447,6 +2471,7 @@ impl JobsStore {
               capabilities_json = excluded.capabilities_json,
               loaded_models_json = excluded.loaded_models_json,
               utilization_json = excluded.utilization_json,
+              platform = excluded.platform,
               last_seen_at = excluded.last_seen_at
             ",
             params![
@@ -2456,6 +2481,7 @@ impl JobsStore {
                 dumps(&request.capabilities)?,
                 dumps(&request.loaded_models)?,
                 optional_dumps(request.utilization.as_ref())?,
+                platform,
                 now,
             ],
         )?;
@@ -3100,7 +3126,7 @@ impl JobsStore {
         worker_id: &str,
         mlx_required: bool,
     ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>)> {
-        self.claim_next_job_routed_with_portable_binding(worker_id, mlx_required, 0)
+        self.claim_next_job_routed_with_portable_binding(worker_id, mlx_required, 0, None, None)
             .map(|(job, decision, _)| (job, decision))
     }
 
@@ -3111,6 +3137,8 @@ impl JobsStore {
         worker_id: &str,
         mlx_required: bool,
         portable_binding_version: u32,
+        portable_backend: Option<&str>,
+        portable_platform: Option<&str>,
     ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>, Option<Value>)> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
@@ -3122,6 +3150,23 @@ impl JobsStore {
         // overlapping claims would race and one would fail. IMMEDIATE serializes claimers.
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let worker = self.get_worker_on_connection(&transaction, worker_id)?;
+        let route_key = if portable_binding_version == 1
+            && worker.platform.as_deref() == portable_platform
+            && portable_platform.is_some()
+            && match portable_backend {
+                Some("mlx") => worker.gpu_id.eq_ignore_ascii_case("mlx"),
+                Some("candle") => worker_is_candle(&worker),
+                Some("cpu") => worker.gpu_id.eq_ignore_ascii_case("cpu"),
+                _ => false,
+            } {
+            Some(format!(
+                "{}:{}",
+                portable_backend.expect("matched above"),
+                portable_platform.expect("matched above")
+            ))
+        } else {
+            None
+        };
         let worker_gpu_id = worker.gpu_id.clone();
         let has_active_gpu_job = active_gpu_job_exists(&transaction, &worker.gpu_id)?;
         let mut hydration = ClaimHydrationStats::default();
@@ -3173,7 +3218,10 @@ impl JobsStore {
                    claim_model_key_3, claim_model_key_4
               from jobs
              where status = 'queued'
-               and (?4 = 1 or portable_model_binding_json is null)
+               and (portable_model_binding_json is null or
+                    (?4 is not null and exists (
+                        select 1 from json_each(portable_model_binding_json, '$.routes')
+                         where key = ?4)))
                and (type in ({list}) or requested_gpu = 'auto' or requested_gpu = ?1)
                and (?2 = 0 or type in ({list}))
                and claim_facts_version = ?3
@@ -3187,7 +3235,7 @@ impl JobsStore {
                 worker.gpu_id,
                 i64::from(has_active_gpu_job),
                 CLAIM_ROUTING_FACTS_VERSION,
-                portable_binding_version
+                route_key,
             ],
             row_to_claim_candidate,
         )?)?;
@@ -3213,6 +3261,17 @@ impl JobsStore {
             return Ok((None, None, None));
         };
         drop(statement);
+        let portable_binding = Self::read_portable_binding(&transaction, &queued.id)?;
+        if let Some(binding) = &portable_binding {
+            let typed: crate::model_artifacts::portable_binding::PortableJobBinding =
+                serde_json::from_value(binding.clone())?;
+            typed
+                .select_route(
+                    portable_backend.unwrap_or_default(),
+                    portable_platform.unwrap_or_default(),
+                )
+                .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+        }
         if should_defer_auto_gpu_claim(&transaction, &queued, &worker)? {
             *self.last_claim_hydration.lock() = hydration;
             return Ok((None, None, None));
@@ -3289,7 +3348,6 @@ impl JobsStore {
             params![queued.id, now, worker_id],
         )?;
         let job = self.get_job_on_connection(&transaction, &queued.id)?;
-        let portable_binding = Self::read_portable_binding(&transaction, &queued.id)?;
         hydration.claimed_snapshot_hydrated += 1;
         transaction.commit()?;
         let decision = route_decision_for_claim(&queued, &worker);
@@ -4387,7 +4445,6 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
 fn row_to_worker(row: &Row<'_>) -> rusqlite::Result<WorkerSnapshot> {
     Ok(WorkerSnapshot {
         id: row.get("id")?,
-        platform: None,
         gpu_id: row.get("gpu_id")?,
         gpu_name: row.get("gpu_name")?,
         status: parse_string_enum(&row.get::<_, String>("status")?),
@@ -4401,6 +4458,7 @@ fn row_to_worker(row: &Row<'_>) -> rusqlite::Result<WorkerSnapshot> {
                 .as_deref(),
         ),
         utilization: loads_optional(row.get::<_, Option<String>>("utilization_json")?.as_deref()),
+        platform: row.get("platform")?,
         status_reason: row.get("status_reason")?,
         registered_at: row.get("registered_at")?,
         last_seen_at: row.get("last_seen_at")?,

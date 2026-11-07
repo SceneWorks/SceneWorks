@@ -132,8 +132,21 @@ pub(crate) async fn create_job(
     });
     let model_provenance =
         canonical_model_provenance(&state, selected_entry, &payload.payload).await?;
+    let portable_binding = crate::portable_admission::capture_portable_model_binding(
+        &state,
+        &payload.job_type,
+        &payload.payload,
+        &payload.requested_gpu,
+    )
+    .await?
+    .map(|binding| {
+        serde_json::to_value(binding).map_err(|error| {
+            ApiError::internal(format!("Serialize portable model binding: {error}"))
+        })
+    })
+    .transpose()?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job_with_model_provenance(
+        store.create_job_with_portable_binding(
             CreateJob {
                 job_type: payload.job_type,
                 project_id: payload.project_id,
@@ -146,6 +159,8 @@ pub(crate) async fn create_job(
                 initial_status: None,
             },
             model_provenance.as_ref(),
+            None,
+            portable_binding.as_ref(),
         )
     })
     .await?;
@@ -163,6 +178,8 @@ pub(crate) async fn claim_job(
     let candle_required = state.settings.candle_required;
     let candle_enforce = state.settings.candle_enforce_unsupported;
     let host_os = state.settings.host_os.clone();
+    let portable_backend = payload.portable_backend.clone();
+    let portable_platform = payload.portable_platform.clone();
     let (stale_sweep, claim_result) = store_call(state.clone(), move |store, timeout| {
         let stale_sweep = store.mark_stale_workers_interrupted(timeout)?;
         let claim_result = (|| {
@@ -189,10 +206,18 @@ pub(crate) async fn claim_job(
             // worker ever polls; this arm covers the raw `POST /api/v1/jobs`, retry and duplicate
             // paths that never pass through that route.
             let platform_unreachable = store.fail_platform_unreachable_jobs(&host_os)?;
-            let (job, decision) = store.claim_next_job_routed(&payload.worker_id, mlx_required)?;
+            let (job, decision, portable_binding) = store
+                .claim_next_job_routed_with_portable_binding(
+                    &payload.worker_id,
+                    mlx_required,
+                    payload.portable_model_binding_version.unwrap_or(0),
+                    payload.portable_backend.as_deref(),
+                    payload.portable_platform.as_deref(),
+                )?;
             Ok::<_, JobsStoreError>((
                 job,
                 decision,
+                portable_binding,
                 stranded,
                 unsupported,
                 candle_stranded,
@@ -207,12 +232,35 @@ pub(crate) async fn claim_job(
     let (
         response,
         decision,
+        portable_binding,
         stranded,
         unsupported,
         candle_stranded,
         candle_unsupported,
         platform_unreachable,
     ) = claim_result?;
+    let portable_model_binding = portable_binding
+        .map(
+            serde_json::from_value::<
+                sceneworks_core::model_artifacts::portable_binding::PortableJobBinding,
+            >,
+        )
+        .transpose()
+        .map_err(|error| {
+            ApiError::internal(format!("Invalid stored portable model binding: {error}"))
+        })?
+        .map(|envelope| {
+            envelope
+                .select_route(
+                    portable_backend.as_deref().unwrap_or_default(),
+                    portable_platform.as_deref().unwrap_or_default(),
+                )
+                .cloned()
+                .map_err(|error| {
+                    ApiError::internal(format!("Invalid claimed portable route: {error}"))
+                })
+        })
+        .transpose()?;
     for job in &stranded {
         emit_mlx_unavailable(job);
         publish(&state, "job.updated", job);
@@ -273,6 +321,7 @@ pub(crate) async fn claim_job(
     }
     Ok(Json(ClaimResponse {
         job: response,
+        portable_model_binding,
         extra: Default::default(),
     }))
 }
@@ -455,23 +504,25 @@ pub(crate) async fn retry_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    let (canonical_payload, model_provenance, download_binding) =
+    let (canonical_payload, model_provenance, download_binding, portable_binding) =
         validate_and_canonicalize_merged_generation_payload(
             &state,
             &job_id,
             &payload.payload_changes,
             true,
+            None,
         )
         .await?;
     payload.payload_changes = canonical_payload;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.retry_job_with_download_binding(
+        store.retry_job_with_portable_binding(
             &job_id,
             RetryJob {
                 payload_changes: payload.payload_changes,
             },
             model_provenance.as_ref(),
             download_binding.as_ref(),
+            portable_binding.as_ref(),
         )
     })
     .await?;
@@ -726,12 +777,13 @@ pub(crate) async fn duplicate_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    let (canonical_payload, model_provenance, download_binding) =
+    let (canonical_payload, model_provenance, download_binding, portable_binding) =
         validate_and_canonicalize_merged_generation_payload(
             &state,
             &job_id,
             &payload.payload_changes,
             false,
+            payload.requested_gpu.as_deref(),
         )
         .await?;
     payload.payload_changes = canonical_payload;
@@ -753,7 +805,7 @@ pub(crate) async fn duplicate_job(
     let job = store_call(state.clone(), move |store, _timeout| {
         // Both halves: main's preallocated id for a freshened FLUX.3 training duplicate, and the
         // feature's canonical-admission source provenance (never read from payload metadata).
-        store.duplicate_job_with_download_binding(
+        store.duplicate_job_with_portable_binding(
             fresh_job_id,
             &job_id,
             DuplicateJob {
@@ -762,6 +814,7 @@ pub(crate) async fn duplicate_job(
             },
             model_provenance.as_ref(),
             download_binding.as_ref(),
+            portable_binding.as_ref(),
         )
     })
     .await?;
@@ -936,13 +989,22 @@ async fn validate_and_canonicalize_merged_generation_payload(
     job_id: &str,
     payload_changes: &JsonObject,
     retry: bool,
-) -> Result<(JsonObject, Option<Value>, Option<Value>), ApiError> {
+    requested_gpu_override: Option<&str>,
+) -> Result<(JsonObject, Option<Value>, Option<Value>, Option<Value>), ApiError> {
     let job_id = job_id.to_owned();
-    let (job, download_binding) = store_call(state.clone(), move |store, _timeout| {
-        Ok((store.get_job(&job_id)?, store.download_binding(&job_id)?))
-    })
-    .await?;
+    let (job, download_binding, frozen_portable_binding) =
+        store_call(state.clone(), move |store, _timeout| {
+            Ok((
+                store.get_job(&job_id)?,
+                store.download_binding(&job_id)?,
+                store.portable_model_binding(&job_id)?,
+            ))
+        })
+        .await?;
     let job_type = job.job_type.clone();
+    let requested_gpu = requested_gpu_override
+        .unwrap_or(&job.requested_gpu)
+        .to_owned();
     let project_id = job.project_id.clone();
     // sc-26691: only a job that actually rendered can be a legacy (pre-resize-mode) render.
     let persisted_rendered = matches!(job.status, JobStatus::Completed);
@@ -1282,7 +1344,71 @@ async fn validate_and_canonicalize_merged_generation_payload(
         None
     };
     let provenance = canonical_model_provenance(state, selected_entry, &merged).await?;
-    Ok((merged, provenance, download_binding))
+    let candidate = crate::portable_admission::capture_portable_model_binding(
+        state,
+        &job_type,
+        &merged,
+        &requested_gpu,
+    )
+    .await?;
+    let candidate = candidate
+        .map(|binding| {
+            serde_json::to_value(binding).map_err(|error| {
+                ApiError::internal(format!("Serialize portable model binding: {error}"))
+            })
+        })
+        .transpose()?;
+    match (&frozen_portable_binding, &candidate) {
+        (Some(expected), Some(actual))
+            if portable_replay_matches_frozen(
+                expected,
+                actual,
+                !retry && requested_gpu_override.is_some(),
+            )? => {}
+        (Some(_), _) => return Err(ApiError::bad_request(
+            "The model source changed since this job was admitted. Bind the original bytes on this host before retrying.",
+        )),
+        (None, Some(_)) => return Err(ApiError::bad_request(
+            "This historical job has no portable source binding. Upgrade its manifest before retrying.",
+        )),
+        (None, None) => {}
+    }
+    Ok((
+        merged,
+        provenance,
+        download_binding,
+        frozen_portable_binding,
+    ))
+}
+
+/// A duplicate may narrow an admitted Auto job to an already frozen worker route. It still
+/// carries the original envelope; only the requested GPU limits which worker can claim it.
+fn portable_replay_matches_frozen(
+    frozen: &Value,
+    candidate: &Value,
+    narrow_route: bool,
+) -> Result<bool, ApiError> {
+    use sceneworks_core::model_artifacts::portable_binding::PortableJobBinding;
+    let frozen: PortableJobBinding = serde_json::from_value(frozen.clone())
+        .map_err(|error| ApiError::bad_request(format!("Invalid saved source binding: {error}")))?;
+    frozen
+        .validate()
+        .map_err(|error| ApiError::bad_request(format!("Invalid saved source binding: {error}")))?;
+    let candidate: PortableJobBinding =
+        serde_json::from_value(candidate.clone()).map_err(|error| {
+            ApiError::bad_request(format!("Invalid replay source binding: {error}"))
+        })?;
+    candidate.validate().map_err(|error| {
+        ApiError::bad_request(format!("Invalid replay source binding: {error}"))
+    })?;
+    if !narrow_route {
+        return Ok(frozen == candidate);
+    }
+    Ok(frozen.authored_options == candidate.authored_options
+        && candidate
+            .routes
+            .iter()
+            .all(|(key, route)| frozen.routes.get(key) == Some(route)))
 }
 
 /// Accept only the entry returned by an actual server canonicalizer. Presence in an incoming or
@@ -2467,6 +2593,9 @@ pub(crate) async fn persist_reported_assets(
         return Ok(());
     }
     let mut asset_writes = asset_writes.clone();
+    for asset_write in &mut asset_writes {
+        redact_private_binding_markers(asset_write);
+    }
     let generation_set_id = result
         .get("generationSetId")
         .and_then(Value::as_str)
@@ -3180,6 +3309,69 @@ pub(crate) async fn register_trained_control_overlay(
     })
     .await?;
     Ok(Some((overlay_id, manifest_path)))
+}
+
+#[cfg(test)]
+mod portable_replay_tests {
+    use super::*;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        canonical_authored_options_sha256, PortableArtifactFile, PortableArtifactMember,
+        PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
+    };
+    use sceneworks_core::model_artifacts::{ArtifactIdentity, ArtifactMemberRole};
+    use std::collections::BTreeMap;
+
+    fn binding(backends: &[(&str, &str)], digest: &str) -> Value {
+        let authored = json!({"model":"fixture"});
+        let authored_hash = canonical_authored_options_sha256(&authored).unwrap();
+        let routes = backends
+            .iter()
+            .map(|(backend, platform)| {
+                let model = PortableModelBinding::new(
+                    "modelManifestEntry",
+                    "fixture",
+                    *backend,
+                    "default",
+                    None,
+                    &authored_hash,
+                    vec![PortableArtifactMember {
+                        role: ArtifactMemberRole::Primary,
+                        component_id: None,
+                        source: PortableSourceIdentity::Revision {
+                            identity: ArtifactIdentity::pinned(
+                                "fixture/model",
+                                "1".repeat(40),
+                                "default",
+                            )
+                            .unwrap(),
+                        },
+                        tier: None,
+                        files: vec![PortableArtifactFile {
+                            relative_path: "weights.safetensors".into(),
+                            size_bytes: 1,
+                            sha256: format!("sha256:{digest}"),
+                        }],
+                    }],
+                )
+                .unwrap();
+                let route = PortableRouteBinding::new(*backend, *platform, vec![model]).unwrap();
+                (route.key(), route)
+            })
+            .collect::<BTreeMap<_, _>>();
+        serde_json::to_value(PortableJobBinding::new(authored, routes).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn duplicate_can_narrow_only_to_an_original_frozen_route() {
+        let frozen = binding(&[("mlx", "macos"), ("candle", "linux")], &"a".repeat(64));
+        let narrow = binding(&[("mlx", "macos")], &"a".repeat(64));
+        let new_route = binding(&[("candle", "windows")], &"a".repeat(64));
+        let changed_bytes = binding(&[("mlx", "macos")], &"b".repeat(64));
+        assert!(portable_replay_matches_frozen(&frozen, &narrow, true).unwrap());
+        assert!(!portable_replay_matches_frozen(&frozen, &narrow, false).unwrap());
+        assert!(!portable_replay_matches_frozen(&frozen, &new_route, true).unwrap());
+        assert!(!portable_replay_matches_frozen(&frozen, &changed_bytes, true).unwrap());
+    }
 }
 
 #[cfg(test)]

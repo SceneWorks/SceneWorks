@@ -164,14 +164,17 @@ pub(crate) async fn register_worker(
     ApiJson(payload): ApiJson<WorkerRegisterRequest>,
 ) -> Result<Json<WorkerSnapshot>, ApiError> {
     let worker = store_call(state.clone(), move |store, _timeout| {
-        store.register_worker(RegisterWorker {
-            worker_id: payload.worker_id,
-            gpu_id: payload.gpu_id,
-            gpu_name: payload.gpu_name,
-            capabilities: payload.capabilities,
-            loaded_models: payload.loaded_models,
-            utilization: payload.utilization,
-        })
+        store.register_worker_with_platform(
+            RegisterWorker {
+                worker_id: payload.worker_id,
+                gpu_id: payload.gpu_id,
+                gpu_name: payload.gpu_name,
+                capabilities: payload.capabilities,
+                loaded_models: payload.loaded_models,
+                utilization: payload.utilization,
+            },
+            payload.platform.as_deref(),
+        )
     })
     .await?;
     publish(&state, "worker.updated", &worker);

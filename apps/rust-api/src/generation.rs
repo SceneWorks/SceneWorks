@@ -56,8 +56,21 @@ pub(super) async fn create_generation_job_with_binding(
     if let Some(binding) = download_binding.as_mut().and_then(Value::as_object_mut) {
         binding.insert("payload".to_owned(), json!(payload));
     }
+    let portable_binding = crate::portable_admission::capture_portable_model_binding(
+        &state,
+        &job_type,
+        &payload,
+        &requested_gpu,
+    )
+    .await?
+    .map(|binding| {
+        serde_json::to_value(binding).map_err(|error| {
+            ApiError::internal(format!("Serialize portable model binding: {error}"))
+        })
+    })
+    .transpose()?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job_with_download_binding(
+        store.create_job_with_portable_binding(
             CreateJob {
                 job_type,
                 project_id,
@@ -71,6 +84,7 @@ pub(super) async fn create_generation_job_with_binding(
             },
             model_provenance.as_ref(),
             download_binding.as_ref(),
+            portable_binding.as_ref(),
         )
     })
     .await?;
@@ -1266,14 +1280,45 @@ async fn create_vector_prompt_workflow_internal(
             duplicate_of_job_id,
         } => (None, Some(duplicate_of_job_id.to_owned()), 1),
     };
+    let portable_binding = crate::portable_admission::capture_portable_model_binding(
+        &state,
+        &JobType::VectorGenerate,
+        &parent_payload,
+        &payload.requested_gpu,
+    )
+    .await?
+    .map(|binding| {
+        serde_json::to_value(binding).map_err(|error| {
+            ApiError::internal(format!("Serialize portable model binding: {error}"))
+        })
+    })
+    .transpose()?;
+    if portable_binding.is_none() {
+        return Err(ApiError::bad_request(
+            "The vector workflow has no complete portable model source binding.",
+        ));
+    }
+    if let Some(original_id) = source_job_id.as_deref().or(duplicate_of_job_id.as_deref()) {
+        let original_id = original_id.to_owned();
+        let previous = store_call(state.clone(), move |store, _timeout| {
+            store.portable_model_binding(&original_id)
+        })
+        .await?;
+        if previous != portable_binding {
+            return Err(ApiError::bad_request(
+                "The vector workflow's frozen model bytes are unavailable on this host; bind the original sources before replaying.",
+            ));
+        }
+    }
     let parent = store_call(state.clone(), {
         let parent_id = parent_id.clone();
         let project_id = payload.project_id.clone();
         let project_name = payload.project_name.clone();
         let requested_gpu = payload.requested_gpu.clone();
         let parent_payload = parent_payload.clone();
+        let portable_binding = portable_binding.clone();
         move |store, _timeout| {
-            store.create_job_with_id(
+            store.create_job_with_id_and_portable_binding(
                 parent_id,
                 CreateJob {
                     job_type: JobType::VectorGenerate,
@@ -1286,6 +1331,7 @@ async fn create_vector_prompt_workflow_internal(
                     attempts,
                     initial_status: Some(JobStatus::PendingWorkflow),
                 },
+                portable_binding.as_ref(),
             )
         }
     })
