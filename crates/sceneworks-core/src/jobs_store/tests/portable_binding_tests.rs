@@ -313,6 +313,52 @@ fn worker_source_claims_are_private_fresh_and_explicitly_cleared() {
 }
 
 #[test]
+fn grouped_worker_claims_do_not_invent_one_worker_with_split_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    for (worker_id, source_id) in [
+        ("worker-a", "registered_digest:model:a"),
+        ("worker-b", "registered_digest:lora:b"),
+    ] {
+        let claim = PortableSourceClaim::new(
+            source_id,
+            PortableSourceProvenance::OperatorOverride,
+            vec![PortableArtifactFile {
+                relative_path: "weights.safetensors".into(),
+                size_bytes: 1,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+            }],
+        )
+        .unwrap();
+        store
+            .register_worker_with_portable_sources(
+                RegisterWorker {
+                    worker_id: worker_id.into(),
+                    gpu_id: "cpu".into(),
+                    gpu_name: None,
+                    capabilities: vec![],
+                    loaded_models: vec![],
+                    utilization: None,
+                },
+                Some(std::env::consts::OS),
+                Some(&[claim]),
+            )
+            .unwrap();
+    }
+    let grouped = store
+        .portable_source_claim_sets_for_route("cpu", std::env::consts::OS, "auto", 90)
+        .unwrap();
+    assert_eq!(grouped.len(), 2);
+    assert!(grouped.iter().all(|claims| claims.len() == 1));
+    assert!(grouped.iter().all(|claims| {
+        !["registered_digest:model:a", "registered_digest:lora:b"]
+            .into_iter()
+            .all(|id| claims.iter().any(|claim| claim.source_id == id))
+    }));
+}
+
+#[test]
 fn worker_claim_member_requires_exact_current_worker_proof_before_claim() {
     let temp = tempfile::tempdir().unwrap();
     let store = JobsStore::new(temp.path().join("jobs.db"));

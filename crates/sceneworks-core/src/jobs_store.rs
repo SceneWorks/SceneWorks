@@ -2629,6 +2629,27 @@ impl JobsStore {
         requested_gpu: &str,
         worker_timeout_seconds: u64,
     ) -> JobsStoreResult<Vec<PortableSourceClaim>> {
+        Ok(self
+            .portable_source_claim_sets_for_route(
+                backend,
+                platform,
+                requested_gpu,
+                worker_timeout_seconds,
+            )?
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+
+    /// Keep each authenticated worker's private claims together so replay can prove one eligible
+    /// worker has the entire frozen local digest closure before enqueue.
+    pub fn portable_source_claim_sets_for_route(
+        &self,
+        backend: &str,
+        platform: &str,
+        requested_gpu: &str,
+        worker_timeout_seconds: u64,
+    ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
         let connection = self.open_connection()?;
         let cutoff = format_unix_seconds(
             now_unix_seconds().saturating_sub(worker_timeout_seconds.min(i64::MAX as u64) as i64),
@@ -2659,7 +2680,7 @@ impl JobsStore {
                 let worker_claims: Vec<PortableSourceClaim> = serde_json::from_str(&raw)?;
                 validate_portable_source_claims(&worker_claims)
                     .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
-                claims.extend(worker_claims);
+                claims.push(worker_claims);
             }
         }
         Ok(claims)
