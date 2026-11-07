@@ -123,6 +123,15 @@ pub(crate) async fn create_job(
         &mut payload.payload,
     )
     .await?;
+    if matches!(payload.job_type, JobType::ImageDetail) {
+        validate_job_lora_compatibility(
+            &state,
+            payload.project_id.as_deref(),
+            &mut payload.payload,
+            false,
+        )
+        .await?;
+    }
     let selected_entry = canonical_entry.as_ref().or_else(|| {
         if crate::model_sources::canonical_utility_model_carrier(&payload.job_type) {
             payload.payload.get("modelManifestEntry")
@@ -1324,6 +1333,10 @@ async fn validate_and_canonicalize_merged_generation_payload(
     }
     if canonical_raw_image {
         crate::model_sources::ensure_runtime_model_sources(state, &job_type, &mut merged).await?;
+        if matches!(job_type, JobType::ImageDetail) {
+            validate_job_lora_compatibility(state, project_id.as_deref(), &mut merged, false)
+                .await?;
+        }
         if crate::model_sources::canonical_utility_model_carrier(&job_type) {
             canonical_selection = true;
         }
