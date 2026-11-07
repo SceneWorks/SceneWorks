@@ -3495,6 +3495,68 @@ mod tests {
         );
     }
 
+    #[cfg(native_lane)]
+    #[tokio::test]
+    async fn preparation_panic_aborts_before_cache_eviction_or_local_drop() {
+        if let Some(dir) = std::env::var_os("SCENEWORKS_PREPARE_PANIC_CHILD") {
+            let dir = PathBuf::from(dir);
+            crate::generator_panic::install(Some(dir.join("diagnostic")));
+            let (cache, _owner) = GeneratorCacheHandle::isolated();
+            let (seed_tx, seed_rx) = std::sync::mpsc::channel();
+            cache
+                .worker
+                .send(Box::new(move |resident| {
+                    seed_stub_entry(resident);
+                    seed_tx.send(()).unwrap();
+                }))
+                .unwrap();
+            seed_rx.recv().unwrap();
+            struct DropMarker(PathBuf);
+            impl Drop for DropMarker {
+                fn drop(&mut self) {
+                    std::fs::write(&self.0, b"dropped").unwrap();
+                }
+            }
+            let marker = dir.join("dropped");
+            let result = cache
+                .prepare_on_owner(move || -> WorkerResult<()> {
+                    let _local = DropMarker(marker);
+                    panic!("owner preparation fault");
+                })
+                .await;
+            std::fs::write(dir.join("caught"), format!("{result:?}")).unwrap();
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "generator_cache::tests::preparation_panic_aborts_before_cache_eviction_or_local_drop", "--nocapture"])
+            .env("SCENEWORKS_PREPARE_PANIC_CHILD", dir.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(
+                output.status.signal(),
+                Some(6),
+                "owner preparation must abort"
+            );
+        }
+        assert!(
+            !dir.path().join("caught").exists(),
+            "prepare catch path must not run"
+        );
+        assert!(
+            !dir.path().join("dropped").exists(),
+            "owner locals must not unwind"
+        );
+        assert_eq!(
+            crate::generator_panic::read_diagnostic(&dir.path().join("diagnostic")).as_deref(),
+            Some("owner preparation fault")
+        );
+    }
+
     #[test]
     fn generator_cache_idle_timeout_defaults_parses_and_disables() {
         assert_eq!(
