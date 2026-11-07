@@ -177,6 +177,104 @@ fn category_for_cell(cell: &str) -> Option<&'static str> {
     .find_map(|(segment, category)| cell.contains(segment).then_some(category))
 }
 
+/// Decisions are valid only while the named MLX-only product surface still exists. The
+/// structural validator above protects approval provenance; this check joins that provenance to
+/// the compiled product policy and native descriptor facts used by the actual router.
+#[cfg(test)]
+fn validate_live_cells(records: &[ApprovedBackendException]) -> Result<(), String> {
+    use crate::registry::{builtin_model_spec, RoutePolicy};
+
+    for record in records {
+        for cell in &record.cells {
+            let ["models", id, axis, value] = cell.split('/').collect::<Vec<_>>()[..] else {
+                return Err(format!("unrecognized approved cell {cell}"));
+            };
+            let spec =
+                builtin_model_spec(id).ok_or_else(|| format!("approved model {id} is absent"))?;
+            let policy = spec
+                .routing
+                .as_ref()
+                .ok_or_else(|| format!("approved model {id} has no product route"))?;
+            let mlx_video = spec.video_routes.get("mlx").into_iter().flatten();
+            let candle_video = spec.video_routes.get("candle").into_iter().flatten();
+            let supported = match axis {
+                "operationAndMode" => {
+                    mlx_video.clone().any(|route| route.mode == value)
+                        && !candle_video.clone().any(|route| route.mode == value)
+                }
+                "conditioningShape" => {
+                    mlx_video
+                        .clone()
+                        .flat_map(|route| &route.engines)
+                        .any(|engine| engine.conditioning.iter().any(|kind| kind == value))
+                        && !candle_video
+                            .clone()
+                            .flat_map(|route| &route.engines)
+                            .any(|engine| engine.conditioning.iter().any(|kind| kind == value))
+                }
+                "userAdapters" => {
+                    let has = |backend: &str| {
+                        spec.video_routes
+                            .get(backend)
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|route| &route.engines)
+                            .any(|engine| match value {
+                                "lora" => engine.supports_lora,
+                                "lokr" => engine.supports_lokr,
+                                _ => false,
+                            })
+                    };
+                    has("mlx") && !has("candle")
+                }
+                "precisionTier" => match policy {
+                    RoutePolicy::Image {
+                        mlx_routed: true,
+                        candle_quant: false,
+                        ..
+                    } => spec.routes.get("mlx").is_some_and(|route| {
+                        route.supported_quants.iter().any(|tier| tier == value)
+                    }),
+                    RoutePolicy::Video { .. } => {
+                        let mlx_tier = mlx_video
+                            .clone()
+                            .flat_map(|route| &route.engines)
+                            .any(|engine| engine.supported_quants.iter().any(|tier| tier == value));
+                        let candle_tier = candle_video
+                            .clone()
+                            .flat_map(|route| &route.engines)
+                            .any(|engine| engine.supported_quants.iter().any(|tier| tier == value));
+                        (mlx_tier && !candle_tier)
+                            || (value == "bf16"
+                                && mlx_video.clone().next().is_some()
+                                && candle_video.clone().next().is_none())
+                    }
+                    _ => false,
+                },
+                "guidanceMethod" => {
+                    spec.routes.get("mlx").is_some_and(|route| {
+                        route
+                            .supported_guidance_methods
+                            .iter()
+                            .any(|method| method == value)
+                    }) && !spec.routes.get("candle").is_some_and(|route| {
+                        route
+                            .supported_guidance_methods
+                            .iter()
+                            .any(|method| method == value)
+                            || (value == "cfg" && policy.candle_routed())
+                    })
+                }
+                _ => false,
+            };
+            if !supported {
+                return Err(format!("approved cell is no longer MLX-only: {cell}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +303,17 @@ mod tests {
             && record
                 .cells
                 .contains(&"models/ltx_2_3_eros/operationAndMode/text_to_video".to_owned())));
+        let cfg_pp = records
+            .iter()
+            .find(|record| record.id == "epic-7434-cfg-pp-guidance-sequencing")
+            .unwrap();
+        assert_eq!(cfg_pp.authority, "epic-7434");
+        assert!(cfg_pp.evidence.contains("sc-8257"));
+        assert_eq!(cfg_pp.cells.len(), 4);
+        assert!(cfg_pp
+            .cells
+            .iter()
+            .all(|cell| cell.ends_with("/guidanceMethod/cfg_pp")));
     }
 
     #[test]
@@ -219,6 +328,59 @@ mod tests {
         store.records[0].cells.pop();
         store.records[0].authority = "unapproved".into();
         assert!(validate(&store).is_err());
+    }
+
+    #[test]
+    fn approval_provenance_and_live_cell_mutations_fail_closed() {
+        let raw = include_str!("../../../../config/manifests/registry/approved-exceptions.json");
+        let mut store: DecisionStore = serde_json::from_str(raw).unwrap();
+        validate(&store).unwrap();
+        validate_live_cells(&store.records).unwrap();
+
+        let original_date = store.records[0].approved_date.clone();
+        store.records[0].approved_date = "2026-02-30".into();
+        assert!(
+            validate(&store).is_err(),
+            "invalid calendar date was admitted"
+        );
+        store.records[0].approved_date = original_date;
+
+        let original_authority = store.records[0].authority.clone();
+        store.records[0].authority = "team:unapproved".into();
+        assert!(
+            validate(&store).is_err(),
+            "unapproved authority was admitted"
+        );
+        store.records[0].authority = original_authority;
+
+        let original_category = store.records[0].category.clone();
+        store.records[0].category = "operation".into();
+        assert!(
+            validate(&store).is_err(),
+            "wrong cell category was admitted"
+        );
+        store.records[0].category = original_category;
+
+        let original_cell = store.records[0].cells[0].clone();
+        store.records[0].cells[0] = "models/does-not-exist/precisionTier/q4".into();
+        assert!(
+            validate_live_cells(&store.records).is_err(),
+            "unknown product cell was admitted"
+        );
+        store.records[0].cells[0] = original_cell.clone();
+
+        // FLUX.1 Schnell q4 already has an admitted Candle product route.
+        store.records[0].cells[0] = "models/flux_schnell/precisionTier/q4".into();
+        assert!(
+            validate_live_cells(&store.records).is_err(),
+            "non-residual product cell was admitted"
+        );
+        store.records[0].cells[0] = original_cell;
+        store.records[5].cells[0] = "models/sdxl/guidanceMethod/cfg".into();
+        assert!(
+            validate_live_cells(&store.records).is_err(),
+            "shared default CFG was admitted as a gap"
+        );
     }
 
     #[test]

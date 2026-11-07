@@ -169,4 +169,6 @@ impl ModelSpec {
 #[cfg(test)]
 mod assemble;
 #[cfg(test)]
+mod parity_contract_tests;
+#[cfg(test)]
 mod tests;
