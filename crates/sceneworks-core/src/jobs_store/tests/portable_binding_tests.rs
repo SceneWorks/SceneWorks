@@ -356,6 +356,28 @@ fn grouped_worker_claims_do_not_invent_one_worker_with_split_sources() {
             .into_iter()
             .all(|id| claims.iter().any(|claim| claim.source_id == id))
     }));
+    let catalog_payload = json!({
+        "structuredAnalysisEnabled":false,
+        "visionAnalysisEnabled":false,
+        "semanticEmbeddingsEnabled":false
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    assert!(
+        store
+            .portable_source_claim_sets_for_job_route(
+                "cpu",
+                std::env::consts::OS,
+                "auto",
+                90,
+                &JobType::CatalogAnalysis,
+                &catalog_payload,
+            )
+            .unwrap()
+            .is_empty(),
+        "source inventory from a worker without the requested job capability is not availability"
+    );
 }
 
 #[test]

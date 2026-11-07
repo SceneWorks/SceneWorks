@@ -2650,6 +2650,43 @@ impl JobsStore {
         requested_gpu: &str,
         worker_timeout_seconds: u64,
     ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
+        self.portable_source_claim_sets_for_route_with_facts(
+            backend,
+            platform,
+            requested_gpu,
+            worker_timeout_seconds,
+            None,
+        )
+    }
+
+    /// Replay availability must use the same capability and payload gates as claim selection.
+    pub fn portable_source_claim_sets_for_job_route(
+        &self,
+        backend: &str,
+        platform: &str,
+        requested_gpu: &str,
+        worker_timeout_seconds: u64,
+        job_type: &JobType,
+        payload: &Map<String, Value>,
+    ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
+        let facts = ClaimRoutingFacts::from_parts(job_type, payload);
+        self.portable_source_claim_sets_for_route_with_facts(
+            backend,
+            platform,
+            requested_gpu,
+            worker_timeout_seconds,
+            Some(&facts),
+        )
+    }
+
+    fn portable_source_claim_sets_for_route_with_facts(
+        &self,
+        backend: &str,
+        platform: &str,
+        requested_gpu: &str,
+        worker_timeout_seconds: u64,
+        facts: Option<&ClaimRoutingFacts>,
+    ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
         let connection = self.open_connection()?;
         let cutoff = format_unix_seconds(
             now_unix_seconds().saturating_sub(worker_timeout_seconds.min(i64::MAX as u64) as i64),
@@ -2668,7 +2705,10 @@ impl JobsStore {
                 "cpu" => worker.gpu_id.eq_ignore_ascii_case("cpu"),
                 _ => false,
             };
-            if !backend_matches || (requested_gpu != "auto" && requested_gpu != worker.gpu_id) {
+            if !backend_matches
+                || (requested_gpu != "auto" && requested_gpu != worker.gpu_id)
+                || facts.is_some_and(|facts| !worker_supports_claim_routing_facts(&worker, facts))
+            {
                 continue;
             }
             let raw: Option<String> = connection.query_row(

@@ -291,7 +291,14 @@ pub(crate) async fn validate_frozen_replay_binding(
         }
     }
     if needs_worker_availability {
-        filter_replay_routes_by_registered_claims(state, payload, requested_gpu, candidate).await
+        filter_replay_routes_by_registered_claims(
+            state,
+            job_type,
+            payload,
+            requested_gpu,
+            candidate,
+        )
+        .await
     } else {
         Ok(candidate)
     }
@@ -399,6 +406,7 @@ async fn replay_without_api_local_paths(
 
 async fn filter_replay_routes_by_registered_claims(
     state: &AppState,
+    job_type: &JobType,
     payload: &JsonObject,
     requested_gpu: &str,
     candidate: PortableJobBinding,
@@ -422,11 +430,13 @@ async fn filter_replay_routes_by_registered_claims(
         }
         let sets = state
             .jobs_store
-            .portable_source_claim_sets_for_route(
+            .portable_source_claim_sets_for_job_route(
                 &route.backend,
                 &route.platform,
                 requested_gpu,
                 state.settings.worker_timeout_seconds,
+                job_type,
+                payload,
             )
             .map_err(|error| {
                 incomplete(format!(
