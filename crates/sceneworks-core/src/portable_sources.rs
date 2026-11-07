@@ -160,3 +160,87 @@ pub fn required_portable_aux_source_ids(
     ids.dedup();
     Ok(ids)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn selected_ids_and_shapes_follow_character_and_detail_routes() {
+        let flux = json!({"id":"flux_dev"});
+        let payload =
+            json!({"model":"flux_dev","mode":"character_image","referenceAssetId":"asset"});
+        assert_eq!(
+            required_portable_aux_source_ids(
+                &JobType::ImageGenerate,
+                payload.as_object().unwrap(),
+                &flux,
+                "mlx"
+            )
+            .unwrap(),
+            vec!["flux_ip_adapter", "flux_ip_encoder"]
+        );
+        assert_eq!(
+            portable_aux_source_shape("flux_ip_adapter", &flux),
+            Some(PortableAuxSourceShape::File)
+        );
+        assert_eq!(
+            portable_aux_source_shape("flux_ip_encoder", &flux),
+            Some(PortableAuxSourceShape::Directory)
+        );
+        let sdxl = json!({"id":"sdxl"});
+        let detail = json!({"model":"sdxl"});
+        assert_eq!(
+            required_portable_aux_source_ids(
+                &JobType::ImageDetail,
+                detail.as_object().unwrap(),
+                &sdxl,
+                "candle"
+            )
+            .unwrap(),
+            vec!["sdxl_detail_tile_control"]
+        );
+    }
+
+    #[test]
+    fn cover_and_decoder_sources_are_selected_only_when_authored() {
+        let ace = json!({"id":"acestep_v15_turbo"});
+        let cover = json!({"editMode":"cover"});
+        assert_eq!(
+            required_portable_aux_source_ids(
+                &JobType::AudioGenerate,
+                cover.as_object().unwrap(),
+                &ace,
+                "mlx"
+            )
+            .unwrap(),
+            vec!["sft_cover"]
+        );
+        let plain = json!({"editMode":"inpaint"});
+        assert!(required_portable_aux_source_ids(
+            &JobType::AudioGenerate,
+            plain.as_object().unwrap(),
+            &ace,
+            "mlx"
+        )
+        .unwrap()
+        .is_empty());
+        let qwen = json!({"id":"qwen_image","decoders":{"byBackend":{"mlx":[{"id":"wan_2_1_vae","componentId":"vae"}]}}});
+        let decode = json!({"model":"qwen_image","advanced":{"decoder":"wan_2_1_vae"}});
+        assert_eq!(
+            required_portable_aux_source_ids(
+                &JobType::ImageGenerate,
+                decode.as_object().unwrap(),
+                &qwen,
+                "mlx"
+            )
+            .unwrap(),
+            vec!["vae"]
+        );
+        assert_eq!(
+            portable_aux_source_shape("vae", &qwen),
+            Some(PortableAuxSourceShape::File)
+        );
+    }
+}

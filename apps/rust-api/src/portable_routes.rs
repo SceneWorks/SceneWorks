@@ -456,6 +456,14 @@ fn entries_support_route(
             return false;
         }
         if entry.get("type").and_then(Value::as_str) == Some("utility")
+            && entry.get("componentOnly").and_then(Value::as_bool) != Some(true)
+            && *job_type != JobType::CatalogAnalysis
+            && slot != "modelManifestEntry"
+            && slot != "baseModelManifestEntry"
+        {
+            return false;
+        }
+        if entry.get("type").and_then(Value::as_str) == Some("utility")
             && (entry.get("componentOnly").and_then(Value::as_bool) == Some(true)
                 || (*job_type == JobType::CatalogAnalysis
                     && slot != "modelManifestEntry"
@@ -702,7 +710,7 @@ mod tests {
             "mlx",
             "macos"
         ));
-        let non_component = json!({"id":"person_detector","type":"utility","downloads":[{"provider":"huggingface","repo":"example/person","revision":"0123456789012345678901234567890123456789","files":["model.safetensors"],"platforms":["linux"]}]});
+        let non_component = json!({"id":"unroutable_utility_source","type":"utility","downloads":[{"provider":"huggingface","repo":"example/person","revision":"0123456789012345678901234567890123456789","files":["model.safetensors"],"platforms":["linux"]}]});
         let entries = [("modelManifestEntries/0".to_owned(), &non_component)];
         assert!(entries_support_route(
             &JobType::CatalogAnalysis,

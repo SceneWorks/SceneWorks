@@ -59,7 +59,7 @@ pub const SHIPPED_AUXILIARY_SOURCES: &[ShippedAuxiliarySource] = &[
         source_id: "sdxl_detail_tile_control",
         repo: "xinsir/controlnet-tile-sdxl-1.0",
         revision: "1ae8d9529efe58f7362a987363ff86a7904dc84f",
-        files: &["config.json", "diffusion_pytorch_model.safetensors"],
+        files: &["diffusion_pytorch_model.safetensors"],
     },
     ShippedAuxiliarySource {
         source_id: "depth_anything_v2_small",
