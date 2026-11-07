@@ -457,10 +457,36 @@ pub struct PortableArtifactFile {
 /// public worker capability or the static model registry. The file names are logical and relative;
 /// the worker retains all physical paths and leases locally.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PortableSourceProvenance {
+    PinnedRepo {
+        repository: String,
+        revision: String,
+    },
+    OperatorOverride,
+}
+
+impl PortableSourceProvenance {
+    pub fn validate(&self) -> Result<(), ArtifactContractError> {
+        match self {
+            Self::PinnedRepo {
+                repository,
+                revision,
+            } => {
+                super::validate_repository(repository)?;
+                super::validate_immutable_revision(revision)
+            }
+            Self::OperatorOverride => Ok(()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PortableSourceClaim {
     pub schema_version: u32,
     pub source_id: String,
+    pub provenance: PortableSourceProvenance,
     pub files: Vec<PortableArtifactFile>,
     pub closure_sha256: String,
 }
@@ -468,6 +494,7 @@ pub struct PortableSourceClaim {
 impl PortableSourceClaim {
     pub fn new(
         source_id: impl Into<String>,
+        provenance: PortableSourceProvenance,
         mut files: Vec<PortableArtifactFile>,
     ) -> Result<Self, ArtifactContractError> {
         files.sort();
@@ -475,6 +502,7 @@ impl PortableSourceClaim {
         let claim = Self {
             schema_version: PORTABLE_MODEL_BINDING_VERSION,
             source_id: source_id.into(),
+            provenance,
             files,
             closure_sha256,
         };
@@ -487,6 +515,7 @@ impl PortableSourceClaim {
             return Err(error("unsupported portable source claim version"));
         }
         validate_logical_name("source id", &self.source_id)?;
+        self.provenance.validate()?;
         let mut previous = None;
         for file in &self.files {
             super::portable_relative_path(&file.relative_path, "portable source claim file")?;
@@ -504,6 +533,25 @@ impl PortableSourceClaim {
         if portable_file_ledger_sha256(&self.files)? != self.closure_sha256 {
             return Err(error(
                 "portable source claim digest differs from its file closure",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Admission compares a worker advertisement with the authoritative source policy, not just
+    /// a caller-chosen source-id string. Only a route that explicitly permits an operator
+    /// override may pass that provenance as the expected value.
+    pub fn matches_authorized_source(
+        &self,
+        source_id: &str,
+        provenance: &PortableSourceProvenance,
+        files: &[PortableArtifactFile],
+    ) -> Result<(), ArtifactContractError> {
+        self.validate()?;
+        let expected = Self::new(source_id, provenance.clone(), files.to_vec())?;
+        if self != &expected {
+            return Err(error(
+                "worker source claim differs from authorized identity",
             ));
         }
         Ok(())
@@ -1143,12 +1191,63 @@ mod tests {
             size_bytes: 4,
             sha256: format!("sha256:{}", crate::hashing::sha256_bytes(b"data")),
         };
-        let claim = PortableSourceClaim::new("ltx/alternate-text-encoder", vec![file]).unwrap();
+        let claim = PortableSourceClaim::new(
+            "ltx/alternate-text-encoder",
+            PortableSourceProvenance::OperatorOverride,
+            vec![file],
+        )
+        .unwrap();
         assert!(validate_portable_source_claims(std::slice::from_ref(&claim)).is_ok());
         assert!(validate_portable_source_claims(&[claim.clone(), claim.clone()]).is_err());
         let mut changed = claim;
         changed.files[0].size_bytes += 1;
         assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn pinned_source_cannot_masquerade_as_operator_override_or_change_revision() {
+        let file = PortableArtifactFile {
+            relative_path: PathBuf::from("encoder.safetensors"),
+            size_bytes: 4,
+            sha256: format!("sha256:{}", crate::hashing::sha256_bytes(b"data")),
+        };
+        let revision = "a".repeat(40);
+        let pinned = PortableSourceProvenance::PinnedRepo {
+            repository: "owner/encoder".to_owned(),
+            revision: revision.clone(),
+        };
+        let claim =
+            PortableSourceClaim::new("ltx/encoder", pinned.clone(), vec![file.clone()]).unwrap();
+        assert!(claim
+            .matches_authorized_source("ltx/encoder", &pinned, std::slice::from_ref(&file))
+            .is_ok());
+        assert!(claim
+            .matches_authorized_source(
+                "ltx/encoder",
+                &PortableSourceProvenance::OperatorOverride,
+                std::slice::from_ref(&file)
+            )
+            .is_err());
+        let changed_revision = PortableSourceProvenance::PinnedRepo {
+            repository: "owner/encoder".to_owned(),
+            revision: "b".repeat(40),
+        };
+        assert!(claim
+            .matches_authorized_source(
+                "ltx/encoder",
+                &changed_revision,
+                std::slice::from_ref(&file)
+            )
+            .is_err());
+        assert!(PortableSourceClaim::new(
+            "ltx/encoder",
+            PortableSourceProvenance::PinnedRepo {
+                repository: "owner/encoder".to_owned(),
+                revision: "main".to_owned()
+            },
+            vec![file]
+        )
+        .is_err());
     }
 
     #[tokio::test]
