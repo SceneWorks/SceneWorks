@@ -7,6 +7,7 @@ import test, { before } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { projectBuiltinMemoryEvidence, readBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import { declaredSyntheticOwnedAccounting } from "./lib/flux3-owned-accounting-fixture.mjs";
 import { buildMatrix } from "./generate-memory-matrix.mjs";
 import {
@@ -51,6 +52,13 @@ import {
 } from "./extract-memory-anchors.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+async function effectiveManifest() {
+  return projectBuiltinMemoryEvidence(
+    JSON.parse(stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8"))),
+    await readBuiltinMemoryEvidence(ROOT),
+  );
+}
 
 // `buildMatrix` resolves the whole catalog; resolve it once and share it. Every build below uses
 // the DEFAULT resolution — the same one `main()` and `npm run check:memory-anchors` use — so these
@@ -904,9 +912,7 @@ test("a candle lane whose engine has no staged composition is anchored by its re
   );
 
   // The real manifest declares the exemption for all six SenseNova ids on both lanes.
-  const realManifest = JSON.parse(
-    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
-  );
+  const realManifest = await effectiveManifest();
   const realLanes = stagedResidencyExemptLanes(realManifest);
   for (const modelId of realManifest.models
     .filter((model) => model.id.startsWith("sensenova_u1_8b"))
@@ -965,9 +971,7 @@ test("a candle lane whose engine has no staged composition is anchored by its re
 // so a change that scoped the inversion to the SenseNova family — or an exemption silently
 // appearing on, or vanishing from, one of these six — stayed green. This one names them.
 test("the staged-residency inversion governs every exempt candle lane, not only the SenseNova family", async () => {
-  const realManifest = JSON.parse(
-    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
-  );
+  const realManifest = await effectiveManifest();
   const lanes = stagedResidencyExemptLanes(realManifest);
 
   // The expected set is DERIVED from the manifest — no frozen count, no hand-kept list — so a
@@ -1105,9 +1109,7 @@ test("a candle VIDEO record is derivable under the video law, not the still imag
 });
 
 test("every emitted anchor cites a compiled-in corpus, and every retained corpus is compiled in", async () => {
-  const manifest = JSON.parse(
-    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
-  );
+  const manifest = await effectiveManifest();
   const exemptLanes = stagedResidencyExemptLanes(manifest);
   const store = await buildAnchorStore({ matrix });
   const packaged = packagedAnchorSources(
@@ -1195,9 +1197,7 @@ test("a newly packaged candle corpus anchors its own cells rather than bounding 
 
 test("a published memoryStrategyContract outranks a bare manifest tier declaration", async () => {
   const store = await buildAnchorStore({ matrix });
-  const manifest = JSON.parse(
-    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
-  );
+  const manifest = await effectiveManifest();
   const publishesContract = (row) =>
     Boolean(
       manifest.models?.find((model) => model.id === row.modelId)?.[row.backend]
@@ -1356,9 +1356,7 @@ test("RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced, read from it
 
 test("contract_estimate is keyed on the ladder's inputs: a sequential row on a non-receipt-priced route", async () => {
   const store = await buildAnchorStore({ matrix });
-  const manifest = JSON.parse(
-    stripJsoncComments(await readFile(path.join(ROOT, MANIFEST_PATH), "utf8")),
-  );
+  const manifest = await effectiveManifest();
   const publishesContract = (row) =>
     Boolean(
       manifest.models?.find((model) => model.id === row.modelId)?.[row.backend]

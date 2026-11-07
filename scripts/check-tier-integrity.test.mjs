@@ -23,6 +23,7 @@ import {
   validate,
 } from "./check-tier-integrity.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { projectBuiltinMemoryEvidence, readBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import {
   VAE_RESIDENCY_SCOPES,
   VAE_SCOPES,
@@ -44,7 +45,10 @@ async function realInputs() {
   return {
     ledger: JSON.parse(stripJsoncComments(ledger)),
     ledgerSource: ledger,
-    manifest: JSON.parse(stripJsoncComments(manifest)),
+    manifest: projectBuiltinMemoryEvidence(
+      JSON.parse(stripJsoncComments(manifest)),
+      await readBuiltinMemoryEvidence(ROOT),
+    ),
     mlxFitGate,
     routingCatalog,
     routingCandle,

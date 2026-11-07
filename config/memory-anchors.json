@@ -12293,8 +12293,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/boogu_image/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12314,8 +12314,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/boogu_image/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12335,8 +12335,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/boogu_image/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12389,8 +12389,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/boogu_image_turbo/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12410,8 +12410,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/boogu_image_turbo/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12431,8 +12431,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/boogu_image_turbo/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/boogu_image_turbo/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12837,8 +12837,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/kolors/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12858,8 +12858,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/kolors/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -12879,8 +12879,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/kolors/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/kolors/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -13296,8 +13296,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/scail2_14b/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/scail2_14b/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -13459,8 +13459,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/wan_2_2_i2v_14b/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -13480,8 +13480,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/wan_2_2_i2v_14b/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -13501,8 +13501,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_i2v_14b/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/wan_2_2_i2v_14b/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -13555,8 +13555,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/wan_2_2_t2v_14b/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -13576,8 +13576,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/wan_2_2_t2v_14b/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
@@ -13597,8 +13597,8 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/builtin.models.jsonc#models/wan_2_2_t2v_14b/candle",
-        "sha256": "eb1fe95f5b5a553fd08ad21d10403bfb14cfa1ab8ab923b14deb7976325483ac",
+        "path": "config/manifests/registry/evidence.json#models/wan_2_2_t2v_14b/candle",
+        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
         "values": {
