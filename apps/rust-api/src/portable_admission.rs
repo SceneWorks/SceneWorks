@@ -183,6 +183,10 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
 }
 
 fn is_private_or_derived_field(key: &str) -> bool {
+    if key == "baseSubdir" {
+        // A tier directory name is authored source choice, unlike physical local locator paths.
+        return false;
+    }
     if matches!(
         key,
         "modelManifestEntry"
@@ -347,6 +351,20 @@ async fn capture_portable_model_binding_inner(
     requested_gpu: &str,
     frozen: Option<&PortableJobBinding>,
 ) -> Result<Option<PortableJobBinding>, ApiError> {
+    if *job_type == JobType::ModelConvert {
+        if let Some(subdir) = payload.get("baseSubdir").and_then(Value::as_str) {
+            if !subdir.is_empty()
+                && (matches!(subdir, "." | "..")
+                    || !subdir.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    }))
+            {
+                return Err(incomplete(
+                    "conversion baseSubdir is not a portable tier name",
+                ));
+            }
+        }
+    }
     if model_free_job(job_type, payload) {
         return Ok(None);
     }
@@ -2129,6 +2147,7 @@ mod tests {
     fn authored_projection_keeps_choices_without_local_paths_or_credentials() {
         let payload = json!({
             "model":"flux_schnell", "prompt":"red kite", "variant":"q4",
+            "baseSubdir":"bf16", "modelNameOrPath":"/host/private/checkpoint",
             "modelManifestEntry":{"id":"flux_schnell","paths":{"model":"/host/a"}},
             "advanced":{"modelPath":"/host/a","quantTier":"q4"},
             "loras":[{"id":"style","weight":0.6,"installedPath":"/host/loras/style.safetensors"}],
@@ -2139,6 +2158,7 @@ mod tests {
         assert_eq!(actual["model"], "flux_schnell");
         assert!(actual.get("prompt").is_none());
         assert_eq!(actual["advanced"]["quantTier"], "q4");
+        assert_eq!(actual["baseSubdir"], "bf16");
         assert_eq!(actual["loras"][0]["id"], "style");
         assert_eq!(actual["phase"]["loras"][0]["id"], "detail");
         let encoded = actual.to_string();
