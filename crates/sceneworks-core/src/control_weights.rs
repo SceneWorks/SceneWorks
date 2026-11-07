@@ -130,6 +130,79 @@ pub fn default_control_revision(engine_id: &str) -> Option<&'static str> {
         .map(|artifact| artifact.revision)
 }
 
+/// The strict-control route's shipped component for this exact request. The worker and API
+/// consult the same table; an authored registered overlay replaces this default separately.
+/// A control file is selected only when the request actually enters a pose/control route.
+pub fn default_control_weight_for_request(
+    model_id: &str,
+    entry: &serde_json::Value,
+    backend: &str,
+    payload: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&'static ShippedControlWeight> {
+    let poses = payload
+        .get("advanced")?
+        .get("poses")?
+        .as_array()
+        .is_some_and(|poses| !poses.is_empty());
+    if !poses || payload.get("mode").and_then(serde_json::Value::as_str) == Some("edit_image") {
+        return None;
+    }
+    let base_model = entry
+        .get("baseModel")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(model_id);
+    let engine = match base_model {
+        "sdxl"
+        | "realvisxl"
+        | "realvisxl_lightning"
+        | "illustrious_xl_v1"
+        | "illustrious_xl_v2" => "sdxl",
+        "flux_dev" => "flux1_dev_control",
+        "flux2_dev" => "flux2_dev_control",
+        "z_image_turbo" => "z_image_turbo_control",
+        "z_image" => "z_image_control",
+        "qwen_image" => "qwen_image_control",
+        "kolors" => "kolors_control",
+        "krea_2_turbo" => "krea_2_turbo_control",
+        _ => return None,
+    };
+    let file = match engine {
+        "z_image_control" if backend == "candle" => "diffusion_pytorch_model.safetensors",
+        "z_image_control" => "Z-Image-Fun-Controlnet-Union-2.1.safetensors",
+        "qwen_image_control" => match selected_qwen_control_tier(payload) {
+            "q4" => "q4/model.safetensors",
+            "bf16" => "bf16/model.safetensors",
+            _ => "q8/model.safetensors",
+        },
+        _ => {
+            SHIPPED_CONTROL_WEIGHTS
+                .iter()
+                .find(|weight| weight.engine_id == engine)?
+                .file
+        }
+    };
+    SHIPPED_CONTROL_WEIGHTS
+        .iter()
+        .find(|weight| weight.engine_id == engine && weight.file == file)
+}
+
+/// The portable control tier is independent of this host's installed snapshot. The legacy
+/// worker may clamp an implicit Q8 pick to a present tier, but a bound job must keep Q8 across
+/// hosts and fetch or refuse when it is missing.
+pub fn selected_qwen_control_tier(
+    payload: &serde_json::Map<String, serde_json::Value>,
+) -> &'static str {
+    let bits = payload
+        .get("advanced")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|advanced| crate::payload_util::optional_i64(advanced, "mlxQuantize"));
+    match bits {
+        Some(bits) if bits <= 0 => "bf16",
+        Some(bits) if bits <= 4 => "q4",
+        _ => "q8",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

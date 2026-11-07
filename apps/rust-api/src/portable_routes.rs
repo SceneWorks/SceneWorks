@@ -2,9 +2,196 @@
 
 use sceneworks_core::contracts::{JobType, JsonObject};
 use sceneworks_core::jobs_store::{native_route_claims_request, NON_GPU_JOB_TYPES};
+use sceneworks_core::model_artifacts::ArtifactMemberRole;
 use serde_json::Value;
 
 use crate::ApiError;
+
+#[derive(Clone, Debug)]
+pub(crate) enum SelectedSourceLocation {
+    ManifestDownload(Value),
+    LocalPath(String),
+    /// A worker-advertised exact digest closure, never an unpinned API download.
+    OperatorCachedRepo(&'static str),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SelectedRouteSource {
+    pub model_slot: String,
+    pub component_id: String,
+    pub role: ArtifactMemberRole,
+    pub source: SelectedSourceLocation,
+    pub selected_tier: Option<String>,
+}
+
+/// Source additions opened by a route but omitted from its always-required model closure.
+/// A missing selected declaration is an admission refusal, never an implicit worker download.
+pub(crate) fn selected_route_source_rows(
+    job_type: &JobType,
+    payload: &JsonObject,
+    entries: &[(String, &Value)],
+    backend: &str,
+    _platform: &str,
+) -> Result<Vec<SelectedRouteSource>, String> {
+    let mut rows = Vec::new();
+    let advanced = payload.get("advanced").and_then(Value::as_object);
+    for (slot, entry) in entries {
+        let id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("model entry lacks id")?;
+        let add_component = |rows: &mut Vec<SelectedRouteSource>,
+                             component_id: &str,
+                             role: ArtifactMemberRole|
+         -> Result<(), String> {
+            let download = ["downloads", "conditionalComponents"]
+                .into_iter()
+                .filter_map(|field| entry.get(field).and_then(Value::as_array))
+                .flatten()
+                .find(|row| row.get("componentId").and_then(Value::as_str) == Some(component_id))
+                .ok_or_else(|| format!("{id} lacks selected component {component_id}"))?;
+            rows.push(SelectedRouteSource {
+                model_slot: slot.clone(),
+                component_id: component_id.to_owned(),
+                role,
+                source: SelectedSourceLocation::ManifestDownload(download.clone()),
+                selected_tier: None,
+            });
+            Ok(())
+        };
+        if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+            if let Some(decoder) = advanced
+                .and_then(|value| value.get("decoder"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && *value != "native")
+            {
+                let option = entry
+                    .pointer(&format!("/decoders/byBackend/{backend}"))
+                    .and_then(Value::as_array)
+                    .and_then(|options| {
+                        options.iter().find(|option| {
+                            option.get("id").and_then(Value::as_str) == Some(decoder)
+                        })
+                    })
+                    .ok_or_else(|| format!("{id} cannot use decoder {decoder} on {backend}"))?;
+                let component = option
+                    .get("componentId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("decoder {decoder} has no component"))?;
+                add_component(&mut rows, component, ArtifactMemberRole::OptionalComponent)?;
+            }
+            if matches!(id, "flux3_klein" | "flux3_klein_base")
+                && advanced
+                    .and_then(|value| value.get("enhancePrompt"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+            {
+                add_component(
+                    &mut rows,
+                    "prompt_upsampler",
+                    ArtifactMemberRole::OptionalComponent,
+                )?;
+            }
+            if slot == "modelManifestEntry"
+                && advanced
+                    .and_then(|value| value.get("poses"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|poses| !poses.is_empty())
+            {
+                let control = advanced.and_then(|value| value.get("controlWeights"));
+                let (source, tier) = if let Some(control) = control {
+                    if let Some(path) = control.get("path").and_then(Value::as_str) {
+                        (SelectedSourceLocation::LocalPath(path.to_owned()), None)
+                    } else {
+                        let repo = control
+                            .get("repo")
+                            .and_then(Value::as_str)
+                            .ok_or("control override lacks repo")?;
+                        let file = control
+                            .get("filename")
+                            .and_then(Value::as_str)
+                            .ok_or("control override lacks filename")?;
+                        let revision = control
+                            .get("revision")
+                            .and_then(Value::as_str)
+                            .ok_or("control override lacks revision")?;
+                        (
+                            SelectedSourceLocation::ManifestDownload(
+                                serde_json::json!({"provider":"huggingface","repo":repo,"revision":revision,"files":[file]}),
+                            ),
+                            None,
+                        )
+                    }
+                } else if let Some(weight) =
+                    sceneworks_core::control_weights::default_control_weight_for_request(
+                        id, entry, backend, payload,
+                    )
+                {
+                    let tier = (id == "qwen_image").then(|| {
+                        sceneworks_core::control_weights::selected_qwen_control_tier(payload)
+                            .to_owned()
+                    });
+                    (
+                        SelectedSourceLocation::ManifestDownload(
+                            serde_json::json!({"provider":"huggingface","repo":weight.repo,"revision":weight.revision,"files":[weight.file]}),
+                        ),
+                        tier,
+                    )
+                } else {
+                    return Err(format!("{id} has poses but no bound strict-control source"));
+                };
+                rows.push(SelectedRouteSource {
+                    model_slot: slot.clone(),
+                    component_id: "strict_control".to_owned(),
+                    role: ArtifactMemberRole::Control,
+                    source,
+                    selected_tier: tier,
+                });
+            }
+        }
+        if payload.get("editMode").and_then(Value::as_str) == Some("cover")
+            && id.starts_with("acestep")
+        {
+            add_component(
+                &mut rows,
+                "sft_cover",
+                ArtifactMemberRole::OptionalComponent,
+            )?;
+        }
+        if matches!(id, "minimax_h3" | "minimax_h3_ref")
+            && advanced
+                .and_then(|value| value.get("veda"))
+                .and_then(|value| value.get("enabled"))
+                .and_then(Value::as_bool)
+                == Some(true)
+        {
+            add_component(
+                &mut rows,
+                "veda_predictor",
+                ArtifactMemberRole::OptionalComponent,
+            )?;
+        }
+        if id.starts_with("ltx")
+            && backend == "mlx"
+            && advanced.is_some_and(|value| {
+                value.get("useUncensoredEnhancer").and_then(Value::as_bool) == Some(true)
+                    || value.get("textEncoderModel").and_then(Value::as_str)
+                        == Some("ltx_amoral_gemma_3_12b")
+            })
+        {
+            rows.push(SelectedRouteSource {
+                model_slot: slot.clone(),
+                component_id: "uncensored_enhancer".to_owned(),
+                role: ArtifactMemberRole::OptionalComponent,
+                source: SelectedSourceLocation::OperatorCachedRepo(
+                    "TheCluster/amoral-gemma-3-12B-v2-mlx-4bit",
+                ),
+                selected_tier: None,
+            });
+        }
+    }
+    Ok(rows)
+}
 
 /// Backend and platform pairs whose full source closure must be frozen at admission. The
 /// worker claim still applies the requested GPU id and capability filters; this set never
@@ -163,5 +350,88 @@ mod tests {
                 ("candle".to_owned(), "windows".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn selected_sources_bind_default_control_tier_and_override() {
+        let entry = json!({"id":"qwen_image"});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let payload = json!({"model":"qwen_image","advanced":{"poses":[{}]}});
+        let rows = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            payload.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].selected_tier.as_deref(), Some("q8"));
+        assert!(
+            matches!(&rows[0].source, SelectedSourceLocation::ManifestDownload(value) if value["files"][0] == "q8/model.safetensors")
+        );
+        let payload = json!({"model":"qwen_image","advanced":{"poses":[{}],"mlxQuantize":4}});
+        let rows = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            payload.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        assert_eq!(rows[0].selected_tier.as_deref(), Some("q4"));
+    }
+
+    #[test]
+    fn cover_mode_binds_soft_component_only_when_selected() {
+        let entry = json!({"id":"acestep_v15_turbo","downloads":[{"componentId":"sft_cover","required":"soft","repo":"ACE-Step/acestep-v15-xl-sft-diffusers","revision":"4bf7b60a63b27144f539f980927eeb89f5f912b0","files":["transformer/*"]}]});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let cover = json!({"editMode":"cover"});
+        let plain = json!({"editMode":"inpaint"});
+        assert_eq!(
+            selected_route_source_rows(
+                &JobType::AudioGenerate,
+                cover.as_object().unwrap(),
+                &entries,
+                "mlx",
+                "macos"
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+        assert!(selected_route_source_rows(
+            &JobType::AudioGenerate,
+            plain.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos"
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
+    fn selected_decoder_requires_declared_soft_donor() {
+        let entry = json!({"id":"qwen_image","decoders":{"byBackend":{"mlx":[{"id":"wan_2_1_vae","componentId":"vae"}]}},"downloads":[{"componentId":"vae","required":"soft","repo":"donor/vae","revision":"0123456789012345678901234567890123456789","files":["vae.safetensors"]}]});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let payload = json!({"advanced":{"decoder":"wan_2_1_vae"}});
+        let rows = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            payload.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        assert_eq!(rows[0].component_id, "vae");
+        assert!(selected_route_source_rows(
+            &JobType::ImageGenerate,
+            payload.as_object().unwrap(),
+            &entries,
+            "candle",
+            "linux"
+        )
+        .is_err());
     }
 }

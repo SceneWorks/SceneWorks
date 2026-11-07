@@ -695,7 +695,7 @@ pub fn text_encoder_options_for_adapter(adapter: &str, data_dir: &Path) -> Vec<T
 /// [`ltx_gemma_dir_is_complete`] (an mlx_lm gemma snapshot is `config.json` + shards, same shape as the
 /// TE), so a partial/half-downloaded dir never wins.
 #[cfg(target_os = "macos")]
-fn resolve_ltx_uncensored_enhancer_dir(data_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_ltx_uncensored_enhancer_dir(data_dir: &Path) -> Option<PathBuf> {
     if let Some(raw) = std::env::var_os("LTX_UNCENSORED_GEMMA_DIR") {
         let dir = PathBuf::from(raw);
         if ltx_gemma_dir_is_complete(&dir) {
