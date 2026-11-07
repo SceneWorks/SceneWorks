@@ -1877,6 +1877,17 @@ async fn poll_once(
             "/api/v1/jobs/claim",
             &ClaimRequest {
                 worker_id: settings.worker_id.clone(),
+                portable_model_binding_version: Some(
+                    sceneworks_core::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION,
+                ),
+                portable_backend: Some(if settings.gpu_id == "mlx" {
+                    "mlx"
+                } else if cfg!(feature = "backend-candle") && !is_cpu_worker(&settings.gpu_id) {
+                    "candle"
+                } else {
+                    "cpu"
+                }.to_owned()),
+                portable_platform: Some(std::env::consts::OS.to_owned()),
                 extra: BTreeMap::new(),
             },
         )
@@ -1920,6 +1931,7 @@ async fn register_worker(
         &WorkerRegisterRequest {
             worker_id: settings.worker_id.clone(),
             gpu_id: gpu.id.clone(),
+            platform: Some(std::env::consts::OS.to_owned()),
             gpu_name: Some(gpu.name.clone()),
             capabilities: worker_capabilities(gpu),
             loaded_models: Vec::new(),
