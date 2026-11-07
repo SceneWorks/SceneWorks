@@ -1251,7 +1251,7 @@ mod tests {
             .find(|entry| entry["id"] == "iris_3b_depth")
             .unwrap();
         let entries = [("baseModelManifestEntry".to_owned(), entry)];
-        let payload = json!({"plan":plan});
+        let payload = json!({"plan":plan.clone()});
         let rows = selected_route_source_rows(
             &JobType::LoraTrain,
             payload.as_object().unwrap(),
@@ -1273,5 +1273,36 @@ mod tests {
                         fallback_id: "iris_generation_text_encoder"
                     }
                 )));
+        let mut restore_plan = plan;
+        restore_plan["target"]["baseModel"] = json!("iris_3b_restore");
+        restore_plan["config"]["advanced"] = json!({"iris_restore":{"init":"parent"}});
+        let restore_entry = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "iris_3b_restore")
+            .unwrap();
+        let restore_entries = [("baseModelManifestEntry".to_owned(), restore_entry)];
+        let restore_payload = json!({"plan":restore_plan});
+        let restore_rows = selected_route_source_rows(
+            &JobType::LoraTrain,
+            restore_payload.as_object().unwrap(),
+            &restore_entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        let ids: std::collections::BTreeSet<_> = restore_rows
+            .iter()
+            .map(|row| row.component_id.as_str())
+            .collect();
+        assert!(ids.contains("iris_parent_backbone"));
+        for id in [
+            "iris_restore_train_vgg16",
+            "iris_restore_train_lpips_lin",
+            "iris_restore_train_critic_trunk",
+        ] {
+            assert!(ids.contains(id), "{id} must be bound");
+        }
     }
 }
