@@ -1408,9 +1408,12 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
         .map(|(body, _)| body.split_whitespace().collect::<Vec<_>>().join(" "))
         .expect("the original request-aware callback remains identifiable");
     assert!(
-        callback.contains("let GeneratorRequestLoad { spec, prepared_h3 } = load.into();")
+        callback.contains("with_cached_generator_for_request_using_cache(")
+            && callback.contains("with_cached_generator_for_request_using_cache_prepared(")
+            && callback.contains("engine_id, load, load_error_context,")
+            && callback.contains("let GeneratorRequestLoad { spec, prepared_h3 } = load.into();")
             && callback.contains(
-                "with_cached_generator_for_request_after_cold_admission_using_on_with_h3("
+                "with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared("
             )
             && callback.contains("engine_id, spec, prepared_h3, load_error_context,"),
         "the original callback must forward the sealed context, rather than silently substituting \
