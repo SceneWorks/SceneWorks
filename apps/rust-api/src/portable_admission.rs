@@ -861,7 +861,7 @@ async fn capture_portable_model_binding_inner(
         }
         if let Some(route) = selected_route {
             routes.insert(route.key(), route);
-        } else if worker_only_source {
+        } else if worker_only_source && last_route_error.is_none() {
             last_route_error = Some(incomplete(format!(
                 "no eligible worker advertises the complete selected source closure for {backend}:{platform}"
             )));
