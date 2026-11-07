@@ -148,7 +148,9 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
             | "irisModel"
             | "checkpointModelId"
             | "sourceRepo"
+            | "converter"
             | "baseRepo"
+            | "baseSubdir"
             | "sourceFile"
             | "upscalerFile"
             | "modelNameOrPath"
@@ -715,7 +717,8 @@ async fn capture_model_slot(
                     && *job_type == JobType::ModelConvert
                     && download.get("revision").is_none()
                 {
-                    capture_uncataloged_convert_source(state, download, frozen_model).await?
+                    capture_uncataloged_convert_source(state, payload, download, frozen_model)
+                        .await?
                 } else {
                     capture_download_member(state, download, role, component_id).await?
                 },
@@ -1370,6 +1373,7 @@ fn selected_primary_override(
 /// Replay uses the original revision, so an unrelated HEAD move cannot replace or reject it.
 async fn capture_uncataloged_convert_source(
     state: &AppState,
+    payload: &JsonObject,
     download: &Value,
     frozen_model: Option<&PortableModelBinding>,
 ) -> Result<PortableArtifactMember, ApiError> {
@@ -1389,11 +1393,22 @@ async fn capture_uncataloged_convert_source(
     } else {
         resolve_dynamic_hf_revision(state, repo, "main").await?
     };
+    let converter = payload
+        .get("converter")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let source_file = payload.get("sourceFile").and_then(Value::as_str);
+    let selectors =
+        sceneworks_core::portable_convert_sources::portable_convert_primary_file_selectors(
+            converter,
+            source_file,
+        )
+        .map_err(incomplete)?;
     let pinned = serde_json::json!({
         "provider":"huggingface",
         "repo":repo,
         "revision":revision,
-        "files":["*"]
+        "files":selectors
     });
     capture_download_member(state, &pinned, ArtifactMemberRole::Primary, None).await
 }
