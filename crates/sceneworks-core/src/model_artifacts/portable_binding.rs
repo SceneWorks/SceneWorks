@@ -30,6 +30,15 @@ pub fn portable_closure_sha256(
         validate_sha256(&files[0].sha256)?;
         return Ok(files[0].sha256.clone());
     }
+    portable_file_ledger_sha256(files)
+}
+
+fn portable_file_ledger_sha256(
+    files: &[PortableArtifactFile],
+) -> Result<String, ArtifactContractError> {
+    if files.is_empty() {
+        return Err(error("portable artifact closure is empty"));
+    }
     let mut digest = Sha256::new();
     let mut previous = None;
     for file in files {
@@ -442,6 +451,76 @@ pub struct PortableArtifactFile {
     pub relative_path: PathBuf,
     pub size_bytes: u64,
     pub sha256: String,
+}
+
+/// A private worker advertisement for an operator-selected source that cannot be inferred from
+/// public worker capability or the static model registry. The file names are logical and relative;
+/// the worker retains all physical paths and leases locally.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PortableSourceClaim {
+    pub schema_version: u32,
+    pub source_id: String,
+    pub files: Vec<PortableArtifactFile>,
+    pub closure_sha256: String,
+}
+
+impl PortableSourceClaim {
+    pub fn new(
+        source_id: impl Into<String>,
+        mut files: Vec<PortableArtifactFile>,
+    ) -> Result<Self, ArtifactContractError> {
+        files.sort();
+        let closure_sha256 = portable_file_ledger_sha256(&files)?;
+        let claim = Self {
+            schema_version: PORTABLE_MODEL_BINDING_VERSION,
+            source_id: source_id.into(),
+            files,
+            closure_sha256,
+        };
+        claim.validate()?;
+        Ok(claim)
+    }
+
+    pub fn validate(&self) -> Result<(), ArtifactContractError> {
+        if self.schema_version != PORTABLE_MODEL_BINDING_VERSION {
+            return Err(error("unsupported portable source claim version"));
+        }
+        validate_logical_name("source id", &self.source_id)?;
+        let mut previous = None;
+        for file in &self.files {
+            super::portable_relative_path(&file.relative_path, "portable source claim file")?;
+            validate_sha256(&file.sha256)?;
+            if previous
+                .as_ref()
+                .is_some_and(|previous| previous >= &file.relative_path)
+            {
+                return Err(error(
+                    "portable source claim files are duplicated or not canonical",
+                ));
+            }
+            previous = Some(file.relative_path.clone());
+        }
+        if portable_file_ledger_sha256(&self.files)? != self.closure_sha256 {
+            return Err(error(
+                "portable source claim digest differs from its file closure",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_portable_source_claims(
+    claims: &[PortableSourceClaim],
+) -> Result<(), ArtifactContractError> {
+    let mut ids = std::collections::BTreeSet::new();
+    for claim in claims {
+        claim.validate()?;
+        if !ids.insert(&claim.source_id) {
+            return Err(error("duplicate portable source claim id"));
+        }
+    }
+    Ok(())
 }
 
 /// Worker-only mapping from a logical file to the selected local file. A Hugging Face snapshot
@@ -1055,6 +1134,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["advanced/phases/0/loras/0", "loras/0"]
         );
+    }
+
+    #[test]
+    fn private_source_claim_binds_exact_logical_closure() {
+        let file = PortableArtifactFile {
+            relative_path: PathBuf::from("encoder/model.safetensors"),
+            size_bytes: 4,
+            sha256: format!("sha256:{}", crate::hashing::sha256_bytes(b"data")),
+        };
+        let claim = PortableSourceClaim::new("ltx/alternate-text-encoder", vec![file]).unwrap();
+        assert!(validate_portable_source_claims(std::slice::from_ref(&claim)).is_ok());
+        assert!(validate_portable_source_claims(&[claim.clone(), claim.clone()]).is_err());
+        let mut changed = claim;
+        changed.files[0].size_bytes += 1;
+        assert!(changed.validate().is_err());
     }
 
     #[tokio::test]

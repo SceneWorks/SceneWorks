@@ -1060,6 +1060,9 @@ pub struct WorkerRegisterRequest {
     pub gpu_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_source_claims:
+        Option<Vec<crate::model_artifacts::portable_binding::PortableSourceClaim>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu_name: Option<String>,
     pub capabilities: Vec<WorkerCapability>,
@@ -1074,6 +1077,9 @@ pub struct WorkerRegisterRequest {
 #[serde(rename_all = "camelCase")]
 pub struct WorkerHeartbeatRequest {
     pub status: WorkerStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_source_claims:
+        Option<Vec<crate::model_artifacts::portable_binding::PortableSourceClaim>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_job_id: Option<String>,
     pub loaded_models: Vec<String>,
