@@ -1914,7 +1914,24 @@ fn capture_local_model_entry(
         }
     });
     if entry.pointer("/importPlan/checkpointId").is_none() {
-        verify_produced_local_source(state, entry, &locators[0].1)?;
+        let model_id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| incomplete("local model entry has no registered id"))?;
+        let builtin = crate::models::embedded_builtin_catalog_entry(|builtin| {
+            builtin.get("id").and_then(Value::as_str) == Some(model_id)
+        })?
+        .is_some();
+        let declared_training_provenance = entry
+            .pointer("/provenance/trainingJobId")
+            .and_then(Value::as_str)
+            .is_some();
+        if builtin || declared_training_provenance {
+            // A publisher builtin or a claimed trained product must prove its producer. A
+            // separately registered user model is authenticated by its server-owned catalog
+            // record plus the exact Digest bytes frozen below and worker availability claims.
+            verify_produced_local_source(state, entry, &locators[0].1)?;
+        }
     }
     let mut members = Vec::new();
     for (index, (key, path)) in locators.into_iter().enumerate() {
