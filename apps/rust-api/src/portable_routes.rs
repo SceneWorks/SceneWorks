@@ -11,6 +11,8 @@ use crate::ApiError;
 pub(crate) enum SelectedSourceLocation {
     ManifestDownload(Value),
     LocalPath(String),
+    /// Admission resolves the request-selected repository HEAD to an immutable revision.
+    DynamicHfRepo(String),
     /// A worker-advertised exact digest closure, never an unpinned API download.
     OperatorCachedRepo(&'static str),
 }
@@ -59,8 +61,20 @@ pub(crate) fn selected_route_source_rows(
                 .ok_or("training job lacks resolved plan")?,
         )
         .map_err(|error| format!("invalid resolved training plan: {error}"))?;
+        let training_slot = entries
+            .iter()
+            .find(|(_, entry)| {
+                entry.get("id").and_then(Value::as_str) == Some(plan.target.base_model.as_str())
+            })
+            .map(|(slot, _)| slot.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "training base {} lacks a captured manifest entry",
+                    plan.target.base_model
+                )
+            })?;
         if plan.target.base_model == "ltx_2_3" {
-            push_operator_source(&mut rows, "trainingBase", "ltx_training_text_encoder");
+            push_operator_source(&mut rows, training_slot, "ltx_training_text_encoder");
         }
         if sceneworks_core::training::iris::is_iris_training_kernel(&plan.target.kernel) {
             let options = sceneworks_core::training::iris::iris_options(&plan.config)
@@ -75,7 +89,7 @@ pub(crate) fn selected_route_source_rows(
                     .and_then(|downloads| downloads.first())
                     .ok_or("missing pinned Iris REPA teacher declaration")?;
                 rows.push(SelectedRouteSource {
-                    model_slot: "trainingBase".to_owned(),
+                    model_slot: training_slot.to_owned(),
                     component_id: "repa_teacher".to_owned(),
                     role: ArtifactMemberRole::OptionalComponent,
                     source: SelectedSourceLocation::ManifestDownload(teacher.clone()),
@@ -219,7 +233,26 @@ pub(crate) fn selected_route_source_rows(
             }
         }
         if *job_type == JobType::ImageDetail && slot == "modelManifestEntry" {
-            push_operator_source(&mut rows, slot, "sdxl_detail_tile_control");
+            let custom_repo = advanced
+                .and_then(|value| value.get("tileControlNetRepo"))
+                .and_then(Value::as_str)
+                .filter(|repo| {
+                    !repo.trim().is_empty() && *repo != "xinsir/controlnet-tile-sdxl-1.0"
+                });
+            if let Some(repo) = custom_repo {
+                if backend != "mlx" {
+                    return Err("custom Detail tile ControlNet is supported only on MLX".to_owned());
+                }
+                rows.push(SelectedRouteSource {
+                    model_slot: slot.clone(),
+                    component_id: "sdxl_detail_tile_control".to_owned(),
+                    role: ArtifactMemberRole::Control,
+                    source: SelectedSourceLocation::DynamicHfRepo(repo.to_owned()),
+                    selected_tier: None,
+                });
+            } else {
+                push_operator_source(&mut rows, slot, "sdxl_detail_tile_control");
+            }
         }
         if payload.get("editMode").and_then(Value::as_str) == Some("cover")
             && id.starts_with("acestep")
@@ -300,6 +333,19 @@ pub(crate) fn eligible_portable_routes(
         ("candle", &["linux", "windows"][..]),
     ] {
         if explicit_backend.is_some_and(|selected| selected != backend) {
+            continue;
+        }
+        if backend == "candle"
+            && *job_type == JobType::ImageDetail
+            && payload
+                .get("advanced")
+                .and_then(Value::as_object)
+                .and_then(|advanced| advanced.get("tileControlNetRepo"))
+                .and_then(Value::as_str)
+                .is_some_and(|repo| {
+                    !repo.trim().is_empty() && repo != "xinsir/controlnet-tile-sdxl-1.0"
+                })
+        {
             continue;
         }
         let claims =

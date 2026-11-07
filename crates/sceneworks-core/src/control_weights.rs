@@ -67,6 +67,12 @@ pub const SHIPPED_AUXILIARY_SOURCES: &[ShippedAuxiliarySource] = &[
         revision: "5426e4f0f36572d16453bbda7a8389317b1bef99",
         files: &["model.safetensors"],
     },
+    ShippedAuxiliarySource {
+        source_id: "ltx_training_text_encoder",
+        repo: "SceneWorks/ltx-2.3-mlx",
+        revision: "01df27d308466533aa09d251e3aebdcc627d07eb",
+        files: &["gemma/*"],
+    },
 ];
 
 pub fn shipped_auxiliary_source(source_id: &str) -> Option<&'static ShippedAuxiliarySource> {
