@@ -74,57 +74,48 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
         });
     }
     loop {
-        // A Metal watchdog timeout poisons the command queue for this OS process. The just-failed
-        // job was already made terminal by `run_utility_job`; stop BEFORE `poll_once` can claim a
-        // successor, mark this instance unhealthy, and clean-exit. Under `GPU_ID=auto` the existing
-        // supervisor observes that single exit and spawns a fresh process with fresh Metal state.
-        // Clean exit is intentional: an abnormal-exit attribution would manufacture a second job
-        // failure after the truthful first timeout has already been persisted.
-        if settings.gpu_id == "mlx" {
-            if let Some(recycle) = mlx_worker_recovery::global().begin_recycle() {
-                emit_event_value(
-                    Level::ERROR,
-                    json!({
-                        "event": if recycle.process_fault.is_some() {
-                            "mlx_owner_executor_poisoned_worker_recycle"
-                        } else {
-                            "mlx_h3_i2v_poisoned_worker_recycle"
-                        },
-                        "workerId": settings.worker_id,
-                        "gpuId": settings.gpu_id,
-                        "firstTimeout": recycle.first_timeout,
-                        "processFault": recycle.process_fault,
-                        "sawSubmissionsIgnored": recycle.saw_submissions_ignored,
-                    }),
-                );
-                let _ = heartbeat_with_reason(
-                    &api,
-                    &settings,
-                    WorkerStatus::Unhealthy,
-                    None,
-                    Some(recycle.reason),
-                )
-                .await;
-                return Ok(());
+        // An explicit native owner fault or an H3 MLX Metal watchdog timeout poisons this OS
+        // process. The failed job is already terminal; stop before claiming a successor and let
+        // the auto-worker supervisor start a fresh process. A clean exit preserves the original
+        // terminal failure rather than manufacturing a second failure on abnormal exit.
+        if let Some(recycle) = mlx_worker_recovery::global().begin_recycle() {
+            emit_event_value(
+                Level::ERROR,
+                json!({
+                    "event": if recycle.process_fault.is_some() {
+                        "native_owner_executor_poisoned_worker_recycle"
+                    } else {
+                        "mlx_h3_i2v_poisoned_worker_recycle"
+                    },
+                    "workerId": settings.worker_id,
+                    "gpuId": settings.gpu_id,
+                    "firstTimeout": recycle.first_timeout,
+                    "processFault": recycle.process_fault,
+                    "sawSubmissionsIgnored": recycle.saw_submissions_ignored,
+                }),
+            );
+            let _ = heartbeat_with_reason(
+                &api,
+                &settings,
+                WorkerStatus::Unhealthy,
+                None,
+                Some(recycle.reason),
+            )
+            .await;
+            return Ok(());
+        }
+        if let Some(reason) = mlx_worker_recovery::global().quarantine_reason() {
+            // This is reachable only when shutdown interrupted the active job's terminal-write
+            // retry. Stay unclaimable rather than recycling on an unconfirmed failure or
+            // falling through to `poll_once`; the shutdown arm normally resolves immediately.
+            let _ =
+                heartbeat_with_reason(&api, &settings, WorkerStatus::Unhealthy, None, Some(reason))
+                    .await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))) => {}
+                _ = shutdown_signal() => return Ok(()),
             }
-            if let Some(reason) = mlx_worker_recovery::global().quarantine_reason() {
-                // This is reachable only when shutdown interrupted the active job's terminal-write
-                // retry. Stay unclaimable rather than recycling on an unconfirmed failure or
-                // falling through to `poll_once`; the shutdown arm normally resolves immediately.
-                let _ = heartbeat_with_reason(
-                    &api,
-                    &settings,
-                    WorkerStatus::Unhealthy,
-                    None,
-                    Some(reason),
-                )
-                .await;
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))) => {}
-                    _ = shutdown_signal() => return Ok(()),
-                }
-                continue;
-            }
+            continue;
         }
         if !health.is_usable() && Instant::now() >= next_gpu_recheck {
             next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;

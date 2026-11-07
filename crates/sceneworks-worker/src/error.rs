@@ -122,6 +122,9 @@ pub(crate) fn task_join_error(label: &str, error: tokio::task::JoinError) -> Wor
 pub(crate) fn classify_engine_error(context: &str, error: gen_core::Error) -> WorkerError {
     match error {
         gen_core::Error::Canceled => WorkerError::Canceled(format!("{context}: {error}")),
+        // A provider has already classified a fatal process state. Keep its original detail
+        // byte-for-byte so the owner and terminal paths can retire without string inference.
+        gen_core::Error::ProcessPoisoned(detail) => WorkerError::ProcessPoisoned(detail),
         gen_core::Error::Unsupported(_) => {
             WorkerError::InvalidPayload(format!("{context}: {error}"))
         }
@@ -232,6 +235,17 @@ mod tests {
         assert!(
             matches!(classified, WorkerError::Engine(_)),
             "a generic engine failure must stay WorkerError::Engine, got {classified:?}"
+        );
+    }
+
+    #[test]
+    fn typed_provider_process_fault_keeps_original_detail() {
+        let error = classify_engine_error(
+            "FLUX.1 generation failed",
+            gen_core::Error::ProcessPoisoned("first device fault".into()),
+        );
+        assert!(
+            matches!(error, WorkerError::ProcessPoisoned(ref detail) if detail == "first device fault")
         );
     }
 

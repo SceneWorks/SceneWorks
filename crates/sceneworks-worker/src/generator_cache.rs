@@ -12,8 +12,6 @@ use gen_core::{
 #[cfg(any(native_lane, test))]
 use crate::cache_thread::CacheThread;
 use crate::cache_thread::{self, CacheAccess, CacheJob, Fingerprint, SeamMessages};
-#[cfg(any(native_lane, test))]
-use crate::WorkerError;
 use crate::WorkerResult;
 
 /// The generator cache is a single-resident [`crate::cache_thread::CacheThread`] keyed by
@@ -1609,6 +1607,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
 async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3<R>(
     worker: &mpsc::Sender<GeneratorJob>,
     evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,

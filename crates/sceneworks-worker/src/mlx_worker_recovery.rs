@@ -1,9 +1,10 @@
-//! Process recovery for the MiniMax-H3 MLX I2V Metal-watchdog failure (sc-21027).
+//! Process recovery for typed native owner faults and MiniMax-H3 MLX I2V Metal watchdog failures.
 //!
-//! The inference provider labels its two FL2VA-only force boundaries with a stable
+//! Typed native owner faults cover MLX and Candle. The H3 inference provider labels its two
+//! FL2VA-only force boundaries with a stable
 //! `MiniMax-H3 MLX I2V` marker. That lets this worker quarantine only the process instance whose
-//! Metal command queue failed, without changing T2V, another model family, Candle, or an ordinary
-//! MLX allocation failure. A poisoned process must not submit again: the worker loop consumes one
+//! Metal command queue failed, without changing T2V, another model family, or an ordinary
+//! allocation failure. A poisoned process must not submit again: the worker loop consumes one
 //! recycle request before its next claim and exits cleanly for the existing auto-worker supervisor
 //! to replace it.
 //!
@@ -420,26 +421,38 @@ mod tests {
         assert!(state.begin_recycle().is_none());
     }
 
-    #[test]
-    fn typed_owner_fault_keeps_first_error_and_recycles_only_after_terminal_write() {
+    #[tokio::test]
+    async fn typed_candle_fault_keeps_first_error_and_recycles_only_after_terminal_write() {
+        use std::cell::Cell;
+
         let state = MlxWorkerRecovery::new();
         assert_eq!(
-            state.observe_process_fault("original owner panic"),
-            "original owner panic"
+            state.observe_process_fault("Candle device lost"),
+            "Candle device lost"
         );
         assert_eq!(
             state.observe_process_fault("later fallout"),
-            "original owner panic"
+            "Candle device lost"
         );
         assert!(!state.can_claim());
         assert!(state.begin_recycle().is_none());
-        state.note_terminal_failure_persisted();
-        let recycle = state.begin_recycle().expect("one replacement");
-        assert_eq!(
-            recycle.process_fault.as_deref(),
-            Some("original owner panic")
+        let attempts = Cell::new(0);
+        assert!(
+            persist_terminal_failure_with(&state, || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    assert!(state.begin_recycle().is_none());
+                    std::future::ready(TerminalPersistenceAttempt::Retry)
+                } else {
+                    assert!(!state.can_claim());
+                    std::future::ready(TerminalPersistenceAttempt::Persisted)
+                }
+            })
+            .await
         );
-        assert!(recycle.reason.contains("original owner panic"));
+        let recycle = state.begin_recycle().expect("one replacement");
+        assert_eq!(recycle.process_fault.as_deref(), Some("Candle device lost"));
+        assert!(recycle.reason.contains("Candle device lost"));
         assert!(state.begin_recycle().is_none());
     }
 }

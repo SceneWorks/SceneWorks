@@ -377,7 +377,7 @@ async fn handle_job_failure(
             // problem hits all of them identically. Annotating here catches every one, and is a
             // no-op when the guidance is already present.
             let original_detail = error.to_string();
-            let recovery_detail = if settings.gpu_id == "mlx" && owner_process_fault {
+            let recovery_detail = if owner_process_fault {
                 Some(mlx_worker_recovery::global().observe_process_fault(&original_detail))
             } else if settings.gpu_id == "mlx" {
                 mlx_worker_recovery::global().observe(&original_detail)
@@ -389,7 +389,7 @@ async fn handle_job_failure(
                     Level::ERROR,
                     json!({
                         "event": if owner_process_fault {
-                            "mlx_owner_executor_worker_poisoned"
+                            "native_owner_executor_worker_poisoned"
                         } else {
                             "mlx_h3_i2v_worker_poisoned"
                         },

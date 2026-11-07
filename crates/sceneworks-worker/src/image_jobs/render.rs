@@ -283,7 +283,12 @@ pub(super) fn render_on_surface(
             ),
         }
     }
-    .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
+    .map_err(|error| match error {
+        gen_core::Error::ProcessPoisoned(_) => {
+            crate::classify_engine_error("generation failed", error)
+        }
+        other => WorkerError::Engine(format!("generation failed: {other}")),
+    })?;
     if let Some(sink) = surface.warnings {
         sink.borrow_mut().extend(report.warnings);
     }
@@ -409,10 +414,13 @@ pub(super) fn compile_render_plan(
 ) -> WorkerResult<Option<gen_core::RenderPlan>> {
     let plan = registry
         .compile_render_plan(engine_id, spec, request)
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "{engine_id}: cannot compile render plan before load: {error}"
-            ))
+        .map_err(|error| match error {
+            gen_core::Error::ProcessPoisoned(_) => {
+                crate::classify_engine_error("render-plan compilation failed", error)
+            }
+            other => WorkerError::InvalidPayload(format!(
+                "{engine_id}: cannot compile render plan before load: {other}"
+            )),
         })?;
     if plan.is_none()
         && matches!(engine_id, "flux1_schnell" | "flux1_dev")
@@ -874,4 +882,137 @@ pub(super) fn step_fraction(index: usize, current: u32, total: u32, count: u32) 
         0.0
     };
     (0.1 + per * (index as f64 + within)).min(0.95)
+}
+
+#[cfg(test)]
+mod process_fault_tests {
+    use super::*;
+
+    struct FaultGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        poisoned: bool,
+    }
+
+    impl FaultGenerator {
+        fn new(poisoned: bool) -> Self {
+            Self {
+                descriptor: gen_core::ModelDescriptor {
+                    id: "render_fault_mock",
+                    family: "test",
+                    backend: "mlx",
+                    modality: gen_core::Modality::Image,
+                    capabilities: Default::default(),
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
+                    required_components: &[],
+                    control_kinds: None,
+                },
+                poisoned,
+            }
+        }
+    }
+
+    impl Generator for FaultGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn validate(&self, _request: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            _request: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            panic!("planned render must not fall back to legacy generation")
+        }
+
+        fn generate_planned(
+            &self,
+            _request: &gen_core::GenerationRequest,
+            _plan: &gen_core::RenderPlan,
+            _scope: Option<&mut dyn gen_core::MemoryRequestScope>,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::GenerationReport> {
+            if self.poisoned {
+                Err(gen_core::Error::ProcessPoisoned(
+                    "first provider device fault".into(),
+                ))
+            } else {
+                Err(gen_core::Error::Unsupported("ordinary refusal".into()))
+            }
+        }
+    }
+
+    #[test]
+    fn planned_render_preserves_typed_provider_poison_and_ordinary_error_class() {
+        let request = gen_core::GenerationRequest {
+            prompt: "a fox".into(),
+            width: 64,
+            height: 64,
+            count: 1,
+            seed: Some(7),
+            steps: Some(1),
+            ..Default::default()
+        };
+        let poison = FaultGenerator::new(true);
+        let plan = gen_core::RenderPlan::base_image(
+            poison.descriptor(),
+            &request,
+            gen_core::render::PackedImagePass {
+                pixel_stride: 16,
+                token_width: 64,
+                sampler: "euler",
+                guidance: 3.5,
+                sigmas: vec![1.0, 0.0],
+                executed_steps: 1,
+                capture_sigma: 0.0,
+            },
+        )
+        .expect("weights-free plan");
+        let surface = LaneRgbaSurface {
+            render_plan: Some(&plan),
+            ..Default::default()
+        };
+        let render = |generator: &dyn Generator| {
+            render_on_surface(
+                generator,
+                "a fox",
+                64,
+                64,
+                7,
+                1,
+                None,
+                None,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                &PromptEnhance::default(),
+                gen_core::PromptEnhancementSink::default(),
+                gen_core::PreviewSink::default(),
+                &surface,
+                &CancelFlag::new(),
+                &mut |_| {},
+            )
+        };
+        let fatal = render(&poison).expect_err("provider fault must fail render");
+        assert!(
+            matches!(fatal, WorkerError::ProcessPoisoned(ref detail) if detail == "first provider device fault")
+        );
+        let ordinary = render(&FaultGenerator::new(false)).expect_err("ordinary refusal");
+        assert!(
+            matches!(ordinary, WorkerError::Engine(ref detail) if detail == "generation failed: unsupported: ordinary refusal")
+        );
+    }
 }

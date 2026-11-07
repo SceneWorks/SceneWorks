@@ -347,10 +347,16 @@ fn run_with_scope<T>(
             generator.descriptor().id
         )));
     }
-    if let Some(scope) = scope.as_mut() {
-        if let Err(error) = scope.configure_request(request) {
+    if let Some(scope_ref) = scope.as_mut() {
+        if let Err(error) = scope_ref.configure_request(request) {
+            if matches!(error, gen_core::Error::ProcessPoisoned(_)) {
+                // The provider has declared this process unsafe. Even Drop may submit backend
+                // work, so leave the scope to OS process retirement and keep its first error.
+                std::mem::forget(scope.take());
+                return Err(error);
+            }
             let message = error.to_string();
-            let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
+            let _ = scope_ref.finish(gen_core::MemoryRunOutcome::Error {
                 message: message.clone(),
             });
             return Err(error);
@@ -388,6 +394,12 @@ fn run_with_scope<T>(
         Some(scope) => run(generator, request, Some(scope.as_mut()), on_progress),
         None => run(generator, request, None, on_progress),
     };
+    if matches!(result, Err(gen_core::Error::ProcessPoisoned(_))) {
+        // No finish, teardown or backend destructor after the provider reports a fatal process
+        // state. The worker records this exact failure and the supervisor replaces the process.
+        std::mem::forget(scope.take());
+        return result;
+    }
     if let Some(scope) = scope.as_mut() {
         let outcome = match &result {
             Ok(_) => gen_core::MemoryRunOutcome::Complete,
@@ -2290,18 +2302,26 @@ mod tests {
         Complete,
         Canceled,
         Error,
+        ProcessPoisoned,
     }
 
     #[derive(Default)]
     struct LifecycleRecord {
         configure_calls: usize,
         finish_calls: Vec<MemoryRunOutcome>,
+        drop_calls: usize,
         phase_events: Vec<(bool, MemoryPhase)>,
     }
 
     struct MockScope {
         record: Arc<Mutex<LifecycleRecord>>,
         configure_fails: bool,
+    }
+
+    impl Drop for MockScope {
+        fn drop(&mut self) {
+            self.record.lock().unwrap().drop_calls += 1;
+        }
     }
 
     impl MemoryRequestScope for MockScope {
@@ -2422,6 +2442,9 @@ mod tests {
                 }
                 MockGenerate::Canceled => Err(gen_core::Error::Canceled),
                 MockGenerate::Error => Err(gen_core::Error::Unsupported("render failed".into())),
+                MockGenerate::ProcessPoisoned => Err(gen_core::Error::ProcessPoisoned(
+                    "first device fault".into(),
+                )),
             }
         }
 
@@ -2503,6 +2526,10 @@ mod tests {
         let record = generator.record.lock().unwrap();
         assert_eq!(record.configure_calls, 1);
         assert_eq!(record.finish_calls, vec![expected]);
+        assert_eq!(
+            record.drop_calls, 1,
+            "healthy and ordinary failure scopes are dropped"
+        );
     }
 
     #[test]
@@ -2547,6 +2574,55 @@ mod tests {
             vec![(true, MemoryPhase::Denoise), (false, MemoryPhase::Denoise)]
         );
         assert_eq!(record.finish_calls, vec![MemoryRunOutcome::Complete]);
+    }
+
+    #[test]
+    fn typed_provider_poison_abandons_scope_without_finish_or_backend_drop() {
+        let generator = MockGenerator::new(MockGenerate::ProcessPoisoned, false);
+        let mut request = gen_core::GenerationRequest {
+            prompt: "a fox".into(),
+            width: 64,
+            height: 64,
+            count: 1,
+            seed: Some(7),
+            steps: Some(1),
+            ..Default::default()
+        };
+        let plan = gen_core::RenderPlan::base_image(
+            gen_core::Generator::descriptor(&generator),
+            &request,
+            gen_core::render::PackedImagePass {
+                pixel_stride: 16,
+                token_width: 64,
+                sampler: "euler",
+                guidance: 3.5,
+                sigmas: vec![1.0, 0.0],
+                executed_steps: 1,
+                capture_sigma: 0.0,
+            },
+        )
+        .expect("weights-free plan");
+        let error = generate_with_scope_report_planned(
+            &generator,
+            &mut request,
+            &plan,
+            Some(&run_context()),
+            &mut |_| {},
+        )
+        .expect_err("fatal provider fault");
+        assert!(
+            matches!(error, gen_core::Error::ProcessPoisoned(ref detail) if detail == "first device fault")
+        );
+        let record = generator.record.lock().unwrap();
+        assert_eq!(record.configure_calls, 1);
+        assert!(
+            record.finish_calls.is_empty(),
+            "no post-fault finish may run"
+        );
+        assert_eq!(
+            record.drop_calls, 0,
+            "scope destructor may touch the device"
+        );
     }
 
     /// A request scope that does what every shipped scope does (`candle-gen`/`mlx-gen`

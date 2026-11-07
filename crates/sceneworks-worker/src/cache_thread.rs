@@ -206,7 +206,7 @@ where
 
     fn mark_poisoned_with_error(&mut self, _error: &WorkerError) {
         self.mark_poisoned();
-        #[cfg(all(target_os = "macos", not(test)))]
+        #[cfg(not(test))]
         if let WorkerError::ProcessPoisoned(detail) = _error {
             crate::mlx_worker_recovery::global().observe_process_fault(detail);
         }
@@ -422,6 +422,7 @@ pub(crate) fn run_cache_worker<K, M>(
 /// The generator owner uses this policy because a panic after a backend submission cannot prove
 /// that dropping the model or clearing the backend cache is safe. The process supervisor replaces
 /// this owner after the active job's original failure has been persisted.
+#[cfg(test)]
 pub(crate) fn run_cache_worker_with_fatal_panics<K, M>(
     rx: mpsc::Receiver<CacheJob<K, M>>,
     idle_timeout: Option<Duration>,
@@ -463,7 +464,7 @@ pub(crate) fn run_cache_worker_with_panic_policy<K, M>(
         {
             if fatal_panics {
                 cache.mark_poisoned();
-                #[cfg(all(target_os = "macos", not(test)))]
+                #[cfg(not(test))]
                 crate::mlx_worker_recovery::global().observe_process_fault(&format!(
                     "Generator owner queue panicked: {}",
                     panic_message(_panic.as_ref())
@@ -694,7 +695,7 @@ where
 }
 
 fn owner_stopped_error(fallback: &str) -> WorkerError {
-    #[cfg(all(target_os = "macos", not(test)))]
+    #[cfg(not(test))]
     if let Some(detail) = crate::mlx_worker_recovery::global().process_fault_detail() {
         return WorkerError::ProcessPoisoned(detail);
     }
@@ -810,6 +811,62 @@ mod tests {
         assert!(worker
             .send(Box::new(|_| panic!("retired owner ran again")))
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn typed_candle_process_fault_retires_owner_but_ordinary_error_does_not() {
+        let (worker, rx) = mpsc::channel::<CacheJob<u32, DropProbe>>();
+        let owner = thread::spawn(move || run_cache_worker(rx, None, false, |_key, _seconds| {}));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let loaded_drops = Arc::clone(&drops);
+        let fatal = run_cached(
+            &worker,
+            1,
+            move || Ok(DropProbe(loaded_drops)),
+            |_model| Err::<(), _>(WorkerError::ProcessPoisoned("Candle device lost".into())),
+            TEST_SEAM_MESSAGES,
+        )
+        .await
+        .expect_err("typed device fault");
+        assert!(
+            matches!(fatal, WorkerError::ProcessPoisoned(ref detail) if detail == "Candle device lost")
+        );
+        owner.join().expect("typed fatal retires owner");
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "no device destructor after fatal"
+        );
+        assert!(worker
+            .send(Box::new(|_| panic!("retired Candle owner ran")))
+            .is_err());
+
+        let (worker, rx) = mpsc::channel::<CacheJob<u32, DropProbe>>();
+        let owner = thread::spawn(move || run_cache_worker(rx, None, false, |_key, _seconds| {}));
+        let ordinary_drops = Arc::new(AtomicUsize::new(0));
+        let loaded_drops = Arc::clone(&ordinary_drops);
+        let ordinary = run_cached(
+            &worker,
+            1,
+            move || Ok(DropProbe(loaded_drops)),
+            |_model| Err::<(), _>(WorkerError::Engine("ordinary request failure".into())),
+            TEST_SEAM_MESSAGES,
+        )
+        .await
+        .expect_err("ordinary error");
+        assert!(matches!(ordinary, WorkerError::Engine(_)));
+        run_cached(
+            &worker,
+            1,
+            || panic!("ordinary failure must keep warm model"),
+            |_model| Ok(()),
+            TEST_SEAM_MESSAGES,
+        )
+        .await
+        .expect("ordinary error leaves owner reusable");
+        drop(worker);
+        owner.join().expect("ordinary owner exits normally");
+        assert_eq!(ordinary_drops.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
