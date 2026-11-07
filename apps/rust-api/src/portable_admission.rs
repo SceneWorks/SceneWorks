@@ -7,7 +7,7 @@
 use crate::error::ApiError;
 use crate::portable_routes::{SelectedRouteSource, SelectedSourceLocation};
 use crate::AppState;
-use sceneworks_core::contracts::{JobType, JsonObject};
+use sceneworks_core::contracts::{JobStatus, JobType, JsonObject};
 use sceneworks_core::model_artifacts::artifact_selection::{
     is_co_requisite_download, is_supported_model_download, requested_runtime_variant,
     safe_download_dir, selected_model_artifact_closure,
@@ -503,6 +503,21 @@ async fn capture_model_slot(
             .unwrap_or("default")
             .to_owned();
         tier = Some(variant.clone());
+        let produced_training = training.as_ref().is_some_and(|training| {
+            let expected = state
+                .settings
+                .data_dir
+                .join("models")
+                .join("mlx")
+                .join(model_id);
+            matches!(
+                (std::fs::canonicalize(&training.path), std::fs::canonicalize(expected)),
+                (Ok(actual), Ok(expected)) if actual == expected
+            )
+        });
+        if produced_training {
+            verify_produced_local_source(state, entry, &training.as_ref().unwrap().path)?;
+        }
         for (index, download) in downloads.iter().enumerate() {
             let role = if is_co_requisite_download(download) {
                 ArtifactMemberRole::CoRequisite
@@ -511,10 +526,24 @@ async fn capture_model_slot(
             };
             let component_id =
                 (role != ArtifactMemberRole::Primary).then(|| format!("{slot}/downloads/{index}"));
-            members.push(capture_download_member(state, download, role, component_id).await?);
+            members.push(
+                if role == ArtifactMemberRole::Primary && produced_training {
+                    capture_local_member(
+                        &training.as_ref().unwrap().path,
+                        &allowed_local_roots(state),
+                        role,
+                        component_id,
+                        tier.clone(),
+                    )?
+                } else {
+                    capture_download_member(state, download, role, component_id).await?
+                },
+            );
         }
-        if let Some(training) = &training {
-            verify_training_primary_path(state, &training.path, primary, &members).await?;
+        if !produced_training {
+            if let Some(training) = &training {
+                verify_training_primary_path(state, &training.path, primary, &members).await?;
+            }
         }
     }
     if let Some(path) =
@@ -1180,6 +1209,9 @@ fn capture_local_model_entry(
             3
         }
     });
+    if entry.pointer("/importPlan/checkpointId").is_none() {
+        verify_produced_local_source(state, entry, &locators[0].1)?;
+    }
     let mut members = Vec::new();
     for (index, (key, path)) in locators.into_iter().enumerate() {
         let files = capture_local_source_files(&path, &allowed_roots)?;
@@ -1202,6 +1234,120 @@ fn capture_local_model_entry(
         members.push(member);
     }
     Ok(members)
+}
+
+/// Conversion and trained full-base roots become portable only after the producer has written a
+/// strong receipt and the API can tie its IDs and output path to a completed source job.
+fn verify_produced_local_source(
+    state: &AppState,
+    entry: &Value,
+    source: &Path,
+) -> Result<(), ApiError> {
+    let model_id = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| incomplete("local model entry has no id"))?;
+    let root = if source.is_file() {
+        source
+            .parent()
+            .ok_or_else(|| incomplete("local model file has no root"))?
+    } else {
+        source
+    };
+    let root = confine_artifact_path(root, &allowed_local_roots(state))
+        .map_err(|error| incomplete(error.to_string()))?;
+    let marker = root.join(".sceneworks-produced-artifact.json");
+    let receipt: sceneworks_worker::ProducedArtifactReceipt =
+        serde_json::from_slice(&std::fs::read(marker).map_err(|error| {
+            incomplete(format!(
+                "local model producer receipt is unavailable: {error}"
+            ))
+        })?)
+        .map_err(|error| incomplete(format!("local model producer receipt is invalid: {error}")))?;
+    if receipt.output_model_id != model_id {
+        return Err(incomplete(
+            "local model producer output id differs from catalog",
+        ));
+    }
+    let producer = state
+        .jobs_store
+        .get_job(&receipt.producer_job_id)
+        .map_err(|error| incomplete(format!("local model producer job is unavailable: {error}")))?;
+    if producer.status != JobStatus::Completed || producer.completed_at.is_none() {
+        return Err(incomplete("local model producer job is not complete"));
+    }
+    match producer.job_type {
+        JobType::ModelConvert => {
+            let expected = state
+                .settings
+                .data_dir
+                .join("models")
+                .join("mlx")
+                .join(model_id);
+            let expected = confine_artifact_path(&expected, &allowed_local_roots(state))
+                .map_err(|error| incomplete(error.to_string()))?;
+            if root != expected
+                || producer.payload.get("modelId").and_then(Value::as_str) != Some(model_id)
+                || producer.payload.get("sourceRepo").and_then(Value::as_str)
+                    != Some(receipt.source_artifact_id.as_str())
+            {
+                return Err(incomplete(
+                    "converted model receipt differs from completed source job",
+                ));
+            }
+        }
+        JobType::LoraTrain => {
+            let plan: sceneworks_core::training::TrainingPlan = serde_json::from_value(
+                producer
+                    .payload
+                    .get("plan")
+                    .cloned()
+                    .ok_or_else(|| incomplete("trained model producer has no plan"))?,
+            )
+            .map_err(|error| incomplete(format!("trained model plan is invalid: {error}")))?;
+            let (output, _) = crate::training::resolve_finetune_output_location(state, model_id);
+            let output = if entry.get("family").and_then(Value::as_str)
+                == Some(sceneworks_core::training::iris::IRIS_FAMILY)
+            {
+                crate::iris_training::iris_full_export_dir(&output, &plan.output.file_name)
+                    .ok_or_else(|| incomplete("Iris producer has no valid export path"))?
+            } else {
+                output
+            };
+            let output = confine_artifact_path(&output, &allowed_local_roots(state))
+                .map_err(|error| incomplete(error.to_string()))?;
+            if root != output
+                || producer
+                    .payload
+                    .get("manifestEntry")
+                    .and_then(|manifest| manifest.get("id"))
+                    .and_then(Value::as_str)
+                    != Some(model_id)
+                || plan.target.base_model != receipt.source_artifact_id
+                || entry
+                    .pointer("/provenance/trainingJobId")
+                    .and_then(Value::as_str)
+                    != Some(producer.id.as_str())
+            {
+                return Err(incomplete(
+                    "trained model receipt differs from completed source job",
+                ));
+            }
+        }
+        _ => {
+            return Err(incomplete(
+                "local model receipt names an unsupported producer job",
+            ))
+        }
+    }
+    sceneworks_worker::verify_produced_artifact_receipt(
+        &root,
+        &producer.id,
+        &receipt.source_artifact_id,
+        model_id,
+    )
+    .map_err(|error| incomplete(format!("local model producer bytes changed: {error}")))?;
+    Ok(())
 }
 
 fn allowed_local_roots(state: &AppState) -> Vec<PathBuf> {
