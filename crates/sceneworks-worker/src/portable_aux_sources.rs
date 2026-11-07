@@ -67,16 +67,13 @@ pub(crate) fn resolve_selected_aux_source(
             {
                 return Some((dir, true));
             }
-            if let Some(dir) = snapshot("SceneWorks/instantid-mlx")
-                .filter(|dir| files.iter().all(|file| dir.join(file).is_file()))
-            {
+            let dir = data_dir.join("cache/instantid-mlx");
+            if files.iter().all(|file| dir.join(file).is_file()) {
                 return Some((dir, false));
             }
-            let dir = data_dir.join("cache/instantid-mlx");
-            files
-                .iter()
-                .all(|file| dir.join(file).is_file())
-                .then_some((dir, false))
+            snapshot("SceneWorks/instantid-mlx")
+                .filter(|dir| files.iter().all(|file| dir.join(file).is_file()))
+                .map(|dir| (dir, false))
         }
         "instantid_controlnet" => {
             if let Some(dir) = std::env::var_os("SCENEWORKS_INSTANTID_CONTROLNET")
@@ -167,18 +164,27 @@ pub(crate) fn resolve_selected_aux_source(
             {
                 return Some((dir.join(file), true));
             }
-            if let Some(path) = snapshot(repo)
-                .map(|dir| dir.join(file))
-                .filter(|path| path.is_file())
-            {
-                return Some((path, false));
-            }
             let dir = data_dir.join(if cfg!(target_os = "macos") {
                 "cache/pulid-flux-mlx"
             } else {
                 "cache/pulid-flux"
             });
-            dir.join(file).is_file().then_some((dir.join(file), false))
+            let local = dir.join(file);
+            let cached = snapshot(repo)
+                .map(|root| root.join(file))
+                .filter(|path| path.is_file());
+            if cfg!(target_os = "macos")
+                || matches!(source_id, "pulid_bisenet" | "pulid_scrfd" | "pulid_arcface")
+            {
+                if local.is_file() {
+                    return Some((local, false));
+                }
+                cached.map(|path| (path, false))
+            } else {
+                cached
+                    .map(|path| (path, false))
+                    .or_else(|| local.is_file().then_some((local, false)))
+            }
         }
         #[cfg(native_lane)]
         "ltx_training_gemma_override" => {
