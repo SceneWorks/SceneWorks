@@ -631,21 +631,23 @@ fn generator_worker() -> &'static mpsc::Sender<GeneratorJob> {
 /// Thin wrapper over the generic [`cache_thread::run_cache_worker`]: no evict-before-load
 /// ([`GENERATOR_EVICT_BEFORE_LOAD`]) and the generator-specific idle-eviction log.
 fn run_generator_cache_worker(rx: mpsc::Receiver<GeneratorJob>, idle_timeout: Option<Duration>) {
-    cache_thread::run_cache_worker_with_panic_policy(
-        rx,
-        idle_timeout,
-        GENERATOR_EVICT_BEFORE_LOAD,
-        cfg!(target_os = "macos"),
-        |key: &LoadIdentity, idle_seconds| {
-            // Documented event (docs/observability.md): expected idle-timeout eviction, so info
-            // level with the engine + idle window.
-            tracing::info!(
-                event = "generator_cache_idle_evicted",
-                engine = %key.engine_id,
-                idleSeconds = idle_seconds,
-            );
-        },
-    );
+    crate::generator_panic::on_generator_owner(|| {
+        cache_thread::run_cache_worker_with_panic_policy(
+            rx,
+            idle_timeout,
+            GENERATOR_EVICT_BEFORE_LOAD,
+            cfg!(target_os = "macos"),
+            |key: &LoadIdentity, idle_seconds| {
+                // Documented event (docs/observability.md): expected idle-timeout eviction, so info
+                // level with the engine + idle window.
+                tracing::info!(
+                    event = "generator_cache_idle_evicted",
+                    engine = %key.engine_id,
+                    idleSeconds = idle_seconds,
+                );
+            },
+        )
+    });
 }
 
 /// Documented event (docs/observability.md): why a request cold-loads instead of reusing the

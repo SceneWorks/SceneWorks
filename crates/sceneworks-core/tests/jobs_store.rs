@@ -3351,7 +3351,7 @@ fn signal_death_fails_active_job_with_attributed_error() {
     assert_eq!(claimed.id, created.id);
 
     let failed = store
-        .fail_worker_job_terminated("worker-1", Some(9), None)
+        .fail_worker_job_terminated("worker-1", Some(9), None, None)
         .expect("signal death recorded")
         .expect("the worker's active job is failed");
 
@@ -3384,7 +3384,7 @@ fn signal_death_with_no_active_job_is_a_noop() {
     register_image_worker(&store);
 
     let failed = store
-        .fail_worker_job_terminated("worker-1", Some(11), None)
+        .fail_worker_job_terminated("worker-1", Some(11), None, None)
         .expect("signal death recorded");
 
     assert!(failed.is_none(), "an idle worker death fails no job");
@@ -3409,7 +3409,7 @@ fn non_signal_exit_fails_active_job_with_exit_code_error() {
     assert_eq!(claimed.id, created.id);
 
     let failed = store
-        .fail_worker_job_terminated("worker-1", None, Some(101))
+        .fail_worker_job_terminated("worker-1", None, Some(101), None)
         .expect("termination recorded")
         .expect("the worker's active job is failed");
 
@@ -3431,6 +3431,49 @@ fn non_signal_exit_fails_active_job_with_exit_code_error() {
     let worker = store.get_worker("worker-1").expect("worker loads");
     assert_eq!(worker.current_job_id, None);
     assert_eq!(worker.status, WorkerStatus::Offline);
+}
+
+#[test]
+fn generator_abort_receipt_persists_specific_terminal_failure_once() {
+    let store = store("generator-abort-receipt");
+    register_image_worker(&store);
+    let first = store.create_job(image_job(Map::new())).unwrap();
+    store.claim_next_job("worker-1").unwrap().unwrap();
+    // Claim routing admits one GPU job per worker. Inject an out-of-band stale
+    // active row to prove abnormal-exit cleanup cannot leave it stuck or attach
+    // the current job's panic cause to it.
+    let second = store.create_job(image_job(Map::new())).unwrap();
+    let connection = Connection::open(store._db.path()).unwrap();
+    connection
+        .execute(
+            "update jobs set status = 'preparing', worker_id = 'worker-1' where id = ?1",
+            params![second.id],
+        )
+        .unwrap();
+    drop(connection);
+    let failed = store
+        .fail_worker_jobs_terminated(
+            "worker-1",
+            Some(6),
+            None,
+            Some("driver fault\nGPU state poisoned"),
+        )
+        .unwrap();
+    assert_eq!(failed.len(), 2);
+    let current = failed.iter().find(|job| job.id == first.id).unwrap();
+    let old = failed.iter().find(|job| job.id == second.id).unwrap();
+    assert_eq!(old.status, JobStatus::Failed);
+    assert_eq!(current.status, JobStatus::Failed);
+    assert!(!old.error.as_deref().unwrap().contains("driver fault"));
+    assert!(current
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("driver faultGPU state poisoned"));
+    assert!(store
+        .fail_worker_job_terminated("worker-1", Some(6), None, Some("again"))
+        .unwrap()
+        .is_none());
 }
 
 #[test]

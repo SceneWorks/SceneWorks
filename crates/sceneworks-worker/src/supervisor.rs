@@ -351,7 +351,16 @@ where
     // exited itself) and is never reported (sc-6320).
     for (worker_id, signal, exit_code) in newly_exited {
         if child_died_abnormally(signal, exit_code) {
-            report_worker_terminated(settings, &worker_id, signal, exit_code).await;
+            let panic_message =
+                crate::generator_panic::read_diagnostic(&worker_panic_path(settings, &worker_id));
+            report_worker_terminated(
+                settings,
+                &worker_id,
+                signal,
+                exit_code,
+                panic_message.as_deref(),
+            )
+            .await;
         }
     }
 
@@ -466,6 +475,16 @@ pub(crate) async fn terminate_child(child: &mut Child) {
 
 pub(crate) fn start_child_worker(settings: &Settings, spec: &WorkerSpec) -> WorkerResult<Child> {
     let executable = std::env::current_exe()?;
+    let panic_path = worker_panic_path(settings, &spec.worker_id);
+    if let Some(parent) = panic_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // A worker id has at most one live child; each spawn starts with a clean receipt.
+    match std::fs::remove_file(&panic_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     emit_event_value(
         Level::INFO,
         json!({
@@ -480,6 +499,7 @@ pub(crate) fn start_child_worker(settings: &Settings, spec: &WorkerSpec) -> Work
     // then add the trimmed, nonblank value Settings accepted (if configured).
     command.env_remove("SCENEWORKS_ACCESS_TOKEN");
     command.envs(child_environment(settings, spec));
+    command.env("SCENEWORKS_GENERATOR_PANIC_FILE", panic_path);
     // Windows graceful-shutdown channel (sc-11184 / F-014). Windows has no per-child
     // SIGTERM, so give the child a supervisor-held stdin pipe: closing the write end in
     // `terminate_child` delivers EOF, which the child's `shutdown_signal()` selects on
@@ -490,6 +510,14 @@ pub(crate) fn start_child_worker(settings: &Settings, spec: &WorkerSpec) -> Work
         command.stdin(std::process::Stdio::piped());
     }
     command.spawn().map_err(Into::into)
+}
+
+fn worker_panic_path(settings: &Settings, worker_id: &str) -> PathBuf {
+    let digest = Sha256::digest(worker_id.as_bytes());
+    settings
+        .data_dir
+        .join("worker-panic")
+        .join(format!("{digest:x}.txt"))
 }
 
 /// The Unix signal that terminated a child, if it died by one (`WIFSIGNALED`).
@@ -519,13 +547,15 @@ async fn report_worker_terminated(
     worker_id: &str,
     signal: Option<i32>,
     exit_code: Option<i32>,
+    panic_message: Option<&str>,
 ) {
     let api = ApiClient::new(settings);
     let path = format!("/api/v1/workers/{worker_id}/terminated");
     let outcome = api
         .post_control_json(
             &path,
-            &json!({ "signal": signal, "exitCode": exit_code }).to_string(),
+            &json!({ "signal": signal, "exitCode": exit_code, "panicMessage": panic_message })
+                .to_string(),
         )
         .await;
     if let Err(error) = outcome {

@@ -1103,6 +1103,9 @@ pub struct WorkerTerminationRequest {
     /// Process exit code when the child exited on its own with a non-zero status
     /// (e.g. 101 for a Rust panic); `None` when it died by signal.
     pub exit_code: Option<i32>,
+    /// Bounded panic text written by the generator owner before aborting, when available.
+    #[serde(default)]
+    pub panic_message: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

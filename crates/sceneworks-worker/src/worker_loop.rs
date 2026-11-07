@@ -2,6 +2,16 @@
 use super::*;
 
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
+    // The owner must abort before unwinding GPU values. Supervised children also
+    // receive a receipt path so their parent can persist the active job's cause.
+    if settings.gpu_id != "cpu" {
+        let path = settings
+            .is_child_worker
+            .then(|| std::env::var_os("SCENEWORKS_GENERATOR_PANIC_FILE"))
+            .flatten()
+            .map(PathBuf::from);
+        crate::generator_panic::install(path);
+    }
     // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
     // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
     // diagnosable from one log line. One shared contract version backs every linked backend.

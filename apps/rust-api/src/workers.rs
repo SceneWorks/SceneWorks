@@ -234,12 +234,19 @@ pub(crate) async fn worker_terminated(
     ApiJson(payload): ApiJson<WorkerTerminationRequest>,
 ) -> Result<Json<Option<JobSnapshot>>, ApiError> {
     let failed = store_call(state.clone(), move |store, _timeout| {
-        store.fail_worker_job_terminated(&worker_id, payload.signal, payload.exit_code)
+        store.fail_worker_jobs_terminated(
+            &worker_id,
+            payload.signal,
+            payload.exit_code,
+            payload.panic_message.as_deref(),
+        )
     })
     .await?;
-    if let Some(job) = &failed {
-        invalidate_model_catalog_for_terminal_jobs(&state, std::slice::from_ref(job));
-        publish(&state, "job.updated", job);
+    if !failed.is_empty() {
+        invalidate_model_catalog_for_terminal_jobs(&state, &failed);
+        for job in &failed {
+            publish(&state, "job.updated", job);
+        }
         // Not `?` (sc-18182): the job is already committed as failed and `job.updated`
         // is already out, so a queue-snapshot error must not turn a SUCCESSFUL
         // attribution into a 500 — the desktop supervisor would then log "failed to
@@ -249,11 +256,11 @@ pub(crate) async fn worker_terminated(
         if let Err(error) = publish_queue(&state).await {
             tracing::warn!(
                 event = "queue_publish_failed_after_worker_termination",
-                job_id = %job.id,
+                failed_jobs = failed.len(),
                 error = ?error,
                 "job.updated was published but the queue snapshot failed"
             );
         }
     }
-    Ok(Json(failed.map(public_job_snapshot)))
+    Ok(Json(failed.into_iter().next().map(public_job_snapshot)))
 }

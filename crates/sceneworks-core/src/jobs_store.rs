@@ -2587,19 +2587,58 @@ impl JobsStore {
         worker_id: &str,
         signal: Option<i32>,
         exit_code: Option<i32>,
+        panic_message: Option<&str>,
     ) -> JobsStoreResult<Option<JobSnapshot>> {
+        Ok(self
+            .fail_worker_jobs_terminated(worker_id, signal, exit_code, panic_message)?
+            .into_iter()
+            .next())
+    }
+
+    /// Fail every active row assigned to the dead process. Normal worker execution is
+    /// serialized, but stale active rows must not remain stuck after a worker death.
+    /// Only the worker's current job receives a panic receipt; older rows get the
+    /// generic termination reason rather than a potentially false attribution.
+    pub fn fail_worker_jobs_terminated(
+        &self,
+        worker_id: &str,
+        signal: Option<i32>,
+        exit_code: Option<i32>,
+        panic_message: Option<&str>,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = utc_now();
         let worker_ids = [worker_id.to_owned()];
         let active_jobs = self.active_jobs_for_workers(&transaction, &worker_ids)?;
-        let mut failed = None;
-        if let Some(job) = active_jobs.into_iter().next() {
+        let current_job_id: Option<String> = transaction
+            .query_row(
+                "select current_job_id from workers where id = ?1",
+                params![worker_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let mut failed = Vec::with_capacity(active_jobs.len());
+        for job in active_jobs {
             // Tailor the OOM/signal hint to the dead job's kind so the guidance is
             // actionable (sc-5567): an image-batch SIGKILL points at count/resolution,
             // not the training-only gradient-checkpointing remediation.
-            let error = termination_failure_error(signal, exit_code, Some(&job.job_type));
+            let error = panic_message
+                .filter(|_| current_job_id.as_deref() == Some(job.id.as_str()))
+                .filter(|message| !message.is_empty())
+                .map(|message| {
+                    let safe: String = message
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(512)
+                        .collect();
+                    format!("Generator worker panicked and aborted before GPU cleanup: {safe}")
+                })
+                .unwrap_or_else(|| {
+                    termination_failure_error(signal, exit_code, Some(&job.job_type))
+                });
             transaction.execute(
                 &format!(
                     "
@@ -2618,8 +2657,11 @@ impl JobsStore {
                 ),
                 params![now, error, job.id],
             )?;
-            failed = Some(self.get_job_on_connection(&transaction, &job.id)?);
+            failed.push(self.get_job_on_connection(&transaction, &job.id)?);
         }
+        // Preserve the endpoint's historical single-job response as the job
+        // the child was actually running, even if stale rows were also failed.
+        failed.sort_by_key(|job| current_job_id.as_deref() != Some(job.id.as_str()));
         // Release the worker so it isn't shown pinned to a now-failed job; the
         // supervisor restarts the child, which re-registers itself fresh.
         transaction.execute(
