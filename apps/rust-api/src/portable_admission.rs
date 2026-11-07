@@ -5,6 +5,7 @@
 //! they never enter the portable job binding or its authored-options projection.
 
 use crate::error::ApiError;
+use crate::portable_routes::{SelectedRouteSource, SelectedSourceLocation};
 use crate::AppState;
 use sceneworks_core::contracts::{JobType, JsonObject};
 use sceneworks_core::model_artifacts::artifact_selection::{
@@ -103,6 +104,7 @@ fn is_source_choice_container(key: &str) -> bool {
             | "lokrs"
             | "controls"
             | "controlWeights"
+            | "veda"
             | "source"
             | "upscale"
     )
@@ -132,6 +134,7 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
             | "textEncoderModel"
             | "enhancerModel"
             | "useUncensoredEnhancer"
+            | "enhancePrompt"
             | "enabled"
             | "repo"
             | "revision"
@@ -205,6 +208,10 @@ pub(crate) async fn capture_portable_model_binding(
         &entries,
         requested_gpu,
     )? {
+        let selected_sources = crate::portable_routes::selected_route_source_rows(
+            job_type, payload, &entries, &backend, &platform,
+        )
+        .map_err(incomplete)?;
         let mut models = Vec::with_capacity(entries.len());
         for (index, (slot, entry)) in entries.iter().enumerate() {
             models.push(
@@ -217,6 +224,7 @@ pub(crate) async fn capture_portable_model_binding(
                     &platform,
                     &authored_hash,
                     index == 0,
+                    &selected_sources,
                 )
                 .await?,
             );
@@ -265,6 +273,7 @@ async fn capture_model_slot(
     platform: &str,
     authored_hash: &str,
     owns_request_overlays: bool,
+    selected_sources: &[SelectedRouteSource],
 ) -> Result<PortableModelBinding, ApiError> {
     let model_id = entry
         .get("id")
@@ -335,6 +344,41 @@ async fn capture_model_slot(
     if owns_request_overlays {
         members.extend(capture_selected_request_overlays(state, payload)?);
     }
+    for source in selected_sources
+        .iter()
+        .filter(|source| source.model_slot == slot)
+    {
+        let mut member = match &source.source {
+            SelectedSourceLocation::ManifestDownload(download) => {
+                capture_download_member(
+                    state,
+                    download,
+                    source.role.clone(),
+                    Some(source.component_id.clone()),
+                )
+                .await?
+            }
+            SelectedSourceLocation::LocalPath(path) => capture_local_member(
+                Path::new(path),
+                &allowed_local_roots(state),
+                source.role.clone(),
+                Some(source.component_id.clone()),
+                source.selected_tier.clone(),
+            )?,
+            SelectedSourceLocation::OperatorCachedRepo(source_id) => {
+                return Err(incomplete(format!(
+                    "operator source {source_id} has no registered exact worker claim"
+                )));
+            }
+        };
+        if let Some(tier) = &source.selected_tier {
+            member.tier = Some(tier.clone());
+        }
+        member
+            .validate()
+            .map_err(|error| incomplete(error.to_string()))?;
+        members.push(member);
+    }
     PortableModelBinding::new(
         slot,
         model_id,
@@ -345,6 +389,28 @@ async fn capture_model_slot(
         members,
     )
     .map_err(|error| incomplete(error.to_string()))
+}
+
+fn capture_local_member(
+    path: &Path,
+    allowed_roots: &[PathBuf],
+    role: ArtifactMemberRole,
+    component_id: Option<String>,
+    tier: Option<String>,
+) -> Result<PortableArtifactMember, ApiError> {
+    let files = capture_local_source_files(path, allowed_roots)?;
+    let digest = portable_closure_sha256(&files).map_err(|error| incomplete(error.to_string()))?;
+    let member = PortableArtifactMember {
+        role,
+        component_id,
+        source: PortableSourceIdentity::Digest { sha256: digest },
+        tier,
+        files,
+    };
+    member
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    Ok(member)
 }
 
 /// Loader precedence for a request-owned source override. The chosen path is captured as a
