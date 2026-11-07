@@ -7,10 +7,12 @@ thread_local! {
     static OWNER_PROCESS_POISONED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(any(native_lane, test))]
 pub(crate) fn owner_process_poisoned() -> bool {
     OWNER_PROCESS_POISONED.with(std::cell::Cell::get)
 }
 
+#[cfg(native_lane)]
 pub(crate) fn owner_device_cleanup_allowed() -> bool {
     !std::thread::panicking() && !owner_process_poisoned()
 }

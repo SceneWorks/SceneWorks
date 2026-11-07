@@ -53,7 +53,7 @@ fn write_diagnostic(path: &Path, payload: &str) {
         end -= 1;
     }
     if let Ok(mut file) = OpenOptions::new().write(true).create_new(true).open(path) {
-        let _ = file.write_all(payload[..end].as_bytes());
+        let _ = file.write_all(&payload.as_bytes()[..end]);
         let _ = file.sync_all();
     }
 }

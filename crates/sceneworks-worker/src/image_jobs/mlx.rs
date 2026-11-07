@@ -127,6 +127,8 @@ use super::stream::drive_native_prompt_batch;
 #[cfg(target_os = "macos")]
 use super::stream::start_cached_gen_stream_with_request_state_using_prepared;
 #[cfg(target_os = "macos")]
+use super::stream::PreparedRenderPlans;
+#[cfg(target_os = "macos")]
 use super::Generator;
 #[cfg(target_os = "macos")]
 use super::Image;
@@ -994,9 +996,7 @@ pub(super) async fn generate_stream_using(
         && ideogram_edit_mask.is_none()
         && flux3_references.is_none()
         && spec.ip_adapter.is_none();
-    let prepare_render_plans: Box<
-        dyn FnOnce(&gen_core::CancelFlag) -> WorkerResult<Vec<Option<gen_core::RenderPlan>>> + Send,
-    > = if base_flux {
+    let prepare_render_plans: PreparedRenderPlans = if base_flux {
         if hires_fix.is_some() {
             return Err(WorkerError::InvalidPayload(
                 "FLUX.1 base rendering does not support Hires.fix refinement".to_owned(),

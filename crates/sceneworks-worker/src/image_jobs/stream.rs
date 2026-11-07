@@ -823,6 +823,11 @@ pub(super) struct CachedGeneratorFactory<L> {
     pub(super) load: L,
 }
 
+pub(super) type PreparedRenderPlans = Box<
+    dyn FnOnce(&gen_core::CancelFlag) -> WorkerResult<Vec<Option<gen_core::RenderPlan>>> + Send,
+>;
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn start_cached_gen_stream_with_request_state_using_prepared<P, D>(
     job_id: String,
     engine_id: &'static str,
@@ -917,6 +922,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn start_cached_gen_stream_with_request_state_using_owned_prepared<P, D, L>(
     job_id: String,
     engine_id: &'static str,

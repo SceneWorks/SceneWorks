@@ -873,9 +873,10 @@ mod tests {
     async fn two_prepared_jobs_serialize_materialization_and_destruction_on_owner() {
         use std::sync::Mutex;
 
+        type OwnerTrace = Arc<Mutex<Vec<(u32, &'static str, thread::ThreadId)>>>;
         struct OwnerDrop {
             id: u32,
-            trace: Arc<Mutex<Vec<(u32, &'static str, thread::ThreadId)>>>,
+            trace: OwnerTrace,
         }
         impl Drop for OwnerDrop {
             fn drop(&mut self) {
