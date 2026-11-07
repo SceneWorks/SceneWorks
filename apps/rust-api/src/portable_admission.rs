@@ -14,9 +14,9 @@ use sceneworks_core::model_artifacts::artifact_selection::{
 };
 use sceneworks_core::model_artifacts::portable_binding::{
     canonical_authored_options_sha256, enumerate_portable_array_slots, portable_closure_sha256,
-    resolve_pinned_hf_files, PortableArtifactFile, PortableArtifactMember, PortableJobBinding,
-    PortableModelBinding, PortableRouteBinding, PortableSourceClaim, PortableSourceIdentity,
-    PortableSourceProvenance,
+    portable_file_ledger_sha256, resolve_pinned_hf_files, PortableArtifactFile,
+    PortableArtifactMember, PortableJobBinding, PortableModelBinding, PortableRouteBinding,
+    PortableSourceClaim, PortableSourceIdentity, PortableSourceProvenance,
 };
 use sceneworks_core::model_artifacts::{
     confine_artifact_path, ArtifactIdentity, ArtifactMemberRole, ModelArtifactResolver,
@@ -248,41 +248,10 @@ pub(crate) async fn validate_frozen_replay_binding(
     frozen
         .validate()
         .map_err(|error| incomplete(error.to_string()))?;
-    let (candidate, needs_worker_availability) = match capture_portable_model_binding_inner(
-        state,
-        job_type,
-        payload,
-        requested_gpu,
-        Some(frozen),
-    )
-    .await
-    {
-        Ok(Some(candidate)) => (candidate, false),
-        Ok(None) => {
-            return Err(incomplete(
-                "model-free replay cannot carry a frozen source binding",
-            ))
-        }
-        Err(_error)
-            if frozen.routes.values().any(|route| {
-                route.models.iter().any(|model| {
-                    model.members.iter().any(|member| {
-                        matches!(member.source, PortableSourceIdentity::Digest { .. })
-                    })
-                })
-            }) =>
-        {
-            // API-host locators may disappear after the original admission. Revalidate the
-            // logical request and pinned sources, then require one worker with every exact local
-            // digest before allowing a retry to enter the queue.
-            (
-                replay_without_api_local_paths(state, job_type, payload, requested_gpu, frozen)
-                    .await?,
-                true,
-            )
-        }
-        Err(error) => return Err(error),
-    };
+    // The private persisted ledger was authenticated at original admission. Replay checks the
+    // current source policy and exact local/worker availability without contacting mutable HEAD
+    // or requiring a second publisher metadata lookup during an API network outage.
+    let candidate = replay_from_frozen_policy(job_type, payload, requested_gpu, frozen)?;
     for (key, route) in &candidate.routes {
         if frozen.routes.get(key) != Some(route) {
             return Err(incomplete(format!(
@@ -290,22 +259,11 @@ pub(crate) async fn validate_frozen_replay_binding(
             )));
         }
     }
-    if needs_worker_availability {
-        filter_replay_routes_by_registered_claims(
-            state,
-            job_type,
-            payload,
-            requested_gpu,
-            candidate,
-        )
+    filter_replay_routes_by_registered_claims(state, job_type, payload, requested_gpu, candidate)
         .await
-    } else {
-        Ok(candidate)
-    }
 }
 
-async fn replay_without_api_local_paths(
-    state: &AppState,
+fn replay_from_frozen_policy(
     job_type: &JobType,
     payload: &JsonObject,
     requested_gpu: &str,
@@ -370,30 +328,6 @@ async fn replay_without_api_local_paths(
                 return Err(incomplete("replay selected source was not frozen"));
             }
         }
-        for member in route.models.iter().flat_map(|model| &model.members) {
-            if let PortableSourceIdentity::Revision { identity } = &member.source {
-                let selectors = member
-                    .files
-                    .iter()
-                    .map(|file| {
-                        file.relative_path
-                            .to_str()
-                            .map(str::to_owned)
-                            .ok_or_else(|| incomplete("frozen source path is not portable UTF-8"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let publisher = resolve_trusted_pinned_files(
-                    state,
-                    &identity.repository,
-                    &identity.revision,
-                    &selectors,
-                )
-                .await?;
-                if publisher != member.files {
-                    return Err(incomplete("frozen publisher source bytes changed"));
-                }
-            }
-        }
         routes.insert(key, route.clone());
     }
     if routes.is_empty() {
@@ -402,6 +336,94 @@ async fn replay_without_api_local_paths(
         ));
     }
     PortableJobBinding::new(authored, routes).map_err(|error| incomplete(error.to_string()))
+}
+
+fn api_local_digests_match(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+    route: &PortableRouteBinding,
+) -> bool {
+    let Ok(entries) = payload_model_entries(payload) else {
+        return false;
+    };
+    let value = Value::Object(payload.clone());
+    let records = enumerate_portable_array_slots(&value, &["loras", "lokrs", "controls"]);
+    for model in &route.models {
+        let Some((index, (_, entry))) = entries
+            .iter()
+            .enumerate()
+            .find(|(_, (slot, _))| *slot == model.slot)
+        else {
+            return false;
+        };
+        for member in &model.members {
+            if !matches!(member.source, PortableSourceIdentity::Digest { .. }) {
+                continue;
+            }
+            let locator = match member.role {
+                ArtifactMemberRole::Primary => {
+                    training_base_selection(job_type, payload, &model.model_id)
+                        .ok()
+                        .flatten()
+                        .map(|training| training.path)
+                        .or_else(|| selected_primary_override(payload, entry, index == 0, false))
+                        .or_else(|| {
+                            entry
+                                .get("installedPath")
+                                .or_else(|| entry.pointer("/paths/model"))
+                                .and_then(Value::as_str)
+                                .map(PathBuf::from)
+                        })
+                }
+                ArtifactMemberRole::Lora | ArtifactMemberRole::Control => member
+                    .component_id
+                    .as_deref()
+                    .and_then(|slot| {
+                        records
+                            .iter()
+                            .find(|(record_slot, _)| record_slot == slot)
+                            .map(|(_, record)| *record)
+                    })
+                    .and_then(|record| {
+                        if member.role == ArtifactMemberRole::Lora {
+                            sceneworks_core::lora_family::adapter_record_path(record)
+                        } else {
+                            record
+                                .get("modelPath")
+                                .or_else(|| record.get("installedPath"))
+                                .or_else(|| record.get("path"))
+                                .and_then(Value::as_str)
+                                .map(PathBuf::from)
+                        }
+                    }),
+                _ => member.component_id.as_deref().and_then(|component| {
+                    component
+                        .strip_prefix(&format!("{}/paths/", model.slot))
+                        .and_then(|key| entry.pointer(&format!("/paths/{key}")))
+                        .or_else(|| {
+                            component
+                                .strip_prefix(&format!("{}/components/", model.slot))
+                                .and_then(|index| index.parse::<usize>().ok())
+                                .and_then(|index| {
+                                    entry.pointer(&format!("/components/{index}/path"))
+                                })
+                        })
+                        .and_then(Value::as_str)
+                        .map(PathBuf::from)
+                }),
+            };
+            let Some(locator) = locator else {
+                return false;
+            };
+            if !capture_local_source_files(&locator, &allowed_local_roots(state))
+                .is_ok_and(|files| files == member.files)
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 async fn filter_replay_routes_by_registered_claims(
@@ -413,18 +435,13 @@ async fn filter_replay_routes_by_registered_claims(
 ) -> Result<PortableJobBinding, ApiError> {
     let mut available = BTreeMap::new();
     for (key, route) in &candidate.routes {
-        let bound_local = route
+        let worker_claim = route
             .models
             .iter()
             .flat_map(|model| &model.members)
-            .any(|member| {
-                matches!(
-                    member.source,
-                    PortableSourceIdentity::Digest { .. }
-                        | PortableSourceIdentity::WorkerClaim { .. }
-                )
-            });
-        if !bound_local {
+            .any(|member| matches!(member.source, PortableSourceIdentity::WorkerClaim { .. }));
+        let local_digest_available = api_local_digests_match(state, job_type, payload, route);
+        if !worker_claim && local_digest_available {
             available.insert(key.clone(), route.clone());
             continue;
         }
@@ -507,10 +524,13 @@ fn replay_route_claims_match(
                             ),
                         ),
                     };
+                    let ledger = portable_file_ledger_sha256(&member.files)
+                        .map_err(|error| incomplete(error.to_string()))?;
                     let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
                         kind,
                         logical_id,
                         component_id,
+                        &ledger,
                     )
                     .map_err(incomplete)?;
                     if !claims.iter().any(|claim| {
@@ -2539,6 +2559,7 @@ mod tests {
             "model",
             "user_model",
             None,
+            &portable_file_ledger_sha256(&[file.clone()]).unwrap(),
         )
         .unwrap();
         let claim = PortableSourceClaim::new(
