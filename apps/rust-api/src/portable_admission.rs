@@ -666,6 +666,23 @@ async fn capture_portable_model_binding_inner(
     frozen: Option<&PortableJobBinding>,
 ) -> Result<Option<PortableJobBinding>, ApiError> {
     if *job_type == JobType::ModelConvert {
+        for key in ["sourceFile", "upscalerFile"] {
+            if let Some(file) = payload.get(key).and_then(Value::as_str) {
+                if key == "upscalerFile" && file.is_empty() {
+                    continue;
+                }
+                if file.starts_with('/')
+                    || file.contains(['\\', ':', '\0'])
+                    || file
+                        .split('/')
+                        .any(|part| part.is_empty() || matches!(part, "." | ".."))
+                {
+                    return Err(incomplete(format!(
+                        "conversion {key} is not a portable repository-relative file"
+                    )));
+                }
+            }
+        }
         if let Some(subdir) = payload.get("baseSubdir").and_then(Value::as_str) {
             if !subdir.is_empty()
                 && (matches!(subdir, "." | "..")
