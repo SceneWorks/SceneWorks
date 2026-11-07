@@ -10,7 +10,7 @@ acceptance report record final CI and protected delivery status.
 
 Make MiniMax H3 render long clips on CUDA using bounded GPU residency and accurate
 request accounting. At the planning baseline, the acceptance case was
-**1344Ã—768, 345 frames, q4, with Veda enabled**, failing preflight with an
+**1344×768, 345 frames, q4, with Veda enabled**, failing preflight with an
 approximately 106 GB requirement against approximately 95 GB available. Deliver a usable
 24 GiB execution configuration as well as correcting that workstation case.
 
@@ -27,7 +27,7 @@ start before editing; the source references below describe this baseline.
 | VAE decoding | Spatial tiling and temporal chunking already exist. | Reuse them and price their actual lifetimes; do not rebuild the decoder. |
 | Dense attention | The CUDA runtime enables media FlashAttention by default; supported calls use fused attention, with a query-chunked materializing fallback. | Price and bound the route that can actually execute, including fallback. A compile-time feature alone is insufficient proof of runtime kernel support. |
 | Strategy contract | CUDA H3 advertises only `Resident`; all four optimized strategies are `Missing`. | Register existing mechanisms and new streaming with executable support and correct parameter domains. |
-| Stock cold admission | The q4 catalog peak is 40.068 decimal GB, measured at 1344Ã—768 and **124 frames**; the gate adds its reserve without receiving the requested duration. | Use resolved request geometry and selected strategy, including 345 frames, before allocation. Keep the measurement as evidence for its measured configuration. |
+| Stock cold admission | The q4 catalog peak is 40.068 decimal GB, measured at 1344×768 and **124 frames**; the gate adds its reserve without receiving the requested duration. | Use resolved request geometry and selected strategy, including 345 frames, before allocation. Keep the measurement as evidence for its measured configuration. |
 | Veda admission | Both cold and queued checks add `WorkspaceBound.total_bytes` to a dense baseline. That total includes host allocations, QKV/output storage, and dense fallback storage. | Separate host and device pools and compose simultaneous lifetimes within each phase. Determine actual overlap rather than assuming every term is an incremental allocation. |
 
 The 106 GB message is an analytical admission result, not a measured peak of the
@@ -42,38 +42,38 @@ historical explanation or create a new measurement-freshness requirement.
 
 ## Requirements
 
-- **E1 â€” Bounded transformer residency.** Support deferred CUDA loading and a
+- **E1 — Bounded transformer residency.** Support deferred CUDA loading and a
   bounded block window for both H3 transformers. Preserve stock q4, q8, and bf16
   loading and the semantics of existing accepted native/imported checkpoints,
   adapters, and H3 task partitions. Stream compatible sources without silently
   changing format or precision. Report an unsupported streaming configuration
   before materializing tensors, while preserving its existing resident route.
-- **E2 â€” Bounded working memory.** Bound attention, feed-forward, staging, and
+- **E2 — Bounded working memory.** Bound attention, feed-forward, staging, and
   predictor allocations for the resolved request. Streamed execution must not
   first load or expand the entire transformer on the GPU. Account for shared
   projections, token refiners, AdaLN tables/precompute, adapters, retained
   activations, current blocks, and transfers that really coexist. Reuse the
   existing native H3 allocation facts and window planners.
-- **E3 â€” Accurate admission.** Calculate separate host and GPU requirements in
+- **E3 — Accurate admission.** Calculate separate host and GPU requirements in
   bytes, with explicit conversions for decimal GB and GiB. Use phase maxima for
   successive lifetimes and sums for overlapping lifetimes, including actual
   dense fallback. Both cold and queued checks must use the same request and
   selected strategy, actual free memory, reference geometry, and adapter stack.
   Unknown allocations must not become zero, and stale measurement provenance
   must not change runtime behavior.
-- **E4 â€” Product integration.** Automatically select a fitting supported strategy
+- **E4 — Product integration.** Automatically select a fitting supported strategy
   before the fixed stock peak can reject a streamable request. Preserve the
   prompt, seed, resolution, frame count, steps, requested tier, conditioning,
   adapters, audio, and Veda controls. If nothing fits, explain the limiting
   phase/pool and offer remedies available for that request. Do not suggest a
   smaller quant tier when q4 is already the smallest supported tier.
-- **E5 â€” Numerical and lifecycle correctness.** Preserve dense semantics within
+- **E5 — Numerical and lifecycle correctness.** Preserve dense semantics within
   established backend tolerances. Compare Veda streaming with the equivalent
   Veda route, not with dense output as an equality oracle. Cancellation, failure,
   and subsequent jobs must release block windows, staging buffers, temporary
   tensors, and provider state. Keep existing FlashAttention and VAE tiling active.
-- **E6 â€” Demonstrated delivery.** Complete the exact workstation case and a
-  24 GiB configuration at the same 1344Ã—768 / 345-frame geometry. Validate dense
+- **E6 — Demonstrated delivery.** Complete the exact workstation case and a
+  24 GiB configuration at the same 1344×768 / 345-frame geometry. Validate dense
   fallback within an admitted envelope. Reuse focused item evidence and perform
   one terminal real-weight acceptance campaign after integration.
 
@@ -212,7 +212,7 @@ reported duration. Inherits E1 through E6.
 
 Acceptance criteria:
 
-1. The integrated SceneWorks request completes at 1344Ã—768 / 345 frames / q4
+1. The integrated SceneWorks request completes at 1344×768 / 345 frames / q4
    with Veda enabled under the approximately 95 GiB available workstation
    envelope, preserving requested content settings and producing valid video
    and generated audio for the requested duration.

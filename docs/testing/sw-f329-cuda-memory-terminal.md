@@ -70,10 +70,10 @@ the21GiB pool plus3GiB outside reserve nor the384GiB host,95GiB workstation,
 manual callers retain their GPU1 default.
 
 The source revisions and minimal file domains are fixed in the runner. The real
-q4 tier is `SceneWorks/minimax-h3-mlx@137ce668â€¦`, Veda predictor `9a1fd3a4â€¦`,
-Turbo8step `5d1d4829â€¦`; supported installed upstream companion snapshots are
-`6818f6c3â€¦` and `939557dcâ€¦`. Placeholder `111â€¦` fixture snapshots are refused.
-Source payloads are copied only once if E:â†’D: hardlinks are impossible, hashed
+q4 tier is `SceneWorks/minimax-h3-mlx@137ce668…`, Veda predictor `9a1fd3a4…`,
+Turbo8step `5d1d4829…`; supported installed upstream companion snapshots are
+`6818f6c3…` and `939557dc…`. Placeholder `111…` fixture snapshots are refused.
+Source payloads are copied only once if E:→D: hardlinks are impossible, hashed
 once in the owned staging root, and hardlinked from D: into each anchor epoch.
 Shard-index completeness is checked before model execution. No shared cache is
 modified, no checkpoint is uploaded, and no model grid is executed.
@@ -81,7 +81,7 @@ modified, no checkpoint is uploaded, and no model grid is executed.
 ## Three anchors in one bounded campaign
 
 1. Actual workstation budget, normal Veda90% execution. Preserve original
-   1344Ã—768,345frames,24fps,14.375seconds,q4,balanced/crop,T2V,prompt and
+   1344×768,345frames,24fps,14.375seconds,q4,balanced/crop,T2V,prompt and
    Turbo8step LoRA at weight1. Verify actual sparse calls, effective8steps,
    request/queued equality, full decoded video and generated stereo32kHz audio,
    exact dimensions/framecount/duration, and changing nonblack frames.
@@ -177,7 +177,7 @@ Its MP4 SHA256 is
 identical to the original enforced 24 GiB normal-Veda output. All 1,068,318,720
 native RGB values and 921,600 interleaved PCM values (both 32 kHz channels,
 including the recorded AAC padding) have zero RMS, maximum and per-channel
-differences. Dimensions remain 1344Ã—768 / 345 frames / 24 fps / 14.375 s with generated
+differences. Dimensions remain 1344×768 / 345 frames / 24 fps / 14.375 s with generated
 stereo audio. The comparison against the old unpooled95 reference reproduces
 the original nonzero video/audio diagnostics.
 
