@@ -356,30 +356,57 @@ fn write_vector_test_manifest_with_provider_state(
 
 fn write_vector_workflow_test_manifest(
     config_dir: &std::path::Path,
-    raster_revision: &str,
     vector_revision: &str,
-) {
+) -> sceneworks_core::hf_home::test_support::CacheRootGuard {
+    let root = config_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("test root");
+    let data = root.join("data");
+    let guard = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        data.clone(),
+        root.join("test-hub"),
+    );
+    let spec = sceneworks_core::registry::builtin_model_spec("flux_schnell")
+        .expect("registered raster model");
+    let raster = spec.project(None);
+    let download = spec
+        .product
+        .downloads
+        .iter()
+        .find(|d| d.default == Some(true))
+        .expect("default raster variant");
+    let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(&data, &download.repo)
+        .unwrap()
+        .join("snapshots")
+        .join(&download.revision)
+        .join(&download.variant);
+    // The workflow requires an installed raster model. Materialize its declared tier in the
+    // fixture's private hub; the metadata-only tests never open or execute these weights.
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::write(
+        snapshot.join("model_index.json"),
+        serde_json::to_vec(&json!({
+            "_class_name":"FluxPipeline", "transformer":["diffusers","FluxTransformer2DModel"],
+            "vae":["diffusers","AutoencoderKL"], "text_encoder":["transformers","CLIPTextModel"],
+            "text_encoder_2":["transformers","T5EncoderModel"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    for component in ["transformer", "vae", "text_encoder", "text_encoder_2"] {
+        let dir = snapshot.join(component);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"fixture").unwrap();
+    }
     std::fs::create_dir_all(config_dir).expect("manifest dir creates");
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
             "models": [
-                {
-                    "id": "flux_schnell",
-                    "name": "Raster test",
-                    "type": "image",
-                    "family": "flux",
-                    "adapter": "flux_diffusers",
-                    "capabilities": ["text_to_image"],
-                    "defaults": { "count": 1, "resolution": { "width": 512, "height": 512 } },
-                    "downloads": [{
-                        "provider": "huggingface",
-                        "repo": "SceneWorks/raster-workflow-test",
-                        "revision": raster_revision,
-                        "files": ["config.json", "model.safetensors"]
-                    }]
-                },
+                raster,
                 {
                     "id": "starvector_test",
                     "name": "Vector test",
@@ -407,21 +434,13 @@ fn write_vector_workflow_test_manifest(
     )
     .expect("builtin models write");
     write_empty_sibling_manifests(config_dir);
-    let root = config_dir
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("test root");
-    for repo in [
-        "SceneWorks__raster-workflow-test",
-        "SceneWorks__vector-workflow-test",
-    ] {
-        let installed = root.join("data/models").join(repo);
-        std::fs::create_dir_all(&installed).expect("workflow install dir creates");
-        std::fs::write(installed.join(".sceneworks-download-complete.json"), b"{}")
-            .expect("workflow receipt writes");
-        std::fs::write(installed.join("config.json"), b"{}").expect("config writes");
-        std::fs::write(installed.join("model.safetensors"), b"weights").expect("weights write");
-    }
+    let installed = data.join("models/SceneWorks__vector-workflow-test");
+    std::fs::create_dir_all(&installed).expect("workflow install dir creates");
+    std::fs::write(installed.join(".sceneworks-download-complete.json"), b"{}")
+        .expect("workflow receipt writes");
+    std::fs::write(installed.join("config.json"), b"{}").expect("config writes");
+    std::fs::write(installed.join("model.safetensors"), b"fixture").expect("weights write");
+    guard
 }
 
 #[test]
@@ -507,9 +526,8 @@ fn prompt_vector_intermediate_ownership_is_server_authored_and_worker_facts_are_
 #[tokio::test]
 async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascades() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_vector_workflow_test_manifest(
+    let _cache_root = write_vector_workflow_test_manifest(
         &temp_dir.path().join("config/manifests"),
-        "1111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222",
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
@@ -550,7 +568,14 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
     );
     assert_eq!(
         workflow["rasterStage"]["revision"],
-        "1111111111111111111111111111111111111111"
+        sceneworks_core::registry::builtin_model_spec("flux_schnell")
+            .unwrap()
+            .product
+            .downloads
+            .iter()
+            .find(|d| d.default == Some(true))
+            .unwrap()
+            .revision
     );
     assert_eq!(
         workflow["vectorStage"]["revision"],
@@ -640,9 +665,8 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
 #[tokio::test]
 async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typed() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_vector_workflow_test_manifest(
+    let _cache_root = write_vector_workflow_test_manifest(
         &temp_dir.path().join("config/manifests"),
-        "1111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222",
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

@@ -16,6 +16,11 @@ presentation. Evidence retains the original provider, artifact-tier, load-shape
 and calibration payloads. Host installation and credential observations are
 supplied by the API or worker at runtime.
 
+The API merges `user.models.jsonc` through the same projection for catalog,
+license and job reads. A user can narrow product menus, choose compatible defaults,
+edit display text or hide a converted builtin from the public model list. Explicit
+job lookup and license checks retain its registered source.
+
 Regenerate the checked-in static snapshot after a semantic input change:
 
 ```sh
