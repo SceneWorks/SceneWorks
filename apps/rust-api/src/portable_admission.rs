@@ -223,6 +223,43 @@ pub(crate) async fn capture_portable_model_binding(
     payload: &JsonObject,
     requested_gpu: &str,
 ) -> Result<Option<PortableJobBinding>, ApiError> {
+    capture_portable_model_binding_inner(state, job_type, payload, requested_gpu, None).await
+}
+
+/// Replay keeps the admitted immutable source even when a mutable repository head moves.
+/// The caller supplies the original canonical source carriers in `payload`; this checks their
+/// present bytes, current server route policy, and every frozen route member before enqueue.
+pub(crate) async fn validate_frozen_replay_binding(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+    requested_gpu: &str,
+    frozen: &PortableJobBinding,
+) -> Result<PortableJobBinding, ApiError> {
+    frozen
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    let candidate =
+        capture_portable_model_binding_inner(state, job_type, payload, requested_gpu, Some(frozen))
+            .await?
+            .ok_or_else(|| incomplete("model-free replay cannot carry a frozen source binding"))?;
+    for (key, route) in &candidate.routes {
+        if frozen.routes.get(key) != Some(route) {
+            return Err(incomplete(format!(
+                "replay source route {key} differs from its frozen identity"
+            )));
+        }
+    }
+    Ok(candidate)
+}
+
+async fn capture_portable_model_binding_inner(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+    requested_gpu: &str,
+    frozen: Option<&PortableJobBinding>,
+) -> Result<Option<PortableJobBinding>, ApiError> {
     if model_free_job(job_type, payload) {
         return Ok(None);
     }
@@ -248,6 +285,11 @@ pub(crate) async fn capture_portable_model_binding(
         }
     }
     let authored_options = portable_authored_options(payload);
+    if frozen.is_some_and(|frozen| frozen.authored_options != authored_options) {
+        return Err(incomplete(
+            "replay source-affecting choices differ from frozen admission",
+        ));
+    }
     let authored_hash = canonical_authored_options_sha256(&authored_options)
         .map_err(|error| incomplete(error.to_string()))?;
     let mut routes = BTreeMap::new();
@@ -257,6 +299,14 @@ pub(crate) async fn capture_portable_model_binding(
         &entries,
         requested_gpu,
     )? {
+        let frozen_route = frozen
+            .map(|frozen| {
+                frozen
+                    .routes
+                    .get(&format!("{backend}:{platform}"))
+                    .ok_or_else(|| incomplete("replay route was not admitted originally"))
+            })
+            .transpose()?;
         let selected_sources = crate::portable_routes::selected_route_source_rows(
             job_type, payload, &entries, &backend, &platform,
         )
@@ -292,6 +342,17 @@ pub(crate) async fn capture_portable_model_binding(
         };
         let mut models = Vec::with_capacity(entries.len());
         for (index, (slot, entry)) in entries.iter().enumerate() {
+            let frozen_model = frozen_route
+                .map(|route| {
+                    route
+                        .models
+                        .iter()
+                        .find(|model| model.slot == *slot)
+                        .ok_or_else(|| {
+                            incomplete(format!("replay model slot {slot} was not frozen"))
+                        })
+                })
+                .transpose()?;
             models.push(
                 capture_model_slot(
                     state,
@@ -305,6 +366,7 @@ pub(crate) async fn capture_portable_model_binding(
                     index == 0,
                     &selected_sources,
                     &source_claims,
+                    frozen_model,
                 )
                 .await?,
             );
@@ -468,6 +530,7 @@ async fn capture_model_slot(
     owns_request_overlays: bool,
     selected_sources: &[SelectedRouteSource],
     source_claims: &[PortableSourceClaim],
+    frozen_model: Option<&PortableModelBinding>,
 ) -> Result<PortableModelBinding, ApiError> {
     let model_id = entry
         .get("id")
@@ -634,17 +697,31 @@ async fn capture_model_slot(
                 source.selected_tier.clone(),
             )?,
             SelectedSourceLocation::OperatorCachedRepo(source_id) => {
+                let claims = frozen_worker_claims(
+                    frozen_model,
+                    &source.role,
+                    &source.component_id,
+                    source_claims,
+                )?;
                 capture_worker_source_member(
                     state,
                     source_id,
                     source.role.clone(),
                     source.component_id.clone(),
-                    source_claims,
+                    &claims,
                 )
                 .await?
             }
             SelectedSourceLocation::DynamicHfRepo(repo) => {
-                let revision = resolve_dynamic_hf_revision(state, repo, "main").await?;
+                let revision = match frozen_revision_for_source(
+                    frozen_model,
+                    &source.role,
+                    &source.component_id,
+                    repo,
+                )? {
+                    Some(revision) => revision,
+                    None => resolve_dynamic_hf_revision(state, repo, "main").await?,
+                };
                 capture_dynamic_detail_file(
                     state,
                     repo,
@@ -659,7 +736,15 @@ async fn capture_model_slot(
                 reference,
                 files,
             } => {
-                let revision = resolve_dynamic_hf_revision(state, repo, reference).await?;
+                let revision = match frozen_revision_for_source(
+                    frozen_model,
+                    &source.role,
+                    &source.component_id,
+                    repo,
+                )? {
+                    Some(revision) => revision,
+                    None => resolve_dynamic_hf_revision(state, repo, reference).await?,
+                };
                 let download = serde_json::json!({
                     "provider":"huggingface",
                     "repo":repo,
@@ -679,7 +764,15 @@ async fn capture_model_slot(
                 reference,
                 files,
             } => {
-                let revision = resolve_dynamic_hf_revision(state, repo, reference).await?;
+                let revision = match frozen_revision_for_source(
+                    frozen_model,
+                    &source.role,
+                    &source.component_id,
+                    repo,
+                )? {
+                    Some(revision) => revision,
+                    None => resolve_dynamic_hf_revision(state, repo, reference).await?,
+                };
                 let download = serde_json::json!({
                     "provider":"huggingface",
                     "repo":repo,
@@ -695,16 +788,29 @@ async fn capture_model_slot(
                 .await?
             }
             SelectedSourceLocation::OperatorOverrideOrManifest { source_id, default } => {
-                if source_claims
-                    .iter()
-                    .any(|claim| claim.source_id == *source_id)
-                {
+                let frozen_source =
+                    frozen_source_member(frozen_model, &source.role, &source.component_id)?;
+                let use_worker_claim = match frozen_source.map(|member| &member.source) {
+                    Some(PortableSourceIdentity::WorkerClaim { .. }) => true,
+                    Some(PortableSourceIdentity::Revision { .. }) => false,
+                    Some(_) => return Err(incomplete("replay auxiliary source kind changed")),
+                    None => source_claims
+                        .iter()
+                        .any(|claim| claim.source_id == *source_id),
+                };
+                if use_worker_claim {
+                    let claims = frozen_worker_claims(
+                        frozen_model,
+                        &source.role,
+                        &source.component_id,
+                        source_claims,
+                    )?;
                     capture_worker_source_member(
                         state,
                         source_id,
                         source.role.clone(),
                         source.component_id.clone(),
-                        source_claims,
+                        &claims,
                     )
                     .await?
                 } else {
@@ -812,6 +918,74 @@ fn selected_detail_weight_file(files: &[PortableArtifactFile]) -> Option<&Portab
                     .all(|component| !component.as_os_str().to_string_lossy().starts_with('.'))
         })
         .min_by(|a, b| a.relative_path.cmp(&b.relative_path))
+}
+
+fn frozen_source_member<'a>(
+    model: Option<&'a PortableModelBinding>,
+    role: &ArtifactMemberRole,
+    component_id: &str,
+) -> Result<Option<&'a PortableArtifactMember>, ApiError> {
+    model
+        .map(|model| {
+            model
+                .members
+                .iter()
+                .find(|member| {
+                    &member.role == role && member.component_id.as_deref() == Some(component_id)
+                })
+                .ok_or_else(|| {
+                    incomplete(format!(
+                        "replay source component {component_id} was not frozen"
+                    ))
+                })
+        })
+        .transpose()
+}
+
+fn frozen_revision_for_source(
+    model: Option<&PortableModelBinding>,
+    role: &ArtifactMemberRole,
+    component_id: &str,
+    repo: &str,
+) -> Result<Option<String>, ApiError> {
+    let Some(member) = frozen_source_member(model, role, component_id)? else {
+        return Ok(None);
+    };
+    match &member.source {
+        PortableSourceIdentity::Revision { identity } if identity.repository == repo => {
+            Ok(Some(identity.revision.clone()))
+        }
+        _ => Err(incomplete(format!(
+            "replay source {component_id} changed repository or identity kind"
+        ))),
+    }
+}
+
+fn frozen_worker_claims(
+    model: Option<&PortableModelBinding>,
+    role: &ArtifactMemberRole,
+    component_id: &str,
+    claims: &[PortableSourceClaim],
+) -> Result<Vec<PortableSourceClaim>, ApiError> {
+    let Some(member) = frozen_source_member(model, role, component_id)? else {
+        return Ok(claims.to_vec());
+    };
+    if !matches!(member.source, PortableSourceIdentity::WorkerClaim { .. }) {
+        return Err(incomplete(format!(
+            "replay source {component_id} is no longer a worker claim"
+        )));
+    }
+    let matching = claims
+        .iter()
+        .filter(|claim| claim.matches_worker_claim_member(member).is_ok())
+        .cloned()
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return Err(incomplete(format!(
+            "replay source {component_id} has no matching live worker claim"
+        )));
+    }
+    Ok(matching)
 }
 
 /// Resolve a mutable, user-selected repository to a publisher commit once, at admission.
@@ -1689,6 +1863,59 @@ fn capture_selected_request_overlays(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn frozen_replay_uses_original_immutable_dynamic_revision() {
+        let old = "a".repeat(40);
+        let file = PortableArtifactFile {
+            relative_path: PathBuf::from("weights.safetensors"),
+            size_bytes: 4,
+            sha256: format!("sha256:{}", "b".repeat(64)),
+        };
+        let member = |role, component_id, repo: &str| PortableArtifactMember {
+            role,
+            component_id,
+            source: PortableSourceIdentity::Revision {
+                identity: ArtifactIdentity::pinned(repo, &old, "default").unwrap(),
+            },
+            tier: Some("default".to_owned()),
+            files: vec![file.clone()],
+        };
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            "model",
+            "mlx",
+            "default",
+            Some("default".to_owned()),
+            canonical_authored_options_sha256(&json!({})).unwrap(),
+            vec![
+                member(ArtifactMemberRole::Primary, None, "owner/base"),
+                member(
+                    ArtifactMemberRole::Control,
+                    Some("dynamic_control".to_owned()),
+                    "owner/control",
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            frozen_revision_for_source(
+                Some(&model),
+                &ArtifactMemberRole::Control,
+                "dynamic_control",
+                "owner/control"
+            )
+            .unwrap(),
+            Some(old)
+        );
+        assert!(frozen_revision_for_source(
+            Some(&model),
+            &ArtifactMemberRole::Control,
+            "dynamic_control",
+            "owner/substitute"
+        )
+        .is_err());
+    }
 
     #[test]
     fn local_produced_closure_excludes_mutable_receipt_files() {
