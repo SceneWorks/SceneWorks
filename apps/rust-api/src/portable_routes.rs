@@ -25,8 +25,8 @@ pub(crate) enum SelectedSourceLocation {
         reference: String,
         files: Vec<String>,
     },
-    /// A converter borrows the same dense subtrees from any installed FLUX.2 tier.
-    /// Admission normalizes and verifies the published per-tier ledgers.
+    /// Admission freezes one worker-advertised FLUX.2 tier's borrowed dense
+    /// subtrees. Custom repositories may have different bytes in other tiers.
     ConversionBorrow {
         repo: String,
         preferred_subdir: Option<String>,
