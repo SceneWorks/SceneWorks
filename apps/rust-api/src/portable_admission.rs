@@ -729,6 +729,7 @@ async fn capture_portable_model_binding_inner(
     let authored_hash = canonical_authored_options_sha256(&authored_options)
         .map_err(|error| incomplete(error.to_string()))?;
     let mut routes = BTreeMap::new();
+    let mut last_route_error = None;
     for (backend, platform) in crate::portable_routes::eligible_portable_routes(
         job_type,
         payload,
@@ -755,7 +756,7 @@ async fn capture_portable_model_binding_inner(
                 )));
             }
         }
-        let source_claims = if selected_sources.iter().any(|source| {
+        let uses_worker_claims = selected_sources.iter().any(|source| {
             matches!(
                 &source.source,
                 SelectedSourceLocation::OperatorCachedRepo(_)
@@ -763,36 +764,70 @@ async fn capture_portable_model_binding_inner(
                     | SelectedSourceLocation::PreferredWorkerClaim { .. }
                     | SelectedSourceLocation::OperatorOverrideOrManifest { .. }
             )
-        }) {
+        });
+        let worker_only_source = selected_sources.iter().any(|source| {
+            matches!(
+                &source.source,
+                SelectedSourceLocation::OperatorCachedRepo(_)
+                    | SelectedSourceLocation::ConversionBorrow { .. }
+                    | SelectedSourceLocation::PreferredWorkerClaim { .. }
+            )
+        });
+        let mut claim_sets = if uses_worker_claims {
             state
                 .jobs_store
-                .portable_source_claims_for_route(
+                .portable_source_claim_sets_for_job_route(
                     &backend,
                     &platform,
                     requested_gpu,
                     state.settings.worker_timeout_seconds,
+                    job_type,
+                    payload,
                 )
                 .map_err(|error| {
                     incomplete(format!("worker source claims are unavailable: {error}"))
                 })?
         } else {
-            Vec::new()
+            vec![Vec::new()]
         };
-        let mut models = Vec::with_capacity(entries.len());
-        for (index, (slot, entry)) in entries.iter().enumerate() {
-            let frozen_model = frozen_route
-                .map(|route| {
-                    route
-                        .models
-                        .iter()
-                        .find(|model| model.slot == *slot)
-                        .ok_or_else(|| {
-                            incomplete(format!("replay model slot {slot} was not frozen"))
-                        })
+        if claim_sets.is_empty() && !worker_only_source {
+            // A pinned manifest default remains admissible when no worker advertises an optional
+            // operator override. Its exact Revision bytes are verified when a worker claims it.
+            claim_sets.push(Vec::new());
+        }
+        let preferred_count = |claims: &[PortableSourceClaim]| {
+            selected_sources
+                .iter()
+                .filter_map(|source| match &source.source {
+                    SelectedSourceLocation::PreferredWorkerClaim { preferred_id, .. } => {
+                        Some(*preferred_id)
+                    }
+                    SelectedSourceLocation::OperatorOverrideOrManifest { source_id, .. } => {
+                        Some(*source_id)
+                    }
+                    _ => None,
                 })
-                .transpose()?;
-            models.push(
-                capture_model_slot(
+                .filter(|source_id| claims.iter().any(|claim| claim.source_id == *source_id))
+                .count()
+        };
+        claim_sets.sort_by(|left, right| preferred_count(right).cmp(&preferred_count(left)));
+        let mut selected_route = None;
+        for source_claims in &claim_sets {
+            let mut models = Vec::with_capacity(entries.len());
+            let mut failed = None;
+            for (index, (slot, entry)) in entries.iter().enumerate() {
+                let frozen_model = frozen_route
+                    .map(|route| {
+                        route
+                            .models
+                            .iter()
+                            .find(|model| model.slot == *slot)
+                            .ok_or_else(|| {
+                                incomplete(format!("replay model slot {slot} was not frozen"))
+                            })
+                    })
+                    .transpose()?;
+                match capture_model_slot(
                     state,
                     job_type,
                     payload,
@@ -803,20 +838,39 @@ async fn capture_portable_model_binding_inner(
                     &authored_hash,
                     index == 0,
                     &selected_sources,
-                    &source_claims,
+                    source_claims,
                     frozen_model,
                 )
-                .await?,
-            );
+                .await
+                {
+                    Ok(model) => models.push(model),
+                    Err(error) => {
+                        failed = Some(error);
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = failed {
+                last_route_error = Some(error);
+                continue;
+            }
+            let route = PortableRouteBinding::new(&backend, &platform, models)
+                .map_err(|error| incomplete(error.to_string()))?;
+            selected_route = Some(route);
+            break;
         }
-        let route = PortableRouteBinding::new(&backend, &platform, models)
-            .map_err(|error| incomplete(error.to_string()))?;
-        routes.insert(route.key(), route);
+        if let Some(route) = selected_route {
+            routes.insert(route.key(), route);
+        } else if worker_only_source {
+            last_route_error = Some(incomplete(format!(
+                "no eligible worker advertises the complete selected source closure for {backend}:{platform}"
+            )));
+        }
     }
     if routes.is_empty() {
-        return Err(incomplete(
-            "no authorized worker route has an exact source binding",
-        ));
+        return Err(last_route_error.unwrap_or_else(|| {
+            incomplete("no authorized worker route has an exact source binding")
+        }));
     }
     PortableJobBinding::new(authored_options, routes)
         .map(Some)
