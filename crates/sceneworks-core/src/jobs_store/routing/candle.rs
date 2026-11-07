@@ -30,18 +30,27 @@ use crate::jobs_store::routing::{
 /// adapters per MoE expert, while base LTX installs additive residuals on its video-attention
 /// projections. Wan-5B now applies dense/packed LoRA and LoKr, and Bernini exposes its provider
 /// slot. 10Eros remains MLX-only after SC-18902's failed Candle acceptance; SVD and Mochi advertise
-/// no adapter slot. Mirror of the candle-gen descriptors — kept in lockstep the same way
-/// `CANDLE_VIDEO_ROUTED_MODELS` mirrors the routed engines.
-pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
-    "wan_2_2",
-    "wan_2_2_t2v_14b",
-    "wan_2_2_i2v_14b",
-    "ltx_2_3",
-    "ltx_2_5",
-    "bernini",
-    "minimax_h3",
-    "minimax_h3_ref",
-];
+/// no adapter slot. Membership is projected from each Candle-routed typed video spec's native
+/// adapter capability; the request-shape gate below still owns carrier validation.
+pub(crate) static CANDLE_VIDEO_LORA_MODELS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        crate::registry::builtin_model_specs()
+            .filter(|spec| {
+                spec.product.model_type == "video"
+                    && spec
+                        .routing
+                        .as_ref()
+                        .is_some_and(|policy| policy.candle_routed())
+                    && spec.video_routes.get("candle").is_some_and(|routes| {
+                        routes
+                            .iter()
+                            .flat_map(|route| &route.engines)
+                            .any(|engine| engine.supports_lora)
+                    })
+            })
+            .map(|spec| spec.product.id.as_str())
+            .collect()
+    });
 
 /// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
 /// `generate_candle_stream` drives plain text-to-image, and the bespoke lanes branched out below add
@@ -231,7 +240,7 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     CandleImageRoute {
         lane: CandleImageLane::QwenImage21Edit,
         // Turbo (sc-25907) is the same request contract under a second engine id.
-        models: ModelMatch::Any(crate::jobs_store::routing::QWEN_IMAGE_2_1_MODEL_IDS),
+        models: ModelMatch::Family(crate::jobs_store::routing::is_qwen_image_2_1_model),
         shape: qwen_image_2_1_edit_candle_eligible,
     },
     CandleImageRoute {
@@ -1475,17 +1484,21 @@ pub(crate) fn is_sdxl_family_candle_model(model: &str) -> bool {
     )
 }
 
-/// The exact SDXL-family ids that share the generic OpenPose ControlNet provider. This is
-/// deliberately wider than the accepted editable subset by one distilled checkpoint: RealVisXL
-/// Lightning supports the pose-only provider recipe, and the two Illustrious q4 packages share the
-/// exact SDXL provider/control composition proven by terminal cells 18-19.
-pub(crate) const SDXL_CONTROL_MODELS: &[&str] = &[
-    "sdxl",
-    "realvisxl",
-    "realvisxl_lightning",
-    "illustrious_xl_v1",
-    "illustrious_xl_v2",
-];
+/// The generic OpenPose provider serves the SDXL product rows mapped to the native `sdxl`
+/// engine. InstantID shares the family but has a distinct provider and no such mapping.
+pub(crate) static SDXL_CONTROL_MODELS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        crate::registry::builtin_model_specs()
+            .filter(|spec| {
+                spec.product.family == "sdxl"
+                    && spec
+                        .routes
+                        .get("candle")
+                        .is_some_and(|route| route.id == "sdxl")
+            })
+            .map(|spec| spec.product.id.as_str())
+            .collect()
+    });
 
 pub(crate) fn is_sdxl_control_model(model: &str) -> bool {
     SDXL_CONTROL_MODELS.contains(&model)
@@ -2138,23 +2151,30 @@ pub(crate) fn krea_control_candle_eligible(payload: &Map<String, Value>) -> bool
 /// Candle-routed image models that HAVE a candle strict-control lane (sc-5489; flux2_dev sc-7736; base
 /// z_image + flux_dev sc-8379 / sc-8412, plus the exact five-model SDXL OpenPose lane).
 /// An `advanced.poses` job on any OTHER candle-routed model has no pose path on candle.
-pub(crate) const CANDLE_POSE_MODELS: &[&str] = &[
-    "sdxl",
-    "realvisxl",
-    "realvisxl_lightning",
-    "illustrious_xl_v1",
-    "illustrious_xl_v2",
-    "qwen_image",
-    "kolors",
-    "z_image_turbo",
-    "z_image",
-    "flux2_dev",
-    "flux_dev",
-    "krea_2_turbo",
-];
+pub(crate) static CANDLE_POSE_MODELS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        crate::registry::builtin_model_specs()
+            .filter(|spec| model_has_candle_pose_lane(&spec.product.id))
+            .map(|spec| spec.product.id.as_str())
+            .collect()
+    });
 
 pub(crate) fn model_has_candle_pose_lane(model: &str) -> bool {
-    CANDLE_POSE_MODELS.contains(&model)
+    CANDLE_IMAGE_ROUTES.iter().any(|route| {
+        matches!(
+            route.lane,
+            CandleImageLane::SdxlControl
+                | CandleImageLane::QwenControl
+                | CandleImageLane::KolorsControl
+                | CandleImageLane::ZImageControl
+                | CandleImageLane::Flux1Control
+                | CandleImageLane::Flux2Control
+                | CandleImageLane::KreaControl
+        ) && match route.models {
+            ModelMatch::Any(models) => models.contains(&model),
+            ModelMatch::Family(predicate) => predicate(model),
+        }
+    })
 }
 
 /// Material control intent on a **candle-routed model with no candle pose lane** —

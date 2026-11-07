@@ -36,6 +36,11 @@ pub fn builtin_model_spec(id: &str) -> Option<&'static ModelSpec> {
     BUILTINS.get(id)
 }
 
+/// All build-validated builtin specs in stable model-id order.
+pub fn builtin_model_specs() -> impl Iterator<Item = &'static ModelSpec> {
+    BUILTINS.values()
+}
+
 /// The preview feature export includes registered builtins and historical job aliases that have
 /// no public catalog row. An absent lane is unknown rather than unsupported.
 pub fn preview_feature(id: &str) -> Option<&'static BTreeMap<String, bool>> {

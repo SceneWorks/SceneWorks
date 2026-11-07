@@ -550,7 +550,13 @@ pub const FP8R_QUANT_TIER: &str = "fp8r";
 /// Klein (distilled) is the only catalog FLUX 3 model; it is also the only model that ships a
 /// publisher FP8R package, so `quantTier: "fp8r"` anywhere else is refused rather than run at some
 /// other precision.
-pub const FLUX3_TIERED_MODEL_IDS: &[&str] = &["flux3_klein", "flux3_klein_base"];
+pub static FLUX3_TIERED_MODEL_IDS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        crate::registry::builtin_model_specs()
+            .filter(|spec| spec.product.family == "flux3" && spec.product.model_type == "image")
+            .map(|spec| spec.product.id.as_str())
+            .collect()
+    });
 
 /// The `advanced` keys that select a FLUX 3 precision. A consumer that judges the rest of the
 /// request surface strips exactly these once [`flux3_requested_tier`] has accepted them.

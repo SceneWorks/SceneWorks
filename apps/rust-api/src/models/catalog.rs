@@ -1,6 +1,27 @@
 use super::*;
 
-pub(super) const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "audio", "utility"];
+pub(super) static ALLOWED_MODEL_TYPES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut types: Vec<_> = sceneworks_core::registry::builtin_model_specs()
+            .map(|spec| spec.product.model_type.as_str())
+            .collect();
+        types.sort_unstable();
+        types.dedup();
+        types
+    });
+
+#[cfg(test)]
+#[test]
+fn import_type_vocabulary_includes_every_shipped_product_kind() {
+    assert!(ALLOWED_MODEL_TYPES.contains(&"vector"));
+    for spec in sceneworks_core::registry::builtin_model_specs() {
+        assert!(
+            ALLOWED_MODEL_TYPES.contains(&spec.product.model_type.as_str()),
+            "{} product type must be importable",
+            spec.product.id
+        );
+    }
+}
 pub(crate) const MODEL_CATALOG_PROBE_CONCURRENCY: usize = 16;
 pub(super) static MODEL_CATALOG_PROBE_PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
     std::sync::OnceLock::new();
