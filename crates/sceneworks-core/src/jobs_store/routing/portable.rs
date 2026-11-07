@@ -55,6 +55,14 @@ pub fn native_route_claims_request(
         "candle" => "0",
         other => return Err(format!("unknown native backend {other:?}")),
     };
+    // Candle claims unsupported pose shapes only to reject them with a typed error.
+    // That is not a render route and must not authorize a portable source closure.
+    if backend == "candle"
+        && matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit)
+        && !super::gaps::job_is_any_candle_eligible(&probe)
+    {
+        return Ok(false);
+    }
     let required = super::super::required_capability(&probe);
     let required_capability: WorkerCapability =
         serde_json::from_value(Value::String(required.to_owned()))
@@ -107,6 +115,12 @@ mod tests {
         let payload = json!({"model":"chroma","advanced":{"poses":[{}]}});
         assert!(!native_route_claims_request(
             "mlx",
+            &JobType::ImageGenerate,
+            payload.as_object().unwrap()
+        )
+        .unwrap());
+        assert!(!native_route_claims_request(
+            "candle",
             &JobType::ImageGenerate,
             payload.as_object().unwrap()
         )
