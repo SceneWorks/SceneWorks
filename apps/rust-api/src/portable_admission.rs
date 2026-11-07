@@ -148,6 +148,9 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
             | "irisModel"
             | "checkpointModelId"
             | "sourceRepo"
+            | "baseRepo"
+            | "sourceFile"
+            | "upscalerFile"
             | "modelNameOrPath"
             | "embedder"
             | "engine"
@@ -626,6 +629,11 @@ async fn capture_model_slot(
                         component_id,
                         tier.clone(),
                     )?
+                } else if role == ArtifactMemberRole::Primary
+                    && *job_type == JobType::ModelConvert
+                    && download.get("revision").is_none()
+                {
+                    capture_uncataloged_convert_source(state, download, frozen_model).await?
                 } else {
                     capture_download_member(state, download, role, component_id).await?
                 },
@@ -1273,6 +1281,39 @@ fn selected_primary_override(
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
+}
+
+/// An uncataloged conversion source is intentionally accepted by the existing API. Resolve its
+/// mutable HEAD once and freeze the complete publisher tree that the conversion worker may read.
+/// Replay uses the original revision, so an unrelated HEAD move cannot replace or reject it.
+async fn capture_uncataloged_convert_source(
+    state: &AppState,
+    download: &Value,
+    frozen_model: Option<&PortableModelBinding>,
+) -> Result<PortableArtifactMember, ApiError> {
+    let repo = required_download_string(download, "repo")?;
+    let revision = if let Some(model) = frozen_model {
+        let primary = model
+            .members
+            .iter()
+            .find(|member| member.role == ArtifactMemberRole::Primary)
+            .ok_or_else(|| incomplete("frozen conversion has no primary source"))?;
+        match &primary.source {
+            PortableSourceIdentity::Revision { identity } if identity.repository == repo => {
+                identity.revision.clone()
+            }
+            _ => return Err(incomplete("frozen conversion repository has changed")),
+        }
+    } else {
+        resolve_dynamic_hf_revision(state, repo, "main").await?
+    };
+    let pinned = serde_json::json!({
+        "provider":"huggingface",
+        "repo":repo,
+        "revision":revision,
+        "files":["*"]
+    });
+    capture_download_member(state, &pinned, ArtifactMemberRole::Primary, None).await
 }
 
 async fn capture_download_member(
