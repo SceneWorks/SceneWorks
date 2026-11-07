@@ -6,13 +6,15 @@ use std::sync::LazyLock;
 use serde_json::{Map, Value};
 
 mod spec;
-pub use spec::ModelSpec;
+pub use spec::{ModelSpec, RoutePolicy};
 mod exceptions;
 pub use exceptions::{approved_backend_exceptions, ApprovedBackendException};
 mod trainer_routes;
 pub(crate) use trainer_routes::expected_backend_local_trainer_id;
 #[allow(dead_code)] // Shared with build.rs, where every shipped evidence row is validated.
 mod evidence;
+#[cfg(test)]
+mod policy;
 pub use evidence::{builtin_memory_evidence, project_builtin_memory_evidence};
 
 static BUILTINS: LazyLock<BTreeMap<String, ModelSpec>> = LazyLock::new(|| {
@@ -22,9 +24,25 @@ static BUILTINS: LazyLock<BTreeMap<String, ModelSpec>> = LazyLock::new(|| {
     )))
     .expect("validated build-time ModelSpec registry")
 });
+static LEGACY_PREVIEW: LazyLock<BTreeMap<String, BTreeMap<String, bool>>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/legacy-model-preview.json"
+    )))
+    .expect("validated legacy preview feature export")
+});
 
 pub fn builtin_model_spec(id: &str) -> Option<&'static ModelSpec> {
     BUILTINS.get(id)
+}
+
+/// The preview feature export includes registered builtins and historical job aliases that have
+/// no public catalog row. An absent lane is unknown rather than unsupported.
+pub fn preview_feature(id: &str) -> Option<&'static BTreeMap<String, bool>> {
+    if let Some(spec) = builtin_model_spec(id) {
+        return (!spec.preview_by_backend.is_empty()).then_some(&spec.preview_by_backend);
+    }
+    LEGACY_PREVIEW.get(id)
 }
 
 impl ModelSpec {

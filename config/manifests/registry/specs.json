@@ -6,6 +6,9 @@
         "minMemoryGb": 12
       }
     },
+    "previewByBackend": {
+      "candle": false
+    },
     "product": {
       "audio": {
         "conditioning": [
@@ -466,6 +469,10 @@
         "minMemoryGb": 16
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_anima",
       "autoDownload": false,
@@ -688,6 +695,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "anima_base": {
@@ -1007,6 +1022,10 @@
         "minMemoryGb": 16
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_anima",
       "autoDownload": false,
@@ -1229,6 +1248,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "anima_turbo": {
@@ -1548,6 +1575,10 @@
         "minMemoryGb": 16
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_anima",
       "autoDownload": false,
@@ -1770,6 +1801,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "aura_sr_v2": {
@@ -2028,6 +2067,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": true,
+      "candle_video_vace": false,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -2764,6 +2810,10 @@
         "minMemoryGb": 64
       }
     },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
+    },
     "product": {
       "adapter": "bernini",
       "candle": {},
@@ -2962,6 +3012,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "boogu_image": {
@@ -3084,6 +3142,10 @@
       "mlx": {
         "minMemoryGb": 64
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": false
     },
     "product": {
       "adapter": "mlx_boogu",
@@ -3292,6 +3354,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "boogu_image_edit": {
@@ -3414,6 +3484,10 @@
       "mlx": {
         "minMemoryGb": 64
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": false
     },
     "product": {
       "adapter": "mlx_boogu",
@@ -3615,6 +3689,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "boogu_image_turbo": {
@@ -3737,6 +3819,10 @@
       "mlx": {
         "minMemoryGb": 64
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": false
     },
     "product": {
       "adapter": "mlx_boogu",
@@ -3928,6 +4014,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "chatterbox_tts": {
@@ -3936,6 +4030,9 @@
         "measured": false,
         "minMemoryGb": 6
       }
+    },
+    "previewByBackend": {
+      "candle": false
     },
     "product": {
       "audio": {
@@ -4935,6 +5032,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "chroma_diffusers",
       "candle": {},
@@ -5153,6 +5254,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "chroma1_flash": {
@@ -5945,6 +6054,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "chroma_diffusers",
       "candle": {},
@@ -6165,6 +6278,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "chroma1_hd": {
@@ -6957,6 +7078,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "chroma_diffusers",
       "candle": {},
@@ -7175,6 +7300,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "clap_htsat_unfused": {
@@ -8440,6 +8573,10 @@
         "minMemoryGb": 96
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_flux2",
       "candle": {},
@@ -8718,6 +8855,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": true
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "flux2_klein_9b": {
@@ -9739,6 +9884,10 @@
         "minMemoryGb": 42
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_flux2",
       "candle": {},
@@ -10022,6 +10171,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "flux2_klein_9b_kv": {
@@ -10940,6 +11097,10 @@
         "minMemoryGb": 42
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_flux2",
       "candle": {},
@@ -11222,6 +11383,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "flux2_klein_9b_true_v2": {
@@ -12079,6 +12248,10 @@
         "minMemoryGb": 42
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_flux2",
       "candle": {},
@@ -12332,6 +12505,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "flux2_vae": {
@@ -12528,6 +12709,10 @@
           "q8": 28
         }
       }
+    },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
     },
     "product": {
       "adapter": "mlx_flux3",
@@ -12829,6 +13014,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": true
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "flux3_klein_base": {
@@ -12945,6 +13138,10 @@
           "q8": 29
         }
       }
+    },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
     },
     "product": {
       "adapter": "mlx_flux3",
@@ -13244,6 +13441,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": true
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "flux_dev": {
@@ -14657,6 +14862,10 @@
         "minMemoryGb": 42
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "flux_diffusers",
       "candle": {},
@@ -14898,6 +15107,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "flux_schnell": {
@@ -15729,6 +15946,10 @@
         "minMemoryGb": 42
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "flux_diffusers",
       "candle": {},
@@ -15946,6 +16167,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "hybrik_resnet34": {
@@ -20505,6 +20734,10 @@
         "minMemoryGb": 48
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_ideogram",
       "candle": {},
@@ -20705,6 +20938,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "ideogram_4_turbo": {
@@ -25225,6 +25466,10 @@
         "minMemoryGb": 48
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_ideogram",
       "candle": {},
@@ -25428,6 +25673,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "illustrious_xl_v1": {
@@ -26490,6 +26743,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "sdxl_diffusers",
       "candle": {},
@@ -26819,6 +27076,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "illustrious_xl_v2": {
@@ -27881,6 +28146,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "sdxl_diffusers",
       "candle": {},
@@ -28208,6 +28477,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "instantid_face_stack": {
@@ -28760,7 +29037,15 @@
         ]
       }
     },
-    "routes": {}
+    "routes": {},
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": false,
+      "kind": "image",
+      "mlx_routed": true
+    }
   },
   "iris_3b": {
     "downloadEvidence": [
@@ -28860,6 +29145,10 @@
         },
         "minMemoryGb": 32
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
     },
     "product": {
       "adapter": "mlx_iris",
@@ -29062,6 +29351,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "iris_3b_depth": {
@@ -29453,6 +29750,9 @@
         "measured": false,
         "minMemoryGb": 2
       }
+    },
+    "previewByBackend": {
+      "candle": false
     },
     "product": {
       "audio": {
@@ -30519,6 +30819,10 @@
         "minMemoryGb": 24
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "kolors_diffusers",
       "candle": {},
@@ -30749,6 +31053,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "krea_2_raw": {
@@ -32491,6 +32803,10 @@
         "minMemoryGb": 48
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_krea",
       "autoDownload": false,
@@ -32787,6 +33103,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "krea_2_turbo": {
@@ -35230,6 +35554,10 @@
         "minMemoryGb": 48
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_krea",
       "autoDownload": false,
@@ -35554,6 +35882,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "krea_realtime_14b": {
@@ -35801,6 +36137,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": false,
+      "candle_video_vace": false,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "mlx": [
         {
@@ -36448,6 +36791,10 @@
         "minMemoryGb": 60
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "lens_turbo",
       "candle": {},
@@ -36699,6 +37046,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "lens_turbo": {
@@ -37258,6 +37613,10 @@
         "minMemoryGb": 60
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "lens_turbo",
       "candle": {},
@@ -37493,6 +37852,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "ltx_2_3": {
@@ -37750,6 +38117,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": true,
+      "candle_video_vace": false,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -38413,6 +38787,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": false,
+      "candle_video_vace": false,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "mlx": [
         {
@@ -38989,6 +39370,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": true,
+      "candle_video_vace": false,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -40400,6 +40788,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
+    },
     "product": {
       "adapter": "mlx_mage",
       "candle": {},
@@ -40655,6 +41047,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "mage_flow_base": {
@@ -41593,6 +41993,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
+    },
     "product": {
       "adapter": "mlx_mage",
       "candle": {},
@@ -41848,6 +42252,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "mage_flow_edit": {
@@ -42762,6 +43174,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
+    },
     "product": {
       "adapter": "mlx_mage",
       "candle": {},
@@ -43016,6 +43432,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "mage_flow_edit_base": {
@@ -43930,6 +44354,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
+    },
     "product": {
       "adapter": "mlx_mage",
       "candle": {},
@@ -44184,6 +44612,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "mage_flow_edit_turbo": {
@@ -45098,6 +45534,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
+    },
     "product": {
       "adapter": "mlx_mage",
       "candle": {},
@@ -45354,6 +45794,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "mage_flow_turbo": {
@@ -46292,6 +46740,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
+    },
     "product": {
       "adapter": "mlx_mage",
       "candle": {},
@@ -46549,6 +47001,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "minimax_h3": {
@@ -47091,6 +47551,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": true,
+      "candle_video_vace": false,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -47777,6 +48244,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": true,
+      "candle_video_vace": false,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -47842,6 +48316,9 @@
   },
   "mmaudio_large_44k": {
     "evidence": {},
+    "previewByBackend": {
+      "candle": false
+    },
     "product": {
       "autoDownload": false,
       "capabilities": [],
@@ -48008,6 +48485,9 @@
   },
   "mmaudio_small_16k": {
     "evidence": {},
+    "previewByBackend": {
+      "candle": false
+    },
     "product": {
       "autoDownload": false,
       "capabilities": [],
@@ -48177,6 +48657,10 @@
       "candle": {
         "measured": false
       }
+    },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
     },
     "product": {
       "adapter": "moss_image_base",
@@ -48361,6 +48845,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "moss_image_sft": {
@@ -48368,6 +48860,10 @@
       "candle": {
         "measured": false
       }
+    },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
     },
     "product": {
       "adapter": "moss_image_sft",
@@ -48618,6 +49114,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": true,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "moss_sfx_v2": {
@@ -48626,6 +49130,9 @@
         "measured": false,
         "minMemoryGb": 12
       }
+    },
+    "previewByBackend": {
+      "candle": false
     },
     "product": {
       "audio": {
@@ -48730,6 +49237,9 @@
         "measured": false,
         "minMemoryGb": 14
       }
+    },
+    "previewByBackend": {
+      "candle": false
     },
     "product": {
       "audio": {
@@ -48850,6 +49360,9 @@
         "measured": false,
         "minMemoryGb": 12
       }
+    },
+    "previewByBackend": {
+      "candle": false
     },
     "product": {
       "audio": {
@@ -49864,6 +50377,10 @@
         "minMemoryGb": 44
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "pulid_flux",
       "candle": {},
@@ -50009,7 +50526,15 @@
         "referenceStrengthDefault": 1.0
       }
     },
-    "routes": {}
+    "routes": {},
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": false,
+      "kind": "image",
+      "mlx_routed": true
+    }
   },
   "qwen_image": {
     "downloadEvidence": [
@@ -50648,6 +51173,10 @@
         "minMemoryGb": 50
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "qwen_image",
       "candle": {},
@@ -50962,6 +51491,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "qwen_image_2_1": {
@@ -51645,6 +52182,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
+    },
     "product": {
       "adapter": "qwen_image_2_1",
       "admissionGeometry": {
@@ -51892,6 +52433,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "qwen_image_2_1_pe_i2i": {
@@ -52771,6 +53320,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
+    },
     "product": {
       "adapter": "qwen_image_2_1_turbo",
       "admissionGeometry": {
@@ -53022,6 +53575,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "qwen_image_edit_2511": {
@@ -53973,6 +54534,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "qwen_image",
       "candle": {},
@@ -54184,6 +54749,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": false,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "qwen_image_edit_2511_lightning": {
@@ -54721,6 +55294,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "qwen_image",
       "candle": {},
@@ -54979,6 +55556,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": false,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "real_esrgan": {
@@ -56270,6 +56855,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "sdxl_diffusers",
       "candle": {},
@@ -56602,6 +57191,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "realvisxl_lightning": {
@@ -57656,6 +58253,10 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "sdxl_diffusers",
       "candle": {},
@@ -57955,6 +58556,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sam2_person_segment": {
@@ -58507,6 +59116,10 @@
         "minMemoryGb": 24
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_sana",
       "autoDownload": false,
@@ -58751,6 +59364,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sana_sprint_1600m": {
@@ -59227,6 +59848,10 @@
         "minMemoryGb": 24
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_sana",
       "autoDownload": false,
@@ -59426,6 +60051,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sapiens_normal_0_3b": {
@@ -59679,6 +60312,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": false,
+      "candle_video_vace": false,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -60084,6 +60724,10 @@
         "minMemoryGb": 64
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_sd3",
       "candle": {},
@@ -60319,6 +60963,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sd3_5_large_turbo": {
@@ -60599,6 +61251,10 @@
         "minMemoryGb": 64
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_sd3",
       "autoDownload": false,
@@ -60837,6 +61493,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sd3_5_medium": {
@@ -61117,6 +61781,10 @@
         "minMemoryGb": 56
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "mlx_sd3",
       "candle": {},
@@ -61353,6 +62021,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sdxl": {
@@ -62664,6 +63340,10 @@
         "minMemoryGb": 50
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "sdxl_diffusers",
       "candle": {},
@@ -62997,6 +63677,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "seedvr2_upscaler": {
@@ -63146,6 +63834,10 @@
           }
         }
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": false
     },
     "product": {
       "adapter": "sensenova_u1",
@@ -63326,6 +64018,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sensenova_u1_8b_fast": {
@@ -63435,6 +64135,10 @@
           }
         }
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": false
     },
     "product": {
       "adapter": "sensenova_u1",
@@ -63659,6 +64363,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sensenova_u1_8b_infographic_v2": {
@@ -63768,6 +64480,10 @@
           }
         }
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": false
     },
     "product": {
       "adapter": "sensenova_u1",
@@ -63943,6 +64659,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sensenova_u1_8b_infographic_v2_fast": {
@@ -64052,6 +64776,10 @@
           }
         }
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": false
     },
     "product": {
       "adapter": "sensenova_u1",
@@ -64271,6 +64999,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sensenova_u1_8b_infographic_v3": {
@@ -64380,6 +65116,10 @@
           }
         }
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": false
     },
     "product": {
       "adapter": "sensenova_u1",
@@ -64555,6 +65295,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "sensenova_u1_8b_infographic_v3_fast": {
@@ -64664,6 +65412,10 @@
           }
         }
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": false
     },
     "product": {
       "adapter": "sensenova_u1",
@@ -64883,6 +65635,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": true,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "starvector_1b": {
@@ -65442,6 +66202,10 @@
         "minMemoryGb": 8
       }
     },
+    "previewByBackend": {
+      "candle": false,
+      "mlx": false
+    },
     "product": {
       "adapter": "mlx_supra2",
       "candle": {},
@@ -65601,6 +66365,14 @@
         "supports_preview": false,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "svd": {
@@ -65702,6 +66474,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": true,
+      "candle_video_routed": true,
+      "candle_video_vace": false,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -66578,6 +67357,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": true,
+      "candle_video_vace": true,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -67376,6 +68162,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": true,
+      "candle_video_routed": true,
+      "candle_video_vace": true,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -67863,6 +68656,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": true,
+      "candle_video_vace": true,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -68155,6 +68955,13 @@
       }
     },
     "routes": {},
+    "routing": {
+      "candle_video_i2v": false,
+      "candle_video_routed": false,
+      "candle_video_vace": false,
+      "kind": "video",
+      "video_mlx_routed": true
+    },
     "videoRoutes": {
       "candle": [
         {
@@ -68300,6 +69107,9 @@
           "q8": 11
         }
       }
+    },
+    "previewByBackend": {
+      "candle": false
     },
     "product": {
       "audio": {
@@ -68607,6 +69417,9 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false
+    },
     "product": {
       "audio": {
         "languages": [
@@ -68835,6 +69648,9 @@
           "q8": 12
         }
       }
+    },
+    "previewByBackend": {
+      "candle": false
     },
     "product": {
       "audio": {
@@ -69070,6 +69886,9 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false
+    },
     "product": {
       "audio": {
         "languages": [
@@ -69299,6 +70118,9 @@
           "q8": 12
         }
       }
+    },
+    "previewByBackend": {
+      "candle": false
     },
     "product": {
       "audio": {
@@ -69535,6 +70357,9 @@
         }
       }
     },
+    "previewByBackend": {
+      "candle": false
+    },
     "product": {
       "audio": {
         "languages": [
@@ -69763,6 +70588,9 @@
           "q8": 12
         }
       }
+    },
+    "previewByBackend": {
+      "candle": false
     },
     "product": {
       "audio": {
@@ -70704,6 +71532,10 @@
         "minMemoryGb": 48
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "z_image_diffusers",
       "candle": {},
@@ -70966,6 +71798,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "z_image_edit": {
@@ -71136,6 +71976,10 @@
         },
         "minMemoryGb": 40
       }
+    },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
     },
     "product": {
       "adapter": "z_image_diffusers",
@@ -71365,6 +72209,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": false,
+      "candle_routed": false,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "z_image_turbo": {
@@ -72220,6 +73072,10 @@
         "minMemoryGb": 40
       }
     },
+    "previewByBackend": {
+      "candle": true,
+      "mlx": true
+    },
     "product": {
       "adapter": "z_image_diffusers",
       "candle": {},
@@ -72493,6 +73349,14 @@
         "supports_preview": true,
         "supports_prompt_enhancement": false
       }
+    },
+    "routing": {
+      "candle_lora": false,
+      "candle_quant": false,
+      "candle_quant_lora": true,
+      "candle_routed": true,
+      "kind": "image",
+      "mlx_routed": true
     }
   },
   "zimage_turbo_training_adapter_v1": {

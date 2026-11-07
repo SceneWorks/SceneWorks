@@ -5,6 +5,11 @@ fn product_json() -> String {
     crate::jsonc::strip_jsonc_comments(PRODUCTS)
 }
 const EVIDENCE: &str = include_str!("../../../../config/manifests/registry/evidence.json");
+const POLICY: &str = include_str!("../../../../config/manifests/registry/route-policy.json");
+const PREVIEW: &str = include_str!("../../../../config/manifests/builtin.preview-support.jsonc");
+fn preview_json() -> String {
+    crate::jsonc::strip_jsonc_comments(PREVIEW)
+}
 const MLX: &str =
     include_str!("../../../../config/engine-capabilities/runtime/capabilities.mlx.json");
 const CANDLE: &str =
@@ -145,6 +150,8 @@ fn descriptor_contents_change_the_spec_while_provenance_does_not() {
         assemble::assemble(
             &product_json(),
             EVIDENCE,
+            POLICY,
+            &preview_json(),
             &[("mlx", &mlx.to_string()), ("candle", CANDLE)],
         )
         .unwrap()
@@ -181,6 +188,8 @@ fn descriptor_contents_change_the_spec_while_provenance_does_not() {
         assemble::assemble(
             &product_json(),
             &evidence.to_string(),
+            POLICY,
+            &preview_json(),
             &[("mlx", MLX), ("candle", CANDLE)]
         )
         .is_ok(),
@@ -228,6 +237,8 @@ fn mutable_distribution_revision_cannot_enter_the_static_catalog() {
     let result = assemble::assemble(
         &products.to_string(),
         EVIDENCE,
+        POLICY,
+        &preview_json(),
         &[("mlx", MLX), ("candle", CANDLE)],
     );
     assert!(result.unwrap_err().contains("valid download"));
@@ -309,4 +320,62 @@ fn all_public_generator_and_provider_families_have_native_projections() {
             .map(|route| route.mode.as_str())
             .collect::<Vec<_>>(),
     );
+}
+
+#[test]
+fn router_policy_and_preview_feature_export_keep_the_frozen_population() {
+    let policy = super::policy::parse(POLICY).unwrap();
+    assert_eq!((policy.image.len(), policy.video.len()), (63, 14));
+    let aliases: Vec<_> = policy
+        .image
+        .iter()
+        .filter(|row| row.legacy_alias)
+        .map(|row| row.id.as_str())
+        .chain(
+            policy
+                .video
+                .iter()
+                .filter(|row| row.legacy_alias)
+                .map(|row| row.id.as_str()),
+        )
+        .collect();
+    assert_eq!(
+        aliases,
+        ["qwen_image_edit", "qwen_image_edit_2509", "mochi_1"]
+    );
+    for id in policy
+        .image
+        .iter()
+        .filter(|row| !row.legacy_alias)
+        .map(|row| row.id.as_str())
+        .chain(
+            policy
+                .video
+                .iter()
+                .filter(|row| !row.legacy_alias)
+                .map(|row| row.id.as_str()),
+        )
+    {
+        assert!(builtin_model_spec(id).unwrap().routing.is_some(), "{id}");
+    }
+
+    let source: Value = serde_json::from_str(&preview_json()).unwrap();
+    let preview = source["models"].as_object().unwrap();
+    assert_eq!(preview.len(), 83);
+    for (id, lanes) in preview {
+        let exported = super::preview_feature(id).unwrap_or_else(|| panic!("missing {id} preview"));
+        assert_eq!(
+            serde_json::to_value(exported).unwrap(),
+            *lanes,
+            "{id} preview changed"
+        );
+        if let Some(spec) = builtin_model_spec(id) {
+            for (backend, route) in &spec.routes {
+                if let Some(advertised) = exported.get(backend) {
+                    assert_eq!(*advertised, route.supports_preview, "{id}/{backend}");
+                }
+            }
+        }
+    }
+    assert_eq!(super::LEGACY_PREVIEW.len(), 8);
 }

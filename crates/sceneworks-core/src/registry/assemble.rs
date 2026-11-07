@@ -1,4 +1,5 @@
 //! Consume the current descriptor dumps. ENG-7 replaces this input adapter at its producer cutover.
+use super::policy;
 use super::spec::{
     BackendEvidence, GeneratorRoute, ModelSpec, ProductModel, ProviderRoute, VideoRoute,
 };
@@ -86,6 +87,8 @@ impl Snapshot {
 pub fn assemble(
     products: &str,
     evidence: &str,
+    route_policy: &str,
+    preview_features: &str,
     dumps: &[(&str, &str)],
 ) -> Result<BTreeMap<String, ModelSpec>, String> {
     let document: Value = serde_json::from_str(products).map_err(|e| e.to_string())?;
@@ -93,6 +96,51 @@ pub fn assemble(
         .as_array()
         .or_else(|| document.get("models").and_then(Value::as_array))
         .ok_or("registry product document needs a models array")?;
+    let route_policy = policy::parse(route_policy)?;
+    let preview_document: Value =
+        serde_json::from_str(preview_features).map_err(|e| e.to_string())?;
+    if preview_document["version"] != 1 {
+        return Err("unsupported preview feature export version".to_owned());
+    }
+    let preview: BTreeMap<String, BTreeMap<String, bool>> = serde_json::from_value(
+        preview_document
+            .get("models")
+            .cloned()
+            .ok_or("preview feature export has no models")?,
+    )
+    .map_err(|e| format!("invalid preview feature export: {e}"))?;
+    if preview
+        .values()
+        .flat_map(|lanes| lanes.keys())
+        .any(|backend| backend != "mlx" && backend != "candle")
+    {
+        return Err("unknown preview feature backend".to_owned());
+    }
+    let product_types: BTreeMap<_, _> = products
+        .iter()
+        .filter_map(|row| Some((row.get("id")?.as_str()?, row.get("type")?.as_str()?)))
+        .collect();
+    for (id, kind, legacy) in route_policy
+        .image
+        .iter()
+        .map(|row| (row.id.as_str(), "image", row.legacy_alias))
+        .chain(
+            route_policy
+                .video
+                .iter()
+                .map(|row| (row.id.as_str(), "video", row.legacy_alias)),
+        )
+    {
+        if legacy != !product_types.contains_key(id)
+            || product_types
+                .get(id)
+                .is_some_and(|product_kind| *product_kind != kind)
+        {
+            return Err(format!(
+                "invalid legacy marker or modality for route policy {id}"
+            ));
+        }
+    }
     let mut evidence: BTreeMap<String, Value> =
         serde_json::from_str(evidence).map_err(|e| e.to_string())?;
     let mut exports = BTreeMap::new();
@@ -260,6 +308,8 @@ pub fn assemble(
                 id.clone(),
                 ModelSpec {
                     product,
+                    routing: route_policy.for_model(&id),
+                    preview_by_backend: preview.get(&id).cloned().unwrap_or_default(),
                     routes,
                     video_routes,
                     provider_routes,

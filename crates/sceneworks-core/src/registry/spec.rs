@@ -10,6 +10,12 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "camelCase")]
 pub struct ModelSpec {
     pub product: ProductModel,
+    /// SceneWorks router admission, separate from native engine descriptor breadth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutePolicy>,
+    /// Stage-1/2 generated preview feature export, joined at build time for every public model.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub preview_by_backend: BTreeMap<String, bool>,
     /// The primary image generator on each backend, retained for existing consumers.
     pub routes: BTreeMap<String, GeneratorRoute>,
     /// Video modes can select several native engines on the same backend.
@@ -23,6 +29,45 @@ pub struct ModelSpec {
     pub model_evidence: Map<String, Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub download_evidence: Vec<Map<String, Value>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RoutePolicy {
+    Image {
+        mlx_routed: bool,
+        candle_routed: bool,
+        candle_quant: bool,
+        candle_lora: bool,
+        candle_quant_lora: bool,
+    },
+    Video {
+        video_mlx_routed: bool,
+        candle_video_routed: bool,
+        candle_video_i2v: bool,
+        candle_video_vace: bool,
+    },
+}
+
+impl RoutePolicy {
+    pub fn mlx_routed(&self) -> bool {
+        match self {
+            Self::Image { mlx_routed, .. } => *mlx_routed,
+            Self::Video {
+                video_mlx_routed, ..
+            } => *video_mlx_routed,
+        }
+    }
+
+    pub fn candle_routed(&self) -> bool {
+        match self {
+            Self::Image { candle_routed, .. } => *candle_routed,
+            Self::Video {
+                candle_video_routed,
+                ..
+            } => *candle_video_routed,
+        }
+    }
 }
 
 /// Shipping product facts. The common identity is typed here; the schema-validated manifest owns

@@ -10,7 +10,10 @@ mod exceptions;
 mod hf_repo_id;
 #[path = "src/jsonc.rs"]
 mod jsonc;
+#[path = "src/registry/policy.rs"]
+mod policy;
 #[path = "src/registry/spec.rs"]
+#[allow(dead_code)]
 mod spec;
 
 use std::path::{Path, PathBuf};
@@ -25,12 +28,18 @@ fn build_registry() {
     println!("cargo:rerun-if-changed=src/hf_repo_id.rs");
     println!("cargo:rerun-if-changed=src/registry/assemble.rs");
     println!("cargo:rerun-if-changed=src/registry/spec.rs");
+    println!("cargo:rerun-if-changed=src/registry/policy.rs");
     let product_manifest = read("manifests/builtin.models.jsonc");
     let product_json = jsonc::strip_jsonc_comments(&product_manifest);
     jsonc::reject_duplicate_keys(&product_json).expect("duplicate builtin manifest key");
     let product_rows: serde_json::Value =
         serde_json::from_str(&product_json).expect("invalid builtin model manifest");
     let evidence_json = read("manifests/registry/evidence.json");
+    let route_policy_json = read("manifests/registry/route-policy.json");
+    let route_policy = policy::parse(&route_policy_json).expect("invalid router product policy");
+    let preview_json =
+        jsonc::strip_jsonc_comments(&read("manifests/builtin.preview-support.jsonc"));
+    jsonc::reject_duplicate_keys(&preview_json).expect("duplicate preview feature key");
     let _approved_decisions = exceptions::approved_backend_exceptions();
     println!("cargo:rerun-if-changed=../../config/manifests/registry/approved-exceptions.json");
     jsonc::reject_duplicate_keys(&evidence_json).expect("duplicate memory evidence key");
@@ -58,6 +67,8 @@ fn build_registry() {
     let specs = assemble::assemble(
         &product_json,
         &evidence_json,
+        &route_policy_json,
+        &preview_json,
         &[
             (
                 "mlx",
@@ -70,6 +81,25 @@ fn build_registry() {
         ],
     )
     .expect("invalid static model registry");
+    let preview: serde_json::Value =
+        serde_json::from_str(&preview_json).expect("validated preview feature export");
+    let legacy_preview: std::collections::BTreeMap<_, _> = preview["models"]
+        .as_object()
+        .expect("validated preview models")
+        .iter()
+        .filter(|(id, _)| !specs.contains_key(id.as_str()))
+        .map(|(id, lanes)| (id.clone(), lanes.clone()))
+        .collect();
+    std::fs::write(
+        PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("legacy-model-preview.json"),
+        serde_json::to_vec(&legacy_preview).expect("serialize legacy preview features"),
+    )
+    .expect("write legacy preview features");
+    std::fs::write(
+        PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("model-route-policy.rs"),
+        route_policy.rust_constants(),
+    )
+    .expect("write typed route policy constants");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("model-registry.json");
     // A host build dependency can enable serde_json's preserve_order feature. The shipped
     // snapshot has the same bytes under either Cargo feature set.

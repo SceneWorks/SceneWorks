@@ -10,7 +10,11 @@ libraries and on the pinned inference gen-core contracts.
 For all 143 shipped builtins, core joins the v2 product manifest, checked-in
 backend descriptor dumps, and memory evidence at build time. The manifest schema
 owns distribution, restrictions, menus and presentation. Descriptor dumps own
-native image, video, audio, vector and utility provider routes. The evidence store
+native image, video, audio, vector and utility provider routes. The typed
+`route-policy.json` owns SceneWorks router admission, which is narrower than engine
+capability; it replaces the former image/video hand tables while retaining three
+legacy job aliases. The generated preview feature export is joined into each spec
+at build time, with legacy-only preview rows compiled separately. The evidence store
 retains the original provider, artifact-tier, load-shape and calibration payloads.
 Host installation and credential observations are supplied by the API or worker
 at runtime. The generated snapshot is a typed dump, not another authored table.
