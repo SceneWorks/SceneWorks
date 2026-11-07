@@ -84,6 +84,7 @@ pub async fn resolve_pinned_hf_files(
         return Err(error("Hugging Face base URL is not HTTP(S)"));
     }
     let tree = pinned_url(&base, repository, revision, None, true)?;
+    let tree_path = tree.path().to_owned();
     let mut next = Some(tree);
     let mut selected = BTreeMap::<PathBuf, PortableArtifactFile>::new();
     let mut matched = vec![false; selectors.len()];
@@ -98,7 +99,7 @@ pub async fn resolve_pinned_hf_files(
             .await
             .and_then(reqwest::Response::error_for_status)
             .map_err(|cause| error(format!("pinned artifact tree lookup failed: {cause}")))?;
-        next = next_tree_page(&base, response.headers())?;
+        next = next_tree_page(&base, &tree_path, response.headers())?;
         let payload = response
             .json::<Value>()
             .await
@@ -231,6 +232,7 @@ fn pinned_url(
 
 fn next_tree_page(
     base: &reqwest::Url,
+    tree_path: &str,
     headers: &reqwest::header::HeaderMap,
 ) -> Result<Option<reqwest::Url>, ArtifactContractError> {
     let Some(link) = headers.get(reqwest::header::LINK) else {
@@ -254,6 +256,7 @@ fn next_tree_page(
             if next.scheme() != base.scheme()
                 || next.host_str() != base.host_str()
                 || next.port_or_known_default() != base.port_or_known_default()
+                || next.path() != tree_path
                 || !next.username().is_empty()
                 || next.password().is_some()
             {
@@ -972,14 +975,23 @@ mod tests {
             reqwest::header::LINK,
             "<https://evil.test/next>; rel=\"next\"".parse().unwrap(),
         );
-        assert!(next_tree_page(&base, &headers).is_err());
+        assert!(next_tree_page(&base, tree.path(), &headers).is_err());
         headers.insert(
             reqwest::header::LINK,
-            "</api/models/owner/model/tree/next?cursor=2>; rel=\"next\""
+            "</api/models/other/model/tree/main?cursor=2>; rel=\"next\""
                 .parse()
                 .unwrap(),
         );
-        assert!(next_tree_page(&base, &headers).unwrap().is_some());
+        assert!(next_tree_page(&base, tree.path(), &headers).is_err());
+        headers.insert(
+            reqwest::header::LINK,
+            format!("</api/models/owner/model/tree/{revision}?cursor=2>; rel=\"next\"")
+                .parse()
+                .unwrap(),
+        );
+        assert!(next_tree_page(&base, tree.path(), &headers)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
