@@ -258,7 +258,7 @@ test('full raw numerical comparison sees late frames, every channel, non-finite 
   for(const value of [NaN,Infinity]){await writeFile(b,pcm([0.1,value,0.3,0.4]));await assert.rejects(rawNumericDifference(a,b,{stream:'audio',channels:2}),/non-finite/);}
 });
 
-test('assembled decoder uses all native frames/stereo samples and fixed existing H3 RMS ceiling, with bounded cleanup',async t=>{
+test('assembled decoder observes all native frames/stereo samples and preserves the legacy gate, with bounded cleanup',async t=>{
   const dir=await directory(t),calls=[];
   const makeCommand=({videoChange=false,audioChange=false,swapChannels=false,nonfiniteAudio=false,truncateVideo=false,truncateAudio=false,truncateVideoBoth=false,truncateAudioBoth=false}={})=>async(command,args)=>{
     assert.equal(command,'ffmpeg');calls.push(args);assert.ok(args.includes('-xerror'));assert.ok(args.includes('-n'));
@@ -318,7 +318,7 @@ test('equivalence failure writes a failed receipt and prevents a two-anchor-only
 });
 
 
-test('fixed RMS policy stays bound to the existing same-backend CUDA H3 campaign ceiling',async()=>{
+test('legacy regression values remain unchanged from sampled-repeat provenance',async()=>{
   const prior=JSON.parse(await readFile(new URL('../docs/testing/sc-26691-campaign/h3-terminal-cuda.json',import.meta.url),'utf8'));
   for(const stream of ['video','audio'])assert.equal(VEDA_EQUIVALENCE[stream],prior.bootstrap.operator.maximumBaselineDelta);
 });

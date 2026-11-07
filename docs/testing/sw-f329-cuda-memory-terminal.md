@@ -70,10 +70,10 @@ the21GiB pool plus3GiB outside reserve nor the384GiB host,95GiB workstation,
 manual callers retain their GPU1 default.
 
 The source revisions and minimal file domains are fixed in the runner. The real
-q4 tier is `SceneWorks/minimax-h3-mlx@137ce668…`, Veda predictor `9a1fd3a4…`,
-Turbo8step `5d1d4829…`; supported installed upstream companion snapshots are
-`6818f6c3…` and `939557dc…`. Placeholder `111…` fixture snapshots are refused.
-Source payloads are copied only once if E:→D: hardlinks are impossible, hashed
+q4 tier is `SceneWorks/minimax-h3-mlx@137ce668â€¦`, Veda predictor `9a1fd3a4â€¦`,
+Turbo8step `5d1d4829â€¦`; supported installed upstream companion snapshots are
+`6818f6c3â€¦` and `939557dcâ€¦`. Placeholder `111â€¦` fixture snapshots are refused.
+Source payloads are copied only once if E:â†’D: hardlinks are impossible, hashed
 once in the owned staging root, and hardlinked from D: into each anchor epoch.
 Shard-index completeness is checked before model execution. No shared cache is
 modified, no checkpoint is uploaded, and no model grid is executed.
@@ -81,7 +81,7 @@ modified, no checkpoint is uploaded, and no model grid is executed.
 ## Three anchors in one bounded campaign
 
 1. Actual workstation budget, normal Veda90% execution. Preserve original
-   1344×768,345frames,24fps,14.375seconds,q4,balanced/crop,T2V,prompt and
+   1344Ã—768,345frames,24fps,14.375seconds,q4,balanced/crop,T2V,prompt and
    Turbo8step LoRA at weight1. Verify actual sparse calls, effective8steps,
    request/queued equality, full decoded video and generated stereo32kHz audio,
    exact dimensions/framecount/duration, and changing nonblack frames.
@@ -90,7 +90,7 @@ modified, no checkpoint is uploaded, and no model grid is executed.
    fallback reason, continuous capped-pool RESERVED high-water, sampled whole
    device/RSS bounds, context/library/foreign reserve, full outputs, and cleanup.
 
-3. Same original request, normal Veda90%, under the same enforced24GiB pool.
+3. Same original request, normal Veda90%, under the same enforced 24 GiB pool.
    Verify positive sparse execution and actual one-block transfer receipts for
    **both** the text encoder and DiT. The workstation must execute the resident
    policy and this anchor must execute the windowed policy. Their completed
@@ -129,15 +129,17 @@ sampled-comparator deltas, executed policy/kernel witnesses and the original
 bound media hashes. A failed comparison writes a failed receipt and prevents
 the campaign's successful aggregate result in the current CGPU controller.
 
-### Numerical acceptance and current failed-run disposition
+### Numerical contract and retained failed-run disposition
 
 E5 requires identical fixed inputs through equivalent affected production paths,
 with dtype, task, adapter stack and workspace policy held equivalent. Compare
 residency separately from cuBLAS default versus explicit 32 MiB workspace. That
-workspace difference is a source-backed, unproven confound; no causal explanation
-or acceptable-drift claim follows from it alone. Reuse valid unchanged component
-proofs and fill demonstrated coverage gaps with the bounded real-q4/Turbo BF16
-projection and large-Q/K witness before another full render.
+workspace difference was initially an unproven confound. The accepted arithmetic
+run 42333250451 now shows an actual FFN workspace effect while 474 same-policy
+preparation/root/FFN metrics are exact. Its input is synthetic, so it does not
+claim to capture the original render's first differing activation. The matched
+full-media result below establishes the equivalent-policy comparison for the
+original request. Existing Q/K and text-encoder proofs retain their measured sources.
 
 Existing Q/K RMS/partial-RoPE assertions are exact for their fixed inputs. Keep
 exact Veda mask/score assertions for common inputs and the source-defined output
@@ -157,16 +159,47 @@ post-idle. Preserve those receipts and their source/binary/media hashes unchange
 The normal-pair full-video RMS 0.09263594898258952 is a recorded divergence. The
 original comparator stopped before audio; a later CPU-only native-stereo diagnostic
 recorded RMS 0.015946034316153112, separately from that failed execution. Neither
-number is declared acceptable. This docs correction changes no controller or test;
-a reviewed acceptance implementation still awaits the component findings/schema.
+number is declared acceptable. Those original receipts remain unchanged. The
+current reference policy now matches the capped arm's pool/workspace route.
 No higher post-result threshold or retrospective campaign pass is authorized.
+
+### Matched full-media result
+
+[Control 42335898368](https://github.com/SceneWorks/SceneWorks/actions/runs/42335898368)
+completed the original GPU0 request with actual Resident/windowNone and zero
+block transfers, using 95 GiB admission, 92 GiB pool plus 3 GiB outside reserve. It
+reused the exact original CGPU/M4 executable and request/model/license bytes.
+The controller is separately identified as bb7/ac07; no new-head build is claimed.
+Owned shutdown and physical post-idle both verified.
+
+Its MP4 SHA256 is
+`6cabbd4062b0a741b9e3ec39818807bd349739b87dc78bf7ac13f37767ce2014`,
+identical to the original enforced 24 GiB normal-Veda output. All 1,068,318,720
+native RGB values and 921,600 interleaved PCM values (both 32 kHz channels,
+including the recorded AAC padding) have zero RMS, maximum and per-channel
+differences. Dimensions remain 1344Ã—768 / 345 frames / 24 fps / 14.375 s with generated
+stereo audio. The comparison against the old unpooled95 reference reproduces
+the original nonzero video/audio diagnostics.
+
+This exact measured identity resolves the residency numerical concern for the
+tested request alongside the component contracts. It introduces no replacement
+tolerance. The legacy 0.001 regression values remain unchanged and explicitly
+retain their sampled-repeat provenance; they are not a general native-media
+backend contract. The original failed aggregate remains failed. The permanent
+inference pin is `2b09938e33370915d4f853389961709b8bbf8bf9`;
+[PR3331](https://github.com/SceneWorks/SceneWorks/pull/3331) and the feature
+acceptance report separately record final checks and protected delivery.
 
 An earlier focused forced-materializing numerical proof remains required:
 Veda-to-dense can still use FlashAttention. Job-stage sampled peaks retain their
 latency/blind spots; the pool watermark is continuous and includes the whole
 process epoch, without resetting away loading/conditioning/decode.
 
-## Retaining the accepted uncapped control after the allocator repair
+## Historical uncapped-control provenance
+
+The retention helpers below verify archived records. Current graded plans reject
+`retainedWorkstation` because that old reference lacks the matched pool policy.
+The historical contract is retained for source and receipt interpretation.
 
 The optional `retainedWorkstation` applies only to the accepted workstation job
 `job_b29fc9a4c1047efdabebe4eaaea1b754` from run42184091082, consumer
@@ -288,7 +321,7 @@ new-source run or a full-checkpoint24GiB result.
 Failed anchors retain results and raw traces. Do not retry unchanged candidates
 or enlarge a routine grid. Diagnose and repair the failing boundary, then rerun
 only evidence actually invalidated. An uncapped Blackwell render or sampled
-cancellation is never reported as enforced24GiB fit or RTX3090 validation.
+cancellation is never reported as enforced 24 GiB fit or RTX3090 validation.
 
 ## Validation and CI cost
 
@@ -321,7 +354,9 @@ mapping or newly added policy labels. The old retention helpers remain available
 for reading historical evidence; plan validation rejects that old reference for
 new grading before any new renders. The conditional control below still compares
 old media observationally. No numerical tolerance is changed here: the existing
-legacy0.001 media grading remains unresolved pending the actual matched control.
+legacy 0.001 regression numbers remain unchanged. The actual matched control above
+has identical encoded media and zero full native differences, so acceptance does
+not depend on inventing a new bound or treating those numbers as a backend tolerance.
 
 The existing manual memory workflow also accepts the explicit
 `mode: "matched-resident-control"`. This is one conditional diagnostic after the

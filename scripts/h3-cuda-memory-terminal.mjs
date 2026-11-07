@@ -228,12 +228,12 @@ export function validateMaterializingProofLog(log){
 }
 
 
-// Existing CUDA H3 terminal operator maximumBaselineDelta: 0.001 (sc-26691 campaign).
-// Keep that same-backend RMS ceiling fixed before observing this campaign. Full native
-// frames/channels below strengthen the existing sampled decodedDelta witness; neither
-// cross-backend tolerances nor forced-dense outputs are an equality oracle.
+// Preserve the original campaign's numeric regression gate. Its 0.001 value came
+// from sampled unchanged-repeat stability, not a general native-media backend
+// tolerance. Matched control42335898368 independently produced identical encoded
+// media and zero complete RGB/stereo differences; no replacement bound is chosen.
 export const VEDA_EQUIVALENCE = Object.freeze({video:0.001,audio:0.001,
-  basis:'sc-26691 CUDA same-backend maximumBaselineDelta=0.001; full native decoded RGB and stereo PCM RMS'});
+  basis:'unchanged legacy campaign regression ceiling; sampled-repeat provenance only, with complete native RGB/stereo observations reported separately'});
 
 export function validateVedaParityPair(records,{sourceEquivalence}={}){
   const take=id=>{const found=records.filter(r=>r.id===id);assert.equal(found.length,1,`one actual ${id} anchor required`);return found[0];};
@@ -343,8 +343,8 @@ export async function compareDecodedMedia(a,b,dir,options={}){
     for(const stream of ['video','audio'])report.streams[stream].maximumRmse=VEDA_EQUIVALENCE[stream];
     for(const stream of ['video','audio']){
       const full=report.streams[stream];
-      assert.ok(full.rmse<=VEDA_EQUIVALENCE[stream]&&full.channelRmse.every(v=>v<=VEDA_EQUIVALENCE[stream]),`${stream} full decoded Veda residency comparison exceeds fixed same-backend RMS ceiling`);
-      assert.ok(full.sampledRmse<=VEDA_EQUIVALENCE[stream],`${stream} existing decodedDelta witness exceeds same-backend RMS ceiling`);
+      assert.ok(full.rmse<=VEDA_EQUIVALENCE[stream]&&full.channelRmse.every(v=>v<=VEDA_EQUIVALENCE[stream]),`${stream} full decoded Veda residency comparison exceeds unchanged legacy regression ceiling`);
+      assert.ok(full.sampledRmse<=VEDA_EQUIVALENCE[stream],`${stream} existing decodedDelta witness exceeds unchanged legacy regression ceiling`);
     }
     return report;
   }catch(error){error.comparison={...report,...error.comparison};throw error;}
