@@ -3010,7 +3010,8 @@ pub(crate) async fn register_trained_base_checkpoint(
         .to_owned();
     let source_model_id = job
         .payload
-        .pointer("/plan/target/baseModel")
+        .get("plan")
+        .and_then(|plan| plan.pointer("/target/baseModel"))
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| ApiError::internal("Training plan requires a base model identity"))?;
