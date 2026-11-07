@@ -248,6 +248,7 @@ pub(crate) async fn capture_portable_model_binding(
             matches!(
                 &source.source,
                 SelectedSourceLocation::OperatorCachedRepo(_)
+                    | SelectedSourceLocation::OperatorOverrideOrManifest { .. }
             )
         }) {
             state
@@ -323,7 +324,7 @@ fn model_free_job(job_type: &JobType, payload: &JsonObject) -> bool {
                 "semanticEmbeddingsEnabled",
             ]
             .into_iter()
-            .all(|key| payload.get(key).and_then(Value::as_bool) != Some(true))
+            .all(|key| payload.get(key).and_then(Value::as_bool) == Some(false))
 }
 
 struct TrainingBaseSelection {
@@ -460,6 +461,11 @@ async fn capture_model_slot(
         .into_iter()
         .flatten()
         .filter(|download| is_supported_model_download(download))
+        .filter(|download| {
+            training.is_none()
+                || !model_id.starts_with("ltx")
+                || !is_co_requisite_download(download)
+        })
         .collect::<Vec<_>>();
     let mut members = Vec::new();
     let variant;
@@ -494,7 +500,9 @@ async fn capture_model_slot(
             verify_training_primary_path(state, &training.path, primary, &members).await?;
         }
     }
-    if let Some(path) = selected_primary_override(payload, entry, owns_request_overlays) {
+    if let Some(path) =
+        selected_primary_override(payload, entry, owns_request_overlays, training.is_some())
+    {
         let files = capture_local_source_files(&path, &allowed_local_roots(state))?;
         let digest =
             portable_closure_sha256(&files).map_err(|error| incomplete(error.to_string()))?;
@@ -565,6 +573,29 @@ async fn capture_model_slot(
                     Some(source.component_id.clone()),
                 )
                 .await?
+            }
+            SelectedSourceLocation::OperatorOverrideOrManifest { source_id, default } => {
+                if source_claims
+                    .iter()
+                    .any(|claim| claim.source_id == *source_id)
+                {
+                    capture_worker_source_member(
+                        state,
+                        source_id,
+                        source.role.clone(),
+                        source.component_id.clone(),
+                        source_claims,
+                    )
+                    .await?
+                } else {
+                    capture_download_member(
+                        state,
+                        default,
+                        source.role.clone(),
+                        Some(source.component_id.clone()),
+                    )
+                    .await?
+                }
             }
         };
         if let Some(tier) = &source.selected_tier {
@@ -710,6 +741,7 @@ async fn capture_worker_source_member(
         PortableSourceProvenance::OperatorOverride => {
             if source_id == "sdxl_detail_tile_control"
                 || (source_id != "ltx_amoral_gemma_3_12b"
+                    && source_id != "ltx_training_gemma_override"
                     && source_id != "ltx_training_text_encoder"
                     && sceneworks_core::control_weights::shipped_auxiliary_source(source_id)
                         .is_none())
@@ -816,7 +848,11 @@ fn selected_primary_override(
     payload: &JsonObject,
     entry: &Value,
     owns_request_overlays: bool,
+    is_training_base: bool,
 ) -> Option<PathBuf> {
+    if is_training_base {
+        return None;
+    }
     owns_request_overlays
         .then(|| payload.get("advanced").and_then(Value::as_object))
         .flatten()
@@ -1406,12 +1442,17 @@ mod tests {
         let payload = json!({"advanced":{"modelPath":"/new/root/model"}});
         let entry = json!({"modelPath":"/old/root/model"});
         assert_eq!(
-            selected_primary_override(payload.as_object().unwrap(), &entry, true),
+            selected_primary_override(payload.as_object().unwrap(), &entry, true, false),
             Some(PathBuf::from("/new/root/model"))
         );
         assert_eq!(
-            selected_primary_override(payload.as_object().unwrap(), &entry, false),
+            selected_primary_override(payload.as_object().unwrap(), &entry, false, false),
             Some(PathBuf::from("/old/root/model"))
+        );
+        assert_eq!(
+            selected_primary_override(payload.as_object().unwrap(), &entry, true, true),
+            None,
+            "a training plan's verified base path cannot be replaced by a generation override"
         );
     }
 
@@ -1431,5 +1472,22 @@ mod tests {
                     .unwrap();
             assert_eq!(selected.tier, expected, "{base}");
         }
+    }
+
+    #[test]
+    fn catalog_analysis_requires_explicit_model_free_flags() {
+        assert!(!model_free_job(
+            &JobType::CatalogAnalysis,
+            &JsonObject::new()
+        ));
+        let no_models = json!({
+            "structuredAnalysisEnabled":false,
+            "visionAnalysisEnabled":false,
+            "semanticEmbeddingsEnabled":false
+        });
+        assert!(model_free_job(
+            &JobType::CatalogAnalysis,
+            no_models.as_object().unwrap()
+        ));
     }
 }
