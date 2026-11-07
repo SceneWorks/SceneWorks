@@ -101,6 +101,10 @@ libc = "0.2"
 # confined even when a managed path is concurrently replaced.
 rustix = { version = "1", features = ["fs"] }
 
+[build-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
 [dev-dependencies]
 # Adversarial PNG fixtures choose compression explicitly, independent of the workspace's
 # unified miniz/zlib-rs backend. Already locked transitively; never a production dependency.

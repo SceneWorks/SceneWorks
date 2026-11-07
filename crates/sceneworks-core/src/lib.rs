@@ -77,6 +77,7 @@ pub mod payload_util;
 pub mod preview_support;
 pub mod process;
 pub mod project_store;
+pub mod registry;
 pub mod safe_path;
 pub mod safetensors;
 pub mod session_log;

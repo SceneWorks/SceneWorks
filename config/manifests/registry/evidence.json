@@ -1,0 +1,789 @@
+{
+  "flux_schnell": {
+    "mlx": {
+      "minMemoryGb": 42,
+      "memoryStrategyContract": {
+        "abi": 1,
+        "provider": "flux1_schnell",
+        "exhaustive": true,
+        "implementations": [
+          {
+            "rung": "resident",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "plain"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "none",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  false
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident"
+            ],
+            "parameters": {},
+            "parameterRanges": {},
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          },
+          {
+            "rung": "staged_residency",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "requiredOffloadPolicy": "sequential",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "plain"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "none",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  false
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "parameters": {},
+            "parameterRanges": {},
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          },
+          {
+            "rung": "bounded_decode",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "plain"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "none",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  false
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident",
+              "bounded_decode"
+            ],
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 64
+            },
+            "parameterRanges": {
+              "decodeTileEdges": [
+                768,
+                640,
+                512
+              ],
+              "decodeOverlaps": [
+                64
+              ]
+            },
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          },
+          {
+            "rung": "bounded_attention",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "plain"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "none",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  false
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 64,
+              "attentionChunkSize": 67108864
+            },
+            "parameterRanges": {
+              "decodeTileEdges": [
+                768,
+                640,
+                512
+              ],
+              "decodeOverlaps": [
+                64
+              ],
+              "attentionChunkSizes": [
+                67108864
+              ]
+            },
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          },
+          {
+            "rung": "bounded_transformer_residency",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "requiredOffloadPolicy": "sequential",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "plain"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "none",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  false
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 64,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1,
+              "transformerWindowComponent": "Dit"
+            },
+            "parameterRanges": {
+              "decodeTileEdges": [
+                768,
+                640,
+                512
+              ],
+              "decodeOverlaps": [
+                64
+              ],
+              "attentionChunkSizes": [
+                67108864
+              ],
+              "transformerWindowSizes": [
+                1
+              ],
+              "transformerWindowComponents": [
+                "Dit"
+              ]
+            },
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          },
+          {
+            "rung": "resident",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "lora"
+            ],
+            "loadProfiles": [
+              "lora"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "adapters",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  false
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident"
+            ],
+            "parameters": {},
+            "parameterRanges": {},
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          },
+          {
+            "rung": "staged_residency",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "requiredOffloadPolicy": "sequential",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "lora"
+            ],
+            "loadProfiles": [
+              "lora"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "adapters",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  false
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "parameters": {},
+            "parameterRanges": {},
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          },
+          {
+            "rung": "resident",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "pid"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "pid",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  true
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident"
+            ],
+            "parameters": {},
+            "parameterRanges": {},
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          },
+          {
+            "rung": "staged_residency",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "requiredOffloadPolicy": "sequential",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "pid"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "pid",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  true
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "parameters": {},
+            "parameterRanges": {},
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          },
+          {
+            "rung": "resident",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "lora"
+            ],
+            "loadProfiles": [
+              "lora_pid"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "adapters-pid",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  true
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident"
+            ],
+            "parameters": {},
+            "parameterRanges": {},
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          },
+          {
+            "rung": "staged_residency",
+            "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+            "requiredOffloadPolicy": "sequential",
+            "tiers": [
+              "bf16",
+              "q4",
+              "q8"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "lora"
+            ],
+            "loadProfiles": [
+              "lora_pid"
+            ],
+            "sourceKinds": [
+              "dir"
+            ],
+            "providerOverlay": "adapters-pid",
+            "requestContexts": [
+              {
+                "mode": "text_to_image",
+                "providerMode": "text_to_image",
+                "referenceCounts": [
+                  0
+                ],
+                "pid": [
+                  true
+                ],
+                "hasPhases": false
+              }
+            ],
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "parameters": {},
+            "parameterRanges": {},
+            "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+          }
+        ]
+      }
+    },
+    "candle": {
+      "calibrations": [
+        {
+          "abi": 3,
+          "loadShape": "eager_materialization",
+          "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+          "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "inferenceClosureDigest": "43e90d2a117e7d834f115fa0152de67ace7f96c845fd8ec88a63bb2ea8e05e66",
+          "provider": "flux1_schnell",
+          "tier": "q4",
+          "mode": "text_to_image",
+          "overlay": "none",
+          "geometry": {
+            "width": 1024,
+            "height": 1024,
+            "batch": 1,
+            "frames": 1
+          },
+          "artifactRepository": "SceneWorks/flux1-schnell-mlx",
+          "artifactResolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "artifactVariant": "q4",
+          "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+          "rung": "resident",
+          "parameters": {}
+        },
+        {
+          "abi": 3,
+          "loadShape": "eager_materialization",
+          "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+          "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "inferenceClosureDigest": "43e90d2a117e7d834f115fa0152de67ace7f96c845fd8ec88a63bb2ea8e05e66",
+          "provider": "flux1_schnell",
+          "tier": "q4",
+          "mode": "text_to_image",
+          "overlay": "none",
+          "geometry": {
+            "width": 1024,
+            "height": 1024,
+            "batch": 1,
+            "frames": 1
+          },
+          "artifactRepository": "SceneWorks/flux1-schnell-mlx",
+          "artifactResolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "artifactVariant": "q4",
+          "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+          "rung": "staged_residency",
+          "parameters": {}
+        },
+        {
+          "abi": 3,
+          "loadShape": "eager_materialization",
+          "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+          "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "inferenceClosureDigest": "43e90d2a117e7d834f115fa0152de67ace7f96c845fd8ec88a63bb2ea8e05e66",
+          "provider": "flux1_schnell",
+          "tier": "q4",
+          "mode": "text_to_image",
+          "overlay": "none",
+          "geometry": {
+            "width": 1024,
+            "height": 1024,
+            "batch": 1,
+            "frames": 1
+          },
+          "artifactRepository": "SceneWorks/flux1-schnell-mlx",
+          "artifactResolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "artifactVariant": "q4",
+          "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+          "rung": "bounded_decode",
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128
+          }
+        },
+        {
+          "abi": 3,
+          "loadShape": "eager_materialization",
+          "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+          "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "inferenceClosureDigest": "43e90d2a117e7d834f115fa0152de67ace7f96c845fd8ec88a63bb2ea8e05e66",
+          "provider": "flux1_schnell",
+          "tier": "q4",
+          "mode": "text_to_image",
+          "overlay": "none",
+          "geometry": {
+            "width": 1024,
+            "height": 1024,
+            "batch": 1,
+            "frames": 1
+          },
+          "artifactRepository": "SceneWorks/flux1-schnell-mlx",
+          "artifactResolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "artifactVariant": "q4",
+          "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+          "rung": "bounded_attention",
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 67108864
+          }
+        },
+        {
+          "abi": 3,
+          "loadShape": "deferred_materialization",
+          "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+          "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "inferenceClosureDigest": "43e90d2a117e7d834f115fa0152de67ace7f96c845fd8ec88a63bb2ea8e05e66",
+          "provider": "flux1_schnell",
+          "tier": "q4",
+          "mode": "text_to_image",
+          "overlay": "none",
+          "geometry": {
+            "width": 1024,
+            "height": 1024,
+            "batch": 1,
+            "frames": 1
+          },
+          "artifactRepository": "SceneWorks/flux1-schnell-mlx",
+          "artifactResolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "artifactVariant": "q4",
+          "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+          "rung": "bounded_transformer_residency",
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          }
+        }
+      ],
+      "supportsSequentialOffload": true,
+      "memoryStrategyCapabilities": {
+        "bounded_decode": {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128
+          },
+          "overlays": [
+            "none"
+          ]
+        },
+        "bounded_attention": {
+          "parameters": {
+            "attentionChunkSize": 67108864
+          },
+          "overlays": [
+            "none"
+          ]
+        },
+        "bounded_transformer_residency": {
+          "parameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "overlays": [
+            "none"
+          ]
+        }
+      },
+      "minMemoryGb": 24,
+      "vramGbByTier": {
+        "q4": 21.3,
+        "q8": 31.8
+      },
+      "vramMeasuredPixels": 1048576,
+      "sequentialPeakGb": {
+        "q4": 18.4,
+        "q8": 26.4
+      },
+      "measured": false,
+      "memoryStrategyContract": {
+        "abi": 1,
+        "provider": "flux1_schnell",
+        "implementations": [
+          {
+            "rung": "staged_residency",
+            "tiers": [
+              "q8",
+              "q4"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "plain"
+            ],
+            "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell"
+          },
+          {
+            "rung": "bounded_decode",
+            "tiers": [
+              "q8",
+              "q4"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "plain"
+            ],
+            "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell"
+          },
+          {
+            "rung": "bounded_attention",
+            "tiers": [
+              "q8",
+              "q4"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "plain"
+            ],
+            "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell"
+          },
+          {
+            "rung": "bounded_transformer_residency",
+            "tiers": [
+              "q8",
+              "q4"
+            ],
+            "modes": [
+              "text_to_image"
+            ],
+            "overlays": [
+              "none"
+            ],
+            "loadProfiles": [
+              "plain"
+            ],
+            "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell"
+          }
+        ]
+      }
+    }
+  }
+}
