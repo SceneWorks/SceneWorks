@@ -40,8 +40,8 @@ import { videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 
-import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
-import { DEFAULT_MAC_CAPABILITIES } from "../modelEligibility.js";
+import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+import { DEFAULT_MAC_CAPABILITIES, wanLightningAvailable } from "../modelEligibility.js";
 
 import { loadStudioSettings } from "../hooks/useStudioSettings.js";
 
@@ -356,7 +356,7 @@ export function VideoStudio() {
   // 5B and every non-Wan engine ignore `advanced.lightning`, so hide the control there
   // (sc-10048, epic 10043). When it's shown and on, the worker governs steps/guidance with the
   // 4-step recipe, so the manual Steps/Guidance inputs are disabled to reflect that.
-  const showLightning = WAN_A14B_LIGHTNING_MODEL_IDS.has(selectedModel?.id);
+  const showLightning = wanLightningAvailable(selectedModel);
   const lightningActive = showLightning && lightning;
   // Clip-conditioning strength (`advanced.videoConditioningStrength`). The LTX/Wan IC-LoRA clip
   // modes always honor it, so those two modes show it for whichever model serves them. The

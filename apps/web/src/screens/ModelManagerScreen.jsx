@@ -11,7 +11,7 @@ import { ModelComponentDetails } from "../components/ModelComponentDetails.jsx";
 import { ImportedCheckpointSurface } from "../components/ImportedCheckpointSurface.jsx";
 import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
-import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
+import { terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
 import {
   extractFamilies,
@@ -23,7 +23,7 @@ import {
   presetLoras,
 } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
-import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../modelEligibility.js";
+import { DEFAULT_MAC_CAPABILITIES, macModelBlock, wanPairedLoraAvailable } from "../modelEligibility.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { formatBytes, formatTierBytes, downloadSizeText } from "../formatting.js";
 import {
@@ -730,7 +730,7 @@ export function ModelManagerScreen() {
     : [];
   const showBaseModelSelect = Boolean(baseModelFamily && baseModelOptions.length);
   const ltxBaseModelRequired = importForm.family === "ltx-video";
-  const isMoeBaseModel = WAN_MOE_PAIRED_LORA_MODEL_IDS.has(importForm.baseModel);
+  const isMoeBaseModel = wanPairedLoraAvailable(baseModelOptions.find((model) => model.id === importForm.baseModel));
   const showSecondaryFileSlot = isMoeBaseModel && importForm.mode === "file";
   const moeMissingSecondary = showSecondaryFileSlot && Boolean(importForm.file) && !importForm.secondaryFile;
 

@@ -27,11 +27,22 @@ import {
   vectorModelAvailability,
   vectorModelServesMode,
   vectorModelUsable,
+  wanLightningAvailable,
+  wanPairedLoraAvailable,
 } from "./modelEligibility.js";
 import { VISION_CAPTION_MODEL_ID } from "./constants.js";
 import { fallbackModels } from "./testSupport/builtinModels.js";
 
 const caps = DEFAULT_MAC_CAPABILITIES; // gating off → Mac blocks are no-ops
+
+it("derives Wan A14B Lightning and paired-LoRA controls from shipped catalog facts", () => {
+  const expected = ["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"];
+  expect(fallbackModels.filter(wanLightningAvailable).map((model) => model.id).sort()).toEqual(expected);
+  expect(fallbackModels.filter(wanPairedLoraAvailable).map((model) => model.id).sort()).toEqual(expected);
+  const imported = { ...fallbackModels.find((model) => model.id === expected[0]), importedSource: { ownershipMode: "managed" } };
+  expect(wanLightningAvailable(imported)).toBe(false);
+  expect(wanPairedLoraAvailable(imported)).toBe(false);
+});
 
 describe("modelEligibility predicates", () => {
   it("routes StarVector image_to_svg by backend and offers missing installs", () => {

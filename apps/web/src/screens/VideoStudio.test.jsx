@@ -2159,7 +2159,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   let container;
   let root;
 
-  // The two A14B MoE engines that honor advanced.lightning (constants.js WAN_A14B_LIGHTNING_MODEL_IDS).
+  // The two A14B MoE engines ship the Lightning package advertised by the catalog.
   const WAN_T2V_14B = {
     id: "wan_2_2_t2v_14b",
     name: "Wan2.2 14B (T2V)",
@@ -2169,7 +2169,8 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     defaults: { duration: 5, resolution: "832x480", fps: 16 },
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
     quantization: {},
-    loraCompatibility: {},
+    loraCompatibility: { sizeClass: "14b" },
+    downloads: [{ repo: "lightx2v/Wan2.2-Lightning" }],
     ui: {},
   };
   const WAN_I2V_14B = {
@@ -2184,6 +2185,8 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     id: "wan_2_2",
     name: "Wan 2.2 (5B)",
     capabilities: ["text_to_video"],
+    loraCompatibility: { sizeClass: "5b" },
+    downloads: [],
   };
   // A non-Wan engine (LTX) — no toggle.
   const NON_WAN = {
@@ -3061,6 +3064,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     family: "wan-video",
     adapter: "wan_video",
     capabilities: ["text_to_video"],
+    downloads: [{ repo: "lightx2v/Wan2.2-Lightning" }],
     defaults: { duration: 5, resolution: "832x480", fps: 16 },
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480"] },
     quantization: {},
@@ -3390,8 +3394,8 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
   // for Wan / LTX / SCAIL-2 / Bernini. Without this leg the test above would also pass against an
   // implementation that hid the pair for every model.
   //
-  // Bernini rather than the Wan A14B fixture on purpose: `wan_2_2_t2v_14b` is in
-  // WAN_A14B_LIGHTNING_MODEL_IDS, and Lightning defaults ON and suppresses guidance itself — so it
+  // Bernini rather than the Wan A14B fixture on purpose: Wan ships the Lightning package,
+  // and Lightning defaults ON and suppresses guidance itself — so it
   // would have proved nothing about the new `video` gate.
   it("keeps Guidance and Negative prompt for a model that declares no video axes", async () => {
     const context = baseContext({ videoModels: [BERNINI_V2V] });
