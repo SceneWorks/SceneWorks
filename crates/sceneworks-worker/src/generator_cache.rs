@@ -846,7 +846,9 @@ pub(crate) struct RequestGpuMemoryLimitGuard {
 #[cfg(all(target_os = "macos", not(test)))]
 impl Drop for RequestGpuMemoryLimitGuard {
     fn drop(&mut self) {
-        mlx_rs::memory::set_memory_limit(self.previous);
+        if crate::owner_device_cleanup_allowed() {
+            mlx_rs::memory::set_memory_limit(self.previous);
+        }
     }
 }
 

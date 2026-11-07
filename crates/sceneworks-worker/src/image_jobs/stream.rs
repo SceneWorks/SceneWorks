@@ -457,6 +457,8 @@ where
 #[cfg(target_os = "macos")]
 pub(super) fn release_gen_cache_between_items() {
     #[cfg(test)]
+    TEST_MLX_CACHE_RELEASE_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+    #[cfg(test)]
     if SUPPRESS_TEST_MLX_CACHE_RELEASE.with(std::cell::Cell::get) {
         return;
     }
@@ -470,6 +472,7 @@ std::thread_local! {
     /// ancillary release while still exercising the exact production item loop. Hardware tests do
     /// not enter this scope and continue to verify the real `clear_cache` behavior.
     static SUPPRESS_TEST_MLX_CACHE_RELEASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_MLX_CACHE_RELEASE_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -496,8 +499,44 @@ struct RequestCacheRelease;
 
 impl Drop for RequestCacheRelease {
     fn drop(&mut self) {
-        release_gen_cache_between_items();
+        if crate::owner_device_cleanup_allowed() {
+            release_gen_cache_between_items();
+        }
     }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn typed_process_fault_skips_request_cache_release() {
+    without_mlx_cache_release_for_headless_test(|| {
+        TEST_MLX_CACHE_RELEASE_ATTEMPTS.with(|attempts| attempts.set(0));
+        drop(RequestCacheRelease);
+        assert_eq!(
+            TEST_MLX_CACHE_RELEASE_ATTEMPTS.with(std::cell::Cell::get),
+            1
+        );
+
+        let panic_result = std::panic::catch_unwind(|| {
+            let _guard = RequestCacheRelease;
+            panic!("owner panic");
+        });
+        assert!(panic_result.is_err());
+        assert_eq!(
+            TEST_MLX_CACHE_RELEASE_ATTEMPTS.with(std::cell::Cell::get),
+            1
+        );
+
+        let fatal = crate::classify_engine_error(
+            "generation failed",
+            gen_core::Error::ProcessPoisoned("device lost".into()),
+        );
+        assert!(matches!(fatal, WorkerError::ProcessPoisoned(_)));
+        drop(RequestCacheRelease);
+        assert_eq!(
+            TEST_MLX_CACHE_RELEASE_ATTEMPTS.with(std::cell::Cell::get),
+            1
+        );
+    });
 }
 
 // Shared by the macOS MLX paths and the Windows/CUDA candle InstantID lane (sc-5491): both load a

@@ -1,6 +1,24 @@
 //! Worker error type ([`WorkerError`]), its `From` conversions, and the [`WorkerResult`] alias.
 use super::*;
 
+thread_local! {
+    // A typed provider fault is terminal for this owner thread. Destructors below the
+    // cache owner's return path must not submit another command to the failed device.
+    static OWNER_PROCESS_POISONED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn owner_process_poisoned() -> bool {
+    OWNER_PROCESS_POISONED.with(std::cell::Cell::get)
+}
+
+pub(crate) fn owner_device_cleanup_allowed() -> bool {
+    !std::thread::panicking() && !owner_process_poisoned()
+}
+
+fn mark_owner_process_poisoned() {
+    OWNER_PROCESS_POISONED.with(|poisoned| poisoned.set(true));
+}
+
 #[derive(Debug)]
 pub enum WorkerError {
     Http(reqwest::Error),
@@ -124,7 +142,10 @@ pub(crate) fn classify_engine_error(context: &str, error: gen_core::Error) -> Wo
         gen_core::Error::Canceled => WorkerError::Canceled(format!("{context}: {error}")),
         // A provider has already classified a fatal process state. Keep its original detail
         // byte-for-byte so the owner and terminal paths can retire without string inference.
-        gen_core::Error::ProcessPoisoned(detail) => WorkerError::ProcessPoisoned(detail),
+        gen_core::Error::ProcessPoisoned(detail) => {
+            mark_owner_process_poisoned();
+            WorkerError::ProcessPoisoned(detail)
+        }
         gen_core::Error::Unsupported(_) => {
             WorkerError::InvalidPayload(format!("{context}: {error}"))
         }
@@ -247,6 +268,7 @@ mod tests {
         assert!(
             matches!(error, WorkerError::ProcessPoisoned(ref detail) if detail == "first device fault")
         );
+        assert!(owner_process_poisoned());
     }
 
     /// sc-16247 / GH #1966: the reported failure end-to-end. A Bazzite host whose kernel module
