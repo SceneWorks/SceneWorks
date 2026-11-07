@@ -9,6 +9,32 @@ pub enum PortableAuxSourceShape {
     Directory,
 }
 
+/// Path-free key for a worker's registered local digest source. The API computes the same key
+/// from the frozen route's logical catalog identity before deciding claim eligibility.
+pub fn registered_digest_claim_id(
+    kind: &str,
+    model_id: &str,
+    component_id: Option<&str>,
+) -> Result<String, String> {
+    if !matches!(kind, "model" | "lora" | "control" | "component")
+        || model_id.trim().is_empty()
+        || model_id != model_id.trim()
+        || model_id.chars().any(char::is_control)
+        || (kind == "component") != component_id.is_some()
+        || component_id.is_some_and(|id| {
+            id.trim().is_empty() || id != id.trim() || id.chars().any(char::is_control)
+        })
+    {
+        return Err("invalid registered digest source identity".to_owned());
+    }
+    let identity =
+        serde_json::to_vec(&(kind, model_id, component_id)).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "registered_digest:{kind}:{}",
+        crate::hashing::sha256_bytes(&identity)
+    ))
+}
+
 /// Private worker claim key for a FLUX.2 conversion base selected from this worker's installed
 /// repository and concrete tier. The provenance and file ledger still carry the byte identity.
 pub fn flux2_convert_base_claim_id(
@@ -535,6 +561,20 @@ mod tests {
         );
         assert!(flux2_convert_base_claim_id("guardfx/borrow", revision, "../q4").is_err());
         assert!(flux2_convert_base_claim_id("guardfx/borrow", "main", "q4").is_err());
+    }
+
+    #[test]
+    fn registered_digest_claim_key_is_path_free_and_slot_stable() {
+        let model = registered_digest_claim_id("model", "imported-model", None).unwrap();
+        let component =
+            registered_digest_claim_id("component", "imported-model", Some("vae")).unwrap();
+        assert_ne!(model, component);
+        assert_eq!(
+            model,
+            registered_digest_claim_id("model", "imported-model", None).unwrap()
+        );
+        assert!(!model.contains("imported-model"));
+        assert!(registered_digest_claim_id("component", "imported-model", None).is_err());
     }
 
     #[test]
