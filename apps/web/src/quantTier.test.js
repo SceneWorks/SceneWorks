@@ -29,7 +29,7 @@ import {
   lightestInstallableTier,
   suggestTier,
   tierFits,
-} from "./tierSuggestion.js";
+} from "./registryTierEvidence.js";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
 
 // The SHIPPED catalog, parsed from the exact bytes the product embeds (same loader shape as

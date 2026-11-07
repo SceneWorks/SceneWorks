@@ -6,7 +6,7 @@ import {
   predictedResolutionPeakGb,
   resolutionFitsMemory,
 } from "./resolutionMemory.js";
-import { MEMORY_HEADROOM_FRACTION } from "./tierSuggestion.js";
+import { MEMORY_HEADROOM_FRACTION } from "./registryTierEvidence.js";
 
 // A Krea-shaped model: a real mlx/candle memory floor + the sc-13959 high-res ladder.
 function kreaModel(overrides = {}) {

@@ -4,7 +4,7 @@ import { useQuantTierPicker } from "../../components/generationStudio.jsx";
 import { SCAIL2_MODEL_ID } from "../../videoStudioValidation.js";
 import { videoModelServesMode } from "../../modelEligibility.js";
 import { allPossibleTiers, installedTiers, tierLabel, tierPickerOptions, tierQuantize } from "../../quantTier.js";
-import { suggestTier } from "../../tierSuggestion.js";
+import { suggestTier } from "../../registryTierEvidence.js";
 import { useHostMemory } from "../../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../../hostMemory.js";
 

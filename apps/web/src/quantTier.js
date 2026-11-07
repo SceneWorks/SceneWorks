@@ -179,7 +179,7 @@ export function isSelectableTier(tier) {
 // caller that knows nothing about worker capabilities behaving exactly as before.
 //
 // Extracted so the THREE readers of this rule share one spelling — `installedTiers`, `allPossibleTiers`,
-// and (sc-15400) `tierSuggestion`'s per-tier memory floor, which must not size a host against a tier
+// and (sc-15400) `registryTierEvidence`'s per-tier memory floor, which must not size a host against a tier
 // that host cannot serve.
 export function tierHostEligible(tier, options = {}) {
   const { convRotEligible = true, nvfp4Eligible = true, fp8rEligible = false } = options;

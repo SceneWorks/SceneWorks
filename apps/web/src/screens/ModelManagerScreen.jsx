@@ -55,7 +55,7 @@ import {
   suggestTier,
   tierFits,
   sdxlCudaMemoryEstimate,
-} from "../tierSuggestion.js";
+} from "../registryTierEvidence.js";
 import { RETIRED_MODEL_CAPABILITIES, capabilityLabel } from "../modelCapabilities.js";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
 import {
@@ -268,7 +268,7 @@ function deleteResultText(result, name) {
 // this basis; we surface the same order to the user. Each entry is the raw `variants[]` object.
 // "training" (sc-8797) is the extra flat-diffusers LoRA-training-base artifact a tiered model can
 // host (lens on macOS); it renders last so the quant tiers stay the visual focus. It is not in
-// tierSuggestion's fidelity list, so it is never the suggested/preselected download.
+// registryTierEvidence's fidelity list, so it is never the suggested/preselected download.
 const TIER_DISPLAY_ORDER = ["bf16", "q8", "q4", "training"];
 
 function orderedMatrixVariants(model) {

@@ -4,7 +4,7 @@ import { AppContext } from "../context/AppContext.js";
 import { SimpleModelManager } from "./SimpleModelManager.jsx";
 import { SimpleUiContext } from "./SimpleUiContext.js";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
-import { MEMORY_HEADROOM_FRACTION, tierFits } from "../tierSuggestion.js";
+import { MEMORY_HEADROOM_FRACTION, tierFits } from "../registryTierEvidence.js";
 const { serverAcknowledgments, getLicenseAcknowledgment } = vi.hoisted(() => ({
   serverAcknowledgments: new Set(), getLicenseAcknowledgment: vi.fn(),
 }));
@@ -469,7 +469,7 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
       // fixture said `true` and the PR body called 37.3 "a measured VRAM requirement"; per the schema the
       // flag means "false when ESTIMATED (scaled from weight size + a measured sibling)", and it covers
       // `minMemoryGb` and `vramGbByTier` together. So neither number here is a measurement, and the row
-      // reports the higher of the two (see the estimated-lane rule in tierSuggestion.js).
+      // reports the higher of the two (see the estimated-lane rule in registryTierEvidence.js).
       candle: { minMemoryGb: 44, vramGbByTier: { q4: 37.3, q8: 42.0, bf16: 52.0 }, measured: false },
       hasVariantMatrix: true,
       variants: [

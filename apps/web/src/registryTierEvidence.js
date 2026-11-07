@@ -1,4 +1,4 @@
-// RAM-based quant-tier download suggestion (sc-8509, epic 8506). The Models page lets a user pick
+// Registry-backed RAM-based quant-tier download suggestion (sc-8509, epic 8506). The Models page lets a user pick
 // which quant tier(s) of a model to DOWNLOAD, with a suggested default: the highest-fidelity tier
 // that should fit the host's memory. This module is the pure, unit-testable core of that logic —
 // deliberately separate from the React screen (like sc-8515's quantTier.js) so sc-8516 can later
@@ -9,7 +9,9 @@
 // installable set. `suggestTier` returning a smaller tier does not make bf16 un-installable — the
 // screen keeps every tier's checkbox enabled.
 //
-// Consumes the sc-8508 per-variant catalog shape: each `model.variants[]` entry carries a `variant`
+// Consumes the public model projection assembled from typed registry product facts and backend
+// evidence. Its existing field names remain stable while manifest memory keys move to evidence.json.
+// Each `model.variants[]` entry carries a `variant`
 // key (bf16/q8/q4) and a `footprint` object. `footprint.diskSizeBytes` is always populated;
 // `footprint.residentMemoryBytes` / `peakMemoryBytes` are the MEASURED memory fields sc-8516 populates
 // (for the tiers it measured on-device; the rest stay null and fall back to the calibrated estimate).
@@ -138,7 +140,7 @@ function calibratedMeasuredPeakBytes(variant) {
     : null;
 }
 
-// Derive an unmeasured quant tier's peak from a smaller measured tier only after the manifest states
+// Derive an unmeasured quant tier's peak from a smaller measured tier only after product data states
 // what fraction of precision-dependent disk growth is active at once. Same-model identity is
 // insufficient: Lens Turbo changes its MoE text-encoder packing between tiers, for example. Wan A14B
 // declares 0.5 because both experts remain on disk while only one is resident. Anchoring the measured
@@ -191,7 +193,7 @@ function measuredSiblingPeakEstimateBytes(variant, model, targetDisk) {
 // `mlx.minMemoryGb` / `candle.minMemoryGb` is a SINGLE per-model integer, and it OVER-states the
 // requirement for every user who only installed a lighter tier: krea_realtime_14b is forced to 64 while
 // its default q4 tier peaks at 27.90 GiB (`downloads[].footprint.peakMemoryBytes` 29,957,689,344 — with
-// q8 at 34.44 and bf16 at 46.71 GiB). The manifest already carries the real per-tier ladder, so a
+// q8 at 34.44 and bf16 at 46.71 GiB). The registry evidence carries the real per-tier ladder, so a
 // consumer that knows WHICH tier is in play should read that tier's measured peak.
 //
 // WHAT THE BLANKET INTEGER IS NOT: it is NOT a ceiling over the model's tiers. An earlier revision of
@@ -286,7 +288,7 @@ function positiveIntegerOrNull(value) {
 // (bf16/q8/q4). The "default" pseudo-variant of a single-variant model and the non-quant "training" base
 // are excluded, so neither can ever be mistaken for a generation tier's footprint.
 //
-// DUPLICATE tier keys resolve to the MAX measured peak rather than last-write-wins. The manifest
+// DUPLICATE tier keys resolve to the MAX measured peak rather than last-write-wins. The projected
 // legitimately declares several downloads under one `variant` key — `mage_flow` carries each of q4/q8/bf16
 // THREE times (main weights, plus a text_encoder and a vae component), and `wan_2_2_t2v_14b` carries each
 // tier twice (a macOS/MLX entry with footprints and a windows/linux candle entry without).
@@ -471,7 +473,7 @@ function installedTiersFloorGb(model, backend, options) {
 // from its owner, `crates/sceneworks-worker/src/vram_gate.rs` `HEADROOM_GB`, which is the gate that
 // actually rejects a candle load: "Fixed transient/runtime headroom (GB) added on top of a per-tier
 // MEASURED peak (`candle.vramGbByTier`) to cover allocator slack + activation spikes not captured by the
-// steady peak. Not added on top of `candle.minMemoryGb`, which the manifest already pads over the
+// steady peak. Not added on top of `candle.minMemoryGb`, which the evidence projection already pads over the
 // measured peak (sc-9094)."
 //
 // SC-15611 owns reserve policy across the lanes. This is a checked MIRROR of
@@ -496,9 +498,9 @@ export const CANDLE_HEADROOM_GB = 2.0;
 //     143 shown against 130 required, +13.0 — with `qwen_image_edit_2511_lightning` bf16 at 98 vs 89.4
 //     and `qwen_image` bf16 at 92 vs 84.5.
 //
-// The blanket `minMemoryGb` integers are already stated in host terms on both lanes — the manifest says
+// The blanket `minMemoryGb` integers are already stated in host terms on both lanes — the evidence contract says
 // so at krea_realtime_14b ("~47 GiB active peak. 64 covers that with OS/app headroom") and `vram_gate`
-// says so for candle ("which the manifest already pads over the measured peak") — so converting here is
+// says so for candle ("which the evidence already pads over the measured peak") — so converting here is
 // what makes the measured basis and the blanket basis comparable, which is what lets them be `max`ed.
 export function hostGbForPeakGb(peakGb, backend) {
   if (peakGb == null || !Number.isFinite(peakGb) || peakGb <= 0) {

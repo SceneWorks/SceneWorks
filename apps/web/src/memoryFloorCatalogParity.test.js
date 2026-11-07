@@ -26,7 +26,7 @@ import {
   suggestTier,
   tierFits,
   variantFootprintBytes,
-} from "./tierSuggestion.js";
+} from "./registryTierEvidence.js";
 import { isSelectableTier, tierHostEligible, tierQuantize } from "./quantTier.js";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
 import { sdxlCudaMemoryEstimate } from "./sdxlCudaMemoryEndpoints.js";
@@ -129,7 +129,7 @@ function loadManifestModels() {
 // below simply cannot see. This file is this PR's central evidence, so its blind spots are written down
 // next to it rather than left to be rediscovered:
 //   * `downloadSizeBytes` WAS one of them, and its absence hid a real hole. `variantFootprintBytes`
-//     consumes it as its LAST-RESORT priority 4 (tierSuggestion.js:92-98, reached via
+//     consumes it as its LAST-RESORT priority 4 (registryTierEvidence.js, reached via
 //     `mlxEstimatedPeakGb`), and `krea_2_raw`/`krea_2_turbo` — the only two shipped matrix entries whose
 //     downloads carry NO `footprint` at all — reach the fill through exactly that leg. Without the field
 //     the mirror answered `needs 48 GB` (the `mlx.minMemoryGb` blanket) for all eight bf16-containing
@@ -1308,7 +1308,7 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     expect(bf16Host, "bf16 must not inherit q8's figure").toBeGreaterThan(q8Host);
   });
 
-  it("enumerates the candle.measured === false entries the way tierSuggestion.js describes them", () => {
+  it("enumerates the candle.measured === false entries the way registryTierEvidence.js describes them", () => {
     // MINOR 4. `candle.measured === false` is the uncalibrated inventory; the subset that also
     // carries `vramGbByTier` is the set the rule is about. Membership is pinned by id so the prose
     // cannot drift from the catalog again. sc-16025 adds the Mage profiles to this set because
