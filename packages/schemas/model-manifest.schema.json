@@ -934,7 +934,7 @@
   },
   "properties": {
     "$schema": { "type": "string" },
-    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "schemaVersion": { "type": "integer", "enum": [1, 2], "description": "Version 1 user JSONC is read through the shared upgrader; version 2 is the canonical written format." },
     "models": {
       "type": "array",
       "items": {

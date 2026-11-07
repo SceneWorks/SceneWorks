@@ -46,6 +46,13 @@ pub const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Measured registry facts are shipped alongside the product manifests. Keep
+/// their source file separate so a manifest cannot silently become the evidence
+/// store again when the memory-key consumers migrate.
+pub const BUILTIN_REGISTRY_EVIDENCE: &str =
+    include_str!("../../../config/manifests/registry/evidence.json");
+pub const BUILTIN_REGISTRY_EVIDENCE_PATH: &str = "registry/evidence.json";
+
 /// Return one immutable shipped catalog, parsed once. Files in `config_dir` and user manifests
 /// are deliberately excluded: edits to those remain observable by the normal filesystem loaders.
 /// Missing, malformed or structurally invalid embedded catalogs are errors, never empty policy.
@@ -381,6 +388,33 @@ pub fn seed_builtin_manifests(config_dir: &Path, mode: SeedMode) -> std::io::Res
         }
         crate::store_util::atomic_write(&target, contents.as_bytes())
             .map_err(|error| std::io::Error::other(format!("install {name}: {error}")))?;
+    }
+    crate::jsonc::reject_duplicate_keys(BUILTIN_REGISTRY_EVIDENCE).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{BUILTIN_REGISTRY_EVIDENCE_PATH}: {error}"),
+        )
+    })?;
+    let evidence: serde_json::Value = serde_json::from_str(BUILTIN_REGISTRY_EVIDENCE)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if !evidence.is_object() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "registry evidence must be a JSON object",
+        ));
+    }
+    let target = dir.join(BUILTIN_REGISTRY_EVIDENCE_PATH);
+    if manifest_needs_write(
+        std::fs::read(&target).ok().as_deref(),
+        BUILTIN_REGISTRY_EVIDENCE.as_bytes(),
+        mode,
+    ) {
+        std::fs::create_dir_all(target.parent().expect("evidence has a parent"))?;
+        crate::store_util::atomic_write(&target, BUILTIN_REGISTRY_EVIDENCE.as_bytes()).map_err(
+            |error| {
+                std::io::Error::other(format!("install {BUILTIN_REGISTRY_EVIDENCE_PATH}: {error}"))
+            },
+        )?;
     }
     Ok(())
 }
@@ -1276,6 +1310,11 @@ mod tests {
             let written = std::fs::read_to_string(dir.join(name)).expect("manifest written");
             assert_eq!(&written, contents, "{name} matches the embedded copy");
         }
+        assert_eq!(
+            std::fs::read_to_string(dir.join(BUILTIN_REGISTRY_EVIDENCE_PATH)).unwrap(),
+            BUILTIN_REGISTRY_EVIDENCE,
+            "registry evidence matches the embedded copy"
+        );
         // No temp files left behind by the atomic write.
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .expect("read manifests dir")
@@ -1351,6 +1390,31 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("builtin.styles.jsonc")).expect("styles written"),
             embedded("builtin.styles.jsonc")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(BUILTIN_REGISTRY_EVIDENCE_PATH)).unwrap(),
+            BUILTIN_REGISTRY_EVIDENCE
+        );
+    }
+
+    #[test]
+    fn registry_evidence_obeys_the_same_seed_modes() {
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = temp.path().join("manifests/registry/evidence.json");
+        std::fs::create_dir_all(evidence.parent().unwrap()).unwrap();
+        std::fs::write(&evidence, b"operator-evidence").unwrap();
+        seed_builtin_manifests(temp.path(), SeedMode::IfMissing).unwrap();
+        assert_eq!(std::fs::read(&evidence).unwrap(), b"operator-evidence");
+        seed_builtin_manifests(temp.path(), SeedMode::SyncFromEmbedded).unwrap();
+        assert_eq!(
+            std::fs::read(&evidence).unwrap(),
+            BUILTIN_REGISTRY_EVIDENCE.as_bytes()
+        );
+        std::fs::write(&evidence, b"stale-evidence").unwrap();
+        seed_builtin_manifests(temp.path(), SeedMode::Overwrite).unwrap();
+        assert_eq!(
+            std::fs::read(&evidence).unwrap(),
+            BUILTIN_REGISTRY_EVIDENCE.as_bytes()
         );
     }
 
