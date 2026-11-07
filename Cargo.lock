@@ -7182,6 +7182,7 @@ dependencies = [
  "serde_path_to_error",
  "sha2 0.10.9",
  "subtle",
+ "syn 2.0.119",
  "tempfile",
  "tokio",
  "tracing",

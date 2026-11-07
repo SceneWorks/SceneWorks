@@ -75,7 +75,7 @@ axum = { workspace = true }
 sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "2b09938e33370915d4f853389961709b8bbf8bf9" }
 quote = "1.0"
 proc-macro2 = "1.0"
-syn = { version = "2.0", features = ["full", "visit"] }
+syn = { workspace = true }
 toml = "0.8"
 tower = { workspace = true }
 # Dev-only stdout subscriber so the residency/fit-gate tests can surface their `tracing::info!`

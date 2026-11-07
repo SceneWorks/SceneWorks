@@ -49,6 +49,8 @@ if-addrs = "0.13"
 # member's attempt to disable inherited defaults.
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
+# Shared AST features used by the core route inventory and worker structural tests.
+syn = { version = "2.0", features = ["full", "visit"] }
 uuid = { version = "1.11", features = ["v4"] }
 tokio = { version = "1.40", default-features = false }
 tempfile = { version = "3.27" }
