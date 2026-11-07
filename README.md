@@ -601,6 +601,8 @@ The exact pre-cutover dependency set, canonical runtime release, validation evid
 rollback procedure are recorded in the
 [Phase 5 consumer cutover](documents/rearchitecture/PHASE_5_CUTOVER.md).
 
+The [Shared Generation Architecture roadmap and CodeGraph handoff](docs/architecture/shared-generation-architecture/README.md) maps the planned engine and application work to its tracked features and items.
+
 ## Development
 
 Build the desktop app or run it in dev:
