@@ -246,11 +246,10 @@ jobs:
       # signing key is scoped to the bundle step below, not here (sc-8864).
       CUDA_COMPUTE_CAP: "80"
       CARGO_NET_OFFLINE: "true"
-    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
-    # default (sc-10420, sc-13603). Hosted runner with no warm cache: a cold CUDA
-    # toolkit install + full candle/CUDA build + NSIS/MSI packaging is the healthy
-    # ~42-49 min, so this sits ~2x above that worst-case release build.
-    timeout-minutes: 90
+    # Guardrail below GitHub's 6-hour default (sc-10420, sc-13603). The hosted
+    # release runner has no warm cache: the 0.11.0 cold Candle/CUDA installer
+    # build was still compiling when the former 90-minute job limit cancelled it.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
