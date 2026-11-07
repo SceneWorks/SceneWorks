@@ -2020,15 +2020,15 @@ pub(crate) async fn heartbeat_with_reason(
                 loaded_models: Vec::new(),
                 utilization: gpu_utilization(&settings.gpu_id).await,
                 status_reason,
-                portable_source_claims: portable_claims.clone(),
+                portable_source_claims: portable_claims.as_ref().map(|(_, claims)| claims.clone()),
                 extra: BTreeMap::new(),
             },
         )
         .await;
     match outcome {
         Ok(_) => {
-            if portable_claims.is_some() {
-                portable_source_claims::mark_inventory_published();
+            if let Some((generation, _)) = portable_claims {
+                portable_source_claims::mark_inventory_published(generation);
             }
             Ok(())
         }

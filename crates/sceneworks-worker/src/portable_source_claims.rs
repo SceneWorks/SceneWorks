@@ -37,27 +37,72 @@ const STATIC_SOURCE_IDS: &[&str] = &[
 ];
 
 static INVENTORY_STARTED: AtomicBool = AtomicBool::new(false);
-static PENDING_INVENTORY: OnceLock<Mutex<Option<Vec<PortableSourceClaim>>>> = OnceLock::new();
+static PENDING_INVENTORY: OnceLock<Mutex<InventoryProgress>> = OnceLock::new();
 
-fn pending_inventory() -> &'static Mutex<Option<Vec<PortableSourceClaim>>> {
-    PENDING_INVENTORY.get_or_init(|| Mutex::new(None))
+#[derive(Default)]
+struct InventoryProgress {
+    claims: Vec<PortableSourceClaim>,
+    generation: u64,
+    acknowledged: u64,
+}
+
+impl InventoryProgress {
+    fn publish(&mut self, claim: PortableSourceClaim) {
+        if self
+            .claims
+            .iter()
+            .any(|existing| existing.source_id == claim.source_id)
+        {
+            return;
+        }
+        self.claims.push(claim);
+        self.claims
+            .sort_by(|left, right| left.source_id.cmp(&right.source_id));
+        self.generation += 1;
+    }
+
+    fn pending(&self) -> Option<(u64, Vec<PortableSourceClaim>)> {
+        (self.generation > self.acknowledged).then(|| (self.generation, self.claims.clone()))
+    }
+
+    fn acknowledge(&mut self, generation: u64) {
+        self.acknowledged = self.acknowledged.max(generation.min(self.generation));
+    }
+}
+
+fn pending_inventory() -> &'static Mutex<InventoryProgress> {
+    PENDING_INVENTORY.get_or_init(|| Mutex::new(InventoryProgress::default()))
 }
 
 /// Registration stays fast even when installed source closure spans terabytes. Exactly one
-/// blocking inventory hashes it in the background; the next ordinary heartbeat publishes the
-/// complete, fresh private claim vector. Until then the API cannot route bound remote jobs here.
+/// blocking inventory hashes it in the background. Each completed source is published on the
+/// next ordinary heartbeat; unverified sources remain ineligible until their own hash completes.
 pub(crate) fn start_background_inventory(settings: Settings) {
     if INVENTORY_STARTED.swap(true, Ordering::AcqRel) {
+        // Registration replaces the server's claim vector. If a scan is already running,
+        // republish its completed claims and let it continue producing fresh ones.
+        pending_inventory()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .acknowledged = 0;
         return;
     }
+    *pending_inventory()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = InventoryProgress::default();
     tokio::spawn(async move {
-        let result =
-            crate::load_progress::spawn_blocking(move || static_source_claims(&settings)).await;
-        match result {
-            Ok(claims) => {
-                *pending_inventory()
+        let result = crate::load_progress::spawn_blocking(move || {
+            collect_source_claims(&settings, |claim| {
+                pending_inventory()
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(claims);
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .publish(claim);
+            });
+        })
+        .await;
+        match result {
+            Ok(()) => {
+                INVENTORY_STARTED.store(false, Ordering::Release);
             }
             Err(error) => {
                 tracing::warn!(%error, "private source inventory failed");
@@ -67,56 +112,50 @@ pub(crate) fn start_background_inventory(settings: Settings) {
     });
 }
 
-pub(crate) fn pending_inventory_claims() -> Option<Vec<PortableSourceClaim>> {
+pub(crate) fn pending_inventory_claims() -> Option<(u64, Vec<PortableSourceClaim>)> {
     pending_inventory()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+        .pending()
 }
 
-pub(crate) fn mark_inventory_published() {
-    *pending_inventory()
+pub(crate) fn mark_inventory_published(generation: u64) {
+    pending_inventory()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .acknowledge(generation);
 }
 
-pub(crate) fn static_source_claims(settings: &Settings) -> Vec<PortableSourceClaim> {
-    let empty = JsonObject::new();
-    let mut claims: Vec<_> = STATIC_SOURCE_IDS
-        .iter()
-        .filter_map(|source_id| {
-            match capture_selected_source(source_id, settings, &empty) {
-                Ok(Some((claim, _))) => Some(claim),
-                Ok(None) => None,
-                Err(error) => {
-                    tracing::warn!(source_id, %error, "private auxiliary source could not be advertised");
-                    None
-                }
-            }
-        })
-        .collect();
-    claims.extend(flux2_conversion_source_claims(settings));
-    claims.extend(registered_digest_source_claims(settings));
+#[cfg(test)]
+fn static_source_claims(settings: &Settings) -> Vec<PortableSourceClaim> {
+    let mut claims = Vec::new();
+    collect_source_claims(settings, |claim| claims.push(claim));
     claims.sort_by(|left, right| left.source_id.cmp(&right.source_id));
-    let mut unique = Vec::new();
-    let mut index = 0;
-    while index < claims.len() {
-        let end = index
-            + claims[index..]
-                .iter()
-                .take_while(|claim| claim.source_id == claims[index].source_id)
-                .count();
-        // The ID includes the exact file ledger. Repeated registrations with identical bytes
-        // advertise one availability; registrations with different bytes have different IDs.
-        unique.push(claims[index].clone());
-        index = end;
-    }
-    unique
+    claims.dedup_by(|left, right| left.source_id == right.source_id);
+    claims
 }
 
-fn registered_digest_source_claims(settings: &Settings) -> Vec<PortableSourceClaim> {
+fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSourceClaim)) {
+    let empty = JsonObject::new();
+    for source_id in STATIC_SOURCE_IDS {
+        match capture_selected_source(source_id, settings, &empty) {
+            Ok(Some((claim, _))) => publish(claim),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(source_id, %error, "private auxiliary source could not be advertised")
+            }
+        }
+    }
+    flux2_conversion_source_claims(settings, &mut publish);
+    registered_digest_source_claims(settings, publish);
+}
+
+fn registered_digest_source_claims(
+    settings: &Settings,
+    mut publish: impl FnMut(PortableSourceClaim),
+) {
     if settings.config_dir.as_os_str().is_empty() {
-        return Vec::new();
+        return;
     }
     let mut claims = Vec::new();
     let manifests = settings.config_dir.join("manifests");
@@ -172,6 +211,9 @@ fn registered_digest_source_claims(settings: &Settings) -> Vec<PortableSourceCla
                 }
             }
         }
+        for claim in claims.drain(..) {
+            publish(claim);
+        }
     }
     let mut lora_manifests = vec![manifests.join("user.loras.jsonc")];
     let projects =
@@ -194,9 +236,11 @@ fn registered_digest_source_claims(settings: &Settings) -> Vec<PortableSourceCla
             if let Ok(path) = crate::paths::normalize_app_managed_lora_path(settings, &path) {
                 append_registered_claim(&mut claims, "lora", id, None, &path);
             }
+            for claim in claims.drain(..) {
+                publish(claim);
+            }
         }
     }
-    claims
 }
 
 fn catalog_records(path: &Path, collection: &str) -> Vec<serde_json::Value> {
@@ -278,11 +322,13 @@ fn append_registered_claim_files(
     }
 }
 
-fn flux2_conversion_source_claims(settings: &Settings) -> Vec<PortableSourceClaim> {
-    let mut claims = Vec::new();
+fn flux2_conversion_source_claims(
+    settings: &Settings,
+    mut publish: impl FnMut(PortableSourceClaim),
+) {
     let hub = sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir);
     let Ok(repos) = std::fs::read_dir(hub) else {
-        return claims;
+        return;
     };
     for repo in repos.flatten() {
         let name = repo.file_name();
@@ -321,7 +367,7 @@ fn flux2_conversion_source_claims(settings: &Settings) -> Vec<PortableSourceClai
                     continue;
                 };
                 match capture_selected_source(&source_id, settings, &JsonObject::new()) {
-                    Ok(Some((claim, _))) => claims.push(claim),
+                    Ok(Some((claim, _))) => publish(claim),
                     Ok(None) => {}
                     Err(error) => {
                         tracing::warn!(source_id, %error, "FLUX.2 conversion source was not advertised")
@@ -330,7 +376,6 @@ fn flux2_conversion_source_claims(settings: &Settings) -> Vec<PortableSourceClai
             }
         }
     }
-    claims
 }
 
 /// Capture the exact effective source that the loader resolver would select for this payload.
@@ -513,6 +558,62 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn incremental_claim_publication_preserves_progress_across_heartbeat_ack() {
+        let make = |source_id| {
+            PortableSourceClaim::new(
+                source_id,
+                PortableSourceProvenance::OperatorOverride,
+                vec![PortableArtifactFile {
+                    relative_path: PathBuf::from("model.safetensors"),
+                    size_bytes: 1,
+                    sha256: format!("sha256:{}", "a".repeat(64)),
+                }],
+            )
+            .unwrap()
+        };
+        let mut progress = InventoryProgress::default();
+        progress.publish(make("first"));
+        let (first_generation, first_claims) = progress.pending().unwrap();
+        assert_eq!(first_claims.len(), 1);
+        progress.publish(make("second"));
+        progress.acknowledge(first_generation);
+        let (second_generation, second_claims) = progress.pending().unwrap();
+        assert_eq!(second_claims.len(), 2);
+        progress.acknowledge(second_generation);
+        assert!(progress.pending().is_none());
+        progress.publish(make("second"));
+        assert!(progress.pending().is_none());
+    }
+
+    #[test]
+    fn failed_registered_source_does_not_block_later_verified_claim() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let valid = data.join("models/valid/model.safetensors");
+        std::fs::create_dir_all(valid.parent().unwrap()).unwrap();
+        std::fs::write(&valid, b"valid").unwrap();
+        let mut settings = Settings::for_test(data.clone());
+        settings.config_dir = temp.path().join("config");
+        let manifest = settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({"models":[
+                {"id":"missing","modelPath":data.join("models/missing")},
+                {"id":"valid","modelPath":valid}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut published = Vec::new();
+        registered_digest_source_claims(&settings, |claim| published.push(claim));
+        assert_eq!(published.len(), 2); // valid model and control aliases
+        assert!(published
+            .iter()
+            .all(|claim| claim.source_id.starts_with("registered_digest:")));
+    }
 
     #[test]
     fn registered_digest_claim_uses_logical_id_and_excludes_receipt_markers() {
