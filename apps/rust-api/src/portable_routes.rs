@@ -181,11 +181,9 @@ pub(crate) fn selected_route_source_rows(
         {
             rows.push(SelectedRouteSource {
                 model_slot: slot.clone(),
-                component_id: "uncensored_enhancer".to_owned(),
+                component_id: "ltx_amoral_gemma_3_12b".to_owned(),
                 role: ArtifactMemberRole::OptionalComponent,
-                source: SelectedSourceLocation::OperatorCachedRepo(
-                    "TheCluster/amoral-gemma-3-12B-v2-mlx-4bit",
-                ),
+                source: SelectedSourceLocation::OperatorCachedRepo("ltx_amoral_gemma_3_12b"),
                 selected_tier: None,
             });
         }
