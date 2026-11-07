@@ -180,6 +180,7 @@ fn category_for_cell(cell: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::{builtin_model_spec, RoutePolicy};
 
     #[test]
     fn approved_product_decisions_keep_the_exact_reviewed_surface() {
@@ -218,5 +219,107 @@ mod tests {
         store.records[0].cells.pop();
         store.records[0].authority = "unapproved".into();
         assert!(validate(&store).is_err());
+    }
+
+    #[test]
+    fn every_approved_cell_matches_typed_route_and_native_capability() {
+        let mut checked = 0;
+        for decision in approved_backend_exceptions() {
+            for cell in &decision.cells {
+                let ["models", id, axis, value] = cell.split('/').collect::<Vec<_>>()[..] else {
+                    panic!("unexpected approved cell {cell}");
+                };
+                let spec = builtin_model_spec(id).unwrap_or_else(|| panic!("missing spec {id}"));
+                let policy = spec
+                    .routing
+                    .as_ref()
+                    .expect("approved model has route policy");
+                match axis {
+                    "operationAndMode" => {
+                        assert!(policy.mlx_routed() && !policy.candle_routed(), "{cell}");
+                        assert!(
+                            spec.video_routes
+                                .get("mlx")
+                                .into_iter()
+                                .flatten()
+                                .any(|r| r.mode == value),
+                            "{cell}"
+                        );
+                        assert!(
+                            !spec
+                                .video_routes
+                                .get("candle")
+                                .into_iter()
+                                .flatten()
+                                .any(|r| r.mode == value),
+                            "{cell}"
+                        );
+                    }
+                    "conditioningShape" => {
+                        assert!(policy.mlx_routed() && !policy.candle_routed(), "{cell}");
+                        assert!(
+                            spec.video_routes
+                                .get("mlx")
+                                .into_iter()
+                                .flatten()
+                                .flat_map(|r| &r.engines)
+                                .any(|e| e.conditioning.iter().any(|c| c == value)),
+                            "{cell}"
+                        );
+                    }
+                    "userAdapters" => {
+                        assert!(policy.mlx_routed() && !policy.candle_routed(), "{cell}");
+                        assert!(
+                            spec.video_routes
+                                .get("mlx")
+                                .into_iter()
+                                .flatten()
+                                .flat_map(|r| &r.engines)
+                                .any(|e| match value {
+                                    "lora" => e.supports_lora,
+                                    "lokr" => e.supports_lokr,
+                                    _ => false,
+                                }),
+                            "{cell}"
+                        );
+                    }
+                    "precisionTier" => match policy {
+                        RoutePolicy::Image {
+                            mlx_routed: true,
+                            candle_quant: false,
+                            ..
+                        } => {
+                            assert!(spec.routes.contains_key("mlx"), "{cell}");
+                        }
+                        RoutePolicy::Video {
+                            video_mlx_routed: true,
+                            candle_video_routed: false,
+                            ..
+                        } => {
+                            assert!(spec.video_routes.contains_key("mlx"), "{cell}");
+                        }
+                        _ => panic!("approved precision cell disagrees with route policy: {cell}"),
+                    },
+                    "guidanceMethod" => {
+                        let mlx = spec.routes.get("mlx").unwrap_or_else(|| panic!("{cell}"));
+                        let candle = spec
+                            .routes
+                            .get("candle")
+                            .unwrap_or_else(|| panic!("{cell}"));
+                        assert!(
+                            mlx.supported_guidance_methods.iter().any(|g| g == value),
+                            "{cell}"
+                        );
+                        assert!(
+                            !candle.supported_guidance_methods.iter().any(|g| g == value),
+                            "{cell}"
+                        );
+                    }
+                    _ => panic!("unhandled approved cell {cell}"),
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 42);
     }
 }
