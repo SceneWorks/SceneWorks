@@ -4,6 +4,7 @@ This is a design-only program. Its aim is to slim SceneWorks and its inference e
 
 | Document | Purpose |
 |---|---|
+| [CodeGraph plan and session handoff](CODEGRAPH_PLAN.md) | Feature and item keys, direct blockers and starting work. Open SW-F331 in CodeGraph for the live program index. |
 | [REQUIREMENTS.md](REQUIREMENTS.md) | Problem, goals, principles (AP1–AP13), requirements, acceptance, metrics, and **decision status** (§10: all DEC-1…19 approved). |
 | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | Target architecture, worked traces (§6), migration, proof cohorts and the engine/app roadmap (§9). |
 | [REVIEW_LOG.md](REVIEW_LOG.md) | The disposition of every review finding, round by round. |
