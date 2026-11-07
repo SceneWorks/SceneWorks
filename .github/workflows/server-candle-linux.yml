@@ -119,7 +119,7 @@ jobs:
           test "$(cat "$SC26687_ARTIFACT_DIR/source-sha.txt")" = "$GITHUB_SHA"
           git rev-parse HEAD:apps/web > "$SC26687_ARTIFACT_DIR/web-tree.txt"
           sha256sum apps/web/package-lock.json config/manifests/builtin.models.jsonc apps/web/verify/hosted-browser/*.mjs apps/web/verify-fixtures.mjs apps/web/vite.verify.config.mjs > "$SC26687_ARTIFACT_DIR/source-inputs.sha256"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - name: Install source UI and isolated per-run browser tooling
@@ -157,7 +157,7 @@ jobs:
           node apps/web/verify/hosted-browser/run-hosted-browser.mjs 2>&1 | tee "$SC26687_ARTIFACT_DIR/browser-proof.log"
       - name: Keep source UI browser evidence including failures
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: h3-ui-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.SC26687_ARTIFACT_DIR }}
@@ -180,7 +180,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Read checkout Rust toolchain
@@ -199,7 +199,7 @@ jobs:
         with:
           toolchain: ${{ steps.h3_admission_toolchain.outputs.channel }}
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2 (v2.9.1+1)
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Initialize CPU proof evidence before dependency setup
@@ -244,7 +244,7 @@ jobs:
             2>&1 | tee "$H3_ADMISSION_EVIDENCE/proof-driver.log"
       - name: Keep actual H3 CPU source, pin, assertions and restoration evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: h3-admission-cpu-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.H3_ADMISSION_EVIDENCE }}
@@ -282,7 +282,7 @@ jobs:
           test "$RUNNER_NAME" = nax-macos-2
           echo "H3_PROOF_EVIDENCE=$RUNNER_TEMP/h3-import-mlx-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/h3-import-mlx-target-${{ github.run_id }}" >> "$GITHUB_ENV"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
@@ -294,7 +294,7 @@ jobs:
         run: node scripts/ci/h3-import-native-proof.mjs mlx "$H3_PROOF_EVIDENCE"
       - name: Keep H3 Metal source identities, configuration, duration and logs
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: h3-import-mlx-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.H3_PROOF_EVIDENCE }}
@@ -333,7 +333,7 @@ jobs:
         run: |
           $env:RUSTC_WRAPPER = ''
           'RUSTC_WRAPPER=' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - name: Select the existing listener-isolated Cargo dependency cache
@@ -353,7 +353,7 @@ jobs:
           node scripts/ci/h3-import-native-proof.mjs cuda "%H3_PROOF_EVIDENCE%"
       - name: Keep H3 CUDA source identities, configuration, duration and logs
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: h3-import-cuda-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.H3_PROOF_EVIDENCE }}
@@ -374,7 +374,7 @@ jobs:
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
@@ -403,7 +403,7 @@ jobs:
       # DELIBERATELY NOT `save-if: main` — this manual-only lane needs to save.
       # Both extra-directory and failure-retention inputs are supported by this
       # exact action pin. An interrupted CUDA compilation may still be cold.
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2 (v2.9.1+1)
         with:
           cache-directories: ${{ env.CANDLE_FLASH_ATTN_BUILD_DIR }}
           env-vars: CANDLE_FLASH_ATTN_BUILD_DIR NVCC NVCC_CCBIN
@@ -446,7 +446,7 @@ jobs:
       - name: Build candle server (rust-api, embed-web + backend-candle)
         run: cargo build -p sceneworks-rust-api --release --features embed-web,backend-candle
       - name: Upload candle server artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sceneworks-api-candle-linux
           path: target/release/sceneworks-rust-api
@@ -588,7 +588,7 @@ jobs:
           }
       - name: Upload diagnostic-only CUDA evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: starvector-diagnostic-candle-1b-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}\starvector-diagnostic-candle-1b
