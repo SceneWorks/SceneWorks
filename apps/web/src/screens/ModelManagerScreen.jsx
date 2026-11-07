@@ -23,7 +23,7 @@ import {
   presetLoras,
 } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
-import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../modelEligibility.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { formatBytes, formatTierBytes, downloadSizeText } from "../formatting.js";
 import {

@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
+import { DEFAULT_MAC_CAPABILITIES } from "./modelEligibility.js";
 import {
   AUDIO_MODES,
   VIDEO_MODES,
@@ -685,7 +685,7 @@ describe("declared video capabilities are all offerable", () => {
   //
   // The fixture is what makes this a real check. On the host these tests run on there is no
   // off-Mac anything: `candleGatingActive` arrives from `GET /api/v1/capabilities/mac` and is
-  // false on a Mac, so every helper in candleGating.js is inert. Tagging the caps object with the
+  // false on a Mac, so every helper in modelEligibility.js is inert. Tagging the caps object with the
   // foreign platform is what runs the branch.
   it("an MLX-only video mode is not offered off-Mac, and is still offered on a Mac", () => {
     // The per-model block the API now emits, in the shape `model_candle_support` serializes.

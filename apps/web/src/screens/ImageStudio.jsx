@@ -147,7 +147,7 @@ import {
   macAvailableModels,
   macGatingActive,
   macModelFeatureBlock,
-} from "../macGating.js";
+} from "../modelEligibility.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { resolutionUniverseKey, useReferenceAspectSnap } from "../hooks/useReferenceAspectSnap.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";

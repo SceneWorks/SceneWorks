@@ -1,8 +1,8 @@
 import { ltxVideoModelId } from "./videoTierHelpers.js";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { downloadOffersFor, videoModelServesMode, videoModelUsable } from "../../modelEligibility.js";
-import { macAvailableModels, macGatingActive } from "../../macGating.js";
-import { candleAvailableModels, candleGatingActive } from "../../candleGating.js";
+import { macAvailableModels, macGatingActive } from "../../modelEligibility.js";
+import { candleAvailableModels, candleGatingActive } from "../../modelEligibility.js";
 
 // Extracted from VideoStudio along its existing concern boundary.
 export function useVideoModelSelection({

@@ -41,7 +41,7 @@ import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 
 import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
-import { DEFAULT_MAC_CAPABILITIES } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES } from "../modelEligibility.js";
 
 import { loadStudioSettings } from "../hooks/useStudioSettings.js";
 
