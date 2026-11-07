@@ -163,56 +163,29 @@ fn registered_digest_source_claims(
         let Some(id) = model.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        let primary = model
-            .get("modelPath")
-            .or_else(|| model.get("paths").and_then(|paths| paths.get("model")))
-            .or_else(|| model.get("installedPath"))
-            .and_then(serde_json::Value::as_str)
-            .map(PathBuf::from);
-        if let Some(path) = primary {
+        let mut captured = std::collections::BTreeMap::<PathBuf, Vec<PortableArtifactFile>>::new();
+        for (key, path) in registered_model_locators(&model) {
             if let Ok(path) = crate::paths::normalize_app_managed_model_entry_path(
                 settings,
                 &path,
                 "registered model source",
             ) {
-                if let Ok(files) = capture_registered_files(&path) {
+                let files = if let Some(files) = captured.get(&path) {
+                    Some(files.clone())
+                } else {
+                    capture_registered_files(&path).ok().inspect(|files| {
+                        captured.insert(path.clone(), files.clone());
+                    })
+                };
+                if let Some(files) = files {
                     append_registered_claim_files(&mut claims, "model", id, None, files.clone());
-                    append_registered_claim_files(&mut claims, "control", id, None, files);
+                    append_registered_claim_files(&mut claims, "control", id, None, files.clone());
+                    append_registered_claim_files(&mut claims, "component", id, Some(&key), files);
                 }
             }
-        }
-        for component in model
-            .get("components")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some(component_id) = component.get("id").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            let path = component
-                .get("path")
-                .or_else(|| model.get("paths").and_then(|paths| paths.get(component_id)))
-                .and_then(serde_json::Value::as_str)
-                .map(PathBuf::from);
-            if let Some(path) = path {
-                if let Ok(path) = crate::paths::normalize_app_managed_model_entry_path(
-                    settings,
-                    &path,
-                    "registered component source",
-                ) {
-                    append_registered_claim(
-                        &mut claims,
-                        "component",
-                        id,
-                        Some(component_id),
-                        &path,
-                    );
-                }
+            for claim in claims.drain(..) {
+                publish(claim);
             }
-        }
-        for claim in claims.drain(..) {
-            publish(claim);
         }
     }
     let mut lora_manifests = vec![manifests.join("user.loras.jsonc")];
@@ -241,6 +214,42 @@ fn registered_digest_source_claims(
             }
         }
     }
+}
+
+/// The local catalog's loader locators, named with the same relative keys as API admission.
+/// The API prefixes secondary IDs with the model slot; the private worker availability claim
+/// uses this slot-independent key so one registration serves any carrier position.
+pub(crate) fn registered_model_locators(entry: &serde_json::Value) -> Vec<(String, PathBuf)> {
+    let mut locators = Vec::new();
+    for key in ["modelPath", "installedPath"] {
+        if let Some(path) = entry.get(key).and_then(serde_json::Value::as_str) {
+            locators.push((key.to_owned(), PathBuf::from(path)));
+        }
+    }
+    if let Some(paths) = entry.get("paths").and_then(serde_json::Value::as_object) {
+        for (key, path) in paths {
+            if let Some(path) = path.as_str() {
+                locators.push((format!("paths/{key}"), PathBuf::from(path)));
+            }
+        }
+    }
+    if let Some(components) = entry
+        .get("components")
+        .and_then(serde_json::Value::as_array)
+    {
+        for (index, component) in components.iter().enumerate() {
+            if let Some(path) = component.get("path").and_then(serde_json::Value::as_str) {
+                locators.push((format!("components/{index}"), PathBuf::from(path)));
+            }
+        }
+    }
+    locators.sort_by_key(|(key, _)| match key.as_str() {
+        "modelPath" => 0,
+        "installedPath" => 1,
+        "paths/model" => 2,
+        _ => 3,
+    });
+    locators
 }
 
 fn catalog_records(path: &Path, collection: &str) -> Vec<serde_json::Value> {
@@ -697,6 +706,52 @@ mod tests {
             .collect();
         assert_eq!(model_claims.len(), 2);
         assert_ne!(model_claims[0].source_id, model_claims[1].source_id);
+    }
+
+    #[test]
+    fn registered_multifile_claims_use_slot_independent_locator_keys() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let model = data.join("models/multi");
+        std::fs::create_dir_all(&model).unwrap();
+        for name in ["model", "vae", "encoder"] {
+            std::fs::write(model.join(format!("{name}.safetensors")), name.as_bytes()).unwrap();
+        }
+        let mut settings = Settings::for_test(data);
+        settings.config_dir = temp.path().join("config");
+        let manifest = settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({"models":[{
+                "id":"multi", "modelPath":model.join("model.safetensors"),
+                "paths":{"vae":model.join("vae.safetensors")},
+                "components":[{"id":"semantic-encoder", "path":model.join("encoder.safetensors")}]
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut claims = Vec::new();
+        registered_digest_source_claims(&settings, |claim| claims.push(claim));
+        for (key, name) in [("paths/vae", "vae"), ("components/0", "encoder")] {
+            let files =
+                capture_registered_files(&model.join(format!("{name}.safetensors"))).unwrap();
+            let ledger =
+                sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                    &files,
+                )
+                .unwrap();
+            let id = sceneworks_core::portable_sources::registered_digest_claim_id(
+                "component",
+                "multi",
+                Some(key),
+                &ledger,
+            )
+            .unwrap();
+            assert!(claims
+                .iter()
+                .any(|claim| claim.source_id == id && claim.files == files));
+        }
     }
 
     #[test]
