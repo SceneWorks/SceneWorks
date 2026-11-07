@@ -248,10 +248,37 @@ pub(crate) async fn validate_frozen_replay_binding(
     frozen
         .validate()
         .map_err(|error| incomplete(error.to_string()))?;
-    let candidate =
-        capture_portable_model_binding_inner(state, job_type, payload, requested_gpu, Some(frozen))
-            .await?
-            .ok_or_else(|| incomplete("model-free replay cannot carry a frozen source binding"))?;
+    let candidate = match capture_portable_model_binding_inner(
+        state,
+        job_type,
+        payload,
+        requested_gpu,
+        Some(frozen),
+    )
+    .await
+    {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => {
+            return Err(incomplete(
+                "model-free replay cannot carry a frozen source binding",
+            ))
+        }
+        Err(_error)
+            if frozen.routes.values().any(|route| {
+                route.models.iter().any(|model| {
+                    model.members.iter().any(|member| {
+                        matches!(member.source, PortableSourceIdentity::Digest { .. })
+                    })
+                })
+            }) =>
+        {
+            // API-host locators may disappear after the original admission. Revalidate the
+            // logical request and pinned sources, then require one worker with every exact local
+            // digest before allowing a retry to enter the queue.
+            replay_without_api_local_paths(state, job_type, payload, requested_gpu, frozen).await?
+        }
+        Err(error) => return Err(error),
+    };
     for (key, route) in &candidate.routes {
         if frozen.routes.get(key) != Some(route) {
             return Err(incomplete(format!(
@@ -259,7 +286,240 @@ pub(crate) async fn validate_frozen_replay_binding(
             )));
         }
     }
-    Ok(candidate)
+    filter_replay_routes_by_registered_claims(state, payload, requested_gpu, candidate).await
+}
+
+async fn replay_without_api_local_paths(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+    requested_gpu: &str,
+    frozen: &PortableJobBinding,
+) -> Result<PortableJobBinding, ApiError> {
+    let authored = portable_authored_options(payload);
+    if authored != frozen.authored_options {
+        return Err(incomplete(
+            "replay source-affecting choices differ from frozen admission",
+        ));
+    }
+    if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("modelPath"))
+        .and_then(Value::as_str)
+        .is_some_and(|path| !path.trim().is_empty())
+    {
+        return Err(incomplete(
+            "unregistered modelPath cannot be replayed from a remote worker root",
+        ));
+    }
+    let entries = payload_model_entries(payload)?;
+    let mut routes = BTreeMap::new();
+    for (backend, platform) in crate::portable_routes::eligible_portable_routes(
+        job_type,
+        payload,
+        &entries,
+        requested_gpu,
+    )? {
+        let key = format!("{backend}:{platform}");
+        let route = frozen
+            .routes
+            .get(&key)
+            .ok_or_else(|| incomplete(format!("replay route {key} was not frozen")))?;
+        if route.models.len() != entries.len() {
+            return Err(incomplete("replay model carrier count changed"));
+        }
+        for (slot, entry) in &entries {
+            let model = route
+                .models
+                .iter()
+                .find(|model| model.slot == *slot)
+                .ok_or_else(|| incomplete(format!("replay model slot {slot} was not frozen")))?;
+            if entry.get("id").and_then(Value::as_str) != Some(&model.model_id) {
+                return Err(incomplete(format!(
+                    "replay model slot {slot} changed identity"
+                )));
+            }
+        }
+        let selected = crate::portable_routes::selected_route_source_rows(
+            job_type, payload, &entries, &backend, &platform,
+        )
+        .map_err(incomplete)?;
+        for source in selected {
+            let model = route
+                .models
+                .iter()
+                .find(|model| model.slot == source.model_slot)
+                .ok_or_else(|| incomplete("replay selected source lost its model slot"))?;
+            if frozen_source_member(Some(model), &source.role, &source.component_id)?.is_none() {
+                return Err(incomplete("replay selected source was not frozen"));
+            }
+        }
+        for member in route.models.iter().flat_map(|model| &model.members) {
+            if let PortableSourceIdentity::Revision { identity } = &member.source {
+                let selectors = member
+                    .files
+                    .iter()
+                    .map(|file| {
+                        file.relative_path
+                            .to_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| incomplete("frozen source path is not portable UTF-8"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let publisher = resolve_trusted_pinned_files(
+                    state,
+                    &identity.repository,
+                    &identity.revision,
+                    &selectors,
+                )
+                .await?;
+                if publisher != member.files {
+                    return Err(incomplete("frozen publisher source bytes changed"));
+                }
+            }
+        }
+        routes.insert(key, route.clone());
+    }
+    if routes.is_empty() {
+        return Err(incomplete(
+            "replay has no currently authorized source route",
+        ));
+    }
+    PortableJobBinding::new(authored, routes).map_err(|error| incomplete(error.to_string()))
+}
+
+async fn filter_replay_routes_by_registered_claims(
+    state: &AppState,
+    payload: &JsonObject,
+    requested_gpu: &str,
+    candidate: PortableJobBinding,
+) -> Result<PortableJobBinding, ApiError> {
+    let mut available = BTreeMap::new();
+    for (key, route) in &candidate.routes {
+        let bound_local = route
+            .models
+            .iter()
+            .flat_map(|model| &model.members)
+            .any(|member| {
+                matches!(
+                    member.source,
+                    PortableSourceIdentity::Digest { .. }
+                        | PortableSourceIdentity::WorkerClaim { .. }
+                )
+            });
+        if !bound_local {
+            available.insert(key.clone(), route.clone());
+            continue;
+        }
+        let sets = state
+            .jobs_store
+            .portable_source_claim_sets_for_route(
+                &route.backend,
+                &route.platform,
+                requested_gpu,
+                state.settings.worker_timeout_seconds,
+            )
+            .map_err(|error| {
+                incomplete(format!(
+                    "worker source availability is unavailable: {error}"
+                ))
+            })?;
+        if sets
+            .iter()
+            .any(|claims| replay_route_claims_match(route, payload, claims).is_ok())
+        {
+            available.insert(key.clone(), route.clone());
+        }
+    }
+    if available.is_empty() {
+        return Err(incomplete(
+            "frozen local source is unavailable from every eligible worker",
+        ));
+    }
+    PortableJobBinding::new(candidate.authored_options, available)
+        .map_err(|error| incomplete(error.to_string()))
+}
+
+fn replay_route_claims_match(
+    route: &PortableRouteBinding,
+    payload: &JsonObject,
+    claims: &[PortableSourceClaim],
+) -> Result<(), ApiError> {
+    let value = Value::Object(payload.clone());
+    let records = enumerate_portable_array_slots(&value, &["loras", "lokrs", "controls"]);
+    for model in &route.models {
+        for member in &model.members {
+            match &member.source {
+                PortableSourceIdentity::Digest { sha256 } => {
+                    let (kind, logical_id, component_id) = match member.role {
+                        ArtifactMemberRole::Primary => ("model", model.model_id.as_str(), None),
+                        ArtifactMemberRole::Lora | ArtifactMemberRole::Control => {
+                            let slot = member
+                                .component_id
+                                .as_deref()
+                                .ok_or_else(|| incomplete("adapter has no frozen slot"))?;
+                            let record = records
+                                .iter()
+                                .find(|(record_slot, _)| record_slot == slot)
+                                .map(|(_, record)| *record)
+                                .ok_or_else(|| incomplete("adapter slot is no longer selected"))?;
+                            let id = record
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.is_empty())
+                                .ok_or_else(|| {
+                                    incomplete("adapter has no registered logical id")
+                                })?;
+                            let kind = if member.role == ArtifactMemberRole::Lora {
+                                "lora"
+                            } else {
+                                "control"
+                            };
+                            (kind, id, None)
+                        }
+                        _ => (
+                            "component",
+                            model.model_id.as_str(),
+                            Some(
+                                member
+                                    .component_id
+                                    .as_deref()
+                                    .ok_or_else(|| incomplete("component has no frozen id"))?,
+                            ),
+                        ),
+                    };
+                    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+                        kind,
+                        logical_id,
+                        component_id,
+                    )
+                    .map_err(incomplete)?;
+                    if !claims.iter().any(|claim| {
+                        claim.source_id == source_id
+                            && claim.provenance == PortableSourceProvenance::OperatorOverride
+                            && claim.files == member.files
+                            && portable_closure_sha256(&claim.files).ok().as_deref()
+                                == Some(sha256.as_str())
+                    }) {
+                        return Err(incomplete(format!(
+                            "registered worker source {source_id} differs from frozen bytes"
+                        )));
+                    }
+                }
+                PortableSourceIdentity::WorkerClaim { .. } => {
+                    if !claims
+                        .iter()
+                        .any(|claim| claim.matches_worker_claim_member(member).is_ok())
+                    {
+                        return Err(incomplete("frozen worker source claim is unavailable"));
+                    }
+                }
+                PortableSourceIdentity::Revision { .. } => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A vector workflow may fail before it creates its raster child. Its parent nevertheless froze
@@ -2230,6 +2490,51 @@ fn capture_selected_request_overlays(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn registered_single_file_digest_claim_uses_content_hash_and_exact_ledger() {
+        let file = PortableArtifactFile {
+            relative_path: PathBuf::from("weights.safetensors"),
+            size_bytes: 4,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        };
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            "user_model",
+            "mlx",
+            "local",
+            None,
+            canonical_authored_options_sha256(&json!({})).unwrap(),
+            vec![PortableArtifactMember {
+                role: ArtifactMemberRole::Primary,
+                component_id: None,
+                source: PortableSourceIdentity::Digest {
+                    sha256: file.sha256.clone(),
+                },
+                tier: None,
+                files: vec![file.clone()],
+            }],
+        )
+        .unwrap();
+        let route = PortableRouteBinding::new("mlx", "macos", vec![model]).unwrap();
+        let claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "model",
+            "user_model",
+            None,
+        )
+        .unwrap();
+        let claim = PortableSourceClaim::new(
+            claim_id,
+            PortableSourceProvenance::OperatorOverride,
+            vec![file],
+        )
+        .unwrap();
+        assert_ne!(claim.closure_sha256, claim.files[0].sha256);
+        assert!(replay_route_claims_match(&route, &JsonObject::new(), &[claim.clone()]).is_ok());
+        let mut changed = claim;
+        changed.files[0].size_bytes += 1;
+        assert!(replay_route_claims_match(&route, &JsonObject::new(), &[changed]).is_err());
+    }
 
     #[test]
     fn frozen_replay_uses_original_immutable_dynamic_revision() {
