@@ -19,13 +19,21 @@ pub(super) async fn run_utility_job(
     settings: &Settings,
     http_client: &reqwest::Client,
     job: JobSnapshot,
+    portable_model_binding: Option<PortableRouteBinding>,
     shutdown: gen_core::CancelFlag,
 ) {
     let job_id = job.id.clone();
     load_progress::with_job(
         api,
         &job_id,
-        run_utility_job_inner(api, settings, http_client, job, shutdown),
+        run_utility_job_inner(
+            api,
+            settings,
+            http_client,
+            job,
+            portable_model_binding,
+            shutdown,
+        ),
     )
     .await;
 }
@@ -35,6 +43,7 @@ async fn run_utility_job_inner(
     settings: &Settings,
     http_client: &reqwest::Client,
     job: JobSnapshot,
+    portable_model_binding: Option<PortableRouteBinding>,
     shutdown: gen_core::CancelFlag,
 ) {
     // Bind the process-shutdown flag as a task-local for the whole dispatch (sc-9618, F-043 follow-up)
@@ -59,11 +68,13 @@ async fn run_utility_job_inner(
         let guard_job_type = job.job_type.clone();
         let guard_payload = job.payload.clone();
         let guard_settings = settings.clone();
+        let guard_binding = portable_model_binding.clone();
         let guard_task = crate::load_progress::spawn_blocking(move || {
-            external_library_runtime::RuntimeSourceGuard::begin(
+            external_library_runtime::RuntimeSourceGuard::begin_with_binding(
                 &guard_job_type,
                 &guard_payload,
                 &guard_settings,
+                guard_binding.as_ref(),
             )
         });
         // The guard's admission pass can re-verify a multi-GB resolved bundle, which outlasts the
@@ -79,8 +90,10 @@ async fn run_utility_job_inner(
         )
         .await
         .map_err(|error| ("Model source unavailable.", error))?;
+        let mut dispatch_job = job.clone();
+        dispatch_job.payload = source_guard.dispatch_payload().clone();
         let dispatch_result =
-            dispatch_utility_job(api, settings, http_client, &job, &shutdown).await;
+            dispatch_utility_job(api, settings, http_client, &dispatch_job, &shutdown).await;
         // Success releases the operation-owned source sessions; failure re-probes the exact bound
         // sources so a mid-load disconnect surfaces as the typed unavailable condition instead of
         // a raw loader error (sc-19708). An error with the source still present stays verbatim.

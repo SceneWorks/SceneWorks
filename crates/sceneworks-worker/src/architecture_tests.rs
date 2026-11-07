@@ -1192,7 +1192,7 @@ fn the_source_guard_await_is_wrapped_in_the_heartbeat_keepalive() {
         .expect("worker must declare run_utility_job")
         .1;
     let after_guard_spawn = function
-        .split_once("RuntimeSourceGuard::begin(")
+        .split_once("RuntimeSourceGuard::begin_with_binding(")
         .expect("run_utility_job must admit every job through the source guard")
         .1;
     let between_guard_and_dispatch = after_guard_spawn

@@ -3580,6 +3580,7 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                         &fixture.settings,
                         &client,
                         job.clone(),
+                        None,
                         gen_core::CancelFlag::new(),
                     )
                     .await;
@@ -3609,6 +3610,7 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                         &fixture.settings,
                         &client,
                         retry,
+                        None,
                         gen_core::CancelFlag::new(),
                     )
                     .await;

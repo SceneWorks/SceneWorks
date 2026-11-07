@@ -22,6 +22,9 @@ use sceneworks_core::lora_family::{
     first_safetensors_path, inspect_adapter_in_dir, reconcile_detected_family,
     validate_minimax_h3_trainer_header, FamilyMismatch, SafetensorsHeaderError,
 };
+use sceneworks_core::model_artifacts::portable_binding::{
+    PortableRouteBinding, PORTABLE_MODEL_BINDING_VERSION,
+};
 // Only the cfg-gated adapter resolvers (image `resolve_adapters` / `classify_adapter`, video
 // `resolve_lora_file`) use these, so gate the import identically or the parity
 // build (no `backend-candle`) trips `-D unused-imports` (sc-10221).
@@ -1734,6 +1737,25 @@ enum JobOutcome {
     ShutdownDuringJob,
 }
 
+/// A private claim receipt. The portable binding is deliberately separate from the public job
+/// snapshot and its payload; it must not be persisted in a share or emitted in a job event.
+struct ClaimedJob {
+    job: JobSnapshot,
+    portable_model_binding: Option<PortableRouteBinding>,
+}
+
+/// Runtime backend advertised to the private portable-source claim. The worker repeats this
+/// check at its pre-loader guard; the server cannot select a different backend's artifact closure.
+fn portable_runtime_backend(settings: &Settings) -> &'static str {
+    if settings.gpu_id == "mlx" {
+        "mlx"
+    } else if cfg!(feature = "backend-candle") && !is_cpu_worker(&settings.gpu_id) {
+        "candle"
+    } else {
+        "cpu"
+    }
+}
+
 /// Run one claimed job while keeping shutdown observable WITHOUT dropping the in-flight future
 /// (sc-8845, F-043).
 ///
@@ -1758,11 +1780,18 @@ async fn run_job_with_shutdown(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
-    job: JobSnapshot,
+    claimed: ClaimedJob,
 ) -> JobOutcome {
-    let job_id = job.id.clone();
+    let job_id = claimed.job.id.clone();
     let shutdown = gen_core::CancelFlag::new();
-    let job_future = run_utility_job(api, settings, http_client, job, shutdown.clone());
+    let job_future = run_utility_job(
+        api,
+        settings,
+        http_client,
+        claimed.job,
+        claimed.portable_model_binding,
+        shutdown.clone(),
+    );
     tokio::pin!(job_future);
 
     tokio::select! {
@@ -1843,7 +1872,7 @@ async fn poll_once(
     settings: &Settings,
     idle_heartbeat: &mut IdleHeartbeat,
     health: &GpuHealth,
-) -> WorkerResult<Option<JobSnapshot>> {
+) -> WorkerResult<Option<ClaimedJob>> {
     // sc-7824 (epic 7819): pick up a live GPU-memory-limit change here, before claiming the next
     // job, so a Settings slider move applies between jobs (not mid-flight) with no worker restart.
     // No-op unless this is the MLX worker and the desktop has written the live-handoff file.
@@ -1881,16 +1910,8 @@ async fn poll_once(
             "/api/v1/jobs/claim",
             &ClaimRequest {
                 worker_id: settings.worker_id.clone(),
-                portable_model_binding_version: Some(
-                    sceneworks_core::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION,
-                ),
-                portable_backend: Some(if settings.gpu_id == "mlx" {
-                    "mlx"
-                } else if cfg!(feature = "backend-candle") && !is_cpu_worker(&settings.gpu_id) {
-                    "candle"
-                } else {
-                    "cpu"
-                }.to_owned()),
+                portable_model_binding_version: Some(PORTABLE_MODEL_BINDING_VERSION),
+                portable_backend: Some(portable_runtime_backend(settings).to_owned()),
                 portable_platform: Some(std::env::consts::OS.to_owned()),
                 extra: BTreeMap::new(),
             },
@@ -1900,7 +1921,10 @@ async fn poll_once(
         tokio::time::sleep(Duration::from_secs(settings.poll_seconds)).await;
         return Ok(None);
     };
-    Ok(Some(job))
+    Ok(Some(ClaimedJob {
+        job,
+        portable_model_binding: claim.portable_model_binding,
+    }))
 }
 
 struct IdleHeartbeat {
