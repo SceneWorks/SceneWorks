@@ -1,6 +1,8 @@
+import { logsApi } from "../api/logsResources.js";
+import { backoffDelay } from "../retry.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { apiFetch } from "../api.js";
+
 import { useAppStatic } from "../context/AppContext.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
@@ -117,7 +119,7 @@ async function fetchLogs(token, { afterSeq, limit, source, level }) {
   if (source) params.set("source", source);
   if (level) params.set("level", level);
   const query = params.toString();
-  return (await apiFetch(`/api/v1/logs${query ? `?${query}` : ""}`, token)) ?? [];
+  return (await logsApi.list (query ? `?${query}` : "", token)) ?? [];
 }
 
 export function LogsScreen() {
@@ -274,7 +276,7 @@ export function LogsScreen() {
         attempt = 0;
         schedule(POLL_MS);
       } else {
-        const delay = Math.min(POLL_BACKOFF_MAX_MS, POLL_MS * 2 ** attempt);
+        const delay = backoffDelay(attempt, { baseMs: POLL_MS, maxMs: POLL_BACKOFF_MAX_MS });
         attempt += 1;
         schedule(delay);
       }

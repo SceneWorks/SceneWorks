@@ -1,4 +1,5 @@
-import { API_BASE_URL, ApiError, apiFetch } from "../api.js";
+import { modelsApi } from "./modelsResources.js";
+import { API_BASE_URL, apiFetch } from "../api.js";
 
 // YuE2 (epic 22988) client seam: the song-job route, the server-side licence acknowledgment and
 // the score-version / comparison records. Every call goes through `apiFetch`, so a refusal arrives
@@ -21,14 +22,18 @@ export function submitYue2Jobs(projectId, body, token) {
 }
 
 // GET/PUT/DELETE /api/v1/models/:id/license-acknowledgment → { modelId, required, termsSha256,
-// acknowledged, acknowledgment }. The acknowledgment is stored server-side for the entry's CURRENT
+// terms, acknowledged, acknowledgment }. The acknowledgment is stored server-side for the entry's CURRENT
 // terms, so it survives a relaunch and lapses when the terms change.
 export function getLicenseAcknowledgment(modelId, token) {
   return apiFetch(`/api/v1/models/${enc(modelId)}/license-acknowledgment`, token);
 }
 
-export function putLicenseAcknowledgment(modelId, token) {
-  return apiFetch(`/api/v1/models/${enc(modelId)}/license-acknowledgment`, token, { method: "PUT" });
+// UIs pass the hydrated commitment so an old notice cannot accept unseen new terms.
+export function putLicenseAcknowledgment(modelId, token, termsSha256) {
+  return apiFetch(`/api/v1/models/${enc(modelId)}/license-acknowledgment`, token, {
+    method: "PUT",
+    ...(termsSha256 ? { headers: { "If-Match": `"${termsSha256}"` } } : {}),
+  });
 }
 
 export function deleteLicenseAcknowledgment(modelId, token) {
@@ -90,7 +95,7 @@ export function createYue2Comparison(projectId, body, token) {
 // revision, status: "queued" | "installed", jobId? }] }. Refusals: 403 `license_acknowledgment_required`,
 // 403 `component_blocked` (context.blocked[]), 404 `conditional_components_not_declared`.
 export function downloadYue2ConditionalComponents(modelId, purpose, body, token) {
-  return apiFetch(`/api/v1/models/${enc(modelId)}/conditional-components/${enc(purpose)}/download`, token, {
+  return modelsApi.conditionalDownload(modelId, purpose, token, {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -119,20 +124,6 @@ export function yue2TranscriptionFileUrl(projectId, transcriptionId, path) {
 // so a bare link would be refused in remote-auth mode). A refusal is an `ApiError` carrying the
 // server's typed code — never an empty file.
 export async function fetchYue2TranscriptionFile(projectId, transcriptionId, path, token) {
-  const headers = new Headers();
-  if (token) {
-    headers.set("X-SceneWorks-Token", token);
-  }
-  const response = await fetch(yue2TranscriptionFileUrl(projectId, transcriptionId, path), { headers });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    const detail = payload?.detail;
-    throw new ApiError(typeof detail === "string" ? detail : `Request failed with ${response.status}`, {
-      status: response.status,
-      detail,
-      code: payload?.code,
-      context: payload?.context,
-    });
-  }
-  return response.blob();
+  const url = yue2TranscriptionFileUrl(projectId, transcriptionId, path);
+  return apiFetch(url.slice(API_BASE_URL.length), token, { responseType: "blob" });
 }

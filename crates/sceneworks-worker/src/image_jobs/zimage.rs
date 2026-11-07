@@ -1,16 +1,73 @@
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::conditioning::parse_poses;
+use super::conditioning::pose_entries;
+use super::conditioning::resolve_control_identity_source;
+use super::conditioning::resolve_identity_init;
+use super::conditioning::stage_likeness;
+use super::conditioning::strip_base_prompt;
+use super::events::consume_gen_events;
+use super::load_spec::attach_manifest_text_encoder;
+#[cfg(test)]
+use super::load_spec::load_control_engine;
+use super::mlx_model;
+use super::quantization::resolve_quant;
+use super::resolve_seed;
+use super::sampling::resolve_guidance;
+use super::sampling::resolve_negative_prompt;
+use super::sampling::resolve_steps;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_cached_gen_stream;
+use super::strict_control::build_control_conditioning;
+use super::strict_control::ensure_depth_estimator_dir;
+use super::strict_control::preprocess_control_entry;
+use super::strict_control::requested_control_kind;
+use super::strict_control::resolve_control_source;
+use super::strict_control::resolve_user_control_map;
+use super::strict_control::strict_control_default_repo;
+use super::strict_control::trusted_control_weight_revision;
+use super::strict_control::validate_control_kind;
+use super::tier_resolver;
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::Conditioning;
+use super::ControlKind;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::Progress;
+use super::Quant;
+use super::WeightsSource;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 /// The engine registry id for the Z-Image Fun-Controlnet-Union variant. The default control repo is
 /// the `STRICT_CONTROL_ENGINES` table row for this id (resolved via `strict_control_default_repo`),
 /// so the resolver, error message, and download hint stay in lockstep on a table repoint (sc-2257
 /// parity).
-const ZIMAGE_CONTROL_ENGINE_ID: &str = "z_image_turbo_control";
-const ZIMAGE_CONTROL_FILE: &str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors";
+pub(super) const ZIMAGE_CONTROL_ENGINE_ID: &str = "z_image_turbo_control";
+pub(super) const ZIMAGE_CONTROL_FILE: &str =
+    "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors";
 
 /// The engine registry id for the **base** (non-distilled, full-CFG) Z-Image Fun-Controlnet-Union
 /// variant (sc-8251). Same VACE Fun-Union control branch as the Turbo variant, but assembled from a
 /// base `Tongyi-MAI/Z-Image` snapshot + the base control checkpoint, and driven with REAL CFG. Default
 /// control repo comes from the `STRICT_CONTROL_ENGINES` table (via `strict_control_default_repo`).
 const ZIMAGE_BASE_CONTROL_ENGINE_ID: &str = "z_image_control";
-const ZIMAGE_BASE_CONTROL_FILE: &str = "Z-Image-Fun-Controlnet-Union-2.1.safetensors";
+pub(super) const ZIMAGE_BASE_CONTROL_FILE: &str = "Z-Image-Fun-Controlnet-Union-2.1.safetensors";
 
 // `pose_entries` / `parse_poses` / `PoseInput` moved to `base.rs` (shared by the candle InstantID
 // lane, sc-5491); still in scope here via the shared `image_jobs` module.
@@ -19,7 +76,7 @@ const ZIMAGE_BASE_CONTROL_FILE: &str = "Z-Image-Fun-Controlnet-Union-2.1.safeten
 /// resolve — routed to the Fun-Controlnet-Union control path rather than plain txt2img.
 /// Control-weights presence is checked in the stream so a missing checkpoint errors
 /// loudly instead of silently dropping the poses to the txt2img path.
-fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == "z_image_turbo"
         && !pose_entries(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
@@ -29,7 +86,7 @@ fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool
 /// resolve — routed to the base Fun-Controlnet-Union path (`z_image_control`) rather than plain
 /// txt2img (sc-8251). The base mirror of [`zimage_control_available`]; keyed on the base model id so
 /// the Turbo control path is untouched.
-fn zimage_base_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn zimage_base_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     request.model == "z_image"
         && !pose_entries(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
@@ -54,9 +111,7 @@ fn resolve_control_weights_for(
     let str_field = |key: &str, default: &'static str| -> String {
         control
             .and_then(|control| control.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(default)
             .to_owned()
     };
@@ -78,7 +133,7 @@ fn resolve_control_weights_for(
 /// Resolve the Z-Image Fun-Controlnet-Union checkpoint. The default repo comes from the shared
 /// strict-control table (single source of truth — `STRICT_CONTROL_ENGINES`); the file default stays
 /// engine-specific.
-fn resolve_control_weights(
+pub(super) fn resolve_control_weights(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
@@ -94,7 +149,7 @@ fn resolve_control_weights(
 /// Resolve the **base** Z-Image Fun-Controlnet-Union checkpoint (sc-8251). The default repo comes from
 /// the shared strict-control table (single source of truth — `STRICT_CONTROL_ENGINES`); the file
 /// default stays engine-specific.
-fn resolve_base_control_weights(
+pub(super) fn resolve_base_control_weights(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
@@ -108,7 +163,7 @@ fn resolve_base_control_weights(
 }
 
 /// Pose ControlNet lock strength: `advanced.controlScale` (default 0.9, clamp [0,2]).
-fn resolve_control_scale(request: &ImageRequest) -> f32 {
+pub(super) fn resolve_control_scale(request: &ImageRequest) -> f32 {
     request
         .advanced
         .get("controlScale")
@@ -143,7 +198,7 @@ fn zimage_control_spec(
 }
 
 #[cfg(all(target_os = "macos", test))]
-fn zimage_control_load(
+pub(super) fn zimage_control_load(
     weights_dir: PathBuf,
     control_weights: PathBuf,
     quant: Option<Quant>,
@@ -154,7 +209,7 @@ fn zimage_control_load(
 }
 
 #[cfg(all(target_os = "macos", test))]
-fn zimage_base_control_load(
+pub(super) fn zimage_base_control_load(
     weights_dir: PathBuf,
     control_weights: PathBuf,
     quant: Option<Quant>,
@@ -169,8 +224,9 @@ fn zimage_base_control_load(
 /// identity `Reference`, assembled by the shared [`build_control_conditioning`] driver) drives the
 /// Fun-Controlnet-Union branch. Z-Image-Turbo is guidance-distilled (no CFG / negative).
 #[allow(clippy::too_many_arguments)]
-fn zimage_control_generate_one(
+pub(super) fn zimage_control_generate_one(
     generator: &dyn Generator,
+    sampling_controls: &GenerationRequest,
     prompt: &str,
     width: u32,
     height: u32,
@@ -191,7 +247,7 @@ fn zimage_control_generate_one(
         conditioning,
         preview,
         cancel: cancel.clone(),
-        ..Default::default()
+        ..sampling_controls.clone()
     };
     let output = generator
         .generate(&request, on_progress)
@@ -209,7 +265,7 @@ fn zimage_control_generate_one(
     }
 }
 
-fn zimage_control_raw_settings(
+pub(super) fn zimage_control_raw_settings(
     request: &ImageRequest,
     repo: &str,
     steps: u32,
@@ -217,26 +273,23 @@ fn zimage_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
-    raw.insert("realModelInference".to_owned(), Value::Bool(true));
-    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    raw.insert("numInferenceSteps".to_owned(), json!(steps));
-    // Z-Image-Turbo is guidance-distilled — no CFG.
-    raw.insert("guidanceScale".to_owned(), Value::Null);
-    raw.insert(
-        "mlxQuantize".to_owned(),
-        quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
-    );
-    raw.insert("controlScale".to_owned(), json!(control_scale));
-    raw.insert("poseCount".to_owned(), json!(pose_count));
-    raw
+    tier_resolver::control_raw_settings(
+        request,
+        repo,
+        steps,
+        control_scale,
+        pose_count,
+        tier_resolver::ControlBackend::Mlx(quant_bits),
+        None,
+        None,
+    )
 }
 
 /// Real Z-Image strict-pose generation: one image per pose, each conditioned on a DWPose
 /// skeleton rendered from the pose keypoints + locked by the Fun-Controlnet-Union branch.
 /// Mirrors [`generate_stream`]'s blocking-thread + streamed-events shape (the MLX
 /// generator is `!Send` + single-thread), reusing [`consume_gen_events`].
-async fn generate_zimage_control_stream(
+pub(super) async fn generate_zimage_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -246,6 +299,7 @@ async fn generate_zimage_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     // Identity img2img-init (sc-2328 / sc-3146) — OPT-IN escape hatch, off by default. The
     // Fun-Controlnet-Union pose head denoises the pose FROM NOISE, so seeding from a reference
     // init fights the pose lock on few-step Turbo (validated marginal on 8-step Turbo; no single
@@ -365,6 +419,7 @@ async fn generate_zimage_control_stream(
                 );
                 let (out_w, out_h, pixels) = zimage_control_generate_one(
                     generator,
+                    &sampling_controls,
                     &prompt,
                     width,
                     height,
@@ -418,8 +473,9 @@ async fn generate_zimage_control_stream(
 /// scale + an optional negative prompt (the base `z_image_control` descriptor `supports_guidance` +
 /// `supports_negative_prompt`).
 #[allow(clippy::too_many_arguments)]
-fn zimage_base_control_generate_one(
+pub(super) fn zimage_base_control_generate_one(
     generator: &dyn Generator,
+    sampling_controls: &GenerationRequest,
     prompt: &str,
     negative_prompt: Option<String>,
     width: u32,
@@ -444,7 +500,7 @@ fn zimage_base_control_generate_one(
         conditioning,
         preview,
         cancel: cancel.clone(),
-        ..Default::default()
+        ..sampling_controls.clone()
     };
     let output = generator.generate(&request, on_progress).map_err(|error| {
         WorkerError::Engine(format!("base Z-Image control generation failed: {error}"))
@@ -498,7 +554,7 @@ fn zimage_base_control_raw_settings(
 /// control checkpoint, and REAL CFG (`guidance` + negative prompt) — the base is undistilled. Pose
 /// rendering + source threading reuse the SAME shared strict-control driver, so the pose tier is
 /// byte-identical to the Turbo path.
-async fn generate_zimage_base_control_stream(
+pub(super) async fn generate_zimage_base_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -508,6 +564,7 @@ async fn generate_zimage_base_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     // Identity img2img-init (opt-in escape hatch, off by default) — same gate as the Turbo path
     // (`advanced.referenceStrength > 0` AND a `referenceAssetId`). Shared across the whole pose set.
     let identity_init = resolve_identity_init(request, settings, project_path)?;
@@ -629,6 +686,7 @@ async fn generate_zimage_base_control_stream(
                 );
                 let (out_w, out_h, pixels) = zimage_base_control_generate_one(
                     generator,
+                    &sampling_controls,
                     &prompt,
                     negative_prompt.clone(),
                     width,
@@ -700,7 +758,8 @@ const ZIMAGE_ADAPTER_LABEL: &str = "mlx_z_image";
 /// The 11 canonical Character-Studio angles, in order. Re-exported from the canonical
 /// [`sceneworks_core::angle_kps`] source of truth (the same table the Key Point Library serves
 /// as its built-in presets — sc-4434) so the worker and the library can never drift.
-const CHARACTER_ANGLE_SET_ORDER: [&str; 11] = sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER;
+pub(super) const CHARACTER_ANGLE_SET_ORDER: [&str; 11] =
+    sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER;
 
 // `angle_prompt_augment` / `strip_base_prompt` / `augment_prompt_for_angle` moved to `base.rs`
 // (shared by the candle InstantID angle-set lane, sc-5491); still in scope here (same module) for
@@ -708,12 +767,12 @@ const CHARACTER_ANGLE_SET_ORDER: [&str; 11] = sceneworks_core::angle_kps::BUILTI
 
 /// The pose-skeleton instruction appended to the prompt for the best-effort pose tier
 /// (parity with `character_studio_angles.POSE_SKELETON_PROMPT`).
-const POSE_SKELETON_PROMPT: &str =
+pub(super) const POSE_SKELETON_PROMPT: &str =
     "matching the exact body pose shown in the OpenPose skeleton reference image";
 
 /// Append the pose-skeleton cue to the user's base prompt (parity with
 /// `augment_prompt_for_pose`).
-fn augment_prompt_for_pose(base: &str) -> String {
+pub(super) fn augment_prompt_for_pose(base: &str) -> String {
     let base = strip_base_prompt(base);
     if base.is_empty() {
         POSE_SKELETON_PROMPT.to_owned()

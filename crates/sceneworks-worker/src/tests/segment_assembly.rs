@@ -4,10 +4,7 @@
 /// the assembly/rollup contract, the OOB bounds guard, and the disabled/missing early-outs are all
 /// covered on any lane the orchestrator compiles on. The real model path stays in the `#[ignore]`
 /// E2E tests. Compiled only where the orchestrator exists (macOS or `-F backend-candle`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod segment_assembly_frames_tests {
     use super::*;
     use crate::person_track::{NormalizedBox, TrackFrame};

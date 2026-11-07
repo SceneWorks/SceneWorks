@@ -8,28 +8,33 @@ publish = false
 [features]
 # Explicit per-data-directory cache roots for CPU integration fixtures only.
 test-support = []
+# Learned CPU fixtures are compiled only for explicit manual model validation.
+# Every proof test is also ignored, including under --all-features.
+model-inference-proof = []
 
 [dependencies]
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
-sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
-sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
+reqwest = { workspace = true, features = ["rustls-tls", "json", "stream"] }
+tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "macros"] }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "2b09938e33370915d4f853389961709b8bbf8bf9" }
+sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "2b09938e33370915d4f853389961709b8bbf8bf9" }
+sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "2b09938e33370915d4f853389961709b8bbf8bf9" }
 # The H3 finetune-import codec (minimax_h3_codec) reads the pruned-AdaLN table contract.
-sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
+sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "2b09938e33370915d4f853389961709b8bbf8bf9" }
 directories = "5"
-fs2 = "0.4"
+fs2 = { workspace = true }
 # sc-19708: exact-file requirement selection matches receipt files against the manifest's
 # declared download patterns with the same glob semantics the API install path uses.
-glob = "0.3"
+glob = { workspace = true }
 getrandom = "0.3"
-parking_lot = "0.12"
-rusqlite = { version = "0.32", features = ["bundled", "functions"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["raw_value"] }
+parking_lot = { workspace = true }
+rusqlite = { workspace = true, features = ["functions"] }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 # sc-22713: a planner draft is corrected by a local 8B model that cannot count lines, so a parse
 # failure has to name the FIELD ("shots[3].startState"), not the offset. Already in the lock via
 # axum, so this adds no package to the build.
 serde_path_to_error = "0.1"
-mime_guess = "2.0"
+mime_guess = { workspace = true }
 url = "2.5"
 # sc-6531 (Dataset Doctor): read image dimensions from the header without a full decode.
 # `imagesize` reads dataset dimensions without decoding.
@@ -48,8 +53,10 @@ png = { workspace = true }
 # sc-6531: SHA-256 of stored bytes = exact-duplicate key + the cache key for Tier-1
 # embeddings (epic 6529 §6.3). Pinned to the workspace's existing 0.10 line (worker + desktop)
 # so no new locked version appears.
-sha2 = "0.10"
-subtle = "2.6"
+sha2 = { workspace = true }
+subtle = { workspace = true }
+# Fallible no-clobber TempPath adapter requires tempfile3.27 at runtime.
+tempfile = { workspace = true }
 # sc-26684: the pruned AdaLN content hash widens stored F16 operands losslessly to F32 through
 # the same `half` the checkpoint readers already compile; the 2.7 line is already locked, so no
 # new version or extension of the graph appears.
@@ -85,9 +92,10 @@ winapi-util = "0.1"
 # member that hashes (worker, desktop, api, memory-adapter) compiles against on this target —
 # the same union hazard `image` is hoisted to `[workspace.dependencies]` for. It cannot be
 # hoisted the same way because `[workspace.dependencies]` entries carry no target cfg.
-sha2 = { version = "0.10", features = ["asm"] }
+sha2 = { workspace = true, features = ["asm"] }
 
 [target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
 libc = "0.2"
 # Descriptor-relative filesystem operations keep resolved-cache staging publication and cleanup
 # confined even when a managed path is concurrently replaced.
@@ -97,15 +105,11 @@ rustix = { version = "1", features = ["fs"] }
 # Adversarial PNG fixtures choose compression explicitly, independent of the workspace's
 # unified miniz/zlib-rs backend. Already locked transitively; never a production dependency.
 flate2 = "1.1"
-# sc-20635: the checkpoint plan store's cross-process lock is an `fs2` advisory file lock, and the
-# integration test stands in for the other process by taking the SAME lock on its own descriptor.
-fs2 = "0.4"
 jsonschema = "0.28"
 # sc-11043: the managed-variant suite pins a fixture checkpoint's own SHA-256 into a variant so the
 # pinned-checksum verification path runs for real. Same 0.10 line the crate already depends on, so
 # no new locked version appears.
-sha2 = "0.10"
-tempfile = "3.13"
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

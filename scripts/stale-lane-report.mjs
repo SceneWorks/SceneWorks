@@ -72,6 +72,7 @@ import { recordsNeedingDigest, stampManifest } from "./backfill-closure-digests.
 import { deriveMargins } from "./derive-ladder-margins.mjs";
 import { inferencePinFromCargo } from "./inference-closure-digest.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -473,7 +474,7 @@ export function adapterCapturableProviders(source, label) {
       throw new Error(`${label}: the dispatch refusal phrase appears outside any match block`);
     }
     gateStarts.push(matchStart);
-    const owner = [...cleaned.slice(0, matchStart).matchAll(/^fn\s+([a-z_][A-Za-z0-9_]*)\s*\(/gm)].at(-1);
+    const owner = [...cleaned.slice(0, matchStart).matchAll(/^(?:pub(?:\([^)]*\))?\s+)?fn\s+([a-z_][A-Za-z0-9_]*)\s*\(/gm)].at(-1);
     if (!owner) throw new Error(`${label}: a dispatch gate lives outside any top-level fn`);
     gateFns.push(owner[1]);
     const block = matchBlockBody(cleaned, matchStart);
@@ -1112,7 +1113,10 @@ export async function loadSources(root = ROOT) {
     controlWeightsSource,
     yue2ProfilePlanBody,
   ] = await Promise.all(
-      Object.values(SOURCE_PATHS).map((relative) => readFile(path.join(root, relative), "utf8")),
+      Object.entries(SOURCE_PATHS).map(([key, relative]) =>
+        key === "mlxAdapter" || key === "candleAdapter"
+          ? rustFacadeSource(path.join(root, relative))
+          : readFile(path.join(root, relative), "utf8")),
     );
   const closures = JSON.parse(closuresBody);
   return {

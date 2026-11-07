@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useDismissOnOutsideOrEscape } from "../hooks/useDismissOnOutsideOrEscape.js";
+import React, { useRef, useState } from "react";
 import { ACCENTS } from "../accents.js";
 
 // Topbar accent picker (sc-accent): collapses the old full swatch row down to a
@@ -11,27 +12,7 @@ export function AccentPicker({ accent, onChange }) {
   const selected = ACCENTS.find((option) => option.id === accent) ?? ACCENTS[0];
   const others = ACCENTS.filter((option) => option.id !== selected.id);
 
-  useEffect(() => {
-    if (!open) {
-      return undefined;
-    }
-    function onDocMouseDown(event) {
-      if (!containerRef.current?.contains(event.target)) {
-        setOpen(false);
-      }
-    }
-    function onDocKey(event) {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDocMouseDown);
-    document.addEventListener("keydown", onDocKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onDocKey);
-    };
-  }, [open]);
+  useDismissOnOutsideOrEscape(containerRef, open, setOpen);
 
   return (
     <div className="accent-picker" ref={containerRef}>

@@ -1,3 +1,4 @@
+import { SamplerSchedulerFields, SamplingSeedField, SamplingStepsField } from "../SamplerSchedulerFields.jsx";
 import React, { useState } from "react";
 import { Icon } from "../Icons.jsx";
 import { LoraPickerSection } from "../generationStudio.jsx";
@@ -211,20 +212,17 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
               value={gen.prompt}
             />
           </label>
-          <label className="ve-field">
-            <span className="ve-field-label">Seed</span>
-            <div className="ve-preset-row">
-              <input
-                className="ve-input"
-                onChange={(e) => gen.setSeed(e.target.value)}
-                placeholder="random"
-                value={gen.seed}
-              />
-              <button className="ve-icon-btn" onClick={gen.randomizeSeed} title="Randomize seed" type="button">
+          <SamplingSeedField
+            value={gen.seed}
+            onChange={(value) => gen.setSeed(value)}
+            inputProps={{
+              placeholder: "random"
+            }}
+            variant="rail"
+            suffix={<button className="ve-icon-btn" onClick={gen.randomizeSeed} title="Randomize seed" type="button">
                 <Icon.Refresh size={15} />
-              </button>
-            </div>
-          </label>
+              </button>}
+          />
           {gen.supportsNegativePrompt ? (
             <label className="ve-field">
               <span className="ve-field-label">Negative prompt</span>
@@ -249,63 +247,48 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
           {gen.advancedOpen ? (
             <div className="ve-adv-body">
               <div className="ve-output-grid">
-                {gen.showSamplerPicker ? (
-                  <label className="ve-field">
-                    <span className="ve-field-label">Sampler</span>
-                    <select className="ve-select" onChange={(e) => gen.setSampler(e.target.value)} value={gen.sampler}>
-                      {gen.samplerOptions.map((value) => (
-                        <option key={value} value={value}>
-                          {value}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-                {gen.showSchedulerPicker ? (
-                  <label className="ve-field">
-                    <span className="ve-field-label">Scheduler</span>
-                    <select className="ve-select" onChange={(e) => gen.setScheduler(e.target.value)} value={gen.scheduler}>
-                      {gen.schedulerOptions.map((value) => (
-                        <option key={value} value={value}>
-                          {value}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-                {gen.showSchedulerPicker && gen.scheduler !== "default" ? (
+                <SamplerSchedulerFields
+                  sampler={gen.sampler}
+                  scheduler={gen.scheduler}
+                  samplerOptions={gen.samplerOptions}
+                  schedulerOptions={gen.schedulerOptions}
+                  onSamplerChange={gen.setSampler}
+                  onSchedulerChange={gen.setScheduler}
+                  variant="rail"
+                  rawLabels
+                />
+                {(
                   <label className="ve-field">
                     <span className="ve-field-label">Scheduler shift</span>
                     <input
                       className="ve-input"
-                      max="10"
-                      min="0.1"
-                      onChange={(e) => gen.setSchedulerShift(Number(e.target.value))}
-                      step="0.1"
+                      min="0"
+                      disabled={gen.selectedModel?.video?.supportsSchedulerShift === false}
+                      placeholder={gen.selectedModel?.defaults?.schedulerShift == null ? "Model default" : String(gen.selectedModel.defaults.schedulerShift)}
+                      onChange={(e) => gen.setSchedulerShift(e.target.value)}
+                      step="any"
                       type="number"
-                      value={gen.schedulerShift}
+                      value={gen.schedulerShift ?? ""}
                     />
                   </label>
-                ) : null}
-                <label className="ve-field">
-                  <span className="ve-field-label">Steps</span>
-                  <input
-                    className="ve-input"
-                    disabled={gen.lightningActive}
-                    onChange={(e) => gen.setStepsOverride(e.target.value)}
-                    placeholder={gen.lightningActive ? "4 (Lightning)" : "auto"}
-                    value={gen.lightningActive ? "" : gen.stepsOverride}
-                  />
-                </label>
+                )}
+                <SamplingStepsField
+                  value={gen.lightningActive ? "" : gen.stepsOverride}
+                  onChange={(value) => gen.setStepsOverride(value)}
+                  inputProps={{
+                    disabled: gen.lightningActive,
+                    placeholder: gen.lightningActive ? "4 (Lightning)" : "auto"
+                  }}
+                  variant="rail"
+                />
                 {gen.supportsGuidance ? (
                   <label className="ve-field">
                     <span className="ve-field-label">Guidance</span>
                     <input
                       className="ve-input"
-                      disabled={gen.lightningActive}
                       onChange={(e) => gen.setGuidanceOverride(e.target.value)}
-                      placeholder={gen.lightningActive ? "off (Lightning)" : "auto"}
-                      value={gen.lightningActive ? "" : gen.guidanceOverride}
+                      placeholder={gen.lightningActive ? "1 (Lightning default)" : "auto"}
+                      value={gen.guidanceOverride}
                     />
                   </label>
                 ) : null}

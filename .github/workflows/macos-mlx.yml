@@ -1035,6 +1035,10 @@ jobs:
             echo "provision_z_image_snapshot requires run_five_rung_reference=true" >&2
             exit 1
           fi
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference) }}
+        with:
+          node-version: 22
       - name: Validate memory-strategy calibration identities
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         env:
@@ -1059,7 +1063,7 @@ jobs:
             echo "qwen_tier must be one of bf16, q4, or q8" >&2
             exit 1
           fi
-          PIN="$(sed -nE 's/^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/\1/p' crates/sceneworks-memory-adapter/src/lib.rs)"
+          PIN="$(node scripts/lib/inference-provenance.mjs)"
           if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then
             echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2
             exit 1
@@ -1083,7 +1087,7 @@ jobs:
             echo "z_image_repository must be the fixed SceneWorks/z-image-turbo-mlx reference artifact" >&2
             exit 1
           fi
-          PIN="$(sed -nE 's/^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/\1/p' crates/sceneworks-memory-adapter/src/lib.rs)"
+          PIN="$(node scripts/lib/inference-provenance.mjs)"
           if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then
             echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2
             exit 1
@@ -1098,7 +1102,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
         run: |
           "$RUNNER_TEMP/qwen-provision-venv/bin/python" -m pip install \
-            --disable-pip-version-check --no-input "huggingface_hub==0.36.0"
+            --disable-pip-version-check --no-input -r .github/requirements-hf.txt
       - name: Set up runner Python 3.12 for Z-Image provisioning
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_z_image_snapshot }}
         run: |
@@ -1109,7 +1113,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_z_image_snapshot }}
         run: |
           "$RUNNER_TEMP/z-image-provision-venv/bin/python" -m pip install \
-            --disable-pip-version-check --no-input "huggingface_hub==0.36.0"
+            --disable-pip-version-check --no-input -r .github/requirements-hf.txt
       - name: Provision exact public Qwen calibration snapshot
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
         env:

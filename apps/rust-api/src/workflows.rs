@@ -67,6 +67,8 @@ pub(crate) const INSPECT_CODE_UNREADABLE: &str = "workflow_inspect_unreadable";
 /// sharing violation on the staging directory is the likely cause, and telling the user their PNG
 /// is malformed sends them to fix a file that is fine.
 pub(crate) const INSPECT_CODE_READ_FAILED: &str = "workflow_inspect_read_failed";
+/// Fixed public summary, safe even when a worker join error carries diagnostics.
+pub(crate) const INSPECT_READ_FAILED_DETAIL: &str = "SceneWorks could not read the uploaded image back off disk, so its workflow could not be checked. Nothing is known to be wrong with the file — try again.";
 
 /// `code` on the 4xx for a request that is not a usable multipart with exactly one `file` field —
 /// an empty body, a JSON body, a missing `boundary`, a missing or duplicated `file`.
@@ -259,6 +261,8 @@ pub(crate) async fn inspect_workflow(
 /// statement about a file the caller sent. Its own code because the caller's next move is a bug
 /// report, not a different image.
 pub(crate) const ASSET_WORKFLOW_CODE_UNREADABLE: &str = "asset_workflow_unreadable";
+/// Fixed public summary: diagnostic parser text is logged separately.
+pub(crate) const ASSET_WORKFLOW_UNREADABLE_DETAIL: &str = "SceneWorks recorded a workflow on this image but can no longer read it back. The image itself is unaffected.";
 
 /// `GET /api/v1/projects/:project_id/assets/:asset_id/workflow` — the recipe an IMPORTED asset is
 /// carrying, plus what this install can do about it right now (sc-15952).
@@ -367,9 +371,7 @@ pub(crate) async fn get_asset_workflow(
         tracing::error!(event = "asset_workflow_unreadable", %project_id, error = %error);
         ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            detail: "SceneWorks recorded a workflow on this image but can no longer read it back. \
-                     The image itself is unaffected."
-                .to_owned(),
+            detail: ASSET_WORKFLOW_UNREADABLE_DETAIL.to_owned(),
             context: None,
             code: Some(ASSET_WORKFLOW_CODE_UNREADABLE),
         }
@@ -401,9 +403,7 @@ pub(crate) async fn get_asset_workflow(
         );
         return Err(ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            detail: "SceneWorks recorded a workflow on this image but can no longer read it back. \
-                     The image itself is unaffected."
-                .to_owned(),
+            detail: ASSET_WORKFLOW_UNREADABLE_DETAIL.to_owned(),
             context: None,
             code: Some(ASSET_WORKFLOW_CODE_UNREADABLE),
         });
@@ -565,9 +565,7 @@ fn inspect_error(error: &WorkflowChunkError) -> ApiError {
         // sentence must not imply otherwise.
         WorkflowChunkError::Io { .. } => ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            detail: "SceneWorks could not read the uploaded image back off disk, so its workflow \
-                     could not be checked. Nothing is known to be wrong with the file — try again."
-                .to_owned(),
+            detail: INSPECT_READ_FAILED_DETAIL.to_owned(),
             context: None,
             code: Some(INSPECT_CODE_READ_FAILED),
         },

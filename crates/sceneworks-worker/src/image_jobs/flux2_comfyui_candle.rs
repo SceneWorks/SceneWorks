@@ -1,12 +1,29 @@
-use super::huggingface_snapshot_dir;
-use super::{
-    consume_gen_events, drive_gen_items, prepare_cached_candle_base_floor,
-    prepare_manifest_text_encoder_with_file_pins, resolve_advanced_or_manifest_u32, resolve_seed,
-    start_cached_gen_stream_after_cold_admission, ApiClient, ColdLoadAdmission, GenerationOutput,
-    GenerationRequest, ImageRequest, JobSnapshot, JsonObject, LoadSpec, Path, PathBuf,
-    PreparedAdapters, PreparedFileDispatch, Quant, Settings, Value, WeightsSource, WorkerError,
-    WorkerResult,
-};
+use super::adapters::PreparedAdapters;
+use super::events::consume_gen_events;
+use super::load_spec::prepare_manifest_text_encoder_with_file_pins;
+use super::prepare_cached_candle_base_floor;
+use super::resolve_seed;
+use super::routing::PreparedFileDispatch;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::stream::drive_gen_items;
+use super::stream::start_cached_gen_stream_after_cold_admission;
+use super::stream::ColdLoadAdmission;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::Quant;
+use super::WeightsSource;
+use crate::huggingface_snapshot_dir;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 // Candle (Windows/CUDA) in-place ComfyUI FLUX.2-dev txt2img route (epic 10451 Phase 2e, sc-10680).
@@ -193,7 +210,7 @@ pub(super) fn prepare_flux2_comfyui_sources(
     if super::request_is_checkpoint_plan_backed(request) {
         return Ok(None);
     }
-    let Some(_descriptor) = super::imported_generate_request_supported(
+    let Some(_descriptor) = super::routing::imported_generate_request_supported(
         request,
         "flux2",
         gen_core::ImportedModelSource::ComfyUiTree,
@@ -220,7 +237,7 @@ pub(super) fn prepare_flux2_comfyui_sources(
         }
     };
     paths.quant = quant;
-    paths.adapters = super::resolve_prepared_adapters(request, settings)?;
+    paths.adapters = super::adapters::resolve_prepared_adapters(request, settings)?;
     Ok(Some(paths))
 }
 
@@ -262,7 +279,8 @@ pub(super) fn flux2_comfyui_quant(request: &ImageRequest) -> WorkerResult<Quant>
             .get(*key)
             .is_some_and(|value| !value.is_null())
     });
-    let (selected, _) = super::imported_model_quant(request, &descriptor, "ComfyUI FLUX.2")?;
+    let (selected, _) =
+        super::krea_imported::imported_model_quant(request, &descriptor, "ComfyUI FLUX.2")?;
     match selected {
         Some(Quant::Q4) => Ok(Quant::Q4),
         Some(Quant::Q8) => Ok(Quant::Q8),
@@ -427,6 +445,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     let descriptor = crate::inference_runtime::imported_model_descriptor(
         "flux2",
         gen_core::ImportedModelSource::ComfyUiTree,
@@ -508,7 +527,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
                         guidance,
                         preview,
                         cancel: cancel.clone(),
-                        ..Default::default()
+                        ..sampling_controls.clone()
                     };
                     let output = match model.generate(&request, &mut *on_progress) {
                         Ok(output) => output,

@@ -1,20 +1,13 @@
 //! Shared installation-receipt identity and write coordination.
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
-use std::path::{Component, Path};
+use std::path::Path;
 
 /// Serialize receipt read/modify/write across discovery and the download worker.
 pub fn lock(managed: &Path) -> io::Result<crate::file_lock::FileLock> {
-    crate::file_lock::FileLock::exclusive(
-        OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(managed.join(".sceneworks-download-receipt.lock"))?,
-    )
+    crate::file_lock::FileLock::open_exclusive(&managed.join(".sceneworks-download-receipt.lock"))
 }
 
 /// Publish a complete receipt while holding [`lock`].
@@ -45,13 +38,9 @@ pub fn recover_revision(receipt: &Value, repo_root: &Path) -> Option<String> {
         .map(Value::as_str)
         .collect::<Option<Vec<_>>>()?;
     if files.is_empty()
-        || files.iter().any(|file| {
-            file.is_empty()
-                || file.contains('\\')
-                || Path::new(file)
-                    .components()
-                    .any(|part| !matches!(part, Component::Normal(_)))
-        })
+        || files
+            .iter()
+            .any(|file| crate::safe_path::relative_normal_components(file).is_err())
     {
         return None;
     }
@@ -168,11 +157,7 @@ fn resolved_files_tree_stamp_format(
     let mut digest = Sha256::new();
     for name in names {
         let relative = Path::new(name);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
+        if crate::safe_path::relative_normal_components(name).is_err() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("artifact receipt contains unsafe resolved file {name:?}"),

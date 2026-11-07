@@ -31,7 +31,6 @@ mod tests {
     use crate::settings::Settings;
     use gen_core::{LoadSpec, WeightsSource};
     use gen_core_iris::{IrisTask, TEXT_ENCODER_COMPONENT};
-    use sceneworks_core::contracts::JsonObject;
     use serde_json::json;
     use serde_json::Value;
     use std::path::Path;
@@ -43,38 +42,6 @@ mod tests {
         let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
         settings.data_dir = data_dir.to_path_buf();
         settings
-    }
-
-    /// Neutralize the ambient HF cache env so the cache resolves under the temp data dir.
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
-
-    /// The shipped catalog entry, so the test exercises the real `coRequisite` declaration.
-    fn shipped_iris_entry() -> JsonObject {
-        let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .expect("builtin.models.jsonc embedded")
-            .1;
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text))
-                .expect("parse builtin.models.jsonc");
-        manifest
-            .get("models")
-            .and_then(Value::as_array)
-            .and_then(|models| {
-                models
-                    .iter()
-                    .find(|model| model.get("id").and_then(Value::as_str) == Some("iris_3b"))
-            })
-            .and_then(Value::as_object)
-            .cloned()
-            .expect("iris_3b is in the builtin catalog")
     }
 
     fn stage(root: &Path, repo: &str, revision: &str, file: &str) {
@@ -172,15 +139,15 @@ mod tests {
 
     #[test]
     fn generation_stages_the_installed_text_encoder_snapshot() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         stage_text_encoder(data.path());
         let settings = settings_at(data.path());
         let backbone = data.path().join("backbone");
-        let spec = super::super::attach_required_components(
+        let spec = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(backbone.clone())),
             "iris_3b",
-            &shipped_iris_entry(),
+            &crate::test_env::shipped_catalog_entry("iris_3b"),
             &settings,
         )
         .expect("an installed encoder stages");
@@ -199,13 +166,13 @@ mod tests {
 
     #[test]
     fn a_missing_text_encoder_is_a_typed_failure_before_load() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let settings = settings_at(data.path());
-        let error = super::super::attach_required_components(
+        let error = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(data.path().join("backbone"))),
             "iris_3b",
-            &shipped_iris_entry(),
+            &crate::test_env::shipped_catalog_entry("iris_3b"),
             &settings,
         )
         .expect_err("no encoder installed");
@@ -218,16 +185,16 @@ mod tests {
 
     #[test]
     fn a_torn_text_encoder_is_a_typed_failure_before_load() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         // Everything but the shards.
         for file in ["config.json", "tokenizer.json", "tokenizer_config.json"] {
             stage(data.path(), TE_REPO, TE_REVISION, file);
         }
-        let error = super::super::attach_required_components(
+        let error = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(data.path().join("backbone"))),
             "iris_3b",
-            &shipped_iris_entry(),
+            &crate::test_env::shipped_catalog_entry("iris_3b"),
             &settings_at(data.path()),
         )
         .expect_err("torn encoder");
@@ -281,7 +248,7 @@ mod tests {
         assert_eq!(model.default_steps(), gen_core_iris::DEFAULT_STEPS);
         assert_eq!(model.default_guidance(), gen_core_iris::DEFAULT_CFG_SCALE);
 
-        let entry = shipped_iris_entry();
+        let entry = crate::test_env::shipped_catalog_entry("iris_3b");
         let limits = entry.get("limits").and_then(Value::as_object).unwrap();
         let samplers: Vec<&str> = limits["samplers"]
             .as_array()
@@ -393,10 +360,10 @@ mod tests {
     #[test]
     fn the_steps_ceiling_admits_the_models_own_default() {
         assert_eq!(
-            super::super::max_requested_steps(gen_core_iris::DEFAULT_STEPS),
+            crate::image_jobs::sampling::max_requested_steps(gen_core_iris::DEFAULT_STEPS),
             gen_core_iris::DEFAULT_STEPS
         );
-        assert_eq!(super::super::max_requested_steps(40), 80);
+        assert_eq!(crate::image_jobs::sampling::max_requested_steps(40), 80);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -413,8 +380,8 @@ mod tests {
     use crate::api_client::ApiClient;
     use axum::extract::{Path as AxumPath, State};
     use axum::response::{IntoResponse, Response};
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
+
+    use axum::Json;
     use gen_core::{GenerationOutput, GenerationRequest, Generator, Progress};
     use sceneworks_core::contracts::JobSnapshot;
     use std::sync::{Arc, Mutex};
@@ -711,14 +678,12 @@ mod tests {
             .into_response()
         }
         let posts: Posts = Arc::default();
-        let app = Router::new()
-            .route("/api/v1/jobs/:job_id", get(job_route))
-            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-            .route(
-                "/api/v1/workers/:worker_id/heartbeat",
-                post(heartbeat_route),
-            )
-            .with_state((posts.clone(), cancel_requested));
+        let app = crate::test_api_stub::job_progress_heartbeat_routes(
+            job_route,
+            progress_route,
+            heartbeat_route,
+        )
+        .with_state((posts.clone(), cancel_requested));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         crate::load_progress::spawn(async move {
@@ -961,7 +926,7 @@ mod tests {
                     "height": 64,
                     "count": 1,
                     "loras": loras,
-                    "modelManifestEntry": Value::Object(shipped_iris_entry()),
+                    "modelManifestEntry": Value::Object(crate::test_env::shipped_catalog_entry("iris_3b")),
                 });
                 for (key, value) in extra.as_object().cloned().unwrap_or_default() {
                     payload[key] = value;
@@ -1011,7 +976,7 @@ mod tests {
                 // Candle `generate_candle_stream_using` off-Mac (sc-25680) — so progress, cancel,
                 // failure and knob shaping are pinned per backend by one set of assertions.
                 #[cfg(target_os = "macos")]
-                let arm = super::super::generate_stream_using(
+                let arm = crate::image_jobs::mlx::generate_stream_using(
                     &api,
                     &settings,
                     &job,
@@ -1022,7 +987,7 @@ mod tests {
                     loader,
                 );
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                let arm = super::super::generate_candle_stream_using(
+                let arm = super::super::candle::generate_candle_stream_using(
                     &api,
                     &settings,
                     &job,
@@ -1031,7 +996,7 @@ mod tests {
                     "cuda",
                     &mut asset_writes,
                     loader,
-                    Arc::new(super::super::NativeMossStreamRuntime),
+                    Arc::new(super::super::moss::NativeMossStreamRuntime),
                 );
                 let outcome = tokio::time::timeout(Duration::from_secs(60), arm)
                     .await
@@ -1757,7 +1722,7 @@ mod tests {
     /// *Mutation that reds this:* move/drop the `evict_resident_transform()` before the probe.
     #[test]
     fn the_candle_arm_evicts_a_resident_transform_before_probing_vram() {
-        let base = include_str!("base.rs");
+        let base = include_str!("candle.rs");
         let body = &base[base
             .find("async fn generate_candle_stream_using(")
             .expect("candle arm")..];
@@ -1765,7 +1730,7 @@ mod tests {
             .find("crate::transform_cache::evict_resident_transform().await?")
             .expect("the candle arm evicts a resident transform");
         let probe = body
-            .find("crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await")
+            .find("crate::vram_gate::live_capped_budget(&settings.gpu_id).await")
             .expect("the candle arm probes VRAM");
         assert!(evict < probe, "evict before the probe");
     }
@@ -1781,7 +1746,7 @@ mod tests {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn the_candle_gate_has_a_resident_and_a_staged_prediction_for_every_iris_tier_key() {
-        let iris = shipped_iris_entry();
+        let iris = crate::test_env::shipped_catalog_entry("iris_3b");
         for advanced in [
             json!({}),
             json!({ "mlxQuantize": 0 }),

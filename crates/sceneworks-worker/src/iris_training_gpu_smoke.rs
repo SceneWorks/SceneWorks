@@ -28,9 +28,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path as AxumPath, State};
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde_json::{json, Value};
 
 use super::*;
@@ -46,97 +43,27 @@ const RENDER_STEPS: u32 = 20;
 type ProgressPosts = Arc<Mutex<Vec<(String, Value)>>>;
 
 fn stub_job_snapshot(job_id: &str, job_type: &str, project_id: &str) -> Value {
-    json!({
-        "id": job_id,
-        "type": job_type,
-        "status": "running",
-        "projectId": project_id,
-        "projectName": "Iris training smoke",
-        "payload": {},
-        "result": {},
-        "requestedGpu": "auto",
-        "assignedGpu": "0",
-        "workerId": "iris-train-smoke-worker",
-        "progress": 0.1,
-        "stage": "running",
-        "message": "running",
-        "error": null,
-        "etaSeconds": null,
-        "elapsedSeconds": null,
-        "attempts": 1,
-        "sourceJobId": null,
-        "duplicateOfJobId": null,
-        "cancelRequested": false,
-        "createdAt": "2026-10-11T00:00:00Z",
-        "updatedAt": "2026-10-11T00:00:00Z",
-        "startedAt": "2026-10-11T00:00:00Z",
-        "completedAt": null,
-        "canceledAt": null,
-        "lastHeartbeatAt": "2026-10-11T00:00:00Z"
-    })
-}
-
-async fn stub_job(AxumPath(job_id): AxumPath<String>) -> Json<Value> {
-    Json(stub_job_snapshot(&job_id, "lora_train", "smoke"))
-}
-
-async fn stub_progress(
-    State(posts): State<ProgressPosts>,
-    AxumPath(job_id): AxumPath<String>,
-    Json(payload): Json<Value>,
-) -> Json<Value> {
-    posts
-        .lock()
-        .expect("progress posts lock")
-        .push((job_id.clone(), payload));
-    Json(stub_job_snapshot(&job_id, "lora_train", "smoke"))
-}
-
-async fn stub_heartbeat(AxumPath(worker_id): AxumPath<String>) -> Json<Value> {
-    Json(json!({
-        "id": worker_id, "gpuId": "0", "gpuName": null, "status": "busy",
-        "currentJobId": TRAIN_JOB, "capabilities": [], "loadedModels": [],
-        "registeredAt": "2026-10-11T00:00:00Z", "lastSeenAt": "2026-10-11T00:00:00Z"
-    }))
-}
-
-async fn stub_metrics(Json(payload): Json<Value>) -> Json<Value> {
-    Json(payload)
+    crate::test_api_stub::smoke_job(
+        job_id,
+        job_type,
+        Some(project_id),
+        Some("Iris training smoke"),
+        "iris-train-smoke-worker",
+        "2026-10-11T00:00:00Z",
+    )
 }
 
 async fn spawn_worker_api_stub() -> (String, ProgressPosts) {
-    let posts: ProgressPosts = Arc::default();
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(stub_job))
-        .route("/api/v1/jobs/:job_id/progress", post(stub_progress))
-        .route("/api/v1/jobs/:job_id/metrics", post(stub_metrics))
-        .route("/api/v1/workers/:worker_id/heartbeat", post(stub_heartbeat))
-        .with_state(posts.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("worker API stub listener binds");
-    let address = listener.local_addr().expect("worker API stub has address");
-    tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("worker API stub serves");
-    });
-    (format!("http://{address}"), posts)
+    crate::test_api_stub::smoke_api(
+        stub_job_snapshot("", "lora_train", "smoke"),
+        crate::test_api_stub::smoke_worker("", TRAIN_JOB, "2026-10-11T00:00:00Z"),
+        None,
+    )
+    .await
 }
 
 fn shipped_iris_entry() -> Value {
-    let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("builtin.models.jsonc embedded")
-        .1;
-    let manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(text)).expect("parse builtin.models.jsonc");
-    manifest["models"]
-        .as_array()
-        .and_then(|models| models.iter().find(|model| model["id"] == "iris_3b"))
-        .cloned()
-        .expect("iris_3b is in the builtin catalog")
+    Value::Object(crate::test_env::shipped_catalog_entry("iris_3b"))
 }
 
 /// A small, learnable dataset: four flat-colour squares with their colour as the caption.
@@ -1215,46 +1142,16 @@ async fn run_restore_training_smoke(full: bool) {
 // =============================================================================================
 
 type CancelSwitch = Arc<std::sync::atomic::AtomicBool>;
-type CancellableState = (ProgressPosts, CancelSwitch);
-
-fn cancellable_snapshot(job_id: &str, cancel: &CancelSwitch) -> Value {
-    let mut job = stub_job_snapshot(job_id, "lora_train", "smoke");
-    job["cancelRequested"] = json!(cancel.load(std::sync::atomic::Ordering::SeqCst));
-    job
-}
-
-async fn cancellable_job(
-    State((_, cancel)): State<CancellableState>,
-    AxumPath(job_id): AxumPath<String>,
-) -> Json<Value> {
-    Json(cancellable_snapshot(&job_id, &cancel))
-}
-
-async fn cancellable_progress(
-    State((posts, cancel)): State<CancellableState>,
-    AxumPath(job_id): AxumPath<String>,
-    Json(payload): Json<Value>,
-) -> Json<Value> {
-    posts.lock().unwrap().push((job_id.clone(), payload));
-    Json(cancellable_snapshot(&job_id, &cancel))
-}
 
 /// The worker API stub with a user cancel: every job snapshot (the cancel poller's GET and each
 /// progress-post reply) reports `cancelRequested` from `cancel`.
 async fn spawn_cancellable_api_stub(cancel: CancelSwitch) -> (String, ProgressPosts) {
-    let posts: ProgressPosts = Arc::default();
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(cancellable_job))
-        .route("/api/v1/jobs/:job_id/progress", post(cancellable_progress))
-        .route("/api/v1/jobs/:job_id/metrics", post(stub_metrics))
-        .route("/api/v1/workers/:worker_id/heartbeat", post(stub_heartbeat))
-        .with_state((posts.clone(), cancel));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{address}"), posts)
+    crate::test_api_stub::smoke_api(
+        stub_job_snapshot("", "lora_train", "smoke"),
+        crate::test_api_stub::smoke_worker("", TRAIN_JOB, "2026-10-11T00:00:00Z"),
+        Some(cancel),
+    )
+    .await
 }
 
 /// What THIS lane's own trainer says to gradient (activation) checkpointing for `plan`'s task: the

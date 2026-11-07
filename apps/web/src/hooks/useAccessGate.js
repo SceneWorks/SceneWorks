@@ -1,6 +1,7 @@
+import { accessApi } from "../api/access.js";
+import { backoffDelay } from "../retry.js";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-  apiFetch,
   isReauthenticating,
   isThrottled,
   setMediaTicket,
@@ -120,6 +121,8 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   // degrades to placeholders and recovers when a retry lands — and a "media-ticket"
   // notice tells the user why media is broken while the backoff keeps retrying.
   const [mediaTicketFailed, setMediaTicketFailed] = useState(false);
+  const [, setMediaTicketVersion] = useState("");
+  const mediaTicketRef = useRef("");
   // A hidden tab cannot use media URLs, so refreshing their bearer ticket is pure
   // background churn. Keep the visibility listener separate from the mint effect so
   // it is registered once for the hook lifetime rather than once per ticket refresh.
@@ -141,12 +144,15 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
       // mint-before-data ordering rather than ride a stale mediaReady/
       // mediaTicketFailed, and the "Retrying in the background" notice must not
       // linger on the lock screen while no retry is actually running.
+      mediaTicketRef.current = "";
+      setMediaTicket("");
       setMediaReady(false);
       setMediaTicketFailed(false);
       dismissNoticeKind("media-ticket");
       return undefined;
     }
     if (!access.authRequired) {
+      mediaTicketRef.current = "";
       setMediaTicket("");
       recordStartupMark("media-authorization-settled");
       setMediaReady(true);
@@ -160,14 +166,20 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
     let attempt = 0;
     async function acquire() {
       try {
-        // Header-authenticated mint (loopback-trusted desktop sends no token and
-        // still passes). The server keeps re-arming the same sliding ticket, so
-        // already-rendered media URLs stay valid across refreshes.
-        const response = await apiFetch("/api/v1/files/ticket", token, { method: "POST" });
+        // Renew this client's credential through the header-authenticated endpoint.
+        // Absolute expiry rotates it before the old credential expires, allowing
+        // mounted playback to switch URLs while in-flight requests finish.
+        const response = await accessApi.mediaTicket(token, {
+          method: "POST",
+          body: "{}",
+          headers: mediaTicketRef.current ? { "X-SceneWorks-Media-Ticket": mediaTicketRef.current } : {},
+        });
         if (closed) {
           return;
         }
+        mediaTicketRef.current = response.ticket;
         setMediaTicket(response.ticket);
+        setMediaTicketVersion(response.ticket);
         recordStartupMark("media-authorization-settled");
         setMediaReady(true);
         setMediaTicketFailed(false);
@@ -194,7 +206,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
           "media-ticket",
           "media authorization: couldn't obtain a media ticket, so thumbnails, previews, and downloads may fail to load. Retrying in the background.",
         );
-        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        const delay = backoffDelay(attempt, { baseMs: 1000, maxMs: 30000 });
         attempt += 1;
         timer = window.setTimeout(acquire, delay);
       }
@@ -227,7 +239,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
     let attempt = 0;
     async function probe() {
       try {
-        const result = await apiFetch("/api/v1/access", "");
+        const result = await accessApi.inspect("");
         if (closed) {
           return;
         }
@@ -250,7 +262,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
           "access-probe",
           "access check: couldn't reach the host to determine whether a password is required. Retrying in the background.",
         );
-        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        const delay = backoffDelay(attempt, { baseMs: 1000, maxMs: 30000 });
         attempt += 1;
         timer = window.setTimeout(probe, delay);
       }
@@ -386,7 +398,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
     let attempt = 0;
     async function verify() {
       try {
-        const result = await apiFetch("/api/v1/auth/verify", token, { method: "POST" });
+        const result = await accessApi.verify(token, { method: "POST" });
         if (closed) {
           return;
         }
@@ -411,7 +423,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
             ? "access check: the host is temporarily refusing password attempts from this device after too many failures. Retrying in the background."
             : "access check: couldn't reach the host to confirm the saved password. Retrying in the background.",
         );
-        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        const delay = backoffDelay(attempt, { baseMs: 1000, maxMs: 30000 });
         attempt += 1;
         timer = window.setTimeout(verify, delay);
       }
@@ -450,7 +462,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
         return;
       }
       try {
-        const result = await apiFetch("/api/v1/auth/verify", candidate, { method: "POST" });
+        const result = await accessApi.verify(candidate, { method: "POST" });
         if (!result?.ok) {
           setAuthError("Incorrect password. Try again.");
           return;

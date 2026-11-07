@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { inferenceRevision } from "./lib/inference-provenance.mjs";
 // Measure every memory anchor the plan declares for ONE backend on THIS host, committing each
 // measurement as it lands so a crash or a cancel loses at most the anchor in flight.
 //
@@ -609,7 +610,7 @@ function supportVariant(body, sourcePath) {
  * SdxlSurface::Bespoke`). A conjunct naming a DIFFERENT variant makes its term statically false, so
  * most rungs still resolve; only the rung the runtime term actually gates comes back `null`.
  */
-function evaluateStrategyCondition(condition, variant) {
+function evaluateStrategyCondition(condition, variant, bindings = new Map()) {
   let unknown = false;
   for (const term of condition.split("||")) {
     let text = term.trim();
@@ -621,7 +622,10 @@ function evaluateStrategyCondition(condition, variant) {
       if (named) {
         if (named[1] !== variant) termFalse = true;
       } else {
-        termUnknown = true;
+        const flag = /^\s*(!)?\s*(\w+)\s*$/.exec(conjunct);
+        const value = flag?.[2] === "true" ? true : flag?.[2] === "false" ? false : bindings.get(flag?.[2]);
+        if (typeof value !== "boolean") termUnknown = true;
+        else if (flag[1] ? value : !value) termFalse = true;
       }
     }
     if (termFalse) continue;
@@ -671,10 +675,117 @@ function parseMatchArms(armsText, sourcePath) {
     arms.push({
       variants: catchAll && variants.length === 0 ? null : variants,
       guarded: guard.length > 0,
+      condition: guard.join("if").trim(),
       support: supportVariant(body, sourcePath),
     });
   }
   return arms;
+}
+
+/** Comma-separated Rust values; nested calls/blocks remain a single value. */
+function rustValues(text) {
+  const values = [];
+  let rest = text.trim();
+  while (rest) {
+    const value = scanTo(rest, 0, ",");
+    values.push((value ?? rest).trim());
+    if (value === null) break;
+    rest = rest.slice(value.length + 1).trim();
+  }
+  return values;
+}
+
+/** Follow only file-local helper calls and transparent tail delegation, never execute Rust. */
+function declaredStrategyBody(source, value, sourcePath, bindings = new Map(), seen = new Set()) {
+  if (/^\s*MemoryStrategy::ALL\b/.test(value)) return { body: value, bindings };
+  const call = /^\s*(\w+)\s*\(([\s\S]*)\)\s*$/.exec(value);
+  if (!call) return unreadable(sourcePath, "strategies value is neither MemoryStrategy::ALL nor a local helper call");
+  const name = call[1];
+  if (seen.has(name)) return unreadable(sourcePath, `cyclic strategies helper ${name}`);
+  const helper = new RegExp(`\\bfn\\s+${name}\\s*\\(`).exec(source);
+  if (!helper) return unreadable(sourcePath, `strategies: calls ${name}(…), which this file does not define`);
+  const paramsAt = helper.index + helper[0].length;
+  const parameters = scanTo(source, paramsAt, ")");
+  const body = braceBody(source, paramsAt);
+  if (parameters === null || body === null) return unreadable(sourcePath, `fn ${name} has no readable signature/body`);
+  const params = rustValues(parameters);
+  const args = rustValues(call[2]);
+  if (params.length !== args.length) return unreadable(sourcePath, `fn ${name} argument count does not match its call`);
+  const local = new Map();
+  params.forEach((parameter, index) => {
+    const flag = /^(\w+)\s*:\s*bool$/.exec(parameter);
+    if (!flag) return;
+    const arg = args[index];
+    const known = arg === "true" ? true : arg === "false" ? false : bindings.get(arg);
+    // Assignments, shadowing or a mutable borrow defeat constant propagation.
+    const changed = new RegExp(`\\blet\\s+(?:mut\\s+)?${flag[1]}\\b|\\b${flag[1]}\\s*=(?![=>])|&\\s*mut\\s+${flag[1]}\\b`);
+    if (typeof known === "boolean" && !changed.test(body)) local.set(flag[1], known);
+  });
+  const next = new Set(seen).add(name);
+  const tail = body.trim();
+  if (/^\w+\s*\([\s\S]*\)\s*$/.test(tail)) return declaredStrategyBody(source, tail, sourcePath, local, next);
+  return { body, bindings: local };
+}
+
+/** Find a token at block depth zero; quoted strings cannot manufacture a declaration. */
+function topLevelMatches(text, pattern) {
+  const matches = [];
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '"') {
+      for (i += 1; i < text.length && text[i] !== '"'; i += 1) if (text[i] === "\\") i += 1;
+      continue;
+    }
+    if (depth === 0 && (i === 0 || !/\w/.test(text[i - 1]))) {
+      const match = pattern.exec(text.slice(i));
+      if (match) matches.push({ index: i, match });
+    }
+    if ("([{".includes(text[i])) depth += 1;
+    else if (")]}".includes(text[i])) depth -= 1;
+  }
+  return matches;
+}
+
+function declaredSupportExpression(body, sourcePath) {
+  const closure = /\.map\(\s*\|\s*strategy\s*\|\s*/.exec(body);
+  if (!closure || !/\bMemoryStrategy::ALL(?:\s*\.\s*(?:into_iter|iter|copied|cloned)\s*\(\s*\))+\s*$/.test(body.slice(0, closure.index))) {
+    return unreadable(sourcePath, "no .map(|strategy| …) over MemoryStrategy::ALL");
+  }
+  const value = body.slice(closure.index + closure[0].length).trimStart();
+  let fields;
+  let prefix = "";
+  if (/^MemoryStrategyCapability\s*\{/.test(value)) {
+    fields = braceBody(value, 0);
+    const open = value.indexOf("{");
+    if (fields === null || !/^\s*,?\s*\)/.test(value.slice(open + fields.length + 2))) {
+      return unreadable(sourcePath, "capability literal is followed by an unreadable builder/expression");
+    }
+  } else if (value.startsWith("{")) {
+    const block = braceBody(value, 0);
+    if (block === null) return unreadable(sourcePath, "unbalanced capability closure block");
+    const literals = topLevelMatches(block, /^MemoryStrategyCapability\s*\{/);
+    if (literals.length !== 1) return unreadable(sourcePath, "capability block has no single final MemoryStrategyCapability literal");
+    const at = literals[0].index;
+    fields = braceBody(block, at);
+    const open = block.indexOf("{", at);
+    if (fields === null || block.slice(open + fields.length + 2).trim() !== "") {
+      return unreadable(sourcePath, "capability literal is not the closure's final value");
+    }
+    prefix = block.slice(0, at);
+  } else return unreadable(sourcePath, "unreadable capability closure value");
+  const support = rustValues(fields).filter((field) => /^support\b/.test(field));
+  if (support.length !== 1) return unreadable(sourcePath, "capability has no single support field");
+  const expression = support[0].replace(/^support\s*:?\s*/, "").trim() || "support";
+  if (!/^\w+$/.test(expression)) return expression;
+  const declarations = topLevelMatches(prefix, new RegExp(`^let\\s+(mut\\s+)?${expression}\\s*(?::\\s*MemoryStrategySupport\\s*)?=`));
+  if (declarations.length !== 1 || declarations[0].match[1]) return unreadable(sourcePath, "support does not name one immutable closure-local binding");
+  const binding = declarations[0];
+  const start = binding.index + binding.match[0].length;
+  const initializer = scanTo(prefix, start, ";");
+  if (initializer === null || new RegExp(`\\b${expression}\\b`).test(prefix.slice(start + initializer.length + 1))) {
+    return unreadable(sourcePath, "support binding is reassigned, shadowed or used by an unreadable statement");
+  }
+  return initializer.trim();
 }
 
 /**
@@ -684,20 +795,23 @@ function parseMatchArms(armsText, sourcePath) {
  * Throws when a `strategies:` field IS declared in a shape this parser cannot read: an unrecognized
  * declaration is NOT evidence that a rung is unimplemented.
  *
- * Three shapes are read, because all three ship at the pin (sc-22737):
+ * Source-owned declaration shapes read here:
  *
  *   - `strategies: MemoryStrategy::ALL … .map(…)` — the declaration inline in `build_contract`
  *     (`candle-gen-scail2`, `candle-gen-sdxl`, `mlx-gen-krea`, `mlx-gen-z-image`, …);
  *   - `strategies: strategies()` / `strategies(spec)` / `strategies(streamable)` — the SAME
  *     expression hoisted into a file-local helper (`candle-gen-bernini`, both LTX modules, both
  *     MiniMax-H3 modules, both Wan modules). The call is followed to that `fn`'s body; a call whose
- *     helper is not in the file is unreadable, not "no evidence";
+ *     helper is not in the file is unreadable, not "no evidence". Transparent local tail
+ *     delegation is followed, with only unchanged literal boolean arguments propagated;
  *   - inside the closure, `support:` as either the `if strategy == … { … } else { … }` form or a
- *     `match strategy { … }` with `|`-alternatives, `_`, and guarded arms.
+ *     `match strategy { … }` with `|`-alternatives, `_`, and guarded arms;
+ *   - a block closure with one immutable local support initializer and a final capability literal
+ *     using that binding. Parameter-domain statements do not supply or override support evidence.
  *
  * A rung whose FIRST matching arm carries an `if` guard is condition-dependent — `mlx-gen-minimax-h3`
  * declares `BoundedTransformerResidency` `Implemented` only when `streamable` — so asking for it
- * throws rather than picking one side. Guessing either way would state a rung's support as fact when
+ * throws unless the local call chain proves its boolean guard. Guessing either way states support as fact when
  * the source text does not decide it.
  */
 /**
@@ -739,36 +853,33 @@ export async function readCompatibilityDefaultSupport(
   }
 }
 
+// A recognized source condition can require a concrete contract surface. This is distinct from
+// an unreadable declaration: callers may consult surface evidence, but must not guess support.
+export class RuntimeDependentStrategySupport extends Error {}
+
+function readableRuntimeCondition(condition) {
+  let depth = 0;
+  for (const ch of condition) {
+    if (ch === "(") depth += 1;
+    else if (ch === ")" && --depth < 0) return false;
+  }
+  if (depth !== 0) return false;
+  const name = "[A-Za-z_]\\w*(?:(?:::|\\.)[A-Za-z_]\\w*)*";
+  const comparison = new RegExp(`^${name}\\s*(?:==|!=)\\s*${name}$`);
+  return condition.replace(/[()]/g, "").split(/\|\||&&/).every(term => {
+    const text = term.trim();
+    return /^!?\s*[A-Za-z_]\w*$/.test(text) || comparison.test(text);
+  });
+}
+
 export function parseDeclaredStrategySupport(rawSource, sourcePath) {
   const source = stripRustComments(rawSource);
   const field = /\bstrategies:/.exec(source);
   if (!field) return null;
   const valueStart = field.index + field[0].length;
-  const value = scanTo(source, valueStart, ",") ?? source.slice(valueStart);
-  // A helper call (`strategies(spec)`) is followed to the file-local `fn` it names; the inline form
-  // is its own body. Anything else — a const, a method call, a builder — is refused.
-  let body;
-  const call = /^\s*(\w+)\s*\(/.exec(value);
-  if (/^\s*MemoryStrategy::ALL\b/.test(value)) {
-    body = value;
-  } else if (call) {
-    const helper = new RegExp(`\\bfn\\s+${call[1]}\\s*\\(`).exec(source);
-    if (!helper) {
-      return unreadable(sourcePath, `strategies: calls ${call[1]}(…), which this file does not define`);
-    }
-    body = braceBody(source, helper.index + helper[0].length);
-    if (body === null) return unreadable(sourcePath, `fn ${call[1]} has no readable body`);
-  } else {
-    return unreadable(sourcePath, `strategies: value "${value.trim().slice(0, 60)}" is neither MemoryStrategy::ALL nor a local helper call`);
-  }
-
-  const closure = /\.map\(\s*\|\s*strategy\s*\|\s*MemoryStrategyCapability\s*\{/.exec(body);
-  if (!closure) return unreadable(sourcePath, "no .map(|strategy| MemoryStrategyCapability { … }) over MemoryStrategy::ALL");
-  const fields = body.slice(closure.index + closure[0].length);
-  const supportAt = /\bsupport:\s*/.exec(fields);
-  if (!supportAt) return unreadable(sourcePath, "the capability closure declares no support: field");
-  const supportStart = supportAt.index + supportAt[0].length;
-  const supportExpr = (scanTo(fields, supportStart, ",") ?? fields.slice(supportStart)).trim();
+  const value = scanTo(source, valueStart, ",}") ?? source.slice(valueStart);
+  const { body, bindings } = declaredStrategyBody(source, value, sourcePath);
+  const supportExpr = declaredSupportExpression(body, sourcePath);
 
   // The `if <condition over strategy> { A } else { B }` form.
   if (/^if\b/.test(supportExpr)) {
@@ -797,9 +908,10 @@ export function parseDeclaredStrategySupport(rawSource, sourcePath) {
     const elseSupport = supportVariant(elseBody, sourcePath);
     return (rung) => {
       const variant = strategyVariant(rung);
-      const holds = evaluateStrategyCondition(condition, variant);
+      const holds = evaluateStrategyCondition(condition, variant, bindings);
       if (holds === null) {
-        return fail(
+        if (!readableRuntimeCondition(condition)) return unreadable(sourcePath, "unsupported runtime condition syntax");
+        throw new RuntimeDependentStrategySupport(
           `${sourcePath} gates MemoryStrategy::${variant} on a condition that is not about the strategy `
             + "itself, so its support is a runtime value rather than a fact this source text states. Read "
             + "the rung from the engine capability dump instead of guessing which side of the branch holds.",
@@ -815,18 +927,20 @@ export function parseDeclaredStrategySupport(rawSource, sourcePath) {
     const arms = parseMatchArms(armsText, sourcePath);
     return (rung) => {
       const variant = strategyVariant(rung);
-      const arm = arms.find((candidate) => candidate.variants === null || candidate.variants.includes(variant));
-      if (!arm) {
-        return unreadable(sourcePath, `match strategy { … } has no arm for MemoryStrategy::${variant}`);
+      for (const arm of arms) {
+        if (arm.variants !== null && !arm.variants.includes(variant)) continue;
+        const holds = arm.guarded ? evaluateStrategyCondition(arm.condition, variant, bindings) : true;
+        if (holds === null) {
+          if (!readableRuntimeCondition(arm.condition)) return unreadable(sourcePath, "unsupported runtime guard syntax");
+          throw new RuntimeDependentStrategySupport(
+            `${sourcePath} declares MemoryStrategy::${variant} behind an \`if\` guard, so its support is a `
+              + "runtime condition rather than a fact this source text states. Read the rung from the engine "
+              + "capability dump instead of guessing which side of the guard holds.",
+          );
+        }
+        if (holds) return arm.support;
       }
-      if (arm.guarded) {
-        return fail(
-          `${sourcePath} declares MemoryStrategy::${variant} behind an \`if\` guard, so its support is a `
-            + "runtime condition rather than a fact this source text states. Read the rung from the engine "
-            + "capability dump instead of guessing which side of the guard holds.",
-        );
-      }
-      return arm.support;
+      return unreadable(sourcePath, `match strategy { … } has no arm for MemoryStrategy::${variant}`);
     };
   }
 
@@ -1917,10 +2031,7 @@ export async function readExceededBounds(root = ROOT) {
 }
 
 export async function compiledInferencePin(root = ROOT) {
-  const source = await readFile(path.join(root, ADAPTER_LIB_PATH), "utf8");
-  const match = /^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/m.exec(source);
-  if (!match) fail(`${ADAPTER_LIB_PATH} declares no INFERENCE_PIN`);
-  return match[1];
+  return inferenceRevision(root);
 }
 
 /** The manifest download that ships `tier` of `repo` for `modelId` — its revision names the snapshot. */

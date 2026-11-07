@@ -1,14 +1,33 @@
 #!/usr/bin/env node
+import { canonicalJson as stableJson, compareUtf8Keys as compareUtf8 } from "./lib/canonical-json.mjs";
+import { sha256 } from "./lib/file-sha256.mjs";
 
 // Deterministic source closure for the StarVector permanent-pin terminal candidate.
 // The catalog itself is intentionally excluded: embedding its own byte hash would be recursive.
 
-import { createHash } from "node:crypto";
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+
+// F-183 extracted these existing implementations without changing the historical
+// terminal candidate. New source closures include each extracted compile input.
+export const MODEL_JOB_SPLIT_PATHS = Object.freeze([
+  "crates/sceneworks-worker/src/model_jobs/download.rs",
+  "crates/sceneworks-worker/src/model_jobs/convert.rs",
+  "crates/sceneworks-worker/src/model_jobs/hf_snapshot.rs",
+  "crates/sceneworks-worker/src/model_jobs/receipts.rs",
+  "crates/sceneworks-worker/src/model_jobs/conversion_publication.rs",
+  "crates/sceneworks-worker/src/model_jobs/import.rs",
+]);
+
+// F-137 extracted these production owners from lib.rs. Keep their current compile inputs
+// in future captures without changing the recorded terminal candidate.
+export const WORKER_SPLIT_PATHS = Object.freeze([
+  "crates/sceneworks-worker/src/utility_dispatch.rs",
+  "crates/sceneworks-worker/src/worker_loop.rs",
+]);
 
 export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   ".github/workflows/starvector-terminal-readiness.yml",
@@ -20,6 +39,7 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "apps/rust-api/src/main.rs",
   "apps/rust-api/src/generation.rs",
   "crates/sceneworks-core/src/download_receipt.rs",
+  "crates/sceneworks-core/src/file_lock.rs",
   "crates/sceneworks-worker/Cargo.toml",
   "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
   "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
@@ -27,10 +47,15 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "crates/sceneworks-worker/src/engines.rs",
   "crates/sceneworks-worker/src/inference_runtime.rs",
   "crates/sceneworks-worker/src/lib.rs",
+  ...WORKER_SPLIT_PATHS,
   "crates/sceneworks-worker/src/mlx_decode_cache.rs",
   "crates/sceneworks-worker/src/model_jobs.rs",
+  ...MODEL_JOB_SPLIT_PATHS,
   "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
+  "crates/sceneworks-worker/src/prompt_refine_parse.rs",
+  "crates/sceneworks-worker/src/prompt_refine_finalize.rs",
   "crates/sceneworks-worker/src/refine_model_cache.rs",
+  "crates/sceneworks-worker/src/svg_sanitize.rs",
   "crates/sceneworks-worker/src/vector_admission.rs",
   "crates/sceneworks-worker/src/vector_jobs.rs",
   "package.json",
@@ -40,6 +65,8 @@ export const PRODUCTION_CLOSURE_PATHS = Object.freeze([
   "release/starvector-terminal-recovery-v1.json",
   "release/starvector-terminal-upstream-lock-v1.json",
   "scripts/lib/file-sha256.mjs",
+  "scripts/lib/canonical-json.mjs",
+  "scripts/lib/exec-file-with-fds.mjs",
   "scripts/lib/starvector-terminal-attempt.mjs",
   "scripts/lib/starvector-terminal-gpu.mjs",
   "scripts/lib/starvector-terminal-memory.mjs",
@@ -72,9 +99,6 @@ function fail(message) {
   throw new Error(`StarVector production closure: ${message}`);
 }
 
-function compareUtf8(left, right) {
-  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
-}
 
 export function normalizeClosurePath(input) {
   if (typeof input !== "string" || input.length === 0 || input.includes("\0")) {
@@ -93,17 +117,8 @@ export function normalizeClosurePath(input) {
   return normalized;
 }
 
-export function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort(compareUtf8).map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
+export { stableJson };
 
-function sha256(bytes) {
-  return createHash("sha256").update(bytes).digest("hex");
-}
 
 export function closureSha256(entries) {
   return sha256(stableJson({ entries }));

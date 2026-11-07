@@ -29,7 +29,10 @@ async fn large_json_negotiates_brotli_gzip_and_identity() {
     write_real_catalog(&temp_dir.path().join("config/manifests"));
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
 
     let (identity_status, identity_headers, identity_body) =
         request_raw(app.clone(), "GET", "/api/v1/models", Body::empty(), &[]).await;
@@ -138,13 +141,8 @@ async fn tiny_json_stays_identity_below_the_cpu_threshold() {
 async fn media_and_ranges_are_never_recompressed() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Compression media exclusion" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Compression media exclusion").await;
     let project_id = project["id"].as_str().expect("project id");
     // Keep this comfortably above the JSON compression threshold so the test
     // fails if media-type exclusion is ever removed from the predicate.

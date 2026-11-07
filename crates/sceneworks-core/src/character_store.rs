@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -198,7 +198,7 @@ impl<'a> CharacterStore<'a> {
             "trainedLoras": []
         });
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, false)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -242,7 +242,7 @@ impl<'a> CharacterStore<'a> {
         }
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -266,7 +266,7 @@ impl<'a> CharacterStore<'a> {
             .insert("archived".to_owned(), Value::Bool(true));
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -284,7 +284,7 @@ impl<'a> CharacterStore<'a> {
     ) -> ProjectStoreResult<CharacterMutationResult> {
         let path = find_character_file(&self.project_path, character_id)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         purge_character_on_connection(&transaction, character_id)?;
         fs::remove_file(path)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -318,7 +318,7 @@ impl<'a> CharacterStore<'a> {
 
         let asset_index_mutation = AssetIndexMutation::begin(&self.project_path)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         update_asset_character_link(
             &transaction,
             project_id,
@@ -399,7 +399,7 @@ impl<'a> CharacterStore<'a> {
 
         let asset_index_mutation = AssetIndexMutation::begin(&self.project_path)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         update_asset_character_link(
             &transaction,
             project_id,
@@ -436,7 +436,7 @@ impl<'a> CharacterStore<'a> {
 
         let asset_index_mutation = AssetIndexMutation::begin(&self.project_path)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         update_asset_character_link(
             &transaction,
             project_id,
@@ -466,7 +466,7 @@ impl<'a> CharacterStore<'a> {
     pub fn remove_asset_references(&self, asset_id: &str) -> ProjectStoreResult<u32> {
         validate_required_text(asset_id, "assetId")?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut changed_count = 0;
 
         for sidecar_path in character_sidecars(&self.project_path)? {
@@ -517,7 +517,7 @@ impl<'a> CharacterStore<'a> {
         prepend_array_field(&mut character, "looks", look)?;
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -568,7 +568,7 @@ impl<'a> CharacterStore<'a> {
         object.insert("updatedAt".to_owned(), Value::String(utc_now()));
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -600,7 +600,7 @@ impl<'a> CharacterStore<'a> {
         );
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -644,7 +644,7 @@ impl<'a> CharacterStore<'a> {
         prepend_array_field(&mut character, "loras", link)?;
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -693,7 +693,7 @@ impl<'a> CharacterStore<'a> {
         object.insert("updatedAt".to_owned(), Value::String(utc_now()));
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -725,7 +725,7 @@ impl<'a> CharacterStore<'a> {
         );
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -838,10 +838,11 @@ pub fn write_character_sidecar(project_path: &Path, character: &Value) -> Projec
 fn ensure_character_index(project_path: &Path) -> ProjectStoreResult<()> {
     let (fingerprint, sidecar_count) = character_index_fingerprint(project_path)?;
     let mut connection = connect_project_db_migrated(project_path)?;
-    let indexed_count = connection.query_row("select count(*) from characters", [], |row| {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let indexed_count = transaction.query_row("select count(*) from characters", [], |row| {
         row.get::<_, u64>(0)
     })?;
-    let stored_fingerprint = connection
+    let stored_fingerprint = transaction
         .query_row(
             "select value from project_metadata where key = ?1",
             params![CHARACTER_INDEX_FINGERPRINT_KEY],
@@ -855,7 +856,6 @@ fn ensure_character_index(project_path: &Path) -> ProjectStoreResult<()> {
 
     // Sidecars are authoritative. If a previous commit failed after an atomic sidecar write,
     // or files changed outside the DB path, rebuild only when the sidecar fingerprint changes.
-    let transaction = connection.transaction()?;
     clear_character_tables(&transaction)?;
     reindex_characters_with_fingerprint(&transaction, project_path, &fingerprint)?;
     transaction.commit()?;
@@ -1363,25 +1363,46 @@ fn copy_lora_into_project(
         return Ok((None, false));
     };
     let source_path = PathBuf::from(source_path);
-    if !source_path.exists() || !(source_path.is_file() || source_path.is_dir()) {
-        return Err(ProjectStoreError::BadRequest(format!(
+    let source_not_found = || {
+        ProjectStoreError::BadRequest(format!(
             "LoRA source path not found: {}",
             source_path.display()
-        )));
+        ))
+    };
+    let source_metadata = fs::symlink_metadata(&source_path).map_err(|_| source_not_found())?;
+    if crate::safe_path::is_link_or_reparse_point(&source_metadata) {
+        return Err(ProjectStoreError::BadRequest(
+            "LoRA source must not be a symlink".to_owned(),
+        ));
+    }
+    if !source_metadata.is_file() && !source_metadata.is_dir() {
+        return Err(source_not_found());
     }
     assert_allowed_lora_source(project_path, data_dir, &source_path)?;
     let target_dir = project_path
         .join("loras")
         .join("characters")
         .join(character_id);
+    crate::safe_path::confine_under(
+        project_path,
+        &format!("loras/characters/{character_id}"),
+        crate::safe_path::Confinement::SymlinkSafe,
+    )?;
     fs::create_dir_all(&target_dir)?;
     let target = target_dir.join(
         source_path
             .file_name()
             .ok_or_else(|| ProjectStoreError::BadRequest("Invalid LoRA source path".to_owned()))?,
     );
+    if fs::symlink_metadata(&target)
+        .is_ok_and(|metadata| crate::safe_path::is_link_or_reparse_point(&metadata))
+    {
+        return Err(ProjectStoreError::BadRequest(
+            "LoRA destination must not be a symlink".to_owned(),
+        ));
+    }
     if fs::canonicalize(&source_path).ok() != fs::canonicalize(&target).ok() {
-        if source_path.is_dir() {
+        if source_metadata.is_dir() {
             copy_dir_recursive(&source_path, &target)?;
         } else {
             fs::copy(&source_path, &target)?;
@@ -1411,15 +1432,39 @@ fn assert_allowed_lora_source(
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> ProjectStoreResult<()> {
+    if fs::symlink_metadata(destination)
+        .is_ok_and(|metadata| crate::safe_path::is_link_or_reparse_point(&metadata))
+    {
+        return Err(ProjectStoreError::BadRequest(
+            "LoRA destination must not be a symlink".to_owned(),
+        ));
+    }
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
-        if source_path.is_dir() {
+        if fs::symlink_metadata(&destination_path)
+            .is_ok_and(|metadata| crate::safe_path::is_link_or_reparse_point(&metadata))
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "LoRA destination contains a symlink".to_owned(),
+            ));
+        }
+        let metadata = fs::symlink_metadata(&source_path)?;
+        if crate::safe_path::is_link_or_reparse_point(&metadata) {
+            return Err(ProjectStoreError::BadRequest(
+                "LoRA source contains a symlink".to_owned(),
+            ));
+        }
+        if metadata.is_dir() {
             copy_dir_recursive(&source_path, &destination_path)?;
-        } else {
+        } else if metadata.is_file() {
             fs::copy(&source_path, &destination_path)?;
+        } else {
+            return Err(ProjectStoreError::BadRequest(
+                "LoRA source must contain regular files".to_owned(),
+            ));
         }
     }
     Ok(())
@@ -1465,11 +1510,11 @@ fn to_json_string(value: &Value) -> ProjectStoreResult<String> {
 }
 
 fn required_str<'a>(value: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
-    optional_str(value, key).ok_or_else(|| {
-        ProjectStoreError::BadRequest(format!(
+    crate::store_util::required_str_with(value, key, || {
+        format!(
             "{} is required",
             camel_to_title(key).unwrap_or_else(|| key.to_owned())
-        ))
+        )
     })
 }
 
@@ -1560,6 +1605,72 @@ fn camel_to_title(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn lora_copy_preserves_regular_nested_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/weights.safetensors"), b"fixture").unwrap();
+        copy_dir_recursive(&source, &target).unwrap();
+        assert_eq!(
+            fs::read(target.join("nested/weights.safetensors")).unwrap(),
+            b"fixture"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn lora_copy_rejects_a_linked_source_root_before_creating_outputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let data = temp.path().join("data");
+        fs::create_dir_all(data.join("loras")).unwrap();
+        let source = data.join("loras/regular.safetensors");
+        fs::write(&source, b"fixture").unwrap();
+        let linked = data.join("loras/linked.safetensors");
+        std::os::unix::fs::symlink(&source, &linked).unwrap();
+        assert!(copy_lora_into_project(&project, &data, "character", linked.to_str()).is_err());
+        assert!(!project.join("loras/characters/character").exists());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn lora_copy_rejects_nested_links_and_cycles() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let outside = temp.path().join("secret");
+        fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, source.join("escape")).unwrap();
+        let target = temp.path().join("target");
+        assert!(copy_dir_recursive(&source, &target).is_err());
+        assert!(!target.join("escape").exists());
+        fs::remove_file(source.join("escape")).unwrap();
+        std::os::unix::fs::symlink(&source, source.join("cycle")).unwrap();
+        assert!(copy_dir_recursive(&source, &target).is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn lora_copy_rejects_directory_junction() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret"), b"outside").unwrap();
+        let junction = source.join("junction");
+        assert!(std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .status()
+            .unwrap()
+            .success());
+        assert!(copy_dir_recursive(&source, &temp.path().join("target")).is_err());
+        fs::remove_dir(junction).unwrap();
+    }
+
     use super::*;
 
     /// A representative, fully populated character sidecar: nested `status`,

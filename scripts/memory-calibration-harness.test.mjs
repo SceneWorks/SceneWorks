@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { rustFacadeSources, rustFacadeFunction } from "./lib/rust-facade-source.mjs";
 import { execFile, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir, totalmem } from "node:os";
@@ -618,13 +619,9 @@ test("complete final-output quality may attest identical inputs without claiming
 });
 
 test("the Krea adapter's complete fragment shape passes the real harness with singleton axes", async () => {
-  const adapter = await readFile(
+  const { source: kreaArm } = await rustFacadeFunction(
     fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
-    "utf8",
-  );
-  const kreaArm = adapter.slice(
-    adapter.indexOf("fn run_krea_base(request:"),
-    adapter.indexOf("fn run_krea_control", adapter.indexOf("fn run_krea_base(request:")),
+    "run_krea_base",
   );
   assert.match(kreaArm, /"status": "complete"/);
   assert.match(kreaArm, /"sweep": krea_base_complete_sweep\(request\)\?/);
@@ -674,12 +671,10 @@ test("the Krea adapter's complete fragment shape passes the real harness with si
 });
 
 test("the SDXL adapter's runtime-complete fragment passes the real harness without inventing lifecycle coverage", async () => {
-  const adapter = await readFile(
+  const { source: sdxlArm } = await rustFacadeFunction(
     fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
-    "utf8",
+    "run_sdxl",
   );
-  const start = adapter.indexOf("fn run_sdxl(request:");
-  const sdxlArm = adapter.slice(start, adapter.indexOf("fn run_krea_control", start));
   assert.match(sdxlArm, /"status": "runtime_complete"/);
   assert.match(sdxlArm, /"sweep": sdxl_runtime_complete_sweep\(request\)\?/);
   assert.match(sdxlArm, /"warm_repeat", "result": "not_run"/);
@@ -1350,10 +1345,8 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
   // (`memory_strategy_2_5.rs` `strategies`), a defect of the same class the capability-dump rule
   // in scripts/measure-memory-catalog.test.mjs surfaced on sc-22725's rows.
   //
-  // sc-22737 adds MiniMax-H3's six candle rows (both catalog entries, three tiers each) on exactly
-  // the same grounds: at the 8a65db2a pin the candle capability dump publishes `minimax_h3` with
-  // `implementedRungs: ["resident"]` at every (tier, load shape), so the lane default is a rung the
-  // contract does not implement.
+  // MiniMax-H3 now implements staged residency, so its six Candle rows must inherit the lane
+  // default. The historical Resident-only capability dump is not the current pinned contract.
   //
   // …and Bernini's six plus LTX-2.3's two on the THIRD derived source, because the dump cannot speak
   // for them: both plan a `deferred_materialization` load shape and the dump publishes only
@@ -1367,8 +1360,6 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
     ...["bf16", "q4", "q8"].flatMap((tier) => [
       `scail2_14b:${tier}:candle`,
       `ltx_2_5:${tier}:candle`,
-      `minimax_h3:${tier}:candle`,
-      `minimax_h3_ref:${tier}:candle`,
       `bernini:${tier}:candle`,
       `bernini_image:${tier}:candle`,
     ]),
@@ -1378,6 +1369,17 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
   ]) {
     assert.deepEqual(plan.anchors[key].strategy, { rung: "resident", engagedRungs: ["resident"] }, key);
     assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
+  }
+  for (const model of ["minimax_h3", "minimax_h3_ref"]) {
+    for (const tier of ["bf16", "q4", "q8"]) {
+      const key = `${model}:${tier}:candle`;
+      assert.equal(plan.anchors[key].strategy, undefined, `${key}: no obsolete Resident-only override`);
+      assert.deepEqual(planAnchor(plan, key).strategy, {
+        rung: ANCHOR_STRATEGY.candle.rung,
+        engagedRungs: [...ANCHOR_STRATEGY.candle.engagedRungs],
+        parameters: {},
+      }, key);
+    }
   }
   // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest
   // exemption, and so do the two Iris-3B task routes (sc-25690: depth and restoration load no text
@@ -1393,8 +1395,6 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
     "bernini_image:bf16:candle", "bernini_image:q4:candle", "bernini_image:q8:candle",
     "ltx_2_3:q4:candle", "ltx_2_3:q8:candle",
     "ltx_2_5:bf16:candle", "ltx_2_5:q4:candle", "ltx_2_5:q8:candle",
-    "minimax_h3:bf16:candle", "minimax_h3:q4:candle", "minimax_h3:q8:candle",
-    "minimax_h3_ref:bf16:candle", "minimax_h3_ref:q4:candle", "minimax_h3_ref:q8:candle",
     "scail2_14b:bf16:candle", "scail2_14b:q4:candle", "scail2_14b:q8:candle",
     // sc-24217: Candle Supra2-IMG's contract is gen-core's compatibility default — Resident alone
     // (staged residency `Missing`, not structurally inapplicable, so no manifest exemption).
@@ -3035,10 +3035,12 @@ async function adapterRecordFragments() {
   const bins = ["mlx.rs", "mlx_ltx25.rs", "mlx_wan_scail2.rs", "candle.rs", "candle_wan_scail2.rs"];
   const fragments = new Map();
   for (const bin of bins) {
-    const lines = (await readFile(
+    const owners = await rustFacadeSources(
       fileURLToPath(new URL(`../crates/sceneworks-memory-adapter/src/bin/${bin}`, import.meta.url)),
-      "utf8",
-    )).split("\n");
+    );
+    for (const owner of owners) {
+      const actualBin = path.basename(owner.path);
+      const lines = owner.source.split("\n");
     let fn = null;
     for (let i = 0; i < lines.length; i += 1) {
       const declaration = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z0-9_]+)/.exec(lines[i]);
@@ -3050,9 +3052,10 @@ async function adapterRecordFragments() {
         const key = /^ {8}"([A-Za-z_]+)":/.exec(lines[j]);
         if (key) keys.push(key[1]);
       }
-      fragments.set(`${bin}:${fn}`, keys);
+      fragments.set(`${actualBin}:${fn}`, keys);
     }
   }
+    }
   return fragments;
 }
 
@@ -3084,10 +3087,10 @@ test("every adapter calibration record fragment carries only properties the reco
   }
 
   for (const arm of [
-    "mlx.rs:run_minimax_h3",
-    "mlx.rs:run_bernini",
-    "mlx.rs:run_krea_realtime",
-    "mlx.rs:run_ltx_with_admission",
+    "mlx_minimax_family.rs:run_minimax_h3",
+    "mlx_bernini_family.rs:run_bernini",
+    "mlx_krea_realtime_family.rs:run_krea_realtime",
+    "mlx_ltx_family.rs:run_ltx_with_admission",
     "mlx_wan_scail2.rs:run",
     "mlx_ltx25.rs:run",
   ]) {
@@ -3098,9 +3101,9 @@ test("every adapter calibration record fragment carries only properties the reco
   // The other half of the same decision: the LTX CAMPAIGN carriers keep their `output` descriptor,
   // because `validate_ltx_campaign_entry_fragment` cross-checks `/output/*` against the diagnostics
   // of the same run. It is published for the campaign admissions and for nothing else.
-  const mlx = await readFile(
+  const { source: mlx } = await rustFacadeFunction(
     fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
-    "utf8",
+    "run_ltx_with_admission",
   );
   assert.match(
     mlx,

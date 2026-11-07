@@ -265,7 +265,7 @@ fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_gpu_advertises_generation_capabilities_only() {
-    let mlx = mlx_gpu(&crate::Settings::from_env());
+    let mlx = mlx_gpu(&crate::test_env::offline_settings());
     assert_eq!(mlx.id, "mlx");
     let capabilities = worker_capabilities_with_utility(&mlx, true);
     assert!(capabilities
@@ -328,7 +328,7 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
 fn mlx_gpu_capability_set_matches_expected_full_set() {
     use sceneworks_core::contracts::WorkerCapability;
     use std::collections::BTreeSet;
-    let mlx = mlx_gpu(&crate::Settings::from_env());
+    let mlx = mlx_gpu(&crate::test_env::offline_settings());
     let actual: BTreeSet<_> = mlx.capabilities.iter().cloned().collect();
     let expected: BTreeSet<_> = [
         // seed
@@ -403,7 +403,7 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     // (sceneworks_id, supports_guidance, supports_negative_prompt) — the exact pre-sc-3723
     // values that used to live on each MlxModel row.
     let expected: &[(&str, bool, bool)] = &[
-        ("z_image_turbo", false, false),
+        ("z_image_turbo", true, true),
         // Base (non-distilled) Z-Image (sc-8320): the undistilled foundation model is full real CFG —
         // supports_guidance=true + supports_negative_prompt=true (vs Turbo's CFG-free distill).
         ("z_image", true, true),
@@ -414,7 +414,7 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // (supports_guidance=false), no negative prompt. Requires the mlx-gen pin to include the
         // `ideogram_4_turbo` engine (PR #489) for this row to resolve through the registry.
         ("ideogram_4_turbo", false, false),
-        ("z_image_edit", false, false),
+        ("z_image_edit", true, true),
         ("flux_schnell", false, false),
         ("flux_dev", true, false),
         ("qwen_image", true, true),
@@ -486,13 +486,13 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // Boogu-Image-0.1 (epic 6387 / sc-6399): Base + Edit are true-CFG (supports_guidance=true)
         // with no user negative prompt (the CFG-negative is a fixed empty/drop instruction). Turbo is
         // the DMD few-step, CFG-free distill (supports_guidance=false). None take a negative prompt.
-        ("boogu_image", true, false),
-        ("boogu_image_turbo", false, false),
-        ("boogu_image_edit", true, false),
+        ("boogu_image", true, true),
+        ("boogu_image_turbo", true, true),
+        ("boogu_image_edit", true, true),
         // Krea 2 Turbo (epic 7565 / sc-7572): TDM-distilled few-step, CFG-free
         // (supports_guidance=false) with no user negative prompt (supports_negative_prompt=false) — the
         // z_image_turbo / boogu_image_turbo distilled-turbo pattern.
-        ("krea_2_turbo", false, false),
+        ("krea_2_turbo", true, true),
         // Krea 2 Raw (epic 9992): the UNDISTILLED base run with TRUE CFG — supports_guidance=true +
         // supports_negative_prompt=true (unlike the CFG-free distilled Turbo). The Boogu-base pattern,
         // but Raw ALSO accepts a user negative prompt (the reference `sample()` takes `negative_prompts`).
@@ -503,7 +503,7 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // SD3.5 Large Turbo (epic 7841 / sc-7871): the ADD-distilled few-step, CFG-off sibling — the
         // `sd3_5_large_turbo` descriptor drops guidance + negative prompt (supports_guidance=false,
         // supports_negative_prompt=false), the distilled-turbo pattern.
-        ("sd3_5_large_turbo", false, false),
+        ("sd3_5_large_turbo", true, true),
         // SD3.5 Medium (epic 7841 / sc-7869 M3, wired sc-7871, corrected sc-15440): standard CFG —
         // supports_guidance=true + supports_negative_prompt=true, but supports_true_cfg=false.
         ("sd3_5_medium", true, true),
@@ -522,15 +522,15 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // merged CFG-free few-step student (`uses_cfg() == false`), so its descriptor drops both flags.
         ("anima_base", true, true),
         ("anima_aesthetic", true, true),
-        ("anima_turbo", false, false),
+        ("anima_turbo", true, true),
         // Mage-Flow Base/RL and Edit-Base/Edit retain classifier-free guidance and negative
         // conditioning; the distilled generation/edit Turbo recipes are CFG-free.
         ("mage_flow_base", true, true),
         ("mage_flow", true, true),
-        ("mage_flow_turbo", false, false),
+        ("mage_flow_turbo", true, true),
         ("mage_flow_edit_base", true, true),
         ("mage_flow_edit", true, true),
-        ("mage_flow_edit_turbo", false, false),
+        ("mage_flow_edit_turbo", true, true),
         // Iris-3B (sc-25679): CFG against a negative prompt (default ""), cfg_scale = guidance.
         ("iris_3b", true, true),
         // FLUX 3 Image Klein, distilled (sc-26234): a flow map — no CFG, no negative prompt.
@@ -668,10 +668,16 @@ fn flux3_dit_header_structure_matches_the_released_checkpoints_and_config_geomet
             .map(|(name, _, _)| name.clone())
             .collect::<std::collections::BTreeSet<_>>()
     };
-    let extra: Vec<_> = names(&distilled).difference(&names(&base)).cloned().collect();
+    let extra: Vec<_> = names(&distilled)
+        .difference(&names(&base))
+        .cloned()
+        .collect();
     assert_eq!(
         extra,
-        ["ref_time_in.in_layer.weight", "ref_time_in.out_layer.weight"],
+        [
+            "ref_time_in.in_layer.weight",
+            "ref_time_in.out_layer.weight"
+        ],
         "distilled is exactly base plus the flow-map ref_time_in tensors"
     );
     assert!(!names(&base).iter().any(|n| n.starts_with("ref_time_in.")));
@@ -680,7 +686,13 @@ fn flux3_dit_header_structure_matches_the_released_checkpoints_and_config_geomet
     let blocks = |prefix: &str| {
         names(&base)
             .iter()
-            .filter_map(|n| n.strip_prefix(prefix)?.split('.').next()?.parse::<usize>().ok())
+            .filter_map(|n| {
+                n.strip_prefix(prefix)?
+                    .split('.')
+                    .next()?
+                    .parse::<usize>()
+                    .ok()
+            })
             .collect::<std::collections::BTreeSet<_>>()
     };
     assert_eq!(blocks("txt_mode_blocks."), (0..5).collect());
@@ -695,12 +707,16 @@ fn flux3_dit_header_structure_matches_the_released_checkpoints_and_config_geomet
         let header: Value = serde_json::from_slice(&bytes[8..8 + header_len]).unwrap();
         let header = header.as_object().unwrap();
         assert_eq!(header.len() - 1, tensors);
-        assert_eq!(header.contains_key("ref_time_in.in_layer.weight"), distilled);
+        assert_eq!(
+            header.contains_key("ref_time_in.in_layer.weight"),
+            distilled
+        );
         let payload = bytes.len() - 8 - header_len;
         assert_eq!(payload, tensors * 2);
-        assert!(header.iter().filter(|(k, _)| *k != "__metadata__").all(|(_, v)| {
-            v["data_offsets"][1].as_u64().unwrap() as usize <= payload
-        }));
+        assert!(header
+            .iter()
+            .filter(|(k, _)| *k != "__metadata__")
+            .all(|(_, v)| { v["data_offsets"][1].as_u64().unwrap() as usize <= payload }));
     }
 }
 
@@ -2045,7 +2061,7 @@ fn declared_candle_vram_rows_are_well_formed() {
         );
     }
 
-    let zimage_edit_arm = include_str!("../image_jobs.rs")
+    let zimage_edit_arm = include_str!("../image_jobs/dispatch.rs")
         .split_once("CandleImageRoute::ZimageEdit => {")
         .expect("Z-Image Edit route must remain explicit")
         .1
@@ -3117,7 +3133,7 @@ fn dense_te_declarations_only_appear_on_entries_with_packed_tiers() {
 #[test]
 fn cuda_preflight_runs_on_the_candle_gpu_worker_and_no_other_lane() {
     let gated = |candle: bool, gpu_id: &str| {
-        let mut settings = crate::Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.backend_candle_enabled = candle;
         settings.gpu_id = gpu_id.to_owned();
         crate::should_run_cuda_preflight(&settings)
@@ -3173,7 +3189,7 @@ fn an_unusable_gpu_withholds_every_candle_capability() {
     use crate::gpu::with_candle_capabilities;
     use sceneworks_core::contracts::WorkerCapability;
 
-    let mut settings = crate::Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.backend_candle_enabled = true;
     settings.gpu_id = "0".to_owned();
     // sm_120, so the compute-cap-gated markers (`int8_convrot`, `nvfp4`) are in the healthy set
@@ -3466,7 +3482,7 @@ fn qwen_image_2_1_declares_the_admission_envelope_the_gate_needs() {
 ///
 /// *Mutation that reds this:* editing `maxReferenceAssets` or any `admissionGeometry` value in the
 /// manifest (or an engine bump that moves the provider's constant without a catalog edit).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_reference_cap_and_envelope_come_from_the_linked_provider() {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -3603,7 +3619,7 @@ fn qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source() {
 /// both pipelines honour.
 ///
 /// *Mutation that reds this:* restoring `"samplers": ["default"]` (or dropping any curated name).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_sampler_menu_is_the_providers_curated_menu() {
     use std::collections::BTreeSet;
@@ -3742,7 +3758,7 @@ fn qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source() {
 ///
 /// *Mutation that reds this:* editing Turbo's `maxReferenceAssets`, any `admissionGeometry`
 /// value, a scheduler name, or the bf16 row's revision.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider() {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

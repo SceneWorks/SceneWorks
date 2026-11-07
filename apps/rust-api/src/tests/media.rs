@@ -8,13 +8,7 @@ use std::sync::Arc;
 async fn project_file_route_serves_files_and_rejects_traversal() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Files" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Files").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     let media_path = project_path.join("assets/images/image.png");
@@ -84,13 +78,7 @@ async fn project_file_route_serves_files_and_rejects_traversal() {
 async fn vector_source_is_attachment_only_while_its_preview_is_inline_png() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Vector files" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Vector files").await;
     let project_id = created["id"].as_str().expect("project id");
     let root = std::path::PathBuf::from(created["path"].as_str().expect("project path"))
         .join("assets/images/vector");
@@ -200,13 +188,8 @@ async fn project_file_route_backfills_and_reuses_bounded_thumbnails() {
     let settings = test_settings(&temp_dir);
     let data_dir = settings.data_dir.clone();
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Thumbnail backfill" }),
-    )
-    .await;
+    let (_, created) =
+        crate::tests::support::create_project(app.clone(), &"Thumbnail backfill").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     let media_path = project_path.join("assets/images/large.png");
@@ -326,13 +309,7 @@ async fn project_file_route_serves_a_copy_without_the_workflow() {
     // reader, the PIXELS are unchanged, and the file on disk is untouched.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Strip" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Strip").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
 
@@ -456,13 +433,7 @@ async fn a_strip_request_cannot_revalidate_into_the_unstripped_body() {
     // date must not produce a 304, and the correct tag still must.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Revalidate" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Revalidate").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     let embedded = workflow_png_bytes(&temp_dir, Some("a lighthouse in fog"));
@@ -573,13 +544,7 @@ async fn an_oversized_image_is_refused_rather_than_served_with_its_workflow() {
     // answered with the original is the one outcome this feature must not produce.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Oversize" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Oversize").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
 
@@ -680,13 +645,7 @@ async fn a_media_ticket_authorizes_the_stripped_download_too() {
 async fn project_file_route_serves_byte_ranges() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Ranges" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Ranges").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     let media_path = project_path.join("assets/videos/clip.mp4");
@@ -1078,7 +1037,7 @@ async fn sse_snapshot_precedes_a_concurrent_queue_publication() {
     let job_id = created["id"].as_str().expect("job id").to_owned();
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    *state.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
+    *state.test_hooks.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
     let stream = tokio::spawn(request_sse_prefix(app, "/api/v1/jobs/events", 4));
     barrier.wait().await;
 
@@ -1142,7 +1101,7 @@ async fn sse_revision_barrier_orders_a_delayed_equal_timestamp_job_event_behind_
     old_job.updated_at = terminal.updated_at.clone();
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    *state.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
+    *state.test_hooks.sse_snapshot_before_subscribe_once.lock() = Some(barrier.clone());
     let stream = tokio::spawn(request_sse_prefix_with_ids(app, "/api/v1/jobs/events", 4));
     barrier.wait().await;
 
@@ -1349,9 +1308,21 @@ async fn media_tickets_authenticate_project_file_urls() {
     assert!(ticket_value.len() == 32 && ticket_value.chars().all(|c| c.is_ascii_hexdigit()));
     assert_eq!(ticket["expiresInSeconds"], 300);
 
-    // Re-minting while the ticket is alive returns the SAME sliding ticket, so
-    // already-rendered media URLs stay stable across client refreshes.
+    // Authenticated renewal keeps THIS client's URLs stable; another client
+    // minting independently receives its own credential.
     let (_, reissued) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/files/ticket",
+        Value::Null,
+        &[
+            ("x-sceneworks-token", "secret-token"),
+            ("x-sceneworks-media-ticket", &ticket_value),
+        ],
+    )
+    .await;
+    assert_eq!(reissued["ticket"], ticket_value.as_str());
+    let (_, independent) = request_with_headers(
         app.clone(),
         "POST",
         "/api/v1/files/ticket",
@@ -1359,7 +1330,23 @@ async fn media_tickets_authenticate_project_file_urls() {
         &auth,
     )
     .await;
-    assert_eq!(reissued["ticket"], ticket_value.as_str());
+    assert_ne!(independent["ticket"], ticket_value.as_str());
+    for denied in [
+        "project.db",
+        "project.json",
+        "assets/images/image.sceneworks.json",
+    ] {
+        let (status, headers, _) = request_raw(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{project_id}/files/{denied}?ticket={ticket_value}"),
+            Body::empty(),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied}");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+    }
 
     // Bare media URL (what an <img src> sends): still 401 without a ticket.
     let (status, _) = request(app.clone(), "GET", &file_uri, Value::Null).await;
@@ -1368,7 +1355,7 @@ async fn media_tickets_authenticate_project_file_urls() {
     // With the ticket: authorized, and multi-use (a page renders many thumbnails
     // and <video> issues multiple Range requests against one URL).
     for _ in 0..2 {
-        let (status, _, bytes) = request_raw(
+        let (status, headers, bytes) = request_raw(
             app.clone(),
             "GET",
             &format!("{file_uri}?ticket={ticket_value}"),
@@ -1378,6 +1365,7 @@ async fn media_tickets_authenticate_project_file_urls() {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(bytes, b"image-bytes");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
     }
     let thumbnail_uri = format!(
         "/api/v1/projects/{project_id}/files/assets/images/thumbnail-source.png?thumbnail=384&ticket={ticket_value}"
@@ -1552,9 +1540,9 @@ fn media_ticket_paths_cover_exactly_the_media_routes() {
 fn ticket_store_sliding_reuse_and_expiry() {
     use crate::tickets::{EventTicketContext, TicketStore};
     // Sliding (media) tickets: reusable, stable across re-issue, non-consuming.
-    let store = TicketStore::new(300);
-    let first = store.issue_sliding();
-    let second = store.issue_sliding();
+    let store = TicketStore::media(300, 3600);
+    let first = store.issue_sliding(None);
+    let second = store.issue_sliding(Some(&first.ticket));
     assert_eq!(first.ticket, second.ticket, "live sliding ticket is reused");
     assert!(store.validate(&first.ticket));
     assert!(store.validate(&first.ticket), "validate must not consume");
@@ -1597,7 +1585,7 @@ fn ticket_store_sliding_reuse_and_expiry() {
     // TTL 0: expired as soon as any time passes (the sleep guards against two
     // Instant::now() calls landing on the same tick).
     let expired = TicketStore::new(0);
-    let sliding = expired.issue_sliding();
+    let sliding = expired.issue_sliding(None);
     let single = expired.issue();
     std::thread::sleep(Duration::from_millis(5));
     assert!(!expired.validate(&sliding.ticket));
@@ -1655,13 +1643,7 @@ async fn smart_crop_and_strip_exif_rewrite_and_repoint_items() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Crop Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Crop Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // A 64×16 PNG: crop-loss (64-16)/64 = 0.75, well over the 0.35 flag.
@@ -1789,13 +1771,8 @@ async fn an_rgba_asset_keeps_its_alpha_through_the_file_and_thumbnail_routes() {
     let settings = test_settings(&temp_dir);
     let data_dir = settings.data_dir.clone();
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Transparent render" }),
-    )
-    .await;
+    let (_, created) =
+        crate::tests::support::create_project(app.clone(), &"Transparent render").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     std::fs::create_dir_all(project_path.join("assets/images")).expect("asset dir creates");
@@ -1902,13 +1879,8 @@ async fn a_downscaled_rgba_thumbnail_keeps_its_transparent_and_opaque_regions() 
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Large transparent render" }),
-    )
-    .await;
+    let (_, created) =
+        crate::tests::support::create_project(app.clone(), &"Large transparent render").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     std::fs::create_dir_all(project_path.join("assets/images")).expect("asset dir creates");
@@ -1970,13 +1942,7 @@ async fn an_rgb_asset_is_unchanged_by_the_alpha_aware_thumbnail_route() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, created) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Opaque render" }),
-    )
-    .await;
+    let (_, created) = crate::tests::support::create_project(app.clone(), &"Opaque render").await;
     let project_id = created["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(created["path"].as_str().unwrap());
     std::fs::create_dir_all(project_path.join("assets/images")).expect("asset dir creates");
@@ -2018,4 +1984,84 @@ async fn an_rgb_asset_is_unchanged_by_the_alpha_aware_thumbnail_route() {
         "an opaque RGB asset grew an alpha channel"
     );
     assert_eq!(decoded.to_rgb8().as_raw(), source.as_raw());
+}
+
+#[tokio::test]
+async fn expired_media_ticket_route_returns_401_and_new_ticket_restores_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(&temp);
+    settings.access_token = "secret-token".to_owned();
+    let (app, state) = create_app_with_state(settings).unwrap();
+    let auth = [("x-sceneworks-token", "secret-token")];
+    let (status, project) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Ticket expiry"}),
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let root = std::path::PathBuf::from(project["path"].as_str().unwrap());
+    std::fs::create_dir_all(root.join("assets/documents")).unwrap();
+    std::fs::write(
+        root.join("assets/documents/document.json"),
+        b"{\"segments\":[]}",
+    )
+    .unwrap();
+    let url = format!(
+        "/api/v1/projects/{}/files/assets/documents/document.json",
+        project["id"].as_str().unwrap()
+    );
+    let (status, ticket) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/files/ticket",
+        Value::Null,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ticket}");
+    let old = ticket["ticket"].as_str().unwrap();
+    let (status, _, body) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("{url}?ticket={old}"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"{\"segments\":[]}");
+    state.media_tickets.expire_for_test(old);
+    let (status, _, _) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("{url}?ticket={old}"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, fresh) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/files/ticket",
+        Value::Null,
+        &auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{fresh}");
+    let fresh = fresh["ticket"].as_str().unwrap();
+    assert_ne!(fresh, old);
+    let (status, _, body) = request_raw(
+        app,
+        "GET",
+        &format!("{url}?ticket={fresh}"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"{\"segments\":[]}");
 }

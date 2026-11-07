@@ -207,7 +207,7 @@ pub fn unconditional_source(bundle: Option<&std::path::Path>, guidance: Option<f
 /// shipped row declares the provider's own sanity cap, so the published interface is not narrowed),
 /// else the generic lane's clamp. A larger request is refused, never clamped.
 pub fn max_steps(entry: &JsonObject) -> u32 {
-    crate::video_request::hard_max_steps(entry)
+    crate::limits::hard_max_steps(entry)
         .unwrap_or_else(|| s2::DEFAULT_STEPS.max(crate::image_request::BASE_MAX_IMAGE_STEPS))
 }
 

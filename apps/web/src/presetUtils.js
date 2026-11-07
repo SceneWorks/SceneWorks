@@ -757,11 +757,9 @@ export function presetSaveValidation({ editable, name, model, kind }, { validati
 // digits, dash, underscore). Mirrors the backend's slugify_preset_id so the id
 // the client previews matches what the server stores.
 export function slugifyPresetId(value) {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "_")
-    .replace(/^[_-]+|[_-]+$/g, "");
+  const id = String(value ?? "").trim()
+    .replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase().replace(/^_+|_+$/g, "");
+  return !id || id === "lora" ? "preset" : id;
 }
 
 // Map an active studio mode to the recipe workflow it persists under. Inverts

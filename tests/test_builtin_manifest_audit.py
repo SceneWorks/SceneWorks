@@ -711,7 +711,13 @@ def test_control_weight_authority_audit_detects_absence_and_fallback_mutations()
 
 AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
     # Shared resolver receives MODEL_TABLE's default (or the frozen canonical FLUX3 identity).
-    "image_jobs/base.rs": "unwrap_or(default_repo)",
+    "image_jobs/artifact_resolution.rs": "unwrap_or(default_repo)",
+    # These production readers were formerly hidden by an early cfg(test) import.
+    "image_jobs/flux2_control_candle.rs": "FLUX2_CONTROL_CANDLE_BASE_REPO",
+    "image_jobs/kolors_control.rs": "KOLORS_CONTROL_DEFAULT_REPO",
+    "image_jobs/krea_control.rs": "KREA_CONTROL_MLX_REPO",
+    "image_jobs/qwen_control.rs": "QWEN_CONTROL_DEFAULT_REPO",
+    "image_jobs/zimage_control.rs": "zimage_control_base_default_repo(&request.model)",
     "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
     "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
     "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
@@ -729,6 +735,11 @@ AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
 }
 
 
+def _before_test_module(source: str) -> str:
+    # A cfg(test) import is not the end of production. Stop at the actual inline/external test module.
+    return re.split(r"\n#\[cfg\(test\)\]\s*(?:#\[[^\n]+\]\s*)*mod\s+\w+\s*(?:\{|;)", source, maxsplit=1)[0]
+
+
 def _worker_sources() -> dict[str, str]:
     return {
         path.relative_to(WORKER_SOURCE_PATH).as_posix(): path.read_text(encoding="utf-8")
@@ -744,7 +755,7 @@ def _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
         for relative_path, source in sources.items()
         if re.search(
             r"\.model_manifest_entry\s*\.get\(\"repo\"\)",
-            source.split("\n#[cfg(test)]", maxsplit=1)[0],
+            _before_test_module(source),
         )
     }
     assert actual_lanes == set(audited_lanes), (
@@ -753,7 +764,7 @@ def _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
         f"removed={sorted(set(audited_lanes) - actual_lanes)}"
     )
     for relative_path, fallback_marker in audited_lanes.items():
-        source = sources[relative_path].split("\n#[cfg(test)]", maxsplit=1)[0]
+        source = _before_test_module(sources[relative_path])
         reads = list(re.finditer(r"\.model_manifest_entry\s*\.get\(\"repo\"\)", source))
         assert reads, f"{relative_path}: inventoried lane no longer contains a top-level repo read"
         for read in reads:
@@ -787,7 +798,7 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
 
 
 def _assert_minimax_h3_candle_uses_exact_installed_roots(source: str) -> None:
-    production = source.split("\n#[cfg(test)]", maxsplit=1)[0]
+    production = _before_test_module(source)
     assert '.model_manifest_entry.get("repo")' not in production, (
         "MiniMax-H3 Candle must not accept a top-level manifest repo override; its q4/q8 and "
         "bf16/shared components come from two separately pinned installed snapshots"
@@ -851,7 +862,12 @@ def test_manifest_model_path_is_only_an_optional_override():
         # selected an imported Krea/SDXL route, and declines attribution when every path source is
         # absent. It does not affect generation's normal repo resolution.
         "image_jobs.rs",
-        "image_jobs/base.rs",
+        "image_jobs/artifact_resolution.rs",
+        "image_jobs/flux2_control_candle.rs",
+        "image_jobs/kolors_control.rs",
+        "image_jobs/krea_control.rs",
+        "image_jobs/qwen_control.rs",
+        "image_jobs/zimage_control.rs",
         "image_jobs/flux1_control_candle.rs",
         "image_jobs/flux_ipadapter.rs",
         "image_jobs/instantid.rs",
@@ -873,7 +889,7 @@ def test_manifest_model_path_is_only_an_optional_override():
     }
     actual_readers: list[str] = []
     for path in WORKER_SOURCE_PATH.rglob("*.rs"):
-        source = path.read_text(encoding="utf-8").split("\n#[cfg(test)]", maxsplit=1)[0]
+        source = _before_test_module(path.read_text(encoding="utf-8"))
         for match in re.finditer(
             r'request\.model_manifest_entry\.get\("modelPath"\)',
             source,
@@ -3547,16 +3563,8 @@ def test_recipe_preset_schema_rejects_a_bad_id_pattern():
 # `resolve_negative_prompt` ALL return None. Every one is a guidance-distilled student.
 IMAGE_MODELS_WITHOUT_EITHER_AXIS = frozenset(
     {
-        "z_image_turbo",
-        "z_image_edit",  # runs on the z_image_turbo ENGINE
         "flux_schnell",
         "ideogram_4_turbo",
-        "boogu_image_turbo",
-        "krea_2_turbo",
-        "sd3_5_large_turbo",
-        "anima_turbo",
-        "mage_flow_turbo",
-        "mage_flow_edit_turbo",
         "flux3_klein",  # flow map: no CFG at all (sc-26234)
     }
 )
@@ -3567,8 +3575,6 @@ IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY = frozenset(
     {
         "flux_dev",
         "ideogram_4",
-        "boogu_image",
-        "boogu_image_edit",
         "flux2_dev",
         "sensenova_u1_8b",
         "sensenova_u1_8b_infographic_v2",
@@ -3583,6 +3589,20 @@ IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY = frozenset(
         "supra2_img",
     }
 )
+
+
+IMAGE_MODELS_WITH_EXPERIMENTAL_CFG = frozenset({
+    "z_image_turbo",
+    "z_image_edit",
+    "boogu_image_turbo",
+    "krea_2_turbo",
+    "sd3_5_large_turbo",
+    "anima_turbo",
+    "mage_flow_turbo",
+    "mage_flow_edit_turbo",
+    "boogu_image",
+    "boogu_image_edit",
+})
 
 
 def _image_models_by_id() -> dict:
@@ -3628,12 +3648,9 @@ def test_negative_only_image_models_keep_their_guidance_axis():
         )
 
 
-def test_guidance_taking_image_models_declare_nothing():
-    """sc-15299 polarity guard: absent means TRUE, so every image entry that genuinely takes both
-    axes must stay silent. Includes the true-CFG Chroma family, whose descriptor reads
-    supports_guidance=false but whose Guidance control IS live — the worker forwards
-    `advanced.guidanceScale` as `true_cfg` (base.rs `uses_true_cfg`/`resolve_true_cfg`). Declaring
-    an `image` block for Chroma would break a working knob."""
+def test_guidance_taking_image_models_keep_both_axes():
+    """Absent axis flags mean supported. Positive capability declarations and independent
+    Shift metadata must not hide either axis, including experimental Turbo CFG."""
     models = _image_models_by_id()
     # Only the two AXIS keys hide a control; `negativePromptRequiresGuidance` (sc-25679) keeps both
     # axes live and is policed by its own guard below.
@@ -3643,15 +3660,20 @@ def test_guidance_taking_image_models_declare_nothing():
         for model_id, model in models.items()
         if axis_keys & set(model.get("image") or {})
     }
-    expected = IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY
+    expected = IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY | IMAGE_MODELS_WITH_EXPERIMENTAL_CFG
     assert declared == expected, (
         "unexpected `image` declarations — every other image entry must stay silent so it keeps "
         f"both controls: unexpected={sorted(declared - expected)}, missing={sorted(expected - declared)}"
     )
     for model_id in ("chroma1_hd", "chroma1_base", "chroma1_flash", "sana_1600m", "krea_2_raw", "sdxl"):
-        assert models[model_id].get("image") is None, (
-            f"{model_id} takes both axes (Chroma via true_cfg) and must declare no `image` block"
-        )
+        block = models[model_id].get("image") or {}
+        assert block.get("supportsGuidance") is not False, model_id
+        assert block.get("supportsNegativePrompt") is not False, model_id
+    for model_id in IMAGE_MODELS_WITH_EXPERIMENTAL_CFG:
+        block = models[model_id]["image"]
+        assert block.get("supportsGuidance") is not False, model_id
+        assert block.get("supportsNegativePrompt") is True, model_id
+        assert block.get("negativePromptRequiresGuidance") is True, model_id
 
 
 def test_iris_all_native_tiers_share_the_dense_snapshot_and_encoder():

@@ -1153,29 +1153,7 @@ mod tests {
     const REV_B: &str = "e19706bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn settings(data_dir: PathBuf) -> Settings {
-        Settings {
-            api_url: crate::test_env::OFFLINE_URL.to_owned(),
-            access_token: None,
-            data_dir,
-            config_dir: PathBuf::new(),
-            worker_id: "worker".to_owned(),
-            gpu_id: "cpu".to_owned(),
-            is_child_worker: false,
-            poll_seconds: 1,
-            heartbeat_seconds: 1,
-            shutdown_timeout_seconds: 1,
-            huggingface_base_url: crate::test_env::OFFLINE_URL.to_owned(),
-            huggingface_token: None,
-            credentials: Vec::new(),
-            max_lora_url_bytes: 1,
-            max_model_url_bytes: 1,
-            allow_private_lora_urls: false,
-            utility_workers: 1,
-            backend_mlx_enabled: false,
-            backend_candle_enabled: false,
-            external_model_roots: Vec::new(),
-            gpu_memory_limit_bytes: 0,
-        }
+        Settings::for_test(data_dir)
     }
 
     /// Pin the configured source library to an explicit external dir for the whole body.
@@ -1301,11 +1279,15 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Pin the configured source library AND switch the resolved cache on for the body. Under
-    /// test `Settings::resolved_cache_policy` reads the same environment `Settings::from_env`
-    /// would have read, so this is exactly the production "user enabled the cache" state.
-    fn with_local_cache<T>(library: &Path, body: impl FnOnce() -> T) -> T {
+    /// Enable the same policy field production reads; the original fixture remains disabled.
+    fn with_local_cache<T>(
+        settings: &Settings,
+        library: &Path,
+        body: impl FnOnce(Settings) -> T,
+    ) -> T {
         let _serialized = overlay_guard();
+        let mut settings = settings.clone();
+        settings.resolved_cache.enabled = true;
         crate::test_env::temp_env_vars(
             &[
                 ("HF_HUB_CACHE", library.to_str().expect("utf-8 temp path")),
@@ -1314,7 +1296,7 @@ mod tests {
                     "1",
                 ),
             ],
-            body,
+            || body(settings),
         )
     }
 
@@ -1411,7 +1393,7 @@ mod tests {
     fn a_published_bundle_serves_the_load_and_is_lease_protected() {
         let temp = TempDir::new().unwrap();
         let (settings, library, payload) = installed_model(&temp);
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             let artifact = publish_bundle(
                 &settings.data_dir,
                 &library,
@@ -1519,7 +1501,7 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             for repo in ["guardfx/primary", "guardfx/utility"] {
                 publish_bundle(
                     &settings.data_dir,
@@ -1555,7 +1537,7 @@ mod tests {
     fn payload_resolved_and_receipt_paths_are_served_from_the_leased_bundle() {
         let temp = TempDir::new().unwrap();
         let (settings, library, payload) = installed_model(&temp);
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             let artifact = publish_bundle(
                 &settings.data_dir,
                 &library,
@@ -1627,7 +1609,7 @@ mod tests {
     fn a_disconnected_library_still_serves_a_complete_bundle_without_downloading() {
         let temp = TempDir::new().unwrap();
         let (settings, library, payload) = installed_model(&temp);
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             publish_bundle(
                 &settings.data_dir,
                 &library,
@@ -1664,7 +1646,7 @@ mod tests {
     fn invalid_local_entry_falls_back(break_it: impl FnOnce(&Path, &Path)) {
         let temp = TempDir::new().unwrap();
         let (settings, library, payload) = installed_model(&temp);
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             let artifact = publish_bundle(
                 &settings.data_dir,
                 &library,
@@ -1775,7 +1757,7 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             // Only the q4 tier is published locally.
             let q4_bundle = publish_bundle(
                 &settings.data_dir,
@@ -1905,7 +1887,7 @@ mod tests {
         .unwrap()
         .clone();
 
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             let q4_bundle = publish_bundle(
                 &settings.data_dir,
                 &library,
@@ -1969,7 +1951,7 @@ mod tests {
         write_receipts(&data, repo, json!([receipt]));
         let payload=json!({"modelManifestEntry":{"id":"repair","downloads":[{"provider":"huggingface","repo":repo,"files":["model.safetensors"]}]}}).as_object().unwrap().clone();
         let settings = settings(data.clone());
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             let artifact = publish_bundle(
                 &data,
                 &library,
@@ -2054,7 +2036,7 @@ mod tests {
             .as_object()
             .unwrap()
             .clone();
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             publish_bundle(
                 &settings.data_dir,
                 &library,
@@ -2087,7 +2069,7 @@ mod tests {
         .unwrap()
         .clone();
 
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             let bundle_root = {
                 let scan = sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::valid_local_artifacts(
                     &settings.data_dir,
@@ -2185,7 +2167,7 @@ mod tests {
     fn an_unsupported_bundle_shape_is_reported_and_the_model_stays_on_the_source_tier() {
         let temp = TempDir::new().unwrap();
         let (settings, library, payload) = installed_model(&temp);
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             // Published and complete, but stored FLAT rather than in the source-library layout.
             publish_bundle_at(
                 &settings.data_dir,
@@ -2254,7 +2236,7 @@ mod tests {
         .unwrap()
         .clone();
 
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             // Only ONE of the two models is bundled locally, so one job reports both tiers. They
             // are different repositories, so neither poisons the other's pair.
             publish_bundle(
@@ -2342,7 +2324,7 @@ mod tests {
         .unwrap()
         .clone();
 
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             publish_bundle(
                 &settings.data_dir,
                 &library,
@@ -2372,7 +2354,7 @@ mod tests {
     fn a_disabled_cache_never_prefers_a_local_bundle() {
         let temp = TempDir::new().unwrap();
         let (settings, library, payload) = installed_model(&temp);
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             publish_bundle(
                 &settings.data_dir,
                 &library,
@@ -2414,7 +2396,7 @@ mod tests {
     fn a_successful_source_tier_job_promotes_itself_and_the_next_job_loads_from_the_bundle() {
         let temp = TempDir::new().unwrap();
         let (settings, library, payload) = installed_model(&temp);
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             // FIRST JOB — nothing is cached, so it is served by the configured source library.
             let guard =
                 RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
@@ -3071,7 +3053,7 @@ mod tests {
         ] {
             let temp = TempDir::new().unwrap();
             let (settings, library, payload, read_repo, file) = resident_base_fixture(&temp, shape);
-            with_local_cache(&library, || {
+            with_local_cache(&settings, &library, |settings| {
                 let _rows = ResidentBaseRowGuard::install(
                     "guardfx-family",
                     "bf16",
@@ -3167,7 +3149,7 @@ mod tests {
             REV_C,
             "bf16/transformer/model.safetensors",
         );
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             let _rows = ResidentBaseRowGuard::install(
                 "guardfx-family",
                 "bf16",
@@ -3232,7 +3214,7 @@ mod tests {
             let temp = TempDir::new().unwrap();
             let (settings, library, payload, ..) =
                 resident_base_fixture(&temp, super::ResidentBaseShape::FullTier);
-            with_local_cache(&library, || {
+            with_local_cache(&settings, &library, |settings| {
                 let _rows = ResidentBaseRowGuard::install(
                     "guardfx-family",
                     "bf16",
@@ -3274,7 +3256,7 @@ mod tests {
                      "snapshotRevision": REV_C }]),
         );
         seed_snapshot(&library, read_repo, REV_C, "bf16/vae/model.safetensors");
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             let _rows = ResidentBaseRowGuard::install(
                 "guardfx-family",
                 "bf16",
@@ -3319,7 +3301,7 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
-        with_local_cache(&library, || {
+        with_local_cache(&settings, &library, |settings| {
             let guard =
                 RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
             assert!(guard.resolutions().is_empty());

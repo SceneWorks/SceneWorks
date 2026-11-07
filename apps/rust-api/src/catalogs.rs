@@ -7,10 +7,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path as FsPath, PathBuf};
+use std::path::{Path as FsPath, PathBuf};
+use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, Response, StatusCode};
 use axum::Json;
 use sceneworks_core::catalog_store::{
@@ -33,7 +34,7 @@ use sceneworks_worker::catalog_parquet_scanner::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -72,241 +73,6 @@ const MAX_MATERIALIZED_CAPTION_BYTES: usize = 8_192;
 /// `parity-rust` cap out as a CANCELLED job naming no failing test (sc-19764).
 /// Bounding every wait turns that into a named panic in seconds. This can only
 /// fire on a mispairing; the healthy choreography meets in milliseconds.
-#[cfg(test)]
-const CATALOG_CACHE_STAGE_TEST_WAIT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(120);
-
-/// Candidate budget handed to the ONE candidate this hook parks, so that
-/// candidate times out while it sits at `before_stage`.
-#[cfg(test)]
-const CATALOG_CACHE_STAGE_TEST_CANDIDATE_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(100);
-
-/// Two-party meeting point with a deadline.
-///
-/// Every use below meets two *blocking* threads — the staging verifier and the
-/// project-copy closure both run inside `spawn_blocking`, and the control side
-/// spawns its own blocking task — so parking here never stalls a test's
-/// runtime. The deadline exists purely so a mispairing fails by name instead of
-/// hanging the binary.
-#[cfg(test)]
-struct CatalogCacheStageTestRendezvous {
-    name: &'static str,
-    state: std::sync::Mutex<(usize, u64)>,
-    partner_arrived: std::sync::Condvar,
-}
-
-#[cfg(test)]
-impl CatalogCacheStageTestRendezvous {
-    fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            state: std::sync::Mutex::new((0, 0)),
-            partner_arrived: std::sync::Condvar::new(),
-        }
-    }
-
-    fn wait(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let generation = state.1;
-        state.0 += 1;
-        if state.0 == 2 {
-            *state = (0, generation + 1);
-            drop(state);
-            self.partner_arrived.notify_all();
-            return;
-        }
-        let (mut state, wait) = self
-            .partner_arrived
-            .wait_timeout_while(state, CATALOG_CACHE_STAGE_TEST_WAIT_TIMEOUT, |state| {
-                state.1 == generation
-            })
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if wait.timed_out() {
-            // Leave the meeting point empty so a later arrival cannot pair with
-            // this abandoned one.
-            state.0 -= 1;
-            drop(state);
-            panic!(
-                "catalog cache stage test rendezvous `{}` had no partner within {:?} — the hook \
-                 choreography is mispaired",
-                self.name, CATALOG_CACHE_STAGE_TEST_WAIT_TIMEOUT
-            );
-        }
-    }
-}
-
-/// One-way, NEVER-BLOCKING signal from the materialization future to the test.
-///
-/// This one cannot be a rendezvous. `signal_catalog_cache_timeout_test_hook` is
-/// called from the materialization future itself, i.e. on the test's
-/// current-thread runtime — the same runtime that has to poll the test task
-/// that would supply the partner. Parking there deadlocks outright whenever the
-/// candidate budget expires BEFORE the control side has parked, which is
-/// exactly what a loaded CI runner produces: the test wedges forever, still
-/// holding `catalog_scan_hook_test_lock`, and takes every later user of that
-/// lock with it (sc-19764, PR #2346 — 594 of 597 tests printed, then 21 silent
-/// minutes). So the producer only records the observation and the consumer,
-/// which is free to block on its own thread, waits for it.
-#[cfg(test)]
-struct CatalogCacheStageTestSignal {
-    name: &'static str,
-    observed: std::sync::Mutex<usize>,
-    raised: std::sync::Condvar,
-}
-
-#[cfg(test)]
-impl CatalogCacheStageTestSignal {
-    fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            observed: std::sync::Mutex::new(0),
-            raised: std::sync::Condvar::new(),
-        }
-    }
-
-    /// Never blocks, so it is safe to call from a runtime thread. Extra
-    /// observations are counted, not queued: a second one can never park.
-    fn signal(&self) {
-        *self
-            .observed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
-        self.raised.notify_all();
-    }
-
-    fn wait(&self) {
-        let observed = self
-            .observed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (_observed, wait) = self
-            .raised
-            .wait_timeout_while(
-                observed,
-                CATALOG_CACHE_STAGE_TEST_WAIT_TIMEOUT,
-                |observed| *observed == 0,
-            )
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            !wait.timed_out(),
-            "catalog cache stage test signal `{}` was never raised within {:?}",
-            self.name,
-            CATALOG_CACHE_STAGE_TEST_WAIT_TIMEOUT
-        );
-    }
-}
-
-#[cfg(test)]
-struct CatalogCacheStageTestHook {
-    claimed: std::sync::atomic::AtomicBool,
-    /// Stall injected into the staging verifier BEFORE it claims the hook, so a
-    /// test can put the candidate budget's expiry ahead of the `before_stage`
-    /// meeting point deterministically. That is the ordering a loaded CI runner
-    /// produces on its own; see sc-19764.
-    verifier_delay: std::time::Duration,
-    before_stage: CatalogCacheStageTestRendezvous,
-    release_stage: CatalogCacheStageTestRendezvous,
-    stage_completed: CatalogCacheStageTestRendezvous,
-    timeout_observed: CatalogCacheStageTestSignal,
-    before_project_copy: CatalogCacheStageTestRendezvous,
-    release_project_copy: CatalogCacheStageTestRendezvous,
-}
-
-#[cfg(test)]
-fn catalog_cache_stage_test_hook(
-) -> &'static std::sync::Mutex<Option<std::sync::Arc<CatalogCacheStageTestHook>>> {
-    static HOOK: std::sync::OnceLock<
-        std::sync::Mutex<Option<std::sync::Arc<CatalogCacheStageTestHook>>>,
-    > = std::sync::OnceLock::new();
-    HOOK.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-#[cfg(test)]
-pub(crate) struct CatalogCacheStageTestControl {
-    hook: std::sync::Arc<CatalogCacheStageTestHook>,
-}
-
-#[cfg(test)]
-impl CatalogCacheStageTestControl {
-    /// Always parks on a BLOCKING thread, never on the caller's runtime thread,
-    /// so the control side can never stall the runtime that has to drive the
-    /// materialization it is choreographing.
-    async fn meet(
-        &self,
-        select: fn(&CatalogCacheStageTestHook) -> &CatalogCacheStageTestRendezvous,
-    ) {
-        let hook = self.hook.clone();
-        tokio::task::spawn_blocking(move || select(&hook).wait())
-            .await
-            .expect("catalog materialization test rendezvous joins");
-    }
-
-    pub(crate) async fn wait_before_stage(&self) {
-        self.meet(|hook| &hook.before_stage).await;
-    }
-
-    pub(crate) async fn wait_for_timeout(&self) {
-        let hook = self.hook.clone();
-        tokio::task::spawn_blocking(move || hook.timeout_observed.wait())
-            .await
-            .expect("catalog materialization test signal joins");
-    }
-
-    pub(crate) async fn wait_before_project_copy(&self) {
-        self.meet(|hook| &hook.before_project_copy).await;
-    }
-
-    pub(crate) async fn release_stage(&self) {
-        self.meet(|hook| &hook.release_stage).await;
-    }
-
-    pub(crate) async fn wait_for_stage_completion(&self) {
-        self.meet(|hook| &hook.stage_completed).await;
-    }
-
-    pub(crate) async fn release_project_copy(&self) {
-        self.meet(|hook| &hook.release_project_copy).await;
-    }
-}
-
-#[cfg(test)]
-impl Drop for CatalogCacheStageTestControl {
-    fn drop(&mut self) {
-        let mut current = catalog_cache_stage_test_hook()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if current
-            .as_ref()
-            .is_some_and(|hook| std::sync::Arc::ptr_eq(hook, &self.hook))
-        {
-            *current = None;
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn install_catalog_cache_stage_test_hook(
-    verifier_delay: std::time::Duration,
-) -> CatalogCacheStageTestControl {
-    let hook = std::sync::Arc::new(CatalogCacheStageTestHook {
-        claimed: std::sync::atomic::AtomicBool::new(false),
-        verifier_delay,
-        before_stage: CatalogCacheStageTestRendezvous::new("before_stage"),
-        release_stage: CatalogCacheStageTestRendezvous::new("release_stage"),
-        stage_completed: CatalogCacheStageTestRendezvous::new("stage_completed"),
-        timeout_observed: CatalogCacheStageTestSignal::new("timeout_observed"),
-        before_project_copy: CatalogCacheStageTestRendezvous::new("before_project_copy"),
-        release_project_copy: CatalogCacheStageTestRendezvous::new("release_project_copy"),
-    });
-    *catalog_cache_stage_test_hook()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook.clone());
-    CatalogCacheStageTestControl { hook }
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -535,8 +301,10 @@ pub(crate) async fn list_catalogs(
 
 pub(crate) async fn create_catalog(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     ApiJson(request): ApiJson<CreateCatalogRequest>,
 ) -> Result<(StatusCode, Json<CatalogResponse>), ApiError> {
+    crate::auth::local_only(connect_info.map(|ConnectInfo(addr)| addr))?;
     require_absolute_catalog_path(&request.path)?;
     validated_scan_plan(&state, request.source_config.as_ref()).await?;
     let config_dir = state.settings.config_dir.clone();
@@ -574,8 +342,10 @@ pub(crate) async fn create_catalog(
 
 pub(crate) async fn attach_catalog(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     ApiJson(request): ApiJson<AttachCatalogRequest>,
 ) -> Result<Json<CatalogResponse>, ApiError> {
+    crate::auth::local_only(connect_info.map(|ConnectInfo(addr)| addr))?;
     require_absolute_catalog_path(&request.path)?;
     let config_dir = state.settings.config_dir.clone();
     let response = catalog_call(move || {
@@ -1006,19 +776,9 @@ fn verified_cached_source(
     relative: &str,
     record: &CatalogRecord,
 ) -> Result<AcquiredMaterializationSource, ApiError> {
-    let path = FsPath::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(ApiError::conflict("Catalog cache path was invalid"));
-    }
-    let canonical = fs::canonicalize(catalog_root.join(path))
-        .map_err(|_| ApiError::conflict("Catalog cache image was unavailable"))?;
-    if !canonical.starts_with(catalog_root) || !canonical.is_file() {
-        return Err(ApiError::conflict("Catalog cache path escaped its catalog"));
-    }
+    let canonical = Catalog::resolve_local_image_under(catalog_root, relative).map_err(|_| {
+        ApiError::conflict("Catalog cache image was unavailable or escaped its catalog")
+    })?;
     let byte_count = fs::metadata(&canonical)
         .map_err(|_| ApiError::conflict("Catalog cache image was unavailable"))?
         .len();
@@ -1551,10 +1311,7 @@ fn canonical_json(value: Value) -> Value {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 pub(crate) async fn review_catalog_record(
@@ -1655,19 +1412,14 @@ pub(crate) async fn catalog_record_thumbnail(
                     .and_then(Value::as_str)
             })
             .ok_or_else(|| CatalogError::NotFound("Catalog thumbnail was not found".to_owned()))?;
-        let root = std::fs::canonicalize(catalog.root())?;
-        let path = std::fs::canonicalize(catalog.root().join(relative)).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                CatalogError::NotFound("Catalog thumbnail was not found".to_owned())
-            } else {
-                CatalogError::Io(error)
-            }
-        })?;
-        if !path.starts_with(&root) || !path.is_file() {
-            return Err(CatalogError::InvalidCatalog(
-                "Catalog thumbnail escapes its catalog".to_owned(),
-            ));
-        }
+        let path =
+            Catalog::resolve_local_image_under(catalog.root(), relative).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    CatalogError::NotFound("Catalog thumbnail was not found".to_owned())
+                } else {
+                    CatalogError::Io(error)
+                }
+            })?;
         let metadata = std::fs::metadata(&path)?;
         if metadata.len() > MAX_THUMBNAIL_BYTES {
             return Err(CatalogError::InvalidCatalog(
@@ -2191,7 +1943,7 @@ async fn validated_scan_plan(
     if let Some(validation_plan) = plan.clone() {
         #[cfg(test)]
         let admission_wait = test_duration_override(
-            &state.catalog_scan_preflight_admission_timeout_ms,
+            &state.test_hooks.catalog_scan_preflight_admission_timeout_ms,
             CATALOG_PREFLIGHT_ADMISSION_WAIT,
         );
         #[cfg(not(test))]
@@ -2203,20 +1955,29 @@ async fn validated_scan_plan(
         .await
         .map_err(|_| {
             ApiError::service_unavailable(
+                "catalog_preflight_unavailable",
                 "Parquet validation is busy; retry after another catalog preflight finishes",
             )
         })?
-        .map_err(|_| ApiError::service_unavailable("Parquet validation is shutting down"))?;
+        .map_err(|_| {
+            ApiError::service_unavailable(
+                "catalog_preflight_unavailable",
+                "Parquet validation is shutting down",
+            )
+        })?;
 
         #[cfg(test)]
-        let preflight_delay = state.catalog_scan_preflight_delay_ms_once.clone();
+        let preflight_delay = state
+            .test_hooks
+            .catalog_scan_preflight_delay_ms_once
+            .clone();
         #[cfg(test)]
-        let preflight_started = state.catalog_scan_preflight_started.clone();
+        let preflight_started = state.test_hooks.catalog_scan_preflight_started.clone();
         #[cfg(test)]
-        let preflight_ticks = state.catalog_scan_preflight_test_ticks.clone();
+        let preflight_ticks = state.test_hooks.catalog_scan_preflight_test_ticks.clone();
         #[cfg(test)]
         let execution_timeout = test_duration_override(
-            &state.catalog_scan_preflight_execution_timeout_ms,
+            &state.test_hooks.catalog_scan_preflight_execution_timeout_ms,
             CATALOG_PREFLIGHT_EXECUTION_TIMEOUT,
         );
         #[cfg(not(test))]
@@ -2258,6 +2019,7 @@ async fn validated_scan_plan(
             Err(_) => {
                 cancellation.cancel();
                 return Err(ApiError::service_unavailable(
+                    "catalog_preflight_unavailable",
                     "Parquet validation timed out; reduce the source shard count and retry",
                 ));
             }
@@ -2297,7 +2059,9 @@ fn actionable_scan_plan_error(error: CatalogError) -> ApiError {
 fn actionable_scanner_validation_error(error: CatalogParquetScanError) -> ApiError {
     match error {
         CatalogParquetScanError::InvalidSource(detail) => ApiError::bad_request(detail),
-        CatalogParquetScanError::Interrupted(detail) => ApiError::service_unavailable(detail),
+        CatalogParquetScanError::Interrupted(detail) => {
+            ApiError::service_unavailable("catalog_preflight_unavailable", detail)
+        }
         _ => ApiError::bad_request("Parquet source could not be read with the supplied options"),
     }
 }
@@ -2343,357 +2107,47 @@ async fn schedule_catalog_scan(
     state: &AppState,
     config_dir: PathBuf,
     catalog_id: String,
-    mut plan: CatalogScanPlan,
+    plan: CatalogScanPlan,
 ) {
+    let prepared = prepare_catalog_scan(state, config_dir, catalog_id, plan);
+    enqueue_catalog_scan(state, prepared).await;
+}
+/// Validation is performed by validated_scan_plan before source persistence; recovery uses
+/// scan_plan on the persisted source. Preparation only applies the scheduler-owned row bound.
+struct PreparedCatalogScan {
+    config_dir: PathBuf,
+    catalog_id: String,
+    plan: CatalogScanPlan,
+    work_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    test_hooks: Arc<crate::test_hooks::TestHooks>,
+}
+
+fn prepare_catalog_scan(
+    state: &AppState,
+    config_dir: PathBuf,
+    catalog_id: String,
+    mut plan: CatalogScanPlan,
+) -> PreparedCatalogScan {
     plan.options.max_rows = Some(SCHEDULED_SCAN_PASS_ROWS);
-    #[cfg(test)]
-    let before_start = state.catalog_scan_before_driver_start_once.clone();
-    #[cfg(test)]
-    let stop_after_pass = state.catalog_scan_stop_after_pass_once.clone();
-    #[cfg(test)]
-    let before_terminal_exit = state.catalog_scan_before_terminal_exit_once.clone();
-    #[cfg(test)]
-    let terminal_exit_reached = state.catalog_scan_terminal_exit_reached.clone();
-    #[cfg(test)]
-    let terminal_exit_release = state.catalog_scan_terminal_exit_release.clone();
-    #[cfg(test)]
-    let injected_sqlite_busy_failures = state.catalog_scan_injected_sqlite_busy_failures.clone();
-    #[cfg(test)]
-    let contention_backoff_started = state.catalog_scan_contention_backoff_started.clone();
-    #[cfg(test)]
-    let busy_lease_cancel_barrier = state.catalog_scan_busy_lease_cancel_barrier_once.clone();
-    let work_slots = state.catalog_scan_work_slots.clone();
-    let log_catalog_id = catalog_id.clone();
-    let rejected_config_dir = config_dir.clone();
-    let rejected_catalog_id = catalog_id.clone();
+    PreparedCatalogScan {
+        config_dir,
+        catalog_id,
+        plan,
+        work_slots: state.catalog_scan_work_slots.clone(),
+        #[cfg(test)]
+        test_hooks: state.test_hooks.clone(),
+    }
+}
+
+async fn enqueue_catalog_scan(state: &AppState, prepared: PreparedCatalogScan) {
+    let log_catalog_id = prepared.catalog_id.clone();
+    let rejected_config_dir = prepared.config_dir.clone();
+    let rejected_catalog_id = prepared.catalog_id.clone();
     let spawned = state
         .catalog_scan_supervisor
-        .spawn(catalog_id.clone(), move |cancellation| async move {
-            #[cfg(test)]
-            let start_barrier = { before_start.lock().take() };
-            #[cfg(test)]
-            if let Some(barrier) = start_barrier {
-                tokio::select! {
-                    _ = barrier.wait() => {}
-                    _ = cancellation.cancelled() => {
-                        reconcile_cancelled_catalog_scan(
-                            config_dir.clone(),
-                            catalog_id.clone(),
-                        ).await;
-                        return;
-                    },
-                }
-            }
-            let mut retry_delay = std::time::Duration::from_millis(10);
-            let mut contention_retries = 0_u8;
-            'driver_session: loop {
-                let mut driver = loop {
-                if cancellation.is_cancelled() {
-                    reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone()).await;
-                    return;
-                }
-                let pass_config_dir = config_dir.clone();
-                let pass_catalog_id = catalog_id.clone();
-                let start = catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
-                    AttachedCatalogParquetScanDriver::try_start(
-                        &CatalogRegistry::new(pass_config_dir),
-                        &pass_catalog_id,
-                    )
-                })
-                .await;
-                match start {
-                    Ok(Some(Ok(driver))) => break driver,
-                    Ok(Some(Err(error))) if error.is_retryable_contention() => {
-                        if contention_retries >= CATALOG_SCAN_MAX_CONTENTION_RETRIES {
-                            publish_catalog_scan_contention_exhausted(
-                                config_dir.clone(),
-                                catalog_id.clone(),
-                            )
-                            .await;
-                            return;
-                        }
-                        contention_retries = contention_retries.saturating_add(1);
-                        tokio::select! {
-                            _ = tokio::time::sleep(retry_delay) => {}
-                            _ = cancellation.cancelled() => {
-                                reconcile_cancelled_catalog_scan(
-                                    config_dir.clone(),
-                                    catalog_id.clone(),
-                                ).await;
-                                return;
-                            },
-                        }
-                        retry_delay = retry_delay
-                            .saturating_mul(2)
-                            .min(CATALOG_SCAN_START_MAX_BACKOFF);
-                    }
-                    Ok(Some(Err(CatalogParquetScanError::Busy(_)))) => {
-                        let retry_config_dir = config_dir.clone();
-                        let retry_catalog_id = catalog_id.clone();
-                        let should_retry =
-                            catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
-                                let registry = CatalogRegistry::new(retry_config_dir);
-                                let catalog = registry.open_attached(&retry_catalog_id)?;
-                                let desired = catalog.processing_control()?.desired_state;
-                                let actual = catalog.contract_state()?.processing.state;
-                                Ok::<_, CatalogError>(
-                                    desired == CatalogProcessingDesiredState::Running
-                                        && actual != CatalogProcessingState::Completed,
-                                )
-                            })
-                            .await;
-                        match should_retry {
-                            Ok(Some(Ok(true))) => {}
-                            Ok(Some(Ok(false))) => {
-                                #[cfg(test)]
-                                catalog_scan_terminal_test_barrier(
-                                    &before_terminal_exit,
-                                    &terminal_exit_reached,
-                                    &terminal_exit_release,
-                                    &cancellation,
-                                )
-                                .await;
-                                if cancellation.is_cancelled() {
-                                    reconcile_cancelled_catalog_scan(
-                                        config_dir.clone(),
-                                        catalog_id.clone(),
-                                    )
-                                    .await;
-                                }
-                                return;
-                            }
-                            Ok(Some(Err(CatalogError::NotFound(_)))) => return,
-                            Ok(None) => {
-                                reconcile_cancelled_catalog_scan(
-                                    config_dir.clone(),
-                                    catalog_id.clone(),
-                                )
-                                .await;
-                                return;
-                            }
-                            Ok(Some(Err(error))) => {
-                                tracing::error!(
-                                    event = "catalog_parquet_scan_retry_check_failed",
-                                    catalog_id,
-                                    error = %error,
-                                    "catalog Parquet scanner stopped after a terminal retry check"
-                                );
-                                return;
-                            }
-                            Err(error) => {
-                                tracing::error!(
-                                    event = "catalog_parquet_scan_task_failed",
-                                    catalog_id,
-                                    error = %error,
-                                    "catalog Parquet scanner retry check stopped"
-                                );
-                                return;
-                            }
-                        }
-                        #[cfg(test)]
-                        {
-                            let handshake_armed = { busy_lease_cancel_barrier.lock().is_some() };
-                            contention_backoff_started.notify_one();
-                            if handshake_armed {
-                                // Hold this exact lease-wait boundary for the cancellation fixture,
-                                // rather than relying on a timer to keep the waiter here.
-                                cancellation.cancelled().await;
-                            }
-                        }
-                        tokio::select! {
-                            _ = tokio::time::sleep(retry_delay) => {}
-                            _ = cancellation.cancelled() => {
-                                #[cfg(test)]
-                                {
-                                    let barrier = { busy_lease_cancel_barrier.lock().take() };
-                                    if let Some(barrier) = barrier {
-                                        // First acknowledge cancellation while the fixture still
-                                        // owns the lease; then wait for its explicit release.
-                                        barrier.wait().await;
-                                        barrier.wait().await;
-                                    }
-                                }
-                                reconcile_cancelled_catalog_scan(
-                                    config_dir.clone(),
-                                    catalog_id.clone(),
-                                ).await;
-                                return;
-                            },
-                        }
-                        retry_delay = retry_delay
-                            .saturating_mul(2)
-                            .min(CATALOG_SCAN_START_MAX_BACKOFF);
-                    }
-                    Ok(Some(Err(error))) => {
-                        tracing::error!(
-                            event = "catalog_parquet_scan_start_failed",
-                            catalog_id,
-                            error = %error,
-                            "catalog Parquet scanner could not start"
-                        );
-                        return;
-                    }
-                    Ok(None) => {
-                        reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone())
-                            .await;
-                        return;
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            event = "catalog_parquet_scan_task_failed",
-                            catalog_id,
-                            error = %error,
-                            "catalog Parquet scanner start task stopped"
-                        );
-                        return;
-                    }
-                }
-                };
-                loop {
-                let pass_source = plan.source.clone();
-                let pass_options = plan.options.clone();
-                let pass_cancellation = cancellation.clone();
-                #[cfg(test)]
-                let pass_injected_sqlite_busy_failures = injected_sqlite_busy_failures.clone();
-                let result = catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
-                    #[cfg(test)]
-                    if pass_injected_sqlite_busy_failures
-                        .fetch_update(
-                            std::sync::atomic::Ordering::SeqCst,
-                            std::sync::atomic::Ordering::SeqCst,
-                            |remaining| remaining.checked_sub(1),
-                        )
-                        .is_ok()
-                    {
-                        return (
-                            driver,
-                            Err(CatalogParquetScanError::Catalog(CatalogError::Sqlite(
-                                rusqlite::Error::SqliteFailure(
-                                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                                    Some("injected scheduler contention".to_owned()),
-                                ),
-                            ))),
-                        );
-                    }
-                    let result = driver.scan_pass_with_cancel(&pass_source, &pass_options, || {
-                        pass_cancellation.is_cancelled()
-                    });
-                    (driver, result)
-                })
-                .await;
-                match result {
-                    Err(error) => {
-                        tracing::error!(
-                            event = "catalog_parquet_scan_task_failed",
-                            catalog_id,
-                            error = %error,
-                            "catalog Parquet scanner task stopped"
-                        );
-                        break;
-                    }
-                    Ok(Some((next_driver, Ok(report)))) => {
-                        driver = next_driver;
-                        contention_retries = 0;
-                        retry_delay = std::time::Duration::from_millis(10);
-                        if report.paused || report.checkpoint.complete {
-                            drop(driver);
-                            #[cfg(test)]
-                            catalog_scan_terminal_test_barrier(
-                                &before_terminal_exit,
-                                &terminal_exit_reached,
-                                &terminal_exit_release,
-                                &cancellation,
-                            )
-                            .await;
-                            if cancellation.is_cancelled() {
-                                reconcile_cancelled_catalog_scan(
-                                    config_dir.clone(),
-                                    catalog_id.clone(),
-                                )
-                                .await;
-                            }
-                            break 'driver_session;
-                        }
-                        #[cfg(test)]
-                        if stop_after_pass.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                            break 'driver_session;
-                        }
-                        if cancellation.is_cancelled() {
-                            driver.publish_interrupted();
-                            break 'driver_session;
-                        }
-                    }
-                    Ok(Some((_next_driver, Err(CatalogParquetScanError::Interrupted(error))))) => {
-                        tracing::info!(
-                            event = "catalog_parquet_scan_interrupted",
-                            catalog_id,
-                            error,
-                            "catalog Parquet scanner stopped for server shutdown"
-                        );
-                        break 'driver_session;
-                    }
-                    Ok(Some((next_driver, Err(error)))) if error.is_retryable_contention() => {
-                        tracing::debug!(
-                            event = "catalog_parquet_scan_contention_retry",
-                            catalog_id,
-                            error = %error,
-                            "catalog Parquet scanner will retry transient SQLite contention"
-                        );
-                        if contention_retries >= CATALOG_SCAN_MAX_CONTENTION_RETRIES {
-                            if let Err(publish_error) = next_driver.publish_contention_exhausted() {
-                                tracing::error!(
-                                    event = "catalog_parquet_scan_contention_exhaustion_publish_failed",
-                                    catalog_id,
-                                    error = %publish_error,
-                                    "catalog Parquet scanner could not publish contention exhaustion"
-                                );
-                            }
-                            break 'driver_session;
-                        }
-                        contention_retries = contention_retries.saturating_add(1);
-                        drop(next_driver);
-                        #[cfg(test)]
-                        contention_backoff_started.notify_waiters();
-                        if cancellation.is_cancelled() {
-                            reconcile_cancelled_catalog_scan(
-                                config_dir.clone(),
-                                catalog_id.clone(),
-                            )
-                            .await;
-                            break 'driver_session;
-                        }
-                        tokio::select! {
-                            _ = tokio::time::sleep(retry_delay) => {}
-                            _ = cancellation.cancelled() => {
-                                reconcile_cancelled_catalog_scan(
-                                    config_dir.clone(),
-                                    catalog_id.clone(),
-                                ).await;
-                                break 'driver_session;
-                            },
-                        }
-                        retry_delay = retry_delay
-                            .saturating_mul(2)
-                            .min(CATALOG_SCAN_START_MAX_BACKOFF);
-                        continue 'driver_session;
-                    }
-                    Ok(Some((_next_driver, Err(error)))) => {
-                        tracing::error!(
-                            event = "catalog_parquet_scan_failed",
-                            catalog_id,
-                            error = %error,
-                            "catalog Parquet scanner stopped"
-                        );
-                        break 'driver_session;
-                    }
-                    Ok(None) => {
-                        reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone())
-                            .await;
-                        break 'driver_session;
-                    }
-                }
-            }
-            }
+        .spawn(prepared.catalog_id.clone(), move |cancellation| {
+            run_catalog_scan(prepared, cancellation)
         })
         .await;
     match spawned {
@@ -2712,6 +2166,361 @@ async fn schedule_catalog_scan(
                 catalog_id = log_catalog_id,
                 "catalog Parquet scan was not started because the server is shutting down"
             );
+        }
+    }
+}
+
+async fn run_catalog_scan(
+    prepared: PreparedCatalogScan,
+    cancellation: tokio_util::sync::CancellationToken,
+) {
+    let PreparedCatalogScan {
+        config_dir,
+        catalog_id,
+        plan,
+        work_slots,
+        #[cfg(test)]
+        test_hooks,
+    } = prepared;
+    #[cfg(test)]
+    let before_start = test_hooks.catalog_scan_before_driver_start_once.clone();
+    #[cfg(test)]
+    let stop_after_pass = test_hooks.catalog_scan_stop_after_pass_once.clone();
+    #[cfg(test)]
+    let before_terminal_exit = test_hooks.catalog_scan_before_terminal_exit_once.clone();
+    #[cfg(test)]
+    let terminal_exit_reached = test_hooks.catalog_scan_terminal_exit_reached.clone();
+    #[cfg(test)]
+    let terminal_exit_release = test_hooks.catalog_scan_terminal_exit_release.clone();
+    #[cfg(test)]
+    let injected_sqlite_busy_failures = test_hooks
+        .catalog_scan_injected_sqlite_busy_failures
+        .clone();
+    #[cfg(test)]
+    let contention_backoff_started = test_hooks.catalog_scan_contention_backoff_started.clone();
+    #[cfg(test)]
+    let busy_lease_cancel_barrier = test_hooks
+        .catalog_scan_busy_lease_cancel_barrier_once
+        .clone();
+
+    #[cfg(test)]
+    let start_barrier = { before_start.lock().take() };
+    #[cfg(test)]
+    if let Some(barrier) = start_barrier {
+        tokio::select! {
+            _ = barrier.wait() => {}
+            _ = cancellation.cancelled() => {
+                reconcile_cancelled_catalog_scan(
+                    config_dir.clone(),
+                    catalog_id.clone(),
+                ).await;
+                return;
+            },
+        }
+    }
+    let mut retry_delay = std::time::Duration::from_millis(10);
+    let mut contention_retries = 0_u8;
+    'driver_session: loop {
+        let mut driver = loop {
+            if cancellation.is_cancelled() {
+                reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone()).await;
+                return;
+            }
+            let pass_config_dir = config_dir.clone();
+            let pass_catalog_id = catalog_id.clone();
+            let start = catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
+                AttachedCatalogParquetScanDriver::try_start(
+                    &CatalogRegistry::new(pass_config_dir),
+                    &pass_catalog_id,
+                )
+            })
+            .await;
+            match start {
+                Ok(Some(Ok(driver))) => break driver,
+                Ok(Some(Err(error))) if error.is_retryable_contention() => {
+                    if contention_retries >= CATALOG_SCAN_MAX_CONTENTION_RETRIES {
+                        publish_catalog_scan_contention_exhausted(
+                            config_dir.clone(),
+                            catalog_id.clone(),
+                        )
+                        .await;
+                        return;
+                    }
+                    contention_retries = contention_retries.saturating_add(1);
+                    tokio::select! {
+                        _ = tokio::time::sleep(retry_delay) => {}
+                        _ = cancellation.cancelled() => {
+                            reconcile_cancelled_catalog_scan(
+                                config_dir.clone(),
+                                catalog_id.clone(),
+                            ).await;
+                            return;
+                        },
+                    }
+                    retry_delay = retry_delay
+                        .saturating_mul(2)
+                        .min(CATALOG_SCAN_START_MAX_BACKOFF);
+                }
+                Ok(Some(Err(CatalogParquetScanError::Busy(_)))) => {
+                    let retry_config_dir = config_dir.clone();
+                    let retry_catalog_id = catalog_id.clone();
+                    let should_retry =
+                        catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
+                            let registry = CatalogRegistry::new(retry_config_dir);
+                            let catalog = registry.open_attached(&retry_catalog_id)?;
+                            let desired = catalog.processing_control()?.desired_state;
+                            let actual = catalog.contract_state()?.processing.state;
+                            Ok::<_, CatalogError>(
+                                desired == CatalogProcessingDesiredState::Running
+                                    && actual != CatalogProcessingState::Completed,
+                            )
+                        })
+                        .await;
+                    match should_retry {
+                        Ok(Some(Ok(true))) => {}
+                        Ok(Some(Ok(false))) => {
+                            #[cfg(test)]
+                            catalog_scan_terminal_test_barrier(
+                                &before_terminal_exit,
+                                &terminal_exit_reached,
+                                &terminal_exit_release,
+                                &cancellation,
+                            )
+                            .await;
+                            if cancellation.is_cancelled() {
+                                reconcile_cancelled_catalog_scan(
+                                    config_dir.clone(),
+                                    catalog_id.clone(),
+                                )
+                                .await;
+                            }
+                            return;
+                        }
+                        Ok(Some(Err(CatalogError::NotFound(_)))) => return,
+                        Ok(None) => {
+                            reconcile_cancelled_catalog_scan(
+                                config_dir.clone(),
+                                catalog_id.clone(),
+                            )
+                            .await;
+                            return;
+                        }
+                        Ok(Some(Err(error))) => {
+                            tracing::error!(
+                                event = "catalog_parquet_scan_retry_check_failed",
+                                catalog_id,
+                                error = %error,
+                                "catalog Parquet scanner stopped after a terminal retry check"
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                event = "catalog_parquet_scan_task_failed",
+                                catalog_id,
+                                error = %error,
+                                "catalog Parquet scanner retry check stopped"
+                            );
+                            return;
+                        }
+                    }
+                    #[cfg(test)]
+                    {
+                        let handshake_armed = { busy_lease_cancel_barrier.lock().is_some() };
+                        contention_backoff_started.notify_one();
+                        if handshake_armed {
+                            // Hold this exact lease-wait boundary for the cancellation fixture,
+                            // rather than relying on a timer to keep the waiter here.
+                            cancellation.cancelled().await;
+                        }
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(retry_delay) => {}
+                        _ = cancellation.cancelled() => {
+                            #[cfg(test)]
+                            {
+                                let barrier = { busy_lease_cancel_barrier.lock().take() };
+                                if let Some(barrier) = barrier {
+                                    // First acknowledge cancellation while the fixture still
+                                    // owns the lease; then wait for its explicit release.
+                                    barrier.wait().await;
+                                    barrier.wait().await;
+                                }
+                            }
+                            reconcile_cancelled_catalog_scan(
+                                config_dir.clone(),
+                                catalog_id.clone(),
+                            ).await;
+                            return;
+                        },
+                    }
+                    retry_delay = retry_delay
+                        .saturating_mul(2)
+                        .min(CATALOG_SCAN_START_MAX_BACKOFF);
+                }
+                Ok(Some(Err(error))) => {
+                    tracing::error!(
+                        event = "catalog_parquet_scan_start_failed",
+                        catalog_id,
+                        error = %error,
+                        "catalog Parquet scanner could not start"
+                    );
+                    return;
+                }
+                Ok(None) => {
+                    reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone()).await;
+                    return;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        event = "catalog_parquet_scan_task_failed",
+                        catalog_id,
+                        error = %error,
+                        "catalog Parquet scanner start task stopped"
+                    );
+                    return;
+                }
+            }
+        };
+        loop {
+            let pass_source = plan.source.clone();
+            let pass_options = plan.options.clone();
+            let pass_cancellation = cancellation.clone();
+            #[cfg(test)]
+            let pass_injected_sqlite_busy_failures = injected_sqlite_busy_failures.clone();
+            let result = catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
+                #[cfg(test)]
+                if pass_injected_sqlite_busy_failures
+                    .fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |remaining| remaining.checked_sub(1),
+                    )
+                    .is_ok()
+                {
+                    return (
+                        driver,
+                        Err(CatalogParquetScanError::Catalog(CatalogError::Sqlite(
+                            rusqlite::Error::SqliteFailure(
+                                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                                Some("injected scheduler contention".to_owned()),
+                            ),
+                        ))),
+                    );
+                }
+                let result = driver.scan_pass_with_cancel(&pass_source, &pass_options, || {
+                    pass_cancellation.is_cancelled()
+                });
+                (driver, result)
+            })
+            .await;
+            match result {
+                Err(error) => {
+                    tracing::error!(
+                        event = "catalog_parquet_scan_task_failed",
+                        catalog_id,
+                        error = %error,
+                        "catalog Parquet scanner task stopped"
+                    );
+                    break;
+                }
+                Ok(Some((next_driver, Ok(report)))) => {
+                    driver = next_driver;
+                    contention_retries = 0;
+                    retry_delay = std::time::Duration::from_millis(10);
+                    if report.paused || report.checkpoint.complete {
+                        drop(driver);
+                        #[cfg(test)]
+                        catalog_scan_terminal_test_barrier(
+                            &before_terminal_exit,
+                            &terminal_exit_reached,
+                            &terminal_exit_release,
+                            &cancellation,
+                        )
+                        .await;
+                        if cancellation.is_cancelled() {
+                            reconcile_cancelled_catalog_scan(
+                                config_dir.clone(),
+                                catalog_id.clone(),
+                            )
+                            .await;
+                        }
+                        break 'driver_session;
+                    }
+                    #[cfg(test)]
+                    if stop_after_pass.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        break 'driver_session;
+                    }
+                    if cancellation.is_cancelled() {
+                        driver.publish_interrupted();
+                        break 'driver_session;
+                    }
+                }
+                Ok(Some((_next_driver, Err(CatalogParquetScanError::Interrupted(error))))) => {
+                    tracing::info!(
+                        event = "catalog_parquet_scan_interrupted",
+                        catalog_id,
+                        error,
+                        "catalog Parquet scanner stopped for server shutdown"
+                    );
+                    break 'driver_session;
+                }
+                Ok(Some((next_driver, Err(error)))) if error.is_retryable_contention() => {
+                    tracing::debug!(
+                        event = "catalog_parquet_scan_contention_retry",
+                        catalog_id,
+                        error = %error,
+                        "catalog Parquet scanner will retry transient SQLite contention"
+                    );
+                    if contention_retries >= CATALOG_SCAN_MAX_CONTENTION_RETRIES {
+                        if let Err(publish_error) = next_driver.publish_contention_exhausted() {
+                            tracing::error!(
+                                event = "catalog_parquet_scan_contention_exhaustion_publish_failed",
+                                catalog_id,
+                                error = %publish_error,
+                                "catalog Parquet scanner could not publish contention exhaustion"
+                            );
+                        }
+                        break 'driver_session;
+                    }
+                    contention_retries = contention_retries.saturating_add(1);
+                    drop(next_driver);
+                    #[cfg(test)]
+                    contention_backoff_started.notify_waiters();
+                    if cancellation.is_cancelled() {
+                        reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone())
+                            .await;
+                        break 'driver_session;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(retry_delay) => {}
+                        _ = cancellation.cancelled() => {
+                            reconcile_cancelled_catalog_scan(
+                                config_dir.clone(),
+                                catalog_id.clone(),
+                            ).await;
+                            break 'driver_session;
+                        },
+                    }
+                    retry_delay = retry_delay
+                        .saturating_mul(2)
+                        .min(CATALOG_SCAN_START_MAX_BACKOFF);
+                    continue 'driver_session;
+                }
+                Ok(Some((_next_driver, Err(error)))) => {
+                    tracing::error!(
+                        event = "catalog_parquet_scan_failed",
+                        catalog_id,
+                        error = %error,
+                        "catalog Parquet scanner stopped"
+                    );
+                    break 'driver_session;
+                }
+                Ok(None) => {
+                    reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone()).await;
+                    break 'driver_session;
+                }
+            }
         }
     }
 }
@@ -2959,90 +2768,15 @@ const fn default_catalog_analysis_batch_size() -> u32 {
 }
 
 #[cfg(test)]
-mod scan_admission_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::time::Duration;
+pub(crate) use crate::test_hooks::{
+    catalog_cache_stage_test_hook, install_catalog_cache_stage_test_hook,
+    CatalogCacheStageTestHook, CATALOG_CACHE_STAGE_TEST_CANDIDATE_TIMEOUT,
+};
 
-    fn materialization_record(expected_hash: Option<&str>) -> CatalogRecord {
-        CatalogRecord {
-            id: "record".to_owned(),
-            image_path: "images/record.png".to_owned(),
-            thumbnail_path: None,
-            embedding_path: None,
-            artifact_path: None,
-            metadata: serde_json::json!({
-                "acquisition": {"contentHash": expected_hash}
-            }),
-            created_at: "2026-07-27T00:00:00Z".to_owned(),
-            updated_at: "2026-07-27T00:00:00Z".to_owned(),
-        }
-    }
+#[cfg(test)]
+#[allow(unused_imports)] // Preserve the existing test-control type path.
+pub(crate) use crate::test_hooks::CatalogCacheStageTestControl;
 
-    #[test]
-    fn remote_fallback_must_match_the_catalog_acquisition_hash() {
-        assert!(
-            verify_record_content_hash(&materialization_record(Some("expected")), "changed")
-                .is_err()
-        );
-        assert!(
-            verify_record_content_hash(&materialization_record(Some("expected")), "expected")
-                .is_ok()
-        );
-        assert!(verify_record_content_hash(&materialization_record(None), "downloaded").is_ok());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn global_scan_admission_bounds_distinct_catalog_work_and_preserves_db_capacity() {
-        let slots = Arc::new(Semaphore::new(2));
-        let release = Arc::new(AtomicBool::new(false));
-        let active = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let cancellation = CancellationToken::new();
-        let mut tasks = Vec::new();
-        for _ in 0..8 {
-            let slots = slots.clone();
-            let release = release.clone();
-            let active = active.clone();
-            let peak = peak.clone();
-            let cancellation = cancellation.clone();
-            tasks.push(tokio::spawn(async move {
-                catalog_scan_blocking(slots, &cancellation, move || {
-                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(now, Ordering::SeqCst);
-                    while !release.load(Ordering::SeqCst) {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    active.fetch_sub(1, Ordering::SeqCst);
-                })
-                .await
-                .expect("blocking task joins")
-            }));
-        }
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while active.load(Ordering::SeqCst) != 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("two scan slots fill");
-        assert_eq!(peak.load(Ordering::SeqCst), 2);
-        assert_eq!(slots.available_permits(), 0);
-
-        let status_result = tokio::time::timeout(
-            Duration::from_millis(100),
-            tokio::task::spawn_blocking(|| 42_u64),
-        )
-        .await
-        .expect("unrelated catalog DB work retains blocking-pool capacity")
-        .expect("status task joins");
-        assert_eq!(status_result, 42);
-
-        release.store(true, Ordering::SeqCst);
-        for task in tasks {
-            assert!(task.await.expect("admission task joins").is_some());
-        }
-        assert_eq!(peak.load(Ordering::SeqCst), 2);
-    }
-}
+#[cfg(test)]
+#[path = "catalogs/tests/scan_admission_tests.rs"]
+mod scan_admission_tests;

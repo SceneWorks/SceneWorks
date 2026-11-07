@@ -57,8 +57,17 @@ const shippedLora = (id) => {
   };
 };
 
-const MINIMAX = shippedModel("minimax_h3");
-const MINIMAX_REF = shippedModel("minimax_h3_ref");
+// Install-state fields are supplied by the catalog API, rather than the static manifest.
+const withInstalledH3Tiers = (model, installed = ["q4", "q8", "bf16"]) => ({
+  ...model,
+  hasVariantMatrix: true,
+  variants: ["q4", "q8", "bf16"].map((variant) => ({
+    variant,
+    installState: installed.includes(variant) ? "installed" : "missing",
+  })),
+});
+const MINIMAX = withInstalledH3Tiers(shippedModel("minimax_h3"));
+const MINIMAX_REF = withInstalledH3Tiers(shippedModel("minimax_h3_ref"));
 // The control leg for every "only where it does something" gate below. Bernini is a video model
 // with no accelerator adapter at all, so a change that showed the turbo control globally rather
 // than per-family fails here.
@@ -162,6 +171,29 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
   };
   const lastJob = (context) => context.createVideoJob.mock.calls.at(-1)[0];
   const jobLoraIds = (context) => (lastJob(context).loras ?? []).map((lora) => lora.id);
+  const tierPicker = () => container.querySelector("label.quant-tier-picker select");
+
+  it.each([MINIMAX, MINIMAX_REF])("shows the CUDA tier selector for $id even when bf16 needs repair", async (model) => {
+    await render(baseContext({
+      macCapabilities: null,
+      videoModels: [withInstalledH3Tiers(model, ["q4", "q8"])],
+    }));
+    expect(tierPicker()).toBeTruthy();
+    expect(Object.fromEntries([...tierPicker().options].map((option) => [option.value, option.disabled])))
+      .toEqual({ q4: false, q8: false, bf16: true });
+  });
+
+  it("sends the chosen CUDA H3 tier through the native request field", async () => {
+    const context = baseContext({ macCapabilities: null });
+    await render(context);
+    expect(tierPicker()).toBeTruthy();
+    for (const [tier, bits] of [["q4", 4], ["q8", 8], ["bf16", 0]]) {
+      await act(async () => setSelect(tierPicker(), tier));
+      await generate();
+      expect(lastJob(context).advanced.mlxQuantize).toBe(bits);
+      expect(lastJob(context).advanced).not.toHaveProperty("quantization");
+    }
+  });
   // The GENERIC picker's own controls — the second entry point this story has to keep in agreement
   // with the turbo control. Selecting goes through "Add LoRA" → a `.lora-pick-row`; deselecting
   // goes through the selected slot's own Remove button.

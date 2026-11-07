@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 // sc-11967 (S8): the active video timeline is lifted to App-level useTimelines and
 // survives soft navigation in memory. Two paths used to silently clobber the user's
 // unsaved in-memory structural edits:
@@ -14,6 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../timelineGeneration.js";
 import { useTimelines } from "./useTimelines.js";
+import { FilmLifecycle } from "../components/editor/FilmLifecycle.jsx";
+import { FilmReview } from "../components/editor/FilmReview.jsx";
 
 // Programmable apiFetch: a per-test router keyed by method + path shape. Each call is
 // also recorded so a test can assert the server copy was persisted (generation never
@@ -27,19 +30,13 @@ vi.mock("../api.js", async (importOriginal) => {
     apiFetch: vi.fn(async (path, _token, options = {}) => {
       const method = options.method ?? "GET";
       const body = options.body ? JSON.parse(options.body) : undefined;
-      apiCalls.push({ path, method, body });
+      apiCalls.push({ path, method, body, signal: options.signal });
       return apiRouter({ path, method, body });
     }),
   };
 });
 
-async function settle() {
-  await act(async () => {
-    for (let i = 0; i < 6; i += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 function makeTimeline(overrides = {}) {
   return {
@@ -124,9 +121,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function mount() {
+function mount(renderChild = () => null) {
   const activeProject = { id: "proj_1", name: "Proj" };
   const activeProjectRef = { current: activeProject };
+  const setError = () => {};
   let latest = null;
   function Harness() {
     const [, setN] = useState(0);
@@ -135,7 +133,7 @@ function mount() {
         token: "tok",
         activeProject,
         activeProjectRef,
-        setError: () => {},
+        setError,
         pushNotice: pushNoticeSpy,
         requestedGpu: "auto",
         setActiveView: () => {},
@@ -143,7 +141,7 @@ function mount() {
       }),
       rerender: () => setN((n) => n + 1),
     };
-    return null;
+    return renderChild(latest.api);
   }
   root = createRoot(container);
   act(() => root.render(<Harness />));
@@ -226,13 +224,176 @@ describe("useTimelines dirty tracking (sc-11967)", () => {
   });
 });
 
-describe("useTimelines film delivery polling", () => {
+describe("useTimelines film delivery feed", () => {
+  it("refreshes and rebases the selected cut after a terminal review swap", async () => {
+    const timeline = makeTimeline({ revision: 1, filmAssembly: { runs: { run_1: {} } }, tracks: [{ id: "track_main", name: "Main", items: [{ id: "clip", assetId: "old", type: "video", timelineStart: 0, timelineEnd: 4 }] }] });
+    const saved = { ...timeline, revision: 2, tracks: [{ ...timeline.tracks[0], items: [{ ...timeline.tracks[0].items[0], assetId: "new" }] }] };
+    const run = { locator: { id: "run_1", draftId: "film_1" }, controllerActive: false, record: { timeline: { timelineId: "tl_1" }, shots: [{ shotId: "SH010", selectedAttempt: 1, attempts: [{ attempt: 1, take: { assetId: "old" } }, { attempt: 2, take: { assetId: "new" } }], reviews: [] }] } };
+    const view = { run, takeAssets: [], observations: [], selections: [{ shotId: "SH010", timelineAttempt: 1, recordSelectedAttempt: 1 }] };
+    let swapped = false;
+    let enabled = false;
+    const get = mount((api) => enabled && api.activeTimeline ? <FilmReview draft={{ id: "film_1", productionPlan: { shots: [{ id: "SH010" }] } }} projectId="proj_1" runLocatorId="run_1" refreshFilmTimeline={api.refreshFilmTimeline} refreshTimelines={vi.fn()} onChange={vi.fn()} setNotice={vi.fn()} setSelectedTimelineId={vi.fn()} token="tok" /> : null);
+    await loadSelected(get, timeline);
+    act(() => get().api.setActiveTimeline({ ...get().api.activeTimeline, name: "Unsaved title" }));
+    apiRouter = ({ path }) => {
+      if (path.endsWith("/review/swap")) { swapped = true; return view; }
+      if (path.endsWith("/review")) return view;
+      if (path.endsWith("/timelines/tl_1")) return swapped ? saved : timeline;
+      return [];
+    };
+    enabled = true;
+    act(() => get().rerender());
+    await settle();
+    const swap = [...container.querySelectorAll("button")].filter((button) => button.textContent === "Use in saved cut" && !button.disabled).at(-1);
+    expect(swap).toBeTruthy();
+    await act(async () => swap.click());
+    await settle();
+    expect(swapped).toBe(true);
+    expect(get().api.activeTimeline.name).toBe("Unsaved title");
+    expect(get().api.activeTimeline.tracks[0].items[0].assetId).toBe("new");
+    expect(get().api.isActiveTimelineDirty()).toBe(true);
+  });
+
+  it("retries a transient terminal cut failure through the lifecycle feed then stops", async () => {
+    vi.useFakeTimers();
+    const timeline = makeTimeline({ revision: 1, filmAssembly: { runs: { run_1: {} } } });
+    const running = { locator: { id: "run_1", draftId: "film_1" }, controllerActive: true };
+    let active = true;
+    let cutReads = 0;
+    let enabled = false;
+    const noop = () => {};
+    const get = mount((api) => enabled && api.activeTimeline ? <FilmLifecycle draftId="film_1" projectId="proj_1" token="tok" onRuns={api.refreshFilmTimeline} onRunChange={noop} setNotice={noop} /> : null);
+    await loadSelected(get, timeline);
+    apiCalls.length = 0;
+    apiRouter = ({ path }) => {
+      if (path.endsWith("/film-runs")) return [{ ...running, controllerActive: active }];
+      if (path.endsWith("/planning")) return null;
+      if (path.endsWith("/timelines/tl_1")) { cutReads += 1; if (cutReads === 2) throw new Error("temporary"); return { ...timeline, revision: active ? 1 : 2 }; }
+      return [];
+    };
+    enabled = true;
+    act(() => get().rerender());
+    await settle();
+    expect(cutReads).toBe(1);
+    active = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(cutReads).toBe(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(cutReads).toBe(3);
+    expect(get().api.activeTimeline.revision).toBe(2);
+    const totalCalls = apiCalls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(apiCalls.length).toBe(totalCalls);
+  });
+
+  it("retries an aborted explicit cut refresh even before film metadata is loaded", async () => {
+    const get = mount();
+    const timeline = makeTimeline({ revision: 1 });
+    await loadSelected(get, timeline);
+    const owner = new AbortController();
+    let resolveOld;
+    apiRouter = () => new Promise((resolve) => { resolveOld = resolve; });
+    act(() => { get().api.refreshFilmTimeline([], owner.signal, { force: true, timelineId: "tl_1" }); });
+    owner.abort();
+    await act(async () => resolveOld({ ...timeline, revision: 2, name: "stale" }));
+    apiRouter = () => ({ ...timeline, revision: 2, name: "saved cut" });
+    await act(async () => get().api.refreshFilmTimeline([], new AbortController().signal));
+    expect(get().api.activeTimeline.name).toBe("saved cut");
+    const reads = apiCalls.length;
+    await act(async () => get().api.refreshFilmTimeline([], new AbortController().signal, { force: true, timelineId: "other" }));
+    expect(apiCalls).toHaveLength(reads);
+  });
+
+  it("bounds failed terminal retries and cancels a retry delay when hidden", async () => {
+    vi.useFakeTimers();
+    const get = mount();
+    const timeline = makeTimeline({ revision: 1, filmAssembly: { runs: { run_1: {} } } });
+    await loadSelected(get, timeline);
+    const running = [{ locator: { id: "run_1" }, controllerActive: true }];
+    const terminal = [{ locator: { id: "run_1" }, controllerActive: false }];
+    apiRouter = () => timeline;
+    await act(async () => get().api.refreshFilmTimeline(running, new AbortController().signal));
+    apiCalls.length = 0;
+    apiRouter = () => Promise.reject(new Error("unavailable"));
+    act(() => { get().api.refreshFilmTimeline(terminal, new AbortController().signal); });
+    await settle();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(apiCalls).toHaveLength(3);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(apiCalls).toHaveLength(3);
+    const owner = new AbortController();
+    act(() => { get().api.refreshFilmTimeline(terminal, owner.signal); });
+    await settle();
+    owner.abort();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(apiCalls).toHaveLength(4);
+    apiRouter = () => ({ ...timeline, revision: 2 });
+    await act(async () => get().api.refreshFilmTimeline(terminal, new AbortController().signal));
+    expect(get().api.activeTimeline.revision).toBe(2);
+  });
+
+  it("refreshes on active and terminal snapshots, then stops, and aborts on feed teardown", async () => {
+    vi.useFakeTimers();
+    const get = mount();
+    const timeline = makeTimeline({ filmAssembly: { runs: { run_1: {} } } });
+    await loadSelected(get, timeline);
+    apiCalls.length = 0;
+    apiRouter = () => timeline;
+    const owner = new AbortController();
+    const running = [{ locator: { id: "run_1" }, controllerActive: true }];
+    await act(async () => get().api.refreshFilmTimeline(running, owner.signal));
+    await settle();
+    expect(apiCalls).toHaveLength(1);
+    expect(apiCalls[0].signal).toBeInstanceOf(AbortSignal);
+    await act(async () => get().api.refreshFilmTimeline([{ locator: { id: "run_1" }, controllerActive: false }], owner.signal));
+    await settle();
+    expect(apiCalls).toHaveLength(2);
+    await act(async () => get().api.refreshFilmTimeline([{ locator: { id: "run_1" }, controllerActive: false }], owner.signal));
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(apiCalls).toHaveLength(2);
+    let resolve;
+    apiRouter = () => new Promise((done) => { resolve = done; });
+    act(() => { get().api.refreshFilmTimeline(running, owner.signal); });
+    const pendingSignal = apiCalls.at(-1).signal;
+    owner.abort();
+    expect(pendingSignal.aborted).toBe(true);
+    await act(async () => resolve({ ...timeline, name: "stale" }));
+    expect(get().api.activeTimeline.name).toBe("Main");
+  });
+
+  it("retries a terminal catch-up aborted by hiding before consuming the debt", async () => {
+    const get = mount();
+    const timeline = makeTimeline({ revision: 1, filmAssembly: { runs: { run_1: {} } } });
+    await loadSelected(get, timeline);
+    const running = [{ locator: { id: "run_1" }, controllerActive: true }];
+    const terminal = [{ locator: { id: "run_1" }, controllerActive: false }];
+    const owner = new AbortController();
+    apiRouter = () => timeline;
+    await act(async () => get().api.refreshFilmTimeline(running, owner.signal));
+    let resolveTerminal;
+    apiRouter = () => new Promise((resolve) => { resolveTerminal = resolve; });
+    act(() => { get().api.refreshFilmTimeline(terminal, owner.signal); });
+    owner.abort();
+    await act(async () => resolveTerminal({ ...timeline, revision: 2, name: "stale" }));
+    expect(get().api.activeTimeline.revision).toBe(1);
+    apiRouter = () => ({ ...timeline, revision: 2, name: "delivered" });
+    await act(async () => get().api.refreshFilmTimeline(terminal, new AbortController().signal));
+    expect(get().api.activeTimeline.name).toBe("delivered");
+    expect(get().api.activeTimeline.revision).toBe(2);
+    await act(async () => get().api.refreshFilmTimeline(running, new AbortController().signal));
+    apiRouter = () => Promise.reject(new Error("temporary failure"));
+    await act(async () => get().api.refreshFilmTimeline(terminal, new AbortController().signal));
+    apiRouter = () => ({ ...timeline, revision: 3, name: "retried" });
+    await act(async () => get().api.refreshFilmTimeline(terminal, new AbortController().signal));
+    expect(get().api.activeTimeline.name).toBe("retried");
+  });
+
   it("adopts a later clip on the same timeline revision stream without losing dirty edits or selection", async () => {
     vi.useFakeTimers();
     const get = mount();
     const first = makeTimeline({
       revision: 1,
-      filmAssembly: { runId: "run_1" },
+      filmAssembly: { runs: { run_1: {} } },
       tracks: [{ id: "track_main", name: "Main", items: [{ id: "item_1", assetId: "asset_1", type: "video", timelineStart: 0, timelineEnd: 4 }] }],
     });
     await loadSelected(get, first);
@@ -242,7 +403,7 @@ describe("useTimelines film delivery polling", () => {
 
     const delivered = makeTimeline({
       revision: 2,
-      filmAssembly: { runId: "run_1" },
+      filmAssembly: { runs: { run_1: {} } },
       tracks: [{ id: "track_main", name: "Main", items: [
         { id: "item_1", assetId: "asset_1", type: "video", timelineStart: 0, timelineEnd: 4 },
         { id: "item_2", assetId: "asset_2", type: "video", timelineStart: 4, timelineEnd: 8 },
@@ -254,7 +415,8 @@ describe("useTimelines film delivery polling", () => {
       return delivered;
     };
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    const feedSignal = new AbortController().signal;
+    await act(async () => get().api.refreshFilmTimeline([{ locator: { id: "run_1" }, controllerActive: true }], feedSignal));
     await settle();
     expect(get().api.selectedTimelineId).toBe("tl_1");
     expect(get().api.activeTimeline.name).toBe("Unsaved title");

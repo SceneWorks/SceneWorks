@@ -7,6 +7,28 @@ on:
         description: Exact SceneWorks SHA, matching the selected dispatch ref
         required: true
         type: string
+      suite:
+        description: Explicit manual validation suite (CPU fixtures use no GPU)
+        required: false
+        type: choice
+        default: nax
+        options: [nax, aesthetic-cpu, cv]
+      inference_sha:
+        description: Exact locked inference SHA (required by aesthetic-cpu and cv)
+        required: false
+        type: string
+        default: ""
+      backend:
+        description: CV provider backend (used only by suite=cv)
+        required: false
+        type: choice
+        default: mlx
+        options: [mlx, cuda]
+      build_only:
+        description: CV compile and discovery only, without model execution
+        required: false
+        type: boolean
+        default: true
       mac_go:
         description: Michael explicitly approved this Mac GPU run
         required: true
@@ -27,7 +49,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validate:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && (inputs.suite == '' || inputs.suite == 'nax') }}
     runs-on: [self-hosted, macOS, ARM64, nax]
     timeout-minutes: 45
     defaults:
@@ -135,3 +157,59 @@ jobs:
             ${{ runner.temp }}/nax-native-binding/native-metallib-binding.json
           if-no-files-found: error
           retention-days: 14
+
+  aesthetic-cpu:
+    # Dedicated manual learned validation: never callable by ordinary push/PR CI.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.suite == 'aesthetic-cpu' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AESTHETIC_SOURCE_SHA: ${{ inputs.source_sha }}
+      AESTHETIC_DISPATCH_SHA: ${{ github.sha }}
+      AESTHETIC_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      AESTHETIC_SUITE: ${{ inputs.suite }}
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Initialize CPU evidence paths on the assigned runner
+        shell: bash
+        run: |
+          printf 'AESTHETIC_OUTPUT=%s/aesthetic-cpu-evidence\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'CARGO_TARGET_DIR=%s/aesthetic-cpu-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Admit exact manual source and fixture identities before build
+        run: node scripts/ci/aesthetic-cpu-validation.mjs --preflight
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+      - name: Execute exact ignored CPU aesthetic cases and record body completion
+        run: node scripts/ci/aesthetic-cpu-validation.mjs --run
+      - name: Retain learned execution evidence separately from ordinary CI
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aesthetic-cpu-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aesthetic-cpu-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+  cv:
+    # Registered manual dispatcher bridge; no ordinary CI can select this suite.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.suite == 'cv' }}
+    uses: ./.github/workflows/cv-provider-validation.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      inference_sha: ${{ inputs.inference_sha }}
+      backend: ${{ inputs.backend }}
+      build_only: ${{ inputs.build_only }}
+      mac_go: ${{ inputs.mac_go }}

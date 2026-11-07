@@ -8,6 +8,25 @@
 //! All three losses share one reference-time person detector (ViTPose), so the ViTPose checkpoint
 //! is needed whenever any of them is on.
 
+/// Every advanced technique key parsed by this module.
+pub const TECHNIQUE_KEYS: &[&str] = &[
+    "bodyProportionWeight",
+    "bodyProportionMinT",
+    "bodyProportionMaxT",
+    "bodyProportionEvery",
+    BODY_PROPORTION_INCLUDE_HEAD_KEY,
+    "bodyShapeWeight",
+    "bodyShapeMinT",
+    "bodyShapeMaxT",
+    "bodyShapeEvery",
+    BODY_SHAPE_MIN_COS_KEY,
+    "normalWeight",
+    "normalMinT",
+    "normalMaxT",
+    "normalEvery",
+    NORMAL_RESTRICT_TO_SUBJECT_KEY,
+];
+
 use serde_json::Value;
 
 use super::depth_anchoring::AuxTrainingModel;

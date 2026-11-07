@@ -650,13 +650,7 @@ fn seed_builtin_manifests() -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
-/// Data directory: the settings override if set, otherwise the platform default.
-fn resolved_data_dir() -> PathBuf {
-    crate::settings::load_settings()
-        .data_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(default_data_dir)
-}
+use crate::settings::resolved_data_dir;
 
 fn append_log(path: &Path, line: &str) {
     if let Some(parent) = path.parent() {
@@ -1763,8 +1757,7 @@ fn ensure_cred_ipc(app: &AppHandle) {
     if slot.is_some() {
         return;
     }
-    let socket = app_support_dir().join("cred-ipc.sock");
-    match crate::cred_ipc::start(socket) {
+    match crate::cred_ipc::start() {
         Some(handle) => *slot = Some(handle),
         None => append_log(
             &logs_dir().join("api.log"),
@@ -1949,21 +1942,8 @@ fn loopback_authority(api_url: &str) -> Result<&str, String> {
         .ok_or_else(|| format!("unsupported api url {api_url}"))
 }
 
-/// Minimal blocking HTTP/1.1 POST of a JSON body to the LOCAL API, returning
-/// `Ok(true)` when the response body is anything other than JSON `null`.
-///
-/// Hand-rolled over `TcpStream` rather than through an HTTP client crate, on purpose
-/// (sc-18182). `current_api_url` is always `http://127.0.0.1:<port>` — plain HTTP on
-/// loopback, never TLS or a proxy — so a full client buys nothing and costs a lot
-/// here: adding `reqwest` to this crate collided with the `reqwest 0.12` already
-/// declared for the Windows/Linux CUDA provisioner (two direct deps of the same name
-/// → E0464, breaking the Windows desktop build), and on macOS
-/// `reqwest::Client::builder().build()` PANICS with "No provider set" — reqwest 0.13
-/// resolves `__rustls` through feature unification with tauri-plugin-updater but no
-/// crypto provider, and that panic would kill this supervisor thread outright,
-/// leaving the worker permanently unsupervised. This is 40 lines with none of that.
-///
-/// All timeouts are bounded so a wedged API cannot stall the worker restart.
+/// Desktop supervisor owns the synchronous adapter; HTTP framing, response bounds,
+/// timeouts and authentication are shared with the worker's control-plane client.
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn post_loopback_json(
     api_url: &str,
@@ -1971,71 +1951,20 @@ fn post_loopback_json(
     body: &str,
     access_token: Option<String>,
 ) -> Result<bool, String> {
-    use std::io::{Read, Write};
-    use std::net::{TcpStream, ToSocketAddrs};
-
-    const TIMEOUT: Duration = Duration::from_secs(5);
     let authority = loopback_authority(api_url)?;
-    let address = authority
-        .to_socket_addrs()
-        .map_err(|error| error.to_string())?
-        .next()
-        .ok_or_else(|| format!("no address for {authority}"))?;
-    let mut stream = TcpStream::connect_timeout(&address, TIMEOUT).map_err(|e| e.to_string())?;
-    stream
-        .set_read_timeout(Some(TIMEOUT))
-        .and_then(|()| stream.set_write_timeout(Some(TIMEOUT)))
-        .map_err(|error| error.to_string())?;
-
-    // The route is not in the API's PUBLIC_PATHS, so LAN mode requires the same token
-    // the worker children are handed.
-    //
-    // The token is interpolated into a header line we write ourselves, so nothing
-    // else will validate it (sc-18182): `set_remote_password` only trims and rejects
-    // empty, so a password containing CR/LF would inject arbitrary headers or smuggle
-    // a second request. Drop the header rather than emit a malformed one — the report
-    // then fails a 401 and is logged, the correct best-effort outcome.
-    //
-    // This is deliberately STRICTER than `HeaderValue`, which also admits HTAB and
-    // the C1 range: a password is a single line of text, so rejecting every control
-    // character costs nothing real and needs no per-codepoint reasoning.
-    let auth_header = access_token
-        .filter(|token| !token.chars().any(|c| c.is_control()))
-        .map(|token| format!("X-SceneWorks-Token: {token}\r\n"))
-        .unwrap_or_default();
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\n\
-         Content-Length: {len}\r\n{auth_header}Connection: close\r\n\r\n{body}",
-        len = body.len()
-    );
-    stream
-        .write_all(request.as_bytes())
-        .and_then(|()| stream.flush())
-        .map_err(|error| error.to_string())?;
-
-    let mut response = String::new();
-    // `Connection: close` means the server ends the body by closing, so read to EOF.
-    // A non-UTF8 body would error here; the API only ever answers JSON.
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| error.to_string())?;
-
-    let status = response
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| "malformed status line".to_owned())?;
-    if !(200..300).contains(&status) {
-        return Err(format!("api responded {status}"));
+    let address: std::net::SocketAddr = authority
+        .parse()
+        .map_err(|_| "Invalid loopback API address".to_owned())?;
+    if !address.ip().is_loopback() {
+        return Err("API control address must be loopback".to_owned());
     }
-    // The endpoint returns the failed job, or `null` when this worker id owned no
-    // active job. Distinguishing them keeps the log honest — see the no-op note in
-    // `report_worker_terminated`'s doc comment.
-    let payload = response
-        .split_once("\r\n\r\n")
-        .map(|(_, body)| body.trim())
-        .unwrap_or_default();
-    Ok(!payload.is_empty() && payload != "null")
+    tauri::async_runtime::block_on(sceneworks_core::api_control::post_json(
+        api_url,
+        path,
+        body,
+        access_token.as_deref(),
+    ))
+    .map(|value| !value.is_null())
 }
 
 /// Best-effort: tell the API that a supervised worker child died abnormally, so its
@@ -2197,7 +2126,7 @@ fn supervise_worker(
                         &format!("[desktop] {label} worker environment setup failed: {error}\n"),
                     );
                     std::thread::sleep(Duration::from_secs(backoff));
-                    backoff = (backoff * 2).min(30);
+                    backoff = sceneworks_core::network_policy::next_retry_delay_seconds(backoff);
                     continue;
                 }
             };
@@ -2210,7 +2139,7 @@ fn supervise_worker(
                         &format!("[desktop] {label} worker spawn failed: {error}\n"),
                     );
                     std::thread::sleep(Duration::from_secs(backoff));
-                    backoff = (backoff * 2).min(30);
+                    backoff = sceneworks_core::network_policy::next_retry_delay_seconds(backoff);
                     continue;
                 }
             };
@@ -2400,7 +2329,7 @@ fn supervise_worker(
                 &format!("[desktop] restarting {label} worker in {backoff}s\n"),
             );
             std::thread::sleep(Duration::from_secs(backoff));
-            backoff = (backoff * 2).min(30);
+            backoff = sceneworks_core::network_policy::next_retry_delay_seconds(backoff);
         }
     });
 }
@@ -2649,9 +2578,7 @@ fn candle_worker_slot(managed: &Managed) -> &Mutex<Option<CommandChild>> {
 }
 
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
-}
+use sceneworks_core::process::pid_alive_u32 as pid_alive;
 
 /// File holding this launch's sidecar PIDs, used to reap orphans left by a prior
 /// unclean exit. Linux treats it as mutable state under `XDG_STATE_HOME`; other
@@ -2670,15 +2597,8 @@ fn sidecar_pidfile() -> PathBuf {
 /// Persist the current sidecar PIDs (best effort, atomic via temp+rename).
 fn write_sidecar_pidfile(pids: &SidecarPids) {
     let path = sidecar_pidfile();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let Ok(json) = serde_json::to_vec_pretty(pids) else {
-        return;
-    };
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, &json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+    if let Ok(json) = serde_json::to_vec_pretty(pids) {
+        let _ = sceneworks_core::fsutil::write_atomic(&path, &json);
     }
 }
 
@@ -2871,11 +2791,15 @@ fn is_our_sidecar(pid: u32) -> bool {
 
 #[cfg(unix)]
 fn worker_shutdown_grace_seconds() -> u64 {
-    std::env::var("SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(10)
-        .clamp(1, 30)
+    // Startup rejects this malformed setting. Teardown still needs a bounded grace
+    // if the environment changes later; the shared parser emits the key-only diagnostic.
+    sceneworks_core::env_util::env_u64_any(
+        &["SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS"],
+        10,
+        false,
+    )
+    .unwrap_or(10)
+    .clamp(1, 30)
 }
 
 /// Direct children of every thread in a Linux process. A Tokio worker thread can
@@ -3155,9 +3079,8 @@ fn begin_teardown(app: &AppHandle, then: Teardown) -> bool {
         // Clean exit: drop the pidfile so the next launch doesn't try to reap
         // PIDs we already terminated.
         let _ = std::fs::remove_file(sidecar_pidfile());
-        // Unlink the credential IPC socket (sc-5891) so a graceful quit doesn't leave a
-        // stale `cred-ipc.sock` in the data dir. A crash/force-quit skips this, but the
-        // next launch's bind reaps it (`cred_ipc::start` removes a stale socket first).
+        // Remove this launch's private temporary socket directory. Each launch has
+        // its own endpoint, so a crash cannot block the next launch's bind.
         if let Some(cred_ipc) = cred_ipc {
             cred_ipc.cleanup();
         }
@@ -3852,7 +3775,11 @@ pub async fn start_setup(app: AppHandle) {
             return;
         }
     }
-    run_startup(app.clone()).await;
+    match tauri::async_runtime::spawn_blocking(crate::settings::validate_settings_file).await {
+        Ok(Ok(())) => run_startup(app.clone()).await,
+        Ok(Err(error)) => emit(&app, "error", error, true),
+        Err(error) => emit(&app, "error", error.to_string(), true),
+    }
     app.state::<Managed>()
         .running
         .store(false, Ordering::SeqCst);
@@ -5107,7 +5034,7 @@ mod abnormal_exit_tests {
     /// Every blocking step is deadline-bounded (sc-18182). An unbounded `accept()`
     /// would HANG the whole test binary on exactly the regression these tests exist
     /// to catch — a reporter that never connects — instead of failing it.
-    fn serve_one_request(listener: std::net::TcpListener, reply: &'static [u8]) -> String {
+    fn serve_one_request(listener: std::net::TcpListener, reply: &[u8]) -> String {
         use std::io::{Read, Write};
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -5366,7 +5293,9 @@ mod abnormal_exit_tests {
             );
             let good_request = good_server.join().expect("server thread joins");
             assert!(
-                good_request.contains("X-SceneWorks-Token: hunter2\r\n"),
+                good_request
+                    .to_ascii_lowercase()
+                    .contains("x-sceneworks-token: hunter2\r\n"),
                 "a valid token must be sent, or LAN mode 401s and loses the \
                  attribution: got request:\n{good_request}"
             );
@@ -5396,6 +5325,23 @@ mod abnormal_exit_tests {
             !request.contains("X-SceneWorks-Token"),
             "the malformed token must be dropped entirely, got request:\n{request}"
         );
+    }
+    #[test]
+    fn shared_control_client_decodes_chunked_json_and_bounds_responses() {
+        use std::net::TcpListener;
+        for (reply, expected) in [
+            (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n8\r\n{\"id\":1}\r\n0\r\n\r\n".to_vec(), Ok(true)),
+            (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nnull\r\n0\r\n\r\n".to_vec(), Ok(false)),
+            ([format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 64 * 1024 + 1).into_bytes(), vec![b'x'; 64 * 1024 + 1]].concat(), Err("64 KiB")),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || serve_one_request(listener, &reply));
+            let result = post_loopback_json(&url, "/api/v1/workers/w/terminated", "{}", None);
+            server.join().unwrap();
+            match expected { Ok(value) => assert_eq!(result.unwrap(), value), Err(text) => assert!(result.unwrap_err().contains(text)) }
+        }
+        assert!(post_loopback_json("http://192.0.2.1:80", "/api", "{}", None).is_err());
     }
 }
 

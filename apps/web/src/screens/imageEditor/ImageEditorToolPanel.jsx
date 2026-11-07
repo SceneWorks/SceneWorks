@@ -1,59 +1,873 @@
+import { useMediaTicket } from "../../hooks/useMediaTicket.js";
 import React from "react";
 import { MossImageEditControls } from "../../components/MossImageEditControls.jsx";
 import { MossReferencePicker } from "../../components/MossReferencePicker.jsx";
 import { EditPromptTemplates } from "../../components/EditPromptTemplates.jsx";
 import { assetDisplayUrl } from "../../components/assetMedia.jsx";
-// sc-24113 — the ordered-reference helpers. Pure and shared with the Studio so the rail, the
-// payload builder and the tests all agree on what "reference 2" means.
 import { moveReference, referenceOrdinalLabel } from "../../imageReferenceLimits.js";
-import {
-  TRANSPARENCY_PROMPT_HINT,
-  showTransparencyToggle,
-  transparencyPromptSuggestion,
-} from "../../qwenAlpha.js";
+import { TRANSPARENCY_PROMPT_HINT, showTransparencyToggle, transparencyPromptSuggestion } from "../../qwenAlpha.js";
+import { UPSCALE_ENGINE_DESC } from "./metadata.jsx";
+
+import { CROP_RATIOS, EDIT_OUTPUT_ASPECTS } from "./geometry.js";
+import { FitModeControl, effectiveFitMode } from "../../components/FitModeControl.jsx";
+import { guidanceDefaultFromModel } from "../../samplerOptions.js";
+import { activeLayerOf, identityTransform } from "../../imageLayers.js";
+import { CurveEditor } from "../../components/CurveEditor.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../../components/StudioUpdateNotice.jsx";
+import { upscaleEngineIsRestoration, upscaleEngineHasSoftness, upscaleFactorsForEngine } from "../../imageJobs.js";
+import { IrisRestoreControls } from "../../components/IrisRestoreControls.jsx";
+import { COLOR_ADJUSTMENTS } from "./colorGradeMath.js";
+import { BOX_PALETTE, MAX_BOX_PALETTE, addPaletteColor, boxMetadataGaps, removePaletteColor } from "./boxGeometry.js";
+import { maskHasContent } from "./maskShared.js";
+import { EditorLoraPanel } from "./EditorLoraPanel.jsx";
 
 let renderObserverForTests = null;
+export function setImageEditorToolPanelRenderObserverForTests(observer) { renderObserverForTests = observer; }
 
-export function setImageEditorToolPanelRenderObserverForTests(observer) {
-  renderObserverForTests = observer;
+function EditorMovePanel({
+  working,
+  layerCount,
+  fitToView,
+  actualSize
+}) {
+
+  return (<>
+            <div className="ie-section">
+              <div className="ie-sec-title">Document</div>
+              <div className="ie-readout">
+                <span className="ie-readout-k">Dimensions</span>
+                <span className="ie-readout-v">
+                  {working.width} × {working.height}
+                </span>
+              </div>
+              <div className="ie-readout">
+                <span className="ie-readout-k">Layers</span>
+                <span className="ie-readout-v">{layerCount}</span>
+              </div>
+              <p className="ie-note">
+                Drag on the canvas to pan. Scroll to zoom. Pick a tool to start editing — each tool&apos;s controls appear
+                here.
+              </p>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Quick actions</div>
+              <button className="ie-btn block" onClick={fitToView} type="button">
+                Fit to view
+              </button>
+              <button className="ie-btn block" onClick={actualSize} type="button">
+                Actual size (100%)
+              </button>
+            </div>
+          </>);
 }
 
-export function useStableImageEditorToolPanelScope(scope) {
-  const latestScope = React.useRef(scope);
-  latestScope.current = scope;
-  const stableFunctions = React.useRef(null);
-  if (stableFunctions.current === null) {
-    stableFunctions.current = Object.fromEntries(
-      Object.entries(scope)
-        .filter(([, value]) => typeof value === "function")
-        .map(([key, value]) => [
-          key,
-          /^[A-Z]/.test(key)
-            ? value
-            : (...args) => latestScope.current[key](...args),
-        ]),
-    );
-  }
-  return Object.fromEntries(
-    Object.entries(scope).map(([key, value]) => [
-      key,
-      typeof value === "function" ? stableFunctions.current[key] : value,
-    ]),
-  );
+function EditorTransformPanel({
+  working,
+  setActiveTransform,
+  endTransformGesture,
+  onTransformSlider,
+  flipActiveLayer,
+  resetActiveLayerTransform,
+  setTool
+}) {
+const tLayer = activeLayerOf(working);
+const t = tLayer?.transform ?? identityTransform();
+const scalePct = Math.round(Math.abs(t.scaleX) * 100);
+const signX = t.scaleX < 0 ? -1 : 1;
+const signY = t.scaleY < 0 ? -1 : 1;
+  return (<>
+            <div className="ie-section">
+              <div className="ie-sec-title">Position</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">X</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setActiveTransform({ x: Number(event.target.value) || 0 })}
+                    type="number"
+                    value={Math.round(t.x)}
+                  />
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Y</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setActiveTransform({ y: Number(event.target.value) || 0 })}
+                    type="number"
+                    value={Math.round(t.y)}
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Scale &amp; rotation</div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Scale</span>
+                  <span className="ie-field-val">{scalePct}%</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={300}
+                  min={10}
+                  onBlur={endTransformGesture}
+                  onChange={(event) => {
+                    const pct = Number(event.target.value) / 100;
+                    onTransformSlider({ scaleX: signX * pct, scaleY: signY * pct });
+                  }}
+                  onMouseUp={endTransformGesture}
+                  onTouchEnd={endTransformGesture}
+                  type="range"
+                  value={scalePct}
+                />
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Rotation</span>
+                  <span className="ie-field-val">{Math.round(t.rotation)}°</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={180}
+                  min={-180}
+                  onBlur={endTransformGesture}
+                  onChange={(event) => onTransformSlider({ rotation: Number(event.target.value) })}
+                  onMouseUp={endTransformGesture}
+                  onTouchEnd={endTransformGesture}
+                  type="range"
+                  value={Math.round(t.rotation)}
+                />
+              </div>
+              <div className="ie-seg two" style={{ width: "100%" }}>
+                <button className="ie-seg-btn" onClick={() => flipActiveLayer("h")} type="button">
+                  Flip horizontal
+                </button>
+                <button className="ie-seg-btn" onClick={() => flipActiveLayer("v")} type="button">
+                  Flip vertical
+                </button>
+              </div>
+            </div>
+            <div className="ie-section">
+              <p className="ie-note">You can also drag the handles on the canvas to move, scale or rotate the layer.</p>
+              <button className="ie-btn block" onClick={resetActiveLayerTransform} type="button">
+                Reset transform
+              </button>
+              <button className="ie-btn block primary" onClick={() => setTool("move")} type="button">
+                Done
+              </button>
+            </div>
+          </>);
 }
 
-function samePanelProps(previous, next) {
-  if (previous.panelKey !== next.panelKey) return false;
-  const previousScope = previous.scope;
-  const nextScope = next.scope;
-  const keys = Object.keys(previousScope);
-  if (keys.length !== Object.keys(nextScope).length) return false;
-  return keys.every((key) => Object.is(previousScope[key], nextScope[key]));
+function EditorCropPanel({
+  ratioKey,
+  chooseRatio,
+  rotated,
+  toggleRotate,
+  setCropDim,
+  cropRect,
+  straighten,
+  setStraighten,
+  applyCrop,
+  cancelCrop
+}) {
+
+  return (<>
+            <div className="ie-section">
+              <div className="ie-sec-title">Aspect ratio</div>
+              <div className="ie-seg wrap" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+                {CROP_RATIOS.map((entry) => (
+                  <button
+                    className="ie-seg-btn"
+                    data-active={ratioKey === entry.key}
+                    key={entry.key}
+                    onClick={() => chooseRatio(entry.key)}
+                    type="button"
+                  >
+                    {entry.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                className="ie-btn block"
+                data-active={rotated}
+                disabled={ratioKey === "free" || ratioKey === "1:1"}
+                onClick={toggleRotate}
+                type="button"
+              >
+                ⟲ Swap orientation
+              </button>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Size</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "8px", alignItems: "end" }}>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Width</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setCropDim("width", event.target.value)}
+                    type="number"
+                    value={cropRect ? Math.round(cropRect.width) : ""}
+                  />
+                </div>
+                <span style={{ paddingBottom: "10px", color: "var(--ie-faint)" }}>×</span>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Height</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setCropDim("height", event.target.value)}
+                    type="number"
+                    value={cropRect ? Math.round(cropRect.height) : ""}
+                  />
+                </div>
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Straighten</span>
+                  <span className="ie-field-val">
+                    {straighten > 0 ? "+" : ""}
+                    {straighten}°
+                  </span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={15}
+                  min={-15}
+                  onChange={(event) => setStraighten(Number(event.target.value))}
+                  type="range"
+                  value={straighten}
+                />
+                <p className="ie-note">Rotates the image within the crop; applied on Apply. Inset the crop so the corners stay filled.</p>
+              </div>
+            </div>
+            <div className="ie-section">
+              <button className="ie-btn block primary" onClick={applyCrop} type="button">
+                Apply crop
+              </button>
+              <button className="ie-btn block" onClick={cancelCrop} type="button">
+                Cancel
+              </button>
+            </div>
+          </>);
 }
 
-export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ scope }) {
-  const { mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, token, jobs } = scope;
-  const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, maxEditReferences, StudioUpdateBadge, StudioUpdateNotice, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, editTransparent, setEditTransparent, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, updateOptionLabel } = scope;
+function EditorUpscalePanel({
+  availableUpscaleEngines,
+  upscaleEngine,
+  setUpscaleEngine,
+  upscaleFactor,
+  setUpscaleFactor,
+  aiOp,
+  setIrisRestore,
+  setIrisPlanStatus,
+  working,
+  token,
+  irisRestore,
+  upscaleSoftness,
+  setUpscaleSoftness,
+  irisPlanStatus,
+  runUpscale,
+  setTool
+}) {
+
+  return (<>
+            <div className="ie-section">
+              <div className="ie-sec-title">Engine</div>
+              <div className="ie-cards">
+                {availableUpscaleEngines.map((entry) => (
+                  <button
+                    className="ie-card"
+                    data-active={upscaleEngine === entry.key}
+                    key={entry.key}
+                    onClick={() => {
+                      setUpscaleEngine(entry.key);
+                      if (!entry.factors.includes(upscaleFactor)) setUpscaleFactor(entry.factors[0]);
+                    }}
+                    type="button"
+                  >
+                    <span className="ie-radio" />
+                    <span>
+                      <span className="ie-card-name">{entry.label}</span>
+                      {UPSCALE_ENGINE_DESC[entry.key] ? (
+                        <span className="ie-card-desc">{UPSCALE_ENGINE_DESC[entry.key]}</span>
+                      ) : null}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            {upscaleEngineIsRestoration(upscaleEngine) ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Restoration</div>
+                {/* Iris (sc-25683): the processing + output size come from the engine planner, so a
+                    budget-downscaled source is labelled as such before anything is submitted. */}
+                <IrisRestoreControls
+                  disabled={!!aiOp}
+                  idPrefix="ie-iris"
+                  onChange={setIrisRestore}
+                  onStatus={setIrisPlanStatus}
+                  planBody={working ? { width: working.width, height: working.height } : null}
+                  token={token}
+                  value={irisRestore}
+                />
+              </div>
+            ) : (
+            <div className="ie-section">
+              <div className="ie-sec-title">Scale factor</div>
+              <div className="ie-seg wrap two">
+                {upscaleFactorsForEngine(upscaleEngine).map((value) => (
+                  <button
+                    className="ie-seg-btn"
+                    data-active={upscaleFactor === value}
+                    key={value}
+                    onClick={() => setUpscaleFactor(value)}
+                    type="button"
+                  >
+                    {value}×
+                  </button>
+                ))}
+              </div>
+              {upscaleEngineHasSoftness(upscaleEngine) ? (
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Detail recovery</span>
+                    <span className="ie-field-val">{upscaleSoftness.toFixed(2)}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={1}
+                    min={0}
+                    onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
+                    step={0.05}
+                    type="range"
+                    value={upscaleSoftness}
+                  />
+                  <p className="ie-note">Higher restores more texture from a degraded source; 0 stays faithful to the original.</p>
+                </div>
+              ) : null}
+              <div className="ie-readout">
+                <span className="ie-readout-k">Output size</span>
+                <span className="ie-readout-v">
+                  {working.width * upscaleFactor} × {working.height * upscaleFactor}
+                </span>
+              </div>
+            </div>
+            )}
+            <div className="ie-section">
+              <button
+                className="ie-btn block primary"
+                disabled={!!aiOp || (upscaleEngineIsRestoration(upscaleEngine) && !irisPlanStatus.ready)}
+                onClick={runUpscale}
+                title={upscaleEngineIsRestoration(upscaleEngine) && irisPlanStatus.error ? irisPlanStatus.error : undefined}
+                type="button"
+              >
+                {upscaleEngineIsRestoration(upscaleEngine) ? "Restore image" : "Upscale image"}
+              </button>
+              <button className="ie-btn block" onClick={() => setTool("move")} type="button">
+                Cancel
+              </button>
+            </div>
+          </>);
+}
+
+function EditorDetailPanel({
+  detailModels,
+  setDetailModel,
+  detailModel,
+  selectedDetailModel,
+  createModelDownloadJob,
+  detailStrength,
+  setDetailStrength,
+  detailCnScale,
+  setDetailCnScale,
+  tileControlNetReady,
+  tileControlNet,
+  tileControlNetDownloadRequested,
+  requestTileControlNetDownload,
+  aiOp,
+  runDetail,
+  setTool
+}) {
+
+  return (detailModels.length === 0 ? (
+          <div className="ie-section">
+            <p className="ie-note">No detail-capable models installed.</p>
+          </div>
+        ) : (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Backbone</div>
+              <select className="ie-select" onChange={(event) => setDetailModel(event.target.value)} value={detailModel}>
+                {detailModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {updateOptionLabel(model)}
+                  </option>
+                ))}
+              </select>
+              <StudioUpdateBadge item={selectedDetailModel} />
+              <StudioUpdateNotice item={selectedDetailModel} onUpdate={createModelDownloadJob} />
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Refinement</div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Detail amount</span>
+                  <span className="ie-field-val">{Math.round(detailStrength * 100)}%</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={0.8}
+                  min={0.3}
+                  onChange={(event) => setDetailStrength(Number(event.target.value))}
+                  step={0.05}
+                  type="range"
+                  value={detailStrength}
+                />
+                <p className="ie-note">Higher invents more fine texture.</p>
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Structure lock</span>
+                  <span className="ie-field-val">{Math.round(detailCnScale * 100)}%</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={1}
+                  min={0.4}
+                  onChange={(event) => setDetailCnScale(Number(event.target.value))}
+                  step={0.05}
+                  type="range"
+                  value={detailCnScale}
+                />
+                <p className="ie-note">Higher keeps the result closer to the source composition.</p>
+              </div>
+            </div>
+            {/* Tile ControlNet dependency (sc-2437/sc-2438): Detail can't run without it, but it's a
+                separate utility download — surface it as required with a one-click install when missing,
+                and gate the run. Mirrors the managed edit-LoRA CTA in the AI Edit panel. */}
+            <div className="ie-section">
+              <div className="ie-sec-title">Required model</div>
+              {tileControlNetReady ? (
+                <p className="ie-note">✨ {tileControlNet.name ?? "SDXL Tile ControlNet"} is installed and ready.</p>
+              ) : (
+                <>
+                  <p className="ie-note">
+                    The SDXL tile ControlNet (~2.5 GB) is required for Detail enhance and isn’t installed yet.
+                  </p>
+                  <button
+                    className="ie-btn block"
+                    disabled={!tileControlNet || !createModelDownloadJob || tileControlNetDownloadRequested}
+                    onClick={requestTileControlNetDownload}
+                    type="button"
+                  >
+                    {tileControlNetDownloadRequested
+                      ? "Downloading…"
+                      : `Download ${tileControlNet?.name ?? "SDXL Tile ControlNet"}`}
+                  </button>
+                </>
+              )}
+            </div>
+            <div className="ie-section">
+              <button
+                className="ie-btn block primary"
+                disabled={!!aiOp || !detailModel || !tileControlNetReady}
+                onClick={runDetail}
+                type="button"
+              >
+                Enhance detail
+              </button>
+              <button className="ie-btn block" onClick={() => setTool("move")} type="button">
+                Cancel
+              </button>
+            </div>
+          </>
+        ));
+}
+
+function EditorColorPanel({
+  colorMode,
+  setColorMode,
+  colorAdjust,
+  setAdjustValue,
+  resetAdjust,
+  setColorChannel,
+  colorChannel,
+  histogramRef,
+  levels,
+  setLevelsValue,
+  setCurves,
+  curves,
+  channelStroke,
+  activeGradeIsIdentity,
+  resetActiveColorMode,
+  applyColorGrade
+}) {
+
+  return (<>
+            <div className="ie-section">
+              <div className="ie-seg wrap" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+                {[
+                  ["adjust", "Adjust"],
+                  ["levels", "Levels"],
+                  ["curves", "Curves"],
+                ].map(([mode, label]) => (
+                  <button
+                    className="ie-seg-btn"
+                    data-active={colorMode === mode}
+                    key={mode}
+                    onClick={() => setColorMode(mode)}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {colorMode === "adjust" ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Tone &amp; color</div>
+                {COLOR_ADJUSTMENTS.map(({ key: adjKey, label }) => (
+                  <div className="ie-field" key={adjKey}>
+                    <div className="ie-field-top">
+                      <span className="ie-field-label">{label}</span>
+                      <span className="ie-field-val">
+                        {colorAdjust[adjKey] > 0 ? "+" : ""}
+                        {Math.round(colorAdjust[adjKey] * 100)}
+                      </span>
+                    </div>
+                    <input
+                      className="ie-range"
+                      max={1}
+                      min={-1}
+                      onChange={(event) => setAdjustValue(adjKey, Number(event.target.value))}
+                      onDoubleClick={() => resetAdjust(adjKey)}
+                      step={0.01}
+                      type="range"
+                      value={colorAdjust[adjKey]}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {colorMode === "levels" ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Channel</div>
+                <select className="ie-select" onChange={(event) => setColorChannel(event.target.value)} value={colorChannel}>
+                  <option value="master">Master (RGB)</option>
+                  <option value="r">Red</option>
+                  <option value="g">Green</option>
+                  <option value="b">Blue</option>
+                </select>
+                <canvas className="ie-histo" height={56} ref={histogramRef} width={280} />
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Black point</span>
+                    <span className="ie-field-val">{levels[colorChannel].black}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={254}
+                    min={0}
+                    onChange={(event) => setLevelsValue("black", Number(event.target.value))}
+                    step={1}
+                    type="range"
+                    value={levels[colorChannel].black}
+                  />
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Gamma</span>
+                    <span className="ie-field-val">{levels[colorChannel].gamma.toFixed(2)}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={2.5}
+                    min={0.1}
+                    onChange={(event) => setLevelsValue("gamma", Number(event.target.value))}
+                    step={0.01}
+                    type="range"
+                    value={levels[colorChannel].gamma}
+                  />
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">White point</span>
+                    <span className="ie-field-val">{levels[colorChannel].white}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={255}
+                    min={1}
+                    onChange={(event) => setLevelsValue("white", Number(event.target.value))}
+                    step={1}
+                    type="range"
+                    value={levels[colorChannel].white}
+                  />
+                </div>
+              </div>
+            ) : null}
+            {colorMode === "curves" ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Tone curve</div>
+                <select className="ie-select" onChange={(event) => setColorChannel(event.target.value)} value={colorChannel}>
+                  <option value="master">Master (RGB)</option>
+                  <option value="r">Red</option>
+                  <option value="g">Green</option>
+                  <option value="b">Blue</option>
+                </select>
+                <div className="ie-curvewrap">
+                  <CurveEditor
+                    onChange={(points) => setCurves((prev) => ({ ...prev, [colorChannel]: points }))}
+                    points={curves[colorChannel]}
+                    stroke={channelStroke}
+                  />
+                </div>
+                <p className="ie-note">Drag points to reshape the curve. Double-click to add a point.</p>
+              </div>
+            ) : null}
+            <div className="ie-section">
+              <button className="ie-btn block" disabled={activeGradeIsIdentity()} onClick={resetActiveColorMode} type="button">
+                Reset
+              </button>
+              <button
+                className="ie-btn block primary"
+                disabled={activeGradeIsIdentity()}
+                onClick={applyColorGrade}
+                type="button"
+              >
+                Apply grade
+              </button>
+            </div>
+          </>);
+}
+
+function EditorCutoutPanel({
+  colorKeySeed,
+  colorKeyGlobal,
+  setColorKeyGlobal,
+  colorKeyTolerance,
+  setColorKeyTolerance,
+  colorKeySoftness,
+  setColorKeySoftness,
+  smartSelectSupported,
+  maskMode,
+  maskSubTool,
+  aiOp,
+  setColorKeySeed,
+  clearMask,
+  setCutoutKeepSelected,
+  setMaskMode,
+  setMaskSubTool,
+  setMaskErase,
+  smartSelectCapabilitySupported,
+  smartSelectModel,
+  smartSelectDownloadRequested,
+  requestSmartSelectDownload,
+  maskBrush,
+  setMaskBrush,
+  maskErase,
+  maskRefineRadius,
+  setMaskRefineRadius,
+  maskLines,
+  maskBaseImage,
+  refineMask,
+  cutoutKeepSelected,
+  applyMaskCutout,
+  maskSource,
+  setTool
+}) {
+
+  return (<>
+            <div className="ie-section">
+              <div className="ie-sec-title">Color key</div>
+              <p className="ie-note">
+                Click a background pixel on the active layer. The checkerboard shows the alpha preview without changing the image until you apply it.
+              </p>
+              <div className="ie-readout">
+                <span className="ie-readout-k">Sample</span>
+                <span className="ie-readout-v">
+                  {colorKeySeed ? `${colorKeySeed.x}, ${colorKeySeed.y}` : "Click canvas"}
+                </span>
+              </div>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Selection</div>
+              <div className="ie-seg two" style={{ width: "100%" }}>
+                <button className="ie-seg-btn" data-active={!colorKeyGlobal} onClick={() => setColorKeyGlobal(false)} type="button">
+                  Connected
+                </button>
+                <button className="ie-seg-btn" data-active={colorKeyGlobal} onClick={() => setColorKeyGlobal(true)} type="button">
+                  Global
+                </button>
+              </div>
+              <p className="ie-note">
+                Connected preserves separate same-color subject areas. Global removes every matching pixel on this layer.
+              </p>
+            </div>
+            <div className="ie-section">
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Tolerance</span>
+                  <span className="ie-field-val">{colorKeyTolerance}</span>
+                </div>
+                <input
+                  aria-label="Color-key tolerance"
+                  className="ie-range"
+                  max={100}
+                  min={0}
+                  onChange={(event) => setColorKeyTolerance(Number(event.target.value))}
+                  step={1}
+                  type="range"
+                  value={colorKeyTolerance}
+                />
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Softness</span>
+                  <span className="ie-field-val">{colorKeySoftness}</span>
+                </div>
+                <input
+                  aria-label="Color-key softness"
+                  className="ie-range"
+                  max={100}
+                  min={0}
+                  onChange={(event) => setColorKeySoftness(Number(event.target.value))}
+                  step={1}
+                  type="range"
+                  value={colorKeySoftness}
+                />
+              </div>
+              <p className="ie-note">Matching uses perceptual color distance; softness feathers the alpha edge.</p>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">SAM3 object selection</div>
+              {smartSelectSupported ? (
+                <>
+                  <p className="ie-note">Draw a box around an object on the active layer. SAM3 selection works without choosing an AI Edit model.</p>
+                  <button
+                    className="ie-btn block"
+                    data-active={maskMode && maskSubTool === "select"}
+                    disabled={aiOp?.label === "smart select"}
+                    onClick={() => {
+                      setColorKeySeed(null);
+                      clearMask();
+                      setCutoutKeepSelected(true);
+                      setMaskMode(true);
+                      setMaskSubTool("select");
+                      setMaskErase(false);
+                    }}
+                    type="button"
+                  >
+                    {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
+                  </button>
+                </>
+              ) : smartSelectCapabilitySupported && smartSelectModel ? (
+                <>
+                  <p className="ie-note">SAM3 is supported on this worker but is not installed. Install it in Model Manager to enable Smart Select; color key remains available.</p>
+                  <button
+                    className="ie-btn block"
+                    disabled={smartSelectDownloadRequested || !requestSmartSelectDownload}
+                    onClick={requestSmartSelectDownload}
+                    type="button"
+                  >
+                    {smartSelectDownloadRequested ? "Installing SAM3…" : "Install SAM3"}
+                  </button>
+                </>
+              ) : (
+                <p className="ie-note">SAM3 object selection is unavailable on this worker. Color key remains available above; choose a worker with image segmentation support to use Smart Select.</p>
+              )}
+            </div>
+            {maskMode ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Refine selection</div>
+                {maskSubTool === "select" ? (
+                  <p className="ie-note">Drag a box around an object on the canvas — SAM3 auto-masks it.</p>
+                ) : (
+                  <>
+                    <div className="ie-field">
+                      <div className="ie-field-top">
+                        <span className="ie-field-label">Brush size</span>
+                        <span className="ie-field-val">{maskBrush} px</span>
+                      </div>
+                      <input
+                        aria-label="Selection refine brush size"
+                        className="ie-range"
+                        max={300}
+                        min={5}
+                        onChange={(event) => setMaskBrush(Number(event.target.value))}
+                        step={1}
+                        type="range"
+                        value={maskBrush}
+                      />
+                    </div>
+                    <button className="ie-btn block" data-active={maskErase} onClick={() => setMaskErase((on) => !on)} type="button">
+                      {maskErase ? "Erase from selection" : "Add to selection"}
+                    </button>
+                  </>
+                )}
+                <button className="ie-btn block" onClick={() => setMaskSubTool("brush")} type="button">
+                  Refine brush
+                </button>
+                <div className="ie-field" style={{ marginTop: "10px", marginBottom: "8px" }}>
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Refine radius</span>
+                    <span className="ie-field-val">{maskRefineRadius}px</span>
+                  </div>
+                  <input
+                    aria-label="Selection refine radius"
+                    className="ie-range"
+                    max={40}
+                    min={1}
+                    onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
+                    step={1}
+                    type="range"
+                    value={maskRefineRadius}
+                  />
+                </div>
+                <div className="ie-chip-row">
+                  <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("feather")} type="button">Feather</button>
+                  <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("grow")} type="button">Grow</button>
+                  <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("shrink")} type="button">Shrink</button>
+                  <button className="ie-chip" onClick={() => refineMask("invert")} type="button">Invert</button>
+                </div>
+                {maskHasContent(maskLines) || maskBaseImage ? (
+                  <>
+                    <div className="ie-seg two" style={{ marginTop: "10px", width: "100%" }}>
+                      <button className="ie-seg-btn" data-active={cutoutKeepSelected} onClick={() => setCutoutKeepSelected(true)} type="button">Keep selected</button>
+                      <button className="ie-seg-btn" data-active={!cutoutKeepSelected} onClick={() => setCutoutKeepSelected(false)} type="button">Remove selected</button>
+                    </div>
+                    <button className="ie-btn block primary" onClick={applyMaskCutout} style={{ marginTop: "10px" }} type="button">
+                      Apply cutout
+                    </button>
+                  </>
+                ) : null}
+                {maskSource === "colorKey" ? (
+                  <button className="ie-btn block" onClick={() => { setColorKeySeed(null); clearMask(); setMaskMode(false); }} type="button">
+                    Sample another color
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="ie-section">
+              <button className="ie-btn block" onClick={() => { setColorKeySeed(null); clearMask(); setMaskMode(false); setTool("move"); }} type="button">
+                Cancel
+              </button>
+            </div>
+          </>);
+}
+
+export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel(props) {
+  useMediaTicket();
+  const { mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, token, jobs } = props;
+  const { maxEditReferences, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, editTransparent, setEditTransparent, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported } = props;
   const renderPanel = () => {
     if (editModels.length === 0) {
       return (
@@ -170,9 +984,9 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
         ) : null}
 
         {mossEdit ? <>
-          <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} sharedGuidance onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={scope.tensorAssets} importAsset={scope.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
+          <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} sharedGuidance onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={props.tensorAssets} importAsset={props.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
           <p>The working image is Image 1. Additional slots follow it in order.</p>
-          <MossReferencePicker assets={imageAssets} characters={scope.characters} projectId={scope.projectId} importAsset={scope.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={maxEditReferences - 1} firstOrdinal={2} />
+          <MossReferencePicker assets={imageAssets} characters={props.characters} projectId={props.projectId} importAsset={props.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={maxEditReferences - 1} firstOrdinal={2} />
           {mossEditError ? <p role="alert">{mossEditError}</p> : null}
         </> : null}
         <div hidden={mossEdit}>
@@ -483,11 +1297,11 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
     );
   };
   return renderPanel();
-}, samePanelProps);
+});
 
-export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({ scope }) {
-  const { mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, token, jobs, imageAssets, refAssetIds, setRefAssetIds, maxEditReferences } = scope;
-  const { BOX_PALETTE, MAX_BOX_PALETTE, StudioUpdateBadge, StudioUpdateNotice, addPaletteColor, aiOp, boxColor, boxMetadataGaps, boxes, chooseBoxColor, clearBoxes, composedPrompt, createModelDownloadJob, deleteBox, editModel, editModels, editPrompt, removePaletteColor, runBoxEdit, selectedBox, selectedBoxGaps, selectedBoxId, selectedEditModel, setEditModel, setEditPrompt, setSelectedBoxId, updateBox, updateOptionLabel } = scope;
+export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel(props) {
+  const { mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, token, jobs, imageAssets, refAssetIds, setRefAssetIds, maxEditReferences } = props;
+  const { aiOp, boxColor, boxes, chooseBoxColor, clearBoxes, composedPrompt, createModelDownloadJob, deleteBox, editModel, editModels, editPrompt, runBoxEdit, selectedBox, selectedBoxGaps, selectedBoxId, selectedEditModel, setEditModel, setEditPrompt, setSelectedBoxId, updateBox } = props;
   const renderPanel = () => (
     <>
       <div className="ie-section">
@@ -638,9 +1452,9 @@ export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({
         <div className="ie-section">
           <div className="ie-sec-title">Generate</div>
           {mossEdit ? <>
-            <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={scope.tensorAssets} importAsset={scope.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
+            <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={props.tensorAssets} importAsset={props.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
             <p>The baked working image is Image 1. Additional slots follow it in order.</p>
-            <MossReferencePicker assets={imageAssets} characters={scope.characters} projectId={scope.projectId} importAsset={scope.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={maxEditReferences - 1} firstOrdinal={2} />
+            <MossReferencePicker assets={imageAssets} characters={props.characters} projectId={props.projectId} importAsset={props.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={maxEditReferences - 1} firstOrdinal={2} />
             {mossEditError ? <p role="alert">{mossEditError}</p> : null}
           </> : null}
           {editModels.length ? (
@@ -680,744 +1494,22 @@ export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({
     </>
   );
   return renderPanel();
-}, samePanelProps);
+});
 
-export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ panelKey, scope }) {
+const toolPanels = {
+  move: EditorMovePanel,
+  transform: EditorTransformPanel,
+  crop: EditorCropPanel,
+  upscale: EditorUpscalePanel,
+  detail: EditorDetailPanel,
+  color: EditorColorPanel,
+  cutout: EditorCutoutPanel,
+  edit: ImageEditorEditPanel,
+  boxes: ImageEditorBoxesPanel
+};
+
+export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ panelKey, ...props }) {
   renderObserverForTests?.();
-  const { COLOR_ADJUSTMENTS, CROP_RATIOS, CurveEditor, IrisRestoreControls, StudioUpdateBadge, StudioUpdateNotice, UPSCALE_ENGINE_DESC, irisPlanStatus, irisRestore, setIrisPlanStatus, setIrisRestore, token, upscaleEngineIsRestoration, activeGradeIsIdentity, activeLayerOf, actualSize, aiOp, applyColorGrade, applyCrop, applyMaskCutout, availableUpscaleEngines, cancelCrop, channelStroke, chooseRatio, clearMask, colorAdjust, colorChannel, colorKeyGlobal, colorKeySeed, colorKeySoftness, colorKeyTolerance, colorMode, createModelDownloadJob, cropRect, curves, cutoutKeepSelected, detailCnScale, detailModel, detailModels, detailStrength, endTransformGesture, fitToView, flipActiveLayer, histogramRef, identityTransform, layerCount, levels, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSource, maskSubTool, onTransformSlider, ratioKey, refineMask, requestSmartSelectDownload, requestTileControlNetDownload, resetActiveColorMode, resetActiveLayerTransform, resetAdjust, rotated, runDetail, runUpscale, selectedDetailModel, setActiveTransform, setAdjustValue, setColorChannel, setColorKeyGlobal, setColorKeySeed, setColorKeySoftness, setColorKeyTolerance, setColorMode, setCropDim, setCurves, setCutoutKeepSelected, setDetailCnScale, setDetailModel, setDetailStrength, setLevelsValue, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setStraighten, setTool, setUpscaleEngine, setUpscaleFactor, setUpscaleSoftness, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, straighten, tileControlNet, tileControlNetDownloadRequested, tileControlNetReady, toggleRotate, updateOptionLabel, upscaleEngine, upscaleEngineHasSoftness, upscaleFactor, upscaleFactorsForEngine, upscaleSoftness, working } = scope;
-  const renderPanel = (key) => {
-    switch (key) {
-      case "move":
-        return (
-          <>
-            <div className="ie-section">
-              <div className="ie-sec-title">Document</div>
-              <div className="ie-readout">
-                <span className="ie-readout-k">Dimensions</span>
-                <span className="ie-readout-v">
-                  {working.width} × {working.height}
-                </span>
-              </div>
-              <div className="ie-readout">
-                <span className="ie-readout-k">Layers</span>
-                <span className="ie-readout-v">{layerCount}</span>
-              </div>
-              <p className="ie-note">
-                Drag on the canvas to pan. Scroll to zoom. Pick a tool to start editing — each tool&apos;s controls appear
-                here.
-              </p>
-            </div>
-            <div className="ie-section">
-              <div className="ie-sec-title">Quick actions</div>
-              <button className="ie-btn block" onClick={fitToView} type="button">
-                Fit to view
-              </button>
-              <button className="ie-btn block" onClick={actualSize} type="button">
-                Actual size (100%)
-              </button>
-            </div>
-          </>
-        );
-      case "transform": {
-        const tLayer = activeLayerOf(working);
-        const t = tLayer?.transform ?? identityTransform();
-        const scalePct = Math.round(Math.abs(t.scaleX) * 100);
-        const signX = t.scaleX < 0 ? -1 : 1;
-        const signY = t.scaleY < 0 ? -1 : 1;
-        return (
-          <>
-            <div className="ie-section">
-              <div className="ie-sec-title">Position</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-                <div className="ie-field">
-                  <div className="ie-field-top">
-                    <span className="ie-field-label">X</span>
-                  </div>
-                  <input
-                    className="ie-input ie-numfield"
-                    onChange={(event) => setActiveTransform({ x: Number(event.target.value) || 0 })}
-                    type="number"
-                    value={Math.round(t.x)}
-                  />
-                </div>
-                <div className="ie-field">
-                  <div className="ie-field-top">
-                    <span className="ie-field-label">Y</span>
-                  </div>
-                  <input
-                    className="ie-input ie-numfield"
-                    onChange={(event) => setActiveTransform({ y: Number(event.target.value) || 0 })}
-                    type="number"
-                    value={Math.round(t.y)}
-                  />
-                </div>
-              </div>
-            </div>
-            <div className="ie-section">
-              <div className="ie-sec-title">Scale &amp; rotation</div>
-              <div className="ie-field">
-                <div className="ie-field-top">
-                  <span className="ie-field-label">Scale</span>
-                  <span className="ie-field-val">{scalePct}%</span>
-                </div>
-                <input
-                  className="ie-range"
-                  max={300}
-                  min={10}
-                  onBlur={endTransformGesture}
-                  onChange={(event) => {
-                    const pct = Number(event.target.value) / 100;
-                    onTransformSlider({ scaleX: signX * pct, scaleY: signY * pct });
-                  }}
-                  onMouseUp={endTransformGesture}
-                  onTouchEnd={endTransformGesture}
-                  type="range"
-                  value={scalePct}
-                />
-              </div>
-              <div className="ie-field">
-                <div className="ie-field-top">
-                  <span className="ie-field-label">Rotation</span>
-                  <span className="ie-field-val">{Math.round(t.rotation)}°</span>
-                </div>
-                <input
-                  className="ie-range"
-                  max={180}
-                  min={-180}
-                  onBlur={endTransformGesture}
-                  onChange={(event) => onTransformSlider({ rotation: Number(event.target.value) })}
-                  onMouseUp={endTransformGesture}
-                  onTouchEnd={endTransformGesture}
-                  type="range"
-                  value={Math.round(t.rotation)}
-                />
-              </div>
-              <div className="ie-seg two" style={{ width: "100%" }}>
-                <button className="ie-seg-btn" onClick={() => flipActiveLayer("h")} type="button">
-                  Flip horizontal
-                </button>
-                <button className="ie-seg-btn" onClick={() => flipActiveLayer("v")} type="button">
-                  Flip vertical
-                </button>
-              </div>
-            </div>
-            <div className="ie-section">
-              <p className="ie-note">You can also drag the handles on the canvas to move, scale or rotate the layer.</p>
-              <button className="ie-btn block" onClick={resetActiveLayerTransform} type="button">
-                Reset transform
-              </button>
-              <button className="ie-btn block primary" onClick={() => setTool("move")} type="button">
-                Done
-              </button>
-            </div>
-          </>
-        );
-      }
-      case "crop":
-        return (
-          <>
-            <div className="ie-section">
-              <div className="ie-sec-title">Aspect ratio</div>
-              <div className="ie-seg wrap" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
-                {CROP_RATIOS.map((entry) => (
-                  <button
-                    className="ie-seg-btn"
-                    data-active={ratioKey === entry.key}
-                    key={entry.key}
-                    onClick={() => chooseRatio(entry.key)}
-                    type="button"
-                  >
-                    {entry.label}
-                  </button>
-                ))}
-              </div>
-              <button
-                className="ie-btn block"
-                data-active={rotated}
-                disabled={ratioKey === "free" || ratioKey === "1:1"}
-                onClick={toggleRotate}
-                type="button"
-              >
-                ⟲ Swap orientation
-              </button>
-            </div>
-            <div className="ie-section">
-              <div className="ie-sec-title">Size</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "8px", alignItems: "end" }}>
-                <div className="ie-field">
-                  <div className="ie-field-top">
-                    <span className="ie-field-label">Width</span>
-                  </div>
-                  <input
-                    className="ie-input ie-numfield"
-                    onChange={(event) => setCropDim("width", event.target.value)}
-                    type="number"
-                    value={cropRect ? Math.round(cropRect.width) : ""}
-                  />
-                </div>
-                <span style={{ paddingBottom: "10px", color: "var(--ie-faint)" }}>×</span>
-                <div className="ie-field">
-                  <div className="ie-field-top">
-                    <span className="ie-field-label">Height</span>
-                  </div>
-                  <input
-                    className="ie-input ie-numfield"
-                    onChange={(event) => setCropDim("height", event.target.value)}
-                    type="number"
-                    value={cropRect ? Math.round(cropRect.height) : ""}
-                  />
-                </div>
-              </div>
-              <div className="ie-field">
-                <div className="ie-field-top">
-                  <span className="ie-field-label">Straighten</span>
-                  <span className="ie-field-val">
-                    {straighten > 0 ? "+" : ""}
-                    {straighten}°
-                  </span>
-                </div>
-                <input
-                  className="ie-range"
-                  max={15}
-                  min={-15}
-                  onChange={(event) => setStraighten(Number(event.target.value))}
-                  type="range"
-                  value={straighten}
-                />
-                <p className="ie-note">Rotates the image within the crop; applied on Apply. Inset the crop so the corners stay filled.</p>
-              </div>
-            </div>
-            <div className="ie-section">
-              <button className="ie-btn block primary" onClick={applyCrop} type="button">
-                Apply crop
-              </button>
-              <button className="ie-btn block" onClick={cancelCrop} type="button">
-                Cancel
-              </button>
-            </div>
-          </>
-        );
-      case "upscale":
-        return (
-          <>
-            <div className="ie-section">
-              <div className="ie-sec-title">Engine</div>
-              <div className="ie-cards">
-                {availableUpscaleEngines.map((entry) => (
-                  <button
-                    className="ie-card"
-                    data-active={upscaleEngine === entry.key}
-                    key={entry.key}
-                    onClick={() => {
-                      setUpscaleEngine(entry.key);
-                      if (!entry.factors.includes(upscaleFactor)) setUpscaleFactor(entry.factors[0]);
-                    }}
-                    type="button"
-                  >
-                    <span className="ie-radio" />
-                    <span>
-                      <span className="ie-card-name">{entry.label}</span>
-                      {UPSCALE_ENGINE_DESC[entry.key] ? (
-                        <span className="ie-card-desc">{UPSCALE_ENGINE_DESC[entry.key]}</span>
-                      ) : null}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-            {upscaleEngineIsRestoration(upscaleEngine) ? (
-              <div className="ie-section">
-                <div className="ie-sec-title">Restoration</div>
-                {/* Iris (sc-25683): the processing + output size come from the engine planner, so a
-                    budget-downscaled source is labelled as such before anything is submitted. */}
-                <IrisRestoreControls
-                  disabled={!!aiOp}
-                  idPrefix="ie-iris"
-                  onChange={setIrisRestore}
-                  onStatus={setIrisPlanStatus}
-                  planBody={working ? { width: working.width, height: working.height } : null}
-                  token={token}
-                  value={irisRestore}
-                />
-              </div>
-            ) : (
-            <div className="ie-section">
-              <div className="ie-sec-title">Scale factor</div>
-              <div className="ie-seg wrap two">
-                {upscaleFactorsForEngine(upscaleEngine).map((value) => (
-                  <button
-                    className="ie-seg-btn"
-                    data-active={upscaleFactor === value}
-                    key={value}
-                    onClick={() => setUpscaleFactor(value)}
-                    type="button"
-                  >
-                    {value}×
-                  </button>
-                ))}
-              </div>
-              {upscaleEngineHasSoftness(upscaleEngine) ? (
-                <div className="ie-field">
-                  <div className="ie-field-top">
-                    <span className="ie-field-label">Detail recovery</span>
-                    <span className="ie-field-val">{upscaleSoftness.toFixed(2)}</span>
-                  </div>
-                  <input
-                    className="ie-range"
-                    max={1}
-                    min={0}
-                    onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
-                    step={0.05}
-                    type="range"
-                    value={upscaleSoftness}
-                  />
-                  <p className="ie-note">Higher restores more texture from a degraded source; 0 stays faithful to the original.</p>
-                </div>
-              ) : null}
-              <div className="ie-readout">
-                <span className="ie-readout-k">Output size</span>
-                <span className="ie-readout-v">
-                  {working.width * upscaleFactor} × {working.height * upscaleFactor}
-                </span>
-              </div>
-            </div>
-            )}
-            <div className="ie-section">
-              <button
-                className="ie-btn block primary"
-                disabled={!!aiOp || (upscaleEngineIsRestoration(upscaleEngine) && !irisPlanStatus.ready)}
-                onClick={runUpscale}
-                title={upscaleEngineIsRestoration(upscaleEngine) && irisPlanStatus.error ? irisPlanStatus.error : undefined}
-                type="button"
-              >
-                {upscaleEngineIsRestoration(upscaleEngine) ? "Restore image" : "Upscale image"}
-              </button>
-              <button className="ie-btn block" onClick={() => setTool("move")} type="button">
-                Cancel
-              </button>
-            </div>
-          </>
-        );
-      case "detail":
-        return detailModels.length === 0 ? (
-          <div className="ie-section">
-            <p className="ie-note">No detail-capable models installed.</p>
-          </div>
-        ) : (
-          <>
-            <div className="ie-section">
-              <div className="ie-sec-title">Backbone</div>
-              <select className="ie-select" onChange={(event) => setDetailModel(event.target.value)} value={detailModel}>
-                {detailModels.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {updateOptionLabel(model)}
-                  </option>
-                ))}
-              </select>
-              <StudioUpdateBadge item={selectedDetailModel} />
-              <StudioUpdateNotice item={selectedDetailModel} onUpdate={createModelDownloadJob} />
-            </div>
-            <div className="ie-section">
-              <div className="ie-sec-title">Refinement</div>
-              <div className="ie-field">
-                <div className="ie-field-top">
-                  <span className="ie-field-label">Detail amount</span>
-                  <span className="ie-field-val">{Math.round(detailStrength * 100)}%</span>
-                </div>
-                <input
-                  className="ie-range"
-                  max={0.8}
-                  min={0.3}
-                  onChange={(event) => setDetailStrength(Number(event.target.value))}
-                  step={0.05}
-                  type="range"
-                  value={detailStrength}
-                />
-                <p className="ie-note">Higher invents more fine texture.</p>
-              </div>
-              <div className="ie-field">
-                <div className="ie-field-top">
-                  <span className="ie-field-label">Structure lock</span>
-                  <span className="ie-field-val">{Math.round(detailCnScale * 100)}%</span>
-                </div>
-                <input
-                  className="ie-range"
-                  max={1}
-                  min={0.4}
-                  onChange={(event) => setDetailCnScale(Number(event.target.value))}
-                  step={0.05}
-                  type="range"
-                  value={detailCnScale}
-                />
-                <p className="ie-note">Higher keeps the result closer to the source composition.</p>
-              </div>
-            </div>
-            {/* Tile ControlNet dependency (sc-2437/sc-2438): Detail can't run without it, but it's a
-                separate utility download — surface it as required with a one-click install when missing,
-                and gate the run. Mirrors the managed edit-LoRA CTA in the AI Edit panel. */}
-            <div className="ie-section">
-              <div className="ie-sec-title">Required model</div>
-              {tileControlNetReady ? (
-                <p className="ie-note">✨ {tileControlNet.name ?? "SDXL Tile ControlNet"} is installed and ready.</p>
-              ) : (
-                <>
-                  <p className="ie-note">
-                    The SDXL tile ControlNet (~2.5 GB) is required for Detail enhance and isn’t installed yet.
-                  </p>
-                  <button
-                    className="ie-btn block"
-                    disabled={!tileControlNet || !createModelDownloadJob || tileControlNetDownloadRequested}
-                    onClick={requestTileControlNetDownload}
-                    type="button"
-                  >
-                    {tileControlNetDownloadRequested
-                      ? "Downloading…"
-                      : `Download ${tileControlNet?.name ?? "SDXL Tile ControlNet"}`}
-                  </button>
-                </>
-              )}
-            </div>
-            <div className="ie-section">
-              <button
-                className="ie-btn block primary"
-                disabled={!!aiOp || !detailModel || !tileControlNetReady}
-                onClick={runDetail}
-                type="button"
-              >
-                Enhance detail
-              </button>
-              <button className="ie-btn block" onClick={() => setTool("move")} type="button">
-                Cancel
-              </button>
-            </div>
-          </>
-        );
-      case "color":
-        return (
-          <>
-            <div className="ie-section">
-              <div className="ie-seg wrap" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
-                {[
-                  ["adjust", "Adjust"],
-                  ["levels", "Levels"],
-                  ["curves", "Curves"],
-                ].map(([mode, label]) => (
-                  <button
-                    className="ie-seg-btn"
-                    data-active={colorMode === mode}
-                    key={mode}
-                    onClick={() => setColorMode(mode)}
-                    type="button"
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {colorMode === "adjust" ? (
-              <div className="ie-section">
-                <div className="ie-sec-title">Tone &amp; color</div>
-                {COLOR_ADJUSTMENTS.map(({ key: adjKey, label }) => (
-                  <div className="ie-field" key={adjKey}>
-                    <div className="ie-field-top">
-                      <span className="ie-field-label">{label}</span>
-                      <span className="ie-field-val">
-                        {colorAdjust[adjKey] > 0 ? "+" : ""}
-                        {Math.round(colorAdjust[adjKey] * 100)}
-                      </span>
-                    </div>
-                    <input
-                      className="ie-range"
-                      max={1}
-                      min={-1}
-                      onChange={(event) => setAdjustValue(adjKey, Number(event.target.value))}
-                      onDoubleClick={() => resetAdjust(adjKey)}
-                      step={0.01}
-                      type="range"
-                      value={colorAdjust[adjKey]}
-                    />
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            {colorMode === "levels" ? (
-              <div className="ie-section">
-                <div className="ie-sec-title">Channel</div>
-                <select className="ie-select" onChange={(event) => setColorChannel(event.target.value)} value={colorChannel}>
-                  <option value="master">Master (RGB)</option>
-                  <option value="r">Red</option>
-                  <option value="g">Green</option>
-                  <option value="b">Blue</option>
-                </select>
-                <canvas className="ie-histo" height={56} ref={histogramRef} width={280} />
-                <div className="ie-field">
-                  <div className="ie-field-top">
-                    <span className="ie-field-label">Black point</span>
-                    <span className="ie-field-val">{levels[colorChannel].black}</span>
-                  </div>
-                  <input
-                    className="ie-range"
-                    max={254}
-                    min={0}
-                    onChange={(event) => setLevelsValue("black", Number(event.target.value))}
-                    step={1}
-                    type="range"
-                    value={levels[colorChannel].black}
-                  />
-                </div>
-                <div className="ie-field">
-                  <div className="ie-field-top">
-                    <span className="ie-field-label">Gamma</span>
-                    <span className="ie-field-val">{levels[colorChannel].gamma.toFixed(2)}</span>
-                  </div>
-                  <input
-                    className="ie-range"
-                    max={2.5}
-                    min={0.1}
-                    onChange={(event) => setLevelsValue("gamma", Number(event.target.value))}
-                    step={0.01}
-                    type="range"
-                    value={levels[colorChannel].gamma}
-                  />
-                </div>
-                <div className="ie-field">
-                  <div className="ie-field-top">
-                    <span className="ie-field-label">White point</span>
-                    <span className="ie-field-val">{levels[colorChannel].white}</span>
-                  </div>
-                  <input
-                    className="ie-range"
-                    max={255}
-                    min={1}
-                    onChange={(event) => setLevelsValue("white", Number(event.target.value))}
-                    step={1}
-                    type="range"
-                    value={levels[colorChannel].white}
-                  />
-                </div>
-              </div>
-            ) : null}
-            {colorMode === "curves" ? (
-              <div className="ie-section">
-                <div className="ie-sec-title">Tone curve</div>
-                <select className="ie-select" onChange={(event) => setColorChannel(event.target.value)} value={colorChannel}>
-                  <option value="master">Master (RGB)</option>
-                  <option value="r">Red</option>
-                  <option value="g">Green</option>
-                  <option value="b">Blue</option>
-                </select>
-                <div className="ie-curvewrap">
-                  <CurveEditor
-                    onChange={(points) => setCurves((prev) => ({ ...prev, [colorChannel]: points }))}
-                    points={curves[colorChannel]}
-                    stroke={channelStroke}
-                  />
-                </div>
-                <p className="ie-note">Drag points to reshape the curve. Double-click to add a point.</p>
-              </div>
-            ) : null}
-            <div className="ie-section">
-              <button className="ie-btn block" disabled={activeGradeIsIdentity()} onClick={resetActiveColorMode} type="button">
-                Reset
-              </button>
-              <button
-                className="ie-btn block primary"
-                disabled={activeGradeIsIdentity()}
-                onClick={applyColorGrade}
-                type="button"
-              >
-                Apply grade
-              </button>
-            </div>
-          </>
-        );
-      case "cutout":
-        return (
-          <>
-            <div className="ie-section">
-              <div className="ie-sec-title">Color key</div>
-              <p className="ie-note">
-                Click a background pixel on the active layer. The checkerboard shows the alpha preview without changing the image until you apply it.
-              </p>
-              <div className="ie-readout">
-                <span className="ie-readout-k">Sample</span>
-                <span className="ie-readout-v">
-                  {colorKeySeed ? `${colorKeySeed.x}, ${colorKeySeed.y}` : "Click canvas"}
-                </span>
-              </div>
-            </div>
-            <div className="ie-section">
-              <div className="ie-sec-title">Selection</div>
-              <div className="ie-seg two" style={{ width: "100%" }}>
-                <button className="ie-seg-btn" data-active={!colorKeyGlobal} onClick={() => setColorKeyGlobal(false)} type="button">
-                  Connected
-                </button>
-                <button className="ie-seg-btn" data-active={colorKeyGlobal} onClick={() => setColorKeyGlobal(true)} type="button">
-                  Global
-                </button>
-              </div>
-              <p className="ie-note">
-                Connected preserves separate same-color subject areas. Global removes every matching pixel on this layer.
-              </p>
-            </div>
-            <div className="ie-section">
-              <div className="ie-field">
-                <div className="ie-field-top">
-                  <span className="ie-field-label">Tolerance</span>
-                  <span className="ie-field-val">{colorKeyTolerance}</span>
-                </div>
-                <input
-                  aria-label="Color-key tolerance"
-                  className="ie-range"
-                  max={100}
-                  min={0}
-                  onChange={(event) => setColorKeyTolerance(Number(event.target.value))}
-                  step={1}
-                  type="range"
-                  value={colorKeyTolerance}
-                />
-              </div>
-              <div className="ie-field">
-                <div className="ie-field-top">
-                  <span className="ie-field-label">Softness</span>
-                  <span className="ie-field-val">{colorKeySoftness}</span>
-                </div>
-                <input
-                  aria-label="Color-key softness"
-                  className="ie-range"
-                  max={100}
-                  min={0}
-                  onChange={(event) => setColorKeySoftness(Number(event.target.value))}
-                  step={1}
-                  type="range"
-                  value={colorKeySoftness}
-                />
-              </div>
-              <p className="ie-note">Matching uses perceptual color distance; softness feathers the alpha edge.</p>
-            </div>
-            <div className="ie-section">
-              <div className="ie-sec-title">SAM3 object selection</div>
-              {smartSelectSupported ? (
-                <>
-                  <p className="ie-note">Draw a box around an object on the active layer. SAM3 selection works without choosing an AI Edit model.</p>
-                  <button
-                    className="ie-btn block"
-                    data-active={maskMode && maskSubTool === "select"}
-                    disabled={aiOp?.label === "smart select"}
-                    onClick={() => {
-                      setColorKeySeed(null);
-                      clearMask();
-                      setCutoutKeepSelected(true);
-                      setMaskMode(true);
-                      setMaskSubTool("select");
-                      setMaskErase(false);
-                    }}
-                    type="button"
-                  >
-                    {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
-                  </button>
-                </>
-              ) : smartSelectCapabilitySupported && smartSelectModel ? (
-                <>
-                  <p className="ie-note">SAM3 is supported on this worker but is not installed. Install it in Model Manager to enable Smart Select; color key remains available.</p>
-                  <button
-                    className="ie-btn block"
-                    disabled={smartSelectDownloadRequested || !requestSmartSelectDownload}
-                    onClick={requestSmartSelectDownload}
-                    type="button"
-                  >
-                    {smartSelectDownloadRequested ? "Installing SAM3…" : "Install SAM3"}
-                  </button>
-                </>
-              ) : (
-                <p className="ie-note">SAM3 object selection is unavailable on this worker. Color key remains available above; choose a worker with image segmentation support to use Smart Select.</p>
-              )}
-            </div>
-            {maskMode ? (
-              <div className="ie-section">
-                <div className="ie-sec-title">Refine selection</div>
-                {maskSubTool === "select" ? (
-                  <p className="ie-note">Drag a box around an object on the canvas — SAM3 auto-masks it.</p>
-                ) : (
-                  <>
-                    <div className="ie-field">
-                      <div className="ie-field-top">
-                        <span className="ie-field-label">Brush size</span>
-                        <span className="ie-field-val">{maskBrush} px</span>
-                      </div>
-                      <input
-                        aria-label="Selection refine brush size"
-                        className="ie-range"
-                        max={300}
-                        min={5}
-                        onChange={(event) => setMaskBrush(Number(event.target.value))}
-                        step={1}
-                        type="range"
-                        value={maskBrush}
-                      />
-                    </div>
-                    <button className="ie-btn block" data-active={maskErase} onClick={() => setMaskErase((on) => !on)} type="button">
-                      {maskErase ? "Erase from selection" : "Add to selection"}
-                    </button>
-                  </>
-                )}
-                <button className="ie-btn block" onClick={() => setMaskSubTool("brush")} type="button">
-                  Refine brush
-                </button>
-                <div className="ie-field" style={{ marginTop: "10px", marginBottom: "8px" }}>
-                  <div className="ie-field-top">
-                    <span className="ie-field-label">Refine radius</span>
-                    <span className="ie-field-val">{maskRefineRadius}px</span>
-                  </div>
-                  <input
-                    aria-label="Selection refine radius"
-                    className="ie-range"
-                    max={40}
-                    min={1}
-                    onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
-                    step={1}
-                    type="range"
-                    value={maskRefineRadius}
-                  />
-                </div>
-                <div className="ie-chip-row">
-                  <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("feather")} type="button">Feather</button>
-                  <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("grow")} type="button">Grow</button>
-                  <button className="ie-chip" disabled={!maskHasContent(maskLines) && !maskBaseImage} onClick={() => refineMask("shrink")} type="button">Shrink</button>
-                  <button className="ie-chip" onClick={() => refineMask("invert")} type="button">Invert</button>
-                </div>
-                {maskHasContent(maskLines) || maskBaseImage ? (
-                  <>
-                    <div className="ie-seg two" style={{ marginTop: "10px", width: "100%" }}>
-                      <button className="ie-seg-btn" data-active={cutoutKeepSelected} onClick={() => setCutoutKeepSelected(true)} type="button">Keep selected</button>
-                      <button className="ie-seg-btn" data-active={!cutoutKeepSelected} onClick={() => setCutoutKeepSelected(false)} type="button">Remove selected</button>
-                    </div>
-                    <button className="ie-btn block primary" onClick={applyMaskCutout} style={{ marginTop: "10px" }} type="button">
-                      Apply cutout
-                    </button>
-                  </>
-                ) : null}
-                {maskSource === "colorKey" ? (
-                  <button className="ie-btn block" onClick={() => { setColorKeySeed(null); clearMask(); setMaskMode(false); }} type="button">
-                    Sample another color
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
-            <div className="ie-section">
-              <button className="ie-btn block" onClick={() => { setColorKeySeed(null); clearMask(); setMaskMode(false); setTool("move"); }} type="button">
-                Cancel
-              </button>
-            </div>
-          </>
-        );
-      case "edit":
-        return <ImageEditorEditPanel scope={scope} />;
-      case "boxes":
-        return <ImageEditorBoxesPanel scope={scope} />;
-      default:
-        return null;
-    }
-  };
-  return renderPanel(panelKey);
-}, samePanelProps);
+  const Panel = toolPanels[panelKey];
+  return Panel ? <Panel {...props} /> : null;
+});

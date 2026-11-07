@@ -426,7 +426,7 @@ describe("buildImageJobRequest — Style axis on a structured caption model", ()
         styleText: "cinematic watercolor",
       }),
     );
-    expect(request.prompt).toBe("Subject: a fox in the snow\nStyle: cinematic watercolor");
+    expect(request.prompt).toBe("Description: a fox in the snow\nStyle: cinematic watercolor");
     expect(request.presetPromptResolvedClientSide).toBe(true);
   });
 });

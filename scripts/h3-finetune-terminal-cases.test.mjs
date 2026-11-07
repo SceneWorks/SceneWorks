@@ -72,15 +72,30 @@ test('reference commands call real pinned fixture programs, outside source outpu
   assert.equal(caseBook.numeric['pruned-interpolation'].referenceRevision, '47b06ff920c16b4b7b36de068367a5de0e0968e9');
 });
 test('supporting fixture selectors resolve to actual SceneWorks source, not invented test names', async () => {
-  const sourceFiles = {
-    sceneworksCore: await readFile(path.join(root, 'crates/sceneworks-core/tests/minimax_h3_import.rs'), 'utf8'),
-    worker: await readFile(path.join(root, 'crates/sceneworks-worker/src/video_jobs/minimax_h3_import_tests.rs'), 'utf8'),
-    api: await readFile(path.join(root, 'apps/rust-api/src/models.rs'), 'utf8'),
+  const apiSource = await readFile(path.join(root, 'apps/rust-api/src/models/tests/minimax_h3_import_declaration_tests.rs'), 'utf8');
+  const workerModules = {
+    'video_jobs::tests::minimax_h3_import_tests': await readFile(path.join(root, 'crates/sceneworks-worker/src/video_jobs/minimax_h3_import_tests.rs'), 'utf8'),
+    'video_admission::tests': await readFile(path.join(root, 'crates/sceneworks-worker/src/video_admission/tests.rs'), 'utf8'),
   };
   for (const bindings of Object.values(fixtureBindings)) for (const [pkg, target, selector] of Object.values(bindings)) {
-    if (pkg === 'sceneworks-core' && target !== 'minimax_h3_import') { await access(path.join(root, `crates/sceneworks-core/tests/${target}.rs`)); continue; }
-    const text = sourceFiles[pkg === 'sceneworks-worker' ? 'worker' : pkg === 'sceneworks-rust-api' ? 'api' : 'sceneworksCore'];
+    const module = selector?.split('::').slice(0,-1).join('::');
+    const text = pkg === 'sceneworks-worker' ? workerModules[module]
+      : pkg === 'sceneworks-core' ? await readFile(path.join(root, `crates/sceneworks-core/tests/${target}.rs`), 'utf8') : apiSource;
+    assert.ok(text, `missing actual fixture module for ${selector}`);
+    if (!selector) continue; // An explicitly unfiltered integration binary is its own inventory.
     assert.ok(text.includes(`fn ${selector.split('::').at(-1)}(`), `missing actual selector ${selector}`);
+  }
+});
+test('bounded loading retains complete current-budget assertions for both backends', () => {
+  const selector = 'video_admission::tests::veda_queued_admission_uses_complete_bound_and_current_budget';
+  assert.deepEqual(fixtureBindings.lifecycle['bounded-loading'], ['sceneworks-worker', null, selector]);
+  const plan = concretePlan(root, '/unit_fake/native', '/unit_fake/stage', {inventory:'catalog-regression'});
+  for (const backend of ['mlx','cuda']) {
+    const c = plan.cases.find(c => c.id === `${backend}.lifecycle.bounded-loading`);
+    assert.ok(c.supportingFixture.includes(selector));
+    assert.ok(c.supportingFixture.includes('--lib'));
+    assert.ok(!c.supportingFixture.includes('--ignored'));
+    assert.deepEqual(c.fixtureInventory.slice(-2), ['--', '--list']);
   }
 });
 for (const [check, mode, partition, field] of [

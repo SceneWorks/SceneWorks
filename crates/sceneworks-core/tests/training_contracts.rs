@@ -1,5 +1,7 @@
+mod common;
+use common::fixture_path;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sceneworks_core::training::target_supports_resolution_buckets;
 use sceneworks_core::training::{
@@ -20,19 +22,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-fn fixture_path(relative_path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("tests")
-        .join("fixtures")
-        .join("rust_migration_contracts")
-        .join("training")
-        .join(relative_path)
-}
-
 fn load_fixture(relative_path: &str) -> Value {
-    let path = fixture_path(relative_path);
+    let path = fixture_path(&format!("training/{relative_path}"));
     let payload = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     serde_json::from_str(&payload)
@@ -632,7 +623,7 @@ fn regen_target_registry_fixture() {
     }
     let pretty = serde_json::to_string_pretty(&builtin_training_targets())
         .expect("builtin registry serializes");
-    fs::write(fixture_path("target-registry.json"), pretty + "\n").expect("write fixture");
+    fs::write(fixture_path("training/target-registry.json"), pretty + "\n").expect("write fixture");
 }
 
 #[test]
@@ -644,7 +635,7 @@ fn regen_preset_registry_fixture() {
     let pretty =
         serde_json::to_string_pretty(&sceneworks_core::training::builtin_training_presets())
             .expect("builtin preset registry serializes");
-    fs::write(fixture_path("preset-registry.json"), pretty + "\n").expect("write fixture");
+    fs::write(fixture_path("training/preset-registry.json"), pretty + "\n").expect("write fixture");
 }
 
 #[test]
@@ -2640,10 +2631,40 @@ fn web_depth_anchoring_bounds_match_the_api_bounds() {
         serde_json::from_str(&web_training_const("depthAnchoringModelOptions"))
             .expect("depthAnchoringModelOptions is a JSON-compatible string array");
     assert_eq!(models, DEPTH_ANCHORING_MODELS.to_vec());
-    let workflows: Vec<String> =
-        serde_json::from_str(&web_training_const("depthAnchoringNoVideoLtxWorkflows"))
-            .expect("depthAnchoringNoVideoLtxWorkflows is a JSON-compatible string array");
-    assert_eq!(workflows, DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.to_vec());
+    let registry = builtin_training_targets();
+    let ltx = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "ltx_2_5_video_lora")
+        .unwrap();
+    assert_eq!(
+        ltx.ui.get("noVideoLossWorkflows"),
+        Some(&serde_json::json!(DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS))
+    );
+    let plans = ltx
+        .ui
+        .get("ltxWorkflowPlans")
+        .and_then(serde_json::Value::as_object)
+        .unwrap();
+    let workflows = ltx
+        .limits
+        .get("ltxWorkflows")
+        .and_then(serde_json::Value::as_array)
+        .unwrap();
+    assert_eq!(plans.len(), workflows.len());
+    for workflow in workflows {
+        let name = workflow.as_str().unwrap();
+        let video_generated = plans[name]
+            .get("video")
+            .and_then(|video| video.get("isGenerated"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        assert_eq!(
+            video_generated,
+            !DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&name),
+            "{name}"
+        );
+    }
 }
 
 /// sc-24830 review: submit refuses the depth-anchoring combinations the engine refuses even on an

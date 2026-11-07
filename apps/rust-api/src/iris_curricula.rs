@@ -166,7 +166,7 @@ fn engine_check(backbone: &FsPath, config: &TrainingConfig) -> Option<Result<Val
 /// launch. Always 200 for a well-formed request: the Studio renders `ok` / `refusal`.
 pub(crate) async fn iris_plan_check(
     State(state): State<AppState>,
-    Json(request): Json<PlanCheckRequest>,
+    ApiJson(request): ApiJson<PlanCheckRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let target = iris_target(&request.target_id)?;
     let config = request.config;

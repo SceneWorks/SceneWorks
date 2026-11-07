@@ -402,10 +402,8 @@ pub(crate) async fn resolve_model_manifest_entry_by_repo(
             })
             .any(|download| download.get("repo").and_then(Value::as_str) == Some(repository))
     };
-    let mut resolved = crate::models::model_catalog(state)
+    let mut resolved = crate::models::find_model_catalog_entry(state, declares_repository)
         .await?
-        .into_iter()
-        .find(|entry| declares_repository(entry))
         .and_then(|entry| entry.get("id").and_then(Value::as_str).map(str::to_owned));
     if resolved.is_none() {
         resolved = crate::models::embedded_builtin_catalog_entry(declares_repository)?

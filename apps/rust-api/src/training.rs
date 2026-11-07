@@ -289,11 +289,11 @@ pub(crate) async fn upload_training_dataset_item(
         let item = project_call(state, move |store| {
             store.upload_training_dataset_item(&project_id, upload)
         })
-        .await
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&temp_path);
-        })?;
-        return Ok((StatusCode::CREATED, Json(item)));
+        .await;
+        if item.is_err() {
+            crate::uploads::cleanup_staged_upload(&temp_path).await;
+        }
+        return Ok((StatusCode::CREATED, Json(item?)));
     }
     Err(ApiError::bad_request("Upload file field is required"))
 }
@@ -317,7 +317,7 @@ pub(crate) async fn upload_ltx_prepared_bundle(
             store.install_ltx_prepared_bundle(&project_id, &dataset_id, &item_id, &source_path)
         })
         .await;
-        let _ = std::fs::remove_file(&temp_path);
+        crate::uploads::cleanup_staged_upload(&temp_path).await;
         return Ok((StatusCode::CREATED, Json(dataset?)));
     }
     Err(ApiError::bad_request("Upload file field is required"))
@@ -874,12 +874,15 @@ fn validate_parquet_import_request(
     let source = std::fs::canonicalize(&source).map_err(|error| {
         ApiError::bad_request(format!("Parquet sourcePath is unavailable: {error}"))
     })?;
-    if !source.is_file() && !source.is_dir() {
+    let metadata = std::fs::metadata(&source).map_err(|_| {
+        ApiError::bad_request("Parquet sourcePath must point to a file or directory.")
+    })?;
+    if !metadata.is_file() && !metadata.is_dir() {
         return Err(ApiError::bad_request(
             "Parquet sourcePath must point to a file or directory.",
         ));
     }
-    if source.is_file()
+    if metadata.is_file()
         && !source
             .extension()
             .and_then(|value| value.to_str())
@@ -898,9 +901,16 @@ fn validate_parquet_import_request(
 pub(crate) async fn create_training_dataset_parquet_import_job(
     State(state): State<AppState>,
     Path((project_id, dataset_id)): Path<(String, String)>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     ApiJson(payload): ApiJson<DatasetParquetImportJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let source_path = validate_parquet_import_request(&payload)?;
+    auth::local_only(connect_info.map(|axum::extract::ConnectInfo(addr)| addr))?;
+    let (payload, source_path) = tokio::task::spawn_blocking(move || {
+        let source_path = validate_parquet_import_request(&payload)?;
+        Ok::<_, ApiError>((payload, source_path))
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))??;
     let (dataset, dataset_root, project_name) = project_call(state.clone(), {
         let project_id = project_id.clone();
         let dataset_id = dataset_id.clone();
@@ -1020,42 +1030,48 @@ pub(crate) async fn finalize_training_dataset_parquet_import(
         return Err(ApiError::bad_request("Invalid Parquet import jobId."));
     }
     let staging_root = dataset_root.join("parquet-imports").join(&payload.job_id);
-    let canonical_staging = std::fs::canonicalize(&staging_root).map_err(|error| {
-        ApiError::bad_request(format!(
-            "Parquet import staging directory is unavailable: {error}"
-        ))
-    })?;
     let project_root = dataset_root
         .ancestors()
         .nth(3)
-        .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?;
-    for item in &payload.items {
-        let relative = item
-            .path
-            .as_deref()
-            .ok_or_else(|| ApiError::bad_request("Parquet import item path is required."))?;
-        let candidate = project_root.join(relative);
-        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
-            ApiError::bad_request(format!("Parquet import item is unavailable: {error}"))
+        .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?
+        .to_path_buf();
+    let expected_version = payload.dataset_version;
+    let items = payload.items;
+    #[cfg(test)]
+    let test_gate = state
+        .test_hooks
+        .parquet_finalize_before_validation_once
+        .lock()
+        .take();
+    let items = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _test_scope = test_gate.map(|gate| gate.pause());
+        let canonical_staging = std::fs::canonicalize(&staging_root).map_err(|error| {
+            ApiError::bad_request(format!(
+                "Parquet import staging directory is unavailable: {error}"
+            ))
         })?;
-        if !canonical.starts_with(&canonical_staging) || !canonical.is_file() {
-            return Err(ApiError::bad_request(
-                "Parquet import item path escapes its job staging directory.",
-            ));
+        for item in &items {
+            let relative = item
+                .path
+                .as_deref()
+                .ok_or_else(|| ApiError::bad_request("Parquet import item path is required."))?;
+            let candidate = project_root.join(relative);
+            let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+                ApiError::bad_request(format!("Parquet import item is unavailable: {error}"))
+            })?;
+            if !canonical.starts_with(&canonical_staging) || !canonical.is_file() {
+                return Err(ApiError::bad_request(
+                    "Parquet import item path escapes its job staging directory.",
+                ));
+            }
         }
-    }
+        Ok::<_, ApiError>(items)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Parquet validation task failed: {error}")))??;
     let dataset = project_call(state, move |store| {
-        store.update_training_dataset(
-            &project_id,
-            &dataset_id,
-            TrainingDatasetUpdateInput {
-                name: None,
-                status: None,
-                character_id: None,
-                items: Some(payload.items),
-                preserve_caption_item_ids: Vec::new(),
-            },
-        )
+        store.finalize_training_dataset_import(&project_id, &dataset_id, expected_version, items)
     })
     .await?;
     Ok(Json(dataset))
@@ -1538,7 +1554,7 @@ pub(crate) async fn upload_training_dataset_subject_mask(
             )
         })
         .await;
-        let _ = std::fs::remove_file(&temp_path);
+        crate::uploads::cleanup_staged_upload(&temp_path).await;
         return Ok(Json(report?));
     }
     Err(ApiError::typed(
@@ -1557,9 +1573,8 @@ pub(crate) async fn create_training_dataset_upscale_job(
     Path((project_id, dataset_id)): Path<(String, String)>,
     ApiJson(payload): ApiJson<DatasetUpscaleJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    if !matches!(payload.factor, 2 | 4) {
-        return Err(ApiError::bad_request("Upscale factor must be 2 or 4."));
-    }
+    sceneworks_core::contracts::image_upscale_factor(u64::from(payload.factor))
+        .map_err(|_| ApiError::bad_request("Upscale factor must be 2 or 4."))?;
     if payload.item_ids.is_empty() {
         return Err(ApiError::bad_request("No items to upscale."));
     }
@@ -1925,6 +1940,22 @@ pub(crate) async fn create_training_job(
     Path(project_id): Path<String>,
     ApiJson(payload): ApiJson<LoraTrainingRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let validated = validate_training_submission(&payload)?;
+    let prepared =
+        prepare_training_submission(state.clone(), project_id, payload, validated).await?;
+    enqueue_training_submission(state, prepared).await
+}
+struct ValidatedTrainingSubmission {
+    target: TrainingTarget,
+    is_control: bool,
+    is_base_checkpoint: bool,
+    preset_metadata: Option<TrainingPresetProvenance>,
+    output_name: String,
+}
+
+fn validate_training_submission(
+    payload: &LoraTrainingRequest,
+) -> Result<ValidatedTrainingSubmission, ApiError> {
     // Both dry-run plan validation and real execution exist (story 1417). A
     // dry-run resolves and validates the plan without producing weights; a real
     // run hands the same plan to the worker's Z-Image LoRA kernel.
@@ -2036,6 +2067,38 @@ pub(crate) async fn create_training_job(
         return Err(ApiError::bad_request("Training output name is required."));
     }
 
+    Ok(ValidatedTrainingSubmission {
+        target: target.clone(),
+        is_control,
+        is_base_checkpoint,
+        preset_metadata,
+        output_name,
+    })
+}
+
+struct PreparedTrainingSubmission {
+    job_id: String,
+    project_id: String,
+    project_name: String,
+    job_payload: JsonObject,
+    requested_gpu: String,
+    training_job_type: JobType,
+}
+
+async fn prepare_training_submission(
+    state: AppState,
+    project_id: String,
+    payload: LoraTrainingRequest,
+    validated: ValidatedTrainingSubmission,
+) -> Result<PreparedTrainingSubmission, ApiError> {
+    let ValidatedTrainingSubmission {
+        target,
+        is_control,
+        is_base_checkpoint,
+        preset_metadata,
+        output_name,
+    } = validated;
+    let target = &target;
     // Load the dataset, its absolute root, and the project name for the queue.
     let dataset_id = payload.dataset_id.clone();
     let (mut dataset, dataset_root, project_name) = project_call(state.clone(), {
@@ -2523,6 +2586,28 @@ pub(crate) async fn create_training_job(
     )
     .await?;
 
+    Ok(PreparedTrainingSubmission {
+        job_id,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+        training_job_type,
+    })
+}
+
+async fn enqueue_training_submission(
+    state: AppState,
+    prepared: PreparedTrainingSubmission,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let PreparedTrainingSubmission {
+        job_id,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+        training_job_type,
+    } = prepared;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job_with_id(
             job_id,
@@ -3738,7 +3823,7 @@ const MIN_FREE_TRAINING_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) fn training_disk_space_error(output_dir: &FsPath) -> Option<String> {
     // `output_dir` itself rarely exists yet; probe the nearest existing parent.
     let probe = nearest_existing_ancestor(output_dir)?;
-    let available = fs2::available_space(&probe).ok()?;
+    let available = sceneworks_core::disk::disk_free_bytes(&probe).ok()?;
     insufficient_disk_space(available, MIN_FREE_TRAINING_BYTES).then(|| {
         format!(
             "Not enough free disk space to train: {} available on the volume holding {}, but at least {} is recommended. Free up space and try again.",
@@ -3806,10 +3891,6 @@ pub(crate) fn trusted_adapter_files(
 /// (no `..`, root, drive prefix, or `.`), so joining it to an output dir cannot
 /// escape that dir.
 pub(crate) fn is_plain_relative_file(name: &str) -> bool {
-    let path = FsPath::new(name);
-    !name.is_empty()
-        && path.file_name().is_some()
-        && path
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    // Export filenames originate on the native trainer, so keep Windows native separators.
+    sceneworks_core::safe_path::path_normal_components(FsPath::new(name)).is_ok()
 }

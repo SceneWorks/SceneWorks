@@ -30,10 +30,7 @@ use sceneworks_core::video_request::{
 // gated to the macOS / backend-candle lanes (the shared `generate_video` funnel) —
 // so gate the import to match, or the Linux-no-candle "neither" build sees it as
 // unused (`-D warnings`, the sc-10404 dead-code trap).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::contracts::GenerationMetrics;
 
 use super::*;
@@ -43,35 +40,22 @@ use crate::media_jobs::{run_ffmpeg, run_ffmpeg_with_stdin_chunks, FfmpegContext}
 /// list explicit prevents a family from silently inheriting newly imported parent
 /// names or flattening another engine family's namespace.
 mod prelude {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::load_reference_image;
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle"),
-        test
-    ))]
+    #[cfg(any(native_lane, test))]
     #[allow(unused_imports)]
     pub(super) use super::ltx_frame_count;
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::scail2::scail2_segment_blocking;
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::{
         advanced, assemble_scail2_animate_conditioning, lora_scale, non_empty_negative_prompt,
-        resolve_dense_adapters, resolve_lora_file, video_frame_count, wan_frame_count, AdapterSpec,
-        CancelFlag, CharacterStore, Conditioning, GenerationMetrics, GenerationOutput,
-        GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision,
+        resolve_dense_adapters, video_frame_count, wan_frame_count, AdapterSpec, CancelFlag,
+        CharacterStore, Conditioning, GenerationMetrics, GenerationOutput, GenerationRequest,
+        Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision, PreparedVideoAdapters,
         Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
     };
     #[allow(unused_imports)]
@@ -85,10 +69,7 @@ mod prelude {
         RgbFrame, Settings, Uuid, Value, VideoRequest, WorkerError, WorkerResult, WorkerStatus,
         CANCEL_MESSAGE,
     };
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::{classify_adapter, lora_path};
     #[cfg(target_os = "macos")]
@@ -98,15 +79,9 @@ mod prelude {
 
 // Real MLX Wan2.2 generation (macOS, sc-3034). `runtime-macos` explicitly includes all three Wan
 // registrations in its validated media catalog.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::image_jobs::load_reference_image;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::image_jobs::{classify_adapter, lora_path};
 // epic 3720 (sc-3724): the backend-neutral generation contract types come from `gen_core` while the
 // compile-time runtime bundle decides which backend catalog this module loads from.
@@ -115,10 +90,7 @@ use crate::image_jobs::{classify_adapter, lora_path};
 // (`run_loaded_video_generation`), and `VideoGenInput`/`video_load_spec` are all backend-neutral, so
 // these types compile on both lanes. `cfg(target_os)` decides which provider crate registered the
 // video engine, not which contract types this module names.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{
     AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator,
     LoadPhase, LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
@@ -128,15 +100,9 @@ use gen_core::{
 use gen_core::{AdapterKind, MoeExpert};
 // VACE conditioning + replacement types are shared by the MLX Wan-VACE path and the candle Wan-VACE
 // lane (sc-5494), so they are available on both the macos and windows+backend-candle builds.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{Image, ReplacementMode};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::character_store::CharacterStore;
 // Frame-count stride coercion (Wan needs frames ≡ 1 mod 4; LTX snaps to 8k+1; Mochi snaps to 6k+1)
 // — used by the MLX path and the candle entry (sc-5097).
@@ -146,27 +112,17 @@ use sceneworks_core::character_store::CharacterStore;
 // — so the shipped 5 s @ 30 fps default (150 raw) fails outright on the Wan stride. `mochi_frame_count`
 // (B3/sc-11993) snaps to the NEAREST 6k+1 (151), the count the manifest documents for that default.
 // See `frames_are_the_mochi_lattice_not_wans` for the exact failure mode.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::video_request::{video_frame_count, wan_frame_count};
 // `ltx_frame_count` is used by both native LTX conditioning lanes and by cross-platform tests.
 // `mochi_frame_count` is named only by tests that are themselves macOS/candle-gated.
 // Each is gated to exactly the configs that use it: an import left dead on a single cfg fails the
 // parity lane's `-D warnings` while a macOS check stays green (sc-10404's trap).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 use sceneworks_core::video_request::ltx_frame_count;
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 use sceneworks_core::video_request::mochi_frame_count;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use std::time::{Duration, Instant};
 
 /// Stub adapter id recorded on generated assets — matches the Python
@@ -758,467 +714,47 @@ pub(crate) async fn run_video_generate_job(
     // procedural stub (a stubbed person-replace would be meaningless). It also reports the honest
     // `replacementStatus` the asset sidecar folds in (project_store::build_video_sidecar_parts).
     #[cfg(target_os = "macos")]
-    let (decoded, adapter, raw_settings, replacement_status) =
-        match resolve_video_route(&request, settings) {
-            // sc-5452: SCAIL-2 is a higher-quality cross-identity replacement backend behind the same
-            // YOLO11 → ByteTrack → SAM3 person-track pipeline. A `scail2_14b` person-replace job routes
-            // to SCAIL-2 (the tracked person's masks + the character reference → the engine's
-            // replacement conditioning, `replace_flag = true`); every other replace-capable model keeps
-            // native Wan-VACE (sc-3521). Routed by model id, not weight availability: like the Wan-VACE
-            // path, `generate_scail2_replace` resolves-or-errors loudly if the snapshot is unprovisioned
-            // (a person-replace must never silently degrade to a different backend or the stub). Both
-            // report the honest `replacementStatus` the asset sidecar folds in.
-            VideoRoute::ReplacePersonScail2(engine_id) => {
-                let (decoded, status, lightning) = generate_scail2_replace(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?;
-                (
-                    decoded,
-                    SCAIL2_ADAPTER,
-                    scail2_raw_settings(&request, lightning),
-                    Some(status),
-                )
-            }
-            VideoRoute::ReplacePersonWanVaceFun => {
-                // sc-3459: the native dual-expert Wan2.2 VACE-Fun engine (`wan2_2_vace_fun_14b`,
-                // mlx-gen sc-6604). Same replace_person conditioning as single-expert Wan-VACE, but the
-                // dual-expert snapshot + engine — `generate_wan_vace_fun` resolves-or-errors loudly,
-                // never falling back to the Wan2.1 `wan_vace` checkpoint.
-                let (decoded, status) =
-                    generate_wan_vace_fun(api, settings, job, &request, &project_path, backend)
-                        .await?;
-                (
-                    decoded,
-                    WAN_VACE_FUN_ADAPTER,
-                    wan_vace_raw_settings(&request, "wan2_2_vace_fun_14b"),
-                    Some(status),
-                )
-            }
-            VideoRoute::ReplacePersonWanVace => {
-                let (decoded, status) =
-                    generate_wan_vace(api, settings, job, &request, &project_path, backend).await?;
-                (
-                    decoded,
-                    WAN_VACE_ADAPTER,
-                    wan_vace_raw_settings(&request, "wan_vace"),
-                    Some(status),
-                )
-            }
-            VideoRoute::WanVaceExtendBridge => {
-                // sc-3812 (tier C): route Wan extend/bridge to native Wan-VACE for genuine motion
-                // continuity (the model attends to real source frames, not one boundary still). Falls
-                // back to the sc-3357 single-frame TI2V-5B keyframe path when the VACE snapshot is
-                // unprovisioned, so the mode keeps working on the weights the user already has. The
-                // engine substitution under the `wan_2_2` pick is recorded honestly in raw-settings.
-                match resolve_wan_vace_model_dir(settings) {
-                    Ok(model_dir) => (
-                        generate_wan_vace_extend_bridge(
-                            api,
-                            settings,
-                            job,
-                            &request,
-                            &project_path,
-                            backend,
-                            model_dir,
-                        )
-                        .await?,
-                        WAN_VACE_ADAPTER,
-                        wan_vace_extend_raw_settings(&request),
-                        None,
-                    ),
-                    Err(_) => {
-                        let engine_id = "wan2_2_ti2v_5b";
-                        (
-                            generate_wan(
-                                api,
-                                settings,
-                                job,
-                                &request,
-                                &project_path,
-                                engine_id,
-                                backend,
-                            )
-                            .await?,
-                            WAN_ADAPTER,
-                            wan_raw_settings(&request, engine_id),
-                            None,
-                        )
-                    }
-                }
-            }
-            VideoRoute::Wan(engine_id) => (
-                generate_wan(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?,
-                WAN_ADAPTER,
-                wan_raw_settings(&request, engine_id),
-                None,
-            ),
-            VideoRoute::Ltx(engine_id) => {
-                let (decoded, status) = generate_ltx(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?;
-                (decoded, LTX_ADAPTER, ltx_raw_settings(&request), status)
-            }
-            VideoRoute::Svd(engine_id) => (
-                generate_svd(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?,
-                SVD_ADAPTER,
-                svd_raw_settings(&request),
-                None,
-            ),
-            VideoRoute::Bernini(engine_id) => {
-                // Bernini (epic 4699 / sc-4707 + sc-4703): the full Qwen2.5-VL planner + Wan2.2-T2V-A14B
-                // renderer. Serves text_to_video + the editing/reference video modes (video_to_video /
-                // reference_to_video / reference_video_to_video); `generate_bernini` maps the SceneWorks mode
-                // to the engine guidance task and resolves the source media into the planner conditioning.
-                // (t2i/i2i image companion = a separate image-typed catalog id, tracked under epic 4699.)
-                (
-                    generate_bernini(
-                        api,
-                        settings,
-                        job,
-                        &request,
-                        &project_path,
-                        engine_id,
-                        backend,
-                    )
-                    .await?,
-                    BERNINI_ADAPTER,
-                    bernini_raw_settings(&request),
-                    None,
-                )
-            }
-            VideoRoute::Scail2(engine_id) => {
-                // SCAIL-2 (epic 5439 / sc-5448): Wan2.1-14B I2V character animation. `generate_scail2`
-                // segments the reference image + driving frames with native SAM3, paints the color-coded
-                // masks, and maps the SceneWorks mode to the engine task (animate_character → animation;
-                // replace_person → replacement is wired in sc-5452). No torch path (mac-only engine).
-                // It returns the resolved `lightning` bool so the effective-recipe record uses the
-                // same resolution instead of a second `unwrap_or_default` pass (F-118).
-                let (decoded, lightning) = generate_scail2(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?;
-                (
-                    decoded,
-                    SCAIL2_ADAPTER,
-                    scail2_raw_settings(&request, lightning),
-                    None,
-                )
-            }
-            VideoRoute::KreaRealtime(engine_id) => {
-                // Krea Realtime 14B (epic 8431 / sc-8443 S10): autoregressive self-forcing video whose
-                // shipped checkpoint is Wan 2.1 T2V 14B weight-for-weight. `generate_krea_realtime` maps
-                // the supplied media to the engine conditioning (a reference still → i2v `Reference`,
-                // strength no-op; a source clip → v2v `VideoClip`, strength honored; else t2v) and drives
-                // the shared `generate_video` heartbeat funnel. CFG off; Wan-family LoRAs ride
-                // `LoadSpec::adapters` (sc-15017 S15). It returns its own `rawSettings` because the tier
-                // that actually LOADED (sc-15258) and any partial LoRA application are only knowable
-                // inside the arm — so the record names what actually ran, not what the request asked for.
-                let (decoded, raw_settings) = generate_krea_realtime(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?;
-                (decoded, KREA_REALTIME_ADAPTER, raw_settings, None)
-            }
-            VideoRoute::Mochi(engine_id) => {
-                // Mochi 1 (epic 1788 / sc-11992): 10B AsymmDiT text-to-video, true CFG, pre-quantized
-                // tier dirs. `generate_mochi` fetches an opted-into tier on demand, resolves the tier
-                // dir + its shared T5/VAE co-requisite, runs the pre-flight memory fit gate (the
-                // untiled AsymmVAE decode scales with clip length and MLX's OOM handler is an
-                // unmappable `exit(-1)`), then drives the shared `generate_video` funnel. It returns
-                // its own `rawSettings` so the record names the tier that was actually loaded.
-                let (decoded, raw_settings) =
-                    generate_mochi(api, settings, job, &request, engine_id, backend).await?;
-                (decoded, MOCHI_ADAPTER, raw_settings, None)
-            }
-            VideoRoute::MiniMaxH3(engine_id) => {
-                // MiniMax-H3 (epic 17137 / sc-19508): joint audio+video in ONE denoise pass.
-                // `generate_minimax_h3` maps the supplied media to the engine conditioning — 0/1/2
-                // keyframes for t2va/fl2va, ordered image + audio references for Ref2VA — resolves
-                // the tier's DiT partition and the upstream shared components (two different
-                // repos), and drives the shared `generate_video` funnel. The synchronized stereo
-                // soundtrack rides `DecodedVideo::audio` out of the funnel exactly as LTX's does;
-                // no bespoke audio plumbing.
-                //
-                // It returns its own `rawSettings` because the tier that actually LOADED and the
-                // task that actually DENOISED — i.e. which of the two structurally-identical
-                // 18.78 GB DiT partitions ran — are only knowable inside the arm, and a
-                // wrong-partition render is invisible in the output.
-                let (decoded, raw_settings) = generate_minimax_h3(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?;
-                (decoded, MINIMAX_H3_ADAPTER, raw_settings, None)
-            }
-            VideoRoute::NoPlanLane => {
-                return Err(WorkerError::InvalidPayload(format!(
-                    "[checkpoint-plan:no-video-lane] checkpoint {:?}: no MLX video lane loads a \
-                     checkpoint plan for the {:?} family, and a plan-backed entry never renders \
-                     procedural stub output",
-                    sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(
-                        &request.model_manifest_entry
-                    )
-                    .unwrap_or_default(),
-                    request
-                        .model_manifest_entry
-                        .get("family")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                )));
-            }
-            VideoRoute::Stub => {
-                // An MLX-routed video model whose snapshot didn't resolve must fail
-                // loudly with the resolver's precise error instead of completing with
-                // procedural stub output (sc-4176, epic 3482 "unsupported jobs error
-                // loudly"). replace_person above already follows this rule; the stub
-                // remains only for ids outside the engine families (test models,
-                // not-yet-ported families).
-                wan::ensure_video_engine_weights(&request, settings)?;
-                (
-                    generate_stub_video(&request, seed),
-                    STUB_ADAPTER,
-                    stub_raw_settings(&request),
-                    None,
-                )
-            }
-        };
+    let outcome = dispatch::execute_mlx_video_route(
+        resolve_video_route(&request, settings),
+        api,
+        settings,
+        job,
+        &request,
+        &project_path,
+        backend,
+        seed,
+    )
+    .await?;
     // Windows/CUDA candle video lane (sc-5097): a real wan/ltx txt2video job runs through
     // `generate_candle_video` (the same neutral encode/mux path as MLX + the stub); anything the
     // candle lane doesn't serve stubs exactly as before. Gated on `backend_candle_enabled` (default
     // off → routing unchanged until parity). Conditioning shapes never reach here — the router's
     // `video_job_is_candle_eligible` confines the candle worker to txt2video.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let (decoded, adapter, raw_settings, replacement_status) = {
-        let candle_route = resolve_candle_video_route(&request, settings)?;
-        reject_unsupported_candle_video_route(candle_route)?;
-        match candle_route {
-            // The rejection above is the execution backstop. Keep this arm unreachable so adding a
-            // new match site cannot accidentally turn the unsupported route into successful output.
-            CandleVideoRoute::UnsupportedEros => {
-                unreachable!("unsupported Eros route was rejected")
-            }
-            // sc-6837 (epic 6563): SCAIL-2 is a distinct cross-identity replacement backend (NOT Wan-VACE)
-            // behind the same person-track pipeline. A `scail2_14b` replace_person job routes to the candle
-            // SCAIL-2 engine (the character reference + the tracked person's color masks, `replace_flag`),
-            // mirroring the macOS `generate_scail2_replace` dispatch; every other replace-capable model
-            // keeps candle Wan-VACE. Routed by model id, not weight availability — `generate_candle_scail2_
-            // replace` resolves-or-errors loudly (a person-replace must never silently degrade to a stub).
-            CandleVideoRoute::ReplacePersonScail2(engine_id) => {
-                let (decoded, status, lightning) = generate_candle_scail2_replace(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?;
-                (
-                    decoded,
-                    CANDLE_SCAIL2_ADAPTER,
-                    scail2_raw_settings(&request, lightning),
-                    Some(status),
-                )
-            }
-            CandleVideoRoute::ReplacePersonWanVace => {
-                // Candle Wan-VACE person replacement (sc-5494) — the candle equivalent of the MLX
-                // `wan_vace` path. The router (`video_request_candle_vace_eligible`) already confirmed the
-                // candle-VACE model + the source clip + person track before this job reached the candle
-                // worker; `generate_candle_wan_vace` resolves-or-errors loudly (a person-replace must never
-                // silently degrade to a stub).
-                let (decoded, status) =
-                    generate_candle_wan_vace(api, settings, job, &request, &project_path, backend)
-                        .await?;
-                (
-                    decoded,
-                    CANDLE_WAN_VACE_ADAPTER,
-                    wan_vace_raw_settings(&request, "wan_vace"),
-                    Some(status),
-                )
-            }
-            CandleVideoRoute::ReplacePersonWanVaceFun => {
-                let (decoded, status) = generate_candle_wan_vace_fun(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    backend,
-                )
-                .await?;
-                (
-                    decoded,
-                    CANDLE_WAN_VACE_FUN_ADAPTER,
-                    wan_vace_raw_settings(&request, "wan2_2_vace_fun_14b"),
-                    Some(status),
-                )
-            }
-            CandleVideoRoute::AnimateScail2(engine_id) => {
-                // sc-6837: SCAIL-2 standalone character animation — a reference character + a driving video →
-                // an animated clip. `generate_candle_scail2` segments the reference + driving frames with the
-                // candle SAM3 segmenter, paints the color-coded masks, and runs the `scail2_14b` engine
-                // (`animate_character` → engine task `animation`). The candle sibling of the macOS
-                // `generate_scail2`; resolves-or-errors loudly (no torch fallback — a distinct candle engine).
-                let (decoded, adapter, raw_settings) = generate_candle_scail2(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?;
-                (decoded, adapter, raw_settings, None::<Value>)
-            }
-            CandleVideoRoute::WanVaceExtendBridge => {
-                // Candle Wan-VACE extend/bridge (sc-5494): real source frames pinned at the kept positions +
-                // a generated span (the candle equivalent of the MLX `generate_wan_vace_extend_bridge`).
-                let decoded = generate_candle_wan_vace_extend_bridge(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    backend,
-                )
-                .await?;
-                (
-                    decoded,
-                    CANDLE_WAN_VACE_ADAPTER,
-                    wan_vace_extend_raw_settings(&request),
-                    None::<Value>,
-                )
-            }
-            CandleVideoRoute::Bernini(engine_id) => {
-                // sc-10997 (epic 6562): the candle Bernini VIDEO lane — the full Qwen planner +
-                // Wan2.2-T2V-A14B renderer. `generate_candle_bernini` maps the SceneWorks mode to the engine
-                // `video_mode` task (t2v / v2v / r2v / rv2v / mv2v / ads2v) and resolves the source media into
-                // the planner conditioning (`resolve_candle_bernini_conditioning`) — empty for t2v, one or
-                // more `VideoClip`s for the edit modes, `MultiReference` for the reference modes. The off-Mac
-                // sibling of the macOS `generate_bernini`; resolves-or-errors loudly (no torch fallback — a
-                // distinct candle engine, GPU-val gated on the `SceneWorks/bernini` weights, sc-11003).
-                let decoded = generate_candle_bernini(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?;
-                (
-                    decoded,
-                    CANDLE_BERNINI_ADAPTER,
-                    bernini_raw_settings(&request),
-                    None::<Value>,
-                )
-            }
-            CandleVideoRoute::CandleVideo => {
-                let (decoded, adapter, raw_settings, status) =
-                    generate_candle_video(api, settings, job, &request, &project_path, backend)
-                        .await?;
-                (decoded, adapter, raw_settings, status)
-            }
-            CandleVideoRoute::MiniMaxH3(engine_id) => {
-                let (decoded, raw_settings) = generate_candle_minimax_h3(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    engine_id,
-                    backend,
-                )
-                .await?;
-                (
-                    decoded,
-                    CANDLE_MINIMAX_H3_ADAPTER,
-                    raw_settings,
-                    None::<Value>,
-                )
-            }
-            CandleVideoRoute::WanComfyui => {
-                let (decoded, adapter, raw_settings) = generate_candle_wan_comfyui(
-                    api,
-                    settings,
-                    job,
-                    &request,
-                    &project_path,
-                    backend,
-                )
-                .await?;
-                (decoded, adapter, raw_settings, None::<Value>)
-            }
-            CandleVideoRoute::Stub => (
-                generate_stub_video(&request, seed),
-                STUB_ADAPTER,
-                stub_raw_settings(&request),
-                None::<Value>,
-            ),
-        }
+    let outcome = dispatch::execute_candle_video_route(
+        resolve_candle_video_route(&request, settings)?,
+        api,
+        settings,
+        job,
+        &request,
+        &project_path,
+        backend,
+        seed,
+    )
+    .await?;
+    #[cfg(not(native_lane))]
+    let outcome = VideoRouteOutcome {
+        decoded: generate_stub_video(&request, seed),
+        adapter: STUB_ADAPTER,
+        raw_settings: stub_raw_settings(&request),
+        replacement_status: None::<Value>,
     };
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
-    let (decoded, adapter, raw_settings, replacement_status) = (
-        generate_stub_video(&request, seed),
-        STUB_ADAPTER,
-        stub_raw_settings(&request),
-        None::<Value>,
-    );
+    let VideoRouteOutcome {
+        decoded,
+        adapter,
+        raw_settings,
+        replacement_status,
+    } = outcome;
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
 
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
@@ -1294,11 +830,12 @@ fn validate_video_lora_compatibility(request: &VideoRequest) -> WorkerResult<()>
     if !is_ltx_model(&request.model) {
         return Ok(());
     }
-    sceneworks_core::lora_family::validate_lora_compatibility(
+    sceneworks_core::lora_family::validate_lora_compatibility_with_manifest(
         &request.loras,
         Some("ltx-video"),
         "ltx_video",
         Some(&request.model),
+        (!request.model_manifest_entry.is_empty()).then_some(&request.model_manifest_entry),
     )
     .map_err(WorkerError::InvalidPayload)
 }
@@ -1510,40 +1047,23 @@ fn generate_stub_video(request: &VideoRequest, seed: i64) -> DecodedVideo {
 /// white, with a bright vertical band that sweeps left→right across the clip so frames
 /// differ (visible motion). Exactly `width * height * 3` RGB8 bytes.
 fn stub_video_rgb8(width: u32, height: u32, seed: i64, index: u32, frame_count: u32) -> Vec<u8> {
-    let seed = seed as u64;
-    let base = [
-        (seed & 0xFF) as u8,
-        ((seed >> 8) & 0xFF) as u8,
-        ((seed >> 16) & 0xFF) as u8,
-    ];
-    let v_span = height.saturating_sub(1).max(1) as f32;
-    // The sweeping band's centre column for this frame.
+    let mut buffer = crate::util::gradient_rgb8(width, height, seed);
     let progress = index as f32 / frame_count.max(1) as f32;
     let band_centre = progress * width.saturating_sub(1).max(1) as f32;
     let band_half = (width as f32 * 0.06).max(1.0);
-    let mut buffer = Vec::with_capacity((width as usize) * (height as usize) * 3);
     for y in 0..height {
-        let t = y as f32 / v_span;
-        let row = [lerp(base[0], t), lerp(base[1], t), lerp(base[2], t)];
         for x in 0..width {
             let dist = (x as f32 - band_centre).abs();
             if dist <= band_half {
-                // Brighten toward white inside the band (1.0 at centre → 0 at edge).
                 let highlight = 1.0 - dist / band_half;
-                buffer.push(lerp(row[0], highlight));
-                buffer.push(lerp(row[1], highlight));
-                buffer.push(lerp(row[2], highlight));
-            } else {
-                buffer.extend_from_slice(&row);
+                let offset = ((y as usize) * (width as usize) + (x as usize)) * 3;
+                for channel in &mut buffer[offset..offset + 3] {
+                    *channel = crate::util::lerp(*channel, highlight);
+                }
             }
         }
     }
     buffer
-}
-
-fn lerp(a: u8, t: f32) -> u8 {
-    let a = a as f32;
-    (a + (255.0 - a) * t).round().clamp(0.0, 255.0) as u8
 }
 
 /// A quiet 220 Hz mono tone matching the clip length (`frame_count / fps` seconds) at
@@ -1806,21 +1326,7 @@ fn video_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        // Stamped by update_job before posting (sc-4172).
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 // The shared standalone-audio-reference resolver (sc-17160 / sc-18650). Not an engine family: it is
@@ -1842,22 +1348,13 @@ pub(crate) mod seedvr2;
 pub(crate) mod wan;
 // MiniMax-H3's packed-sequence stall budget (sc-26691): the watchdog arithmetic `wan`'s shared
 // `generate_video` funnel applies to an H3 request.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod minimax_h3_sequence;
 #[cfg(target_os = "macos")]
 use wan::{generate_wan, wan_available, wan_engine_id, wan_raw_settings, WAN_ADAPTER};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) mod bernini;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // `pub(crate)` since sc-18814: the shared video memory gate reads this lane's VRAM budget from
 // `candle_video_vram_budget` — the same figure `wan_video_fit_error` / `svd_fit_error` are handed
 // — rather than probing the card a second way.
@@ -1903,16 +1400,13 @@ pub(crate) mod minimax_h3;
 use minimax_h3::{generate_candle_minimax_h3, CANDLE_MINIMAX_H3_ADAPTER};
 #[cfg(target_os = "macos")]
 use minimax_h3::{generate_minimax_h3, minimax_h3_available, MINIMAX_H3_ADAPTER};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use minimax_h3::{imported_minimax_h3_checkpoint_id, minimax_h3_engine_id, MINIMAX_H3_ENGINE_ID};
 mod svd;
 #[cfg(target_os = "macos")]
 use svd::{generate_svd, svd_available, svd_engine_id, svd_raw_settings, SVD_ADAPTER};
 mod vace;
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 use vace::validate_vace_fun_capability;
 #[cfg(target_os = "macos")]
 use vace::{
@@ -2024,81 +1518,37 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
 
 /// At most 5 user LoRAs per job (mirrors the image path's `MAX_JOB_LORAS`). Shared by every
 /// dense (single-transformer) video family on both backends.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const MAX_JOB_LORAS: usize = 5;
 
 /// The trimmed `negative_prompt`, or `None` when empty/whitespace — the single source for the
 /// idiom the video dispatchers all repeated (sc-8830). Empty negatives must be `None`, not
 /// `Some("")`, so the engines treat them as "no negative" rather than conditioning on the empty
 /// string.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn non_empty_negative_prompt(request: &VideoRequest) -> Option<String> {
     let trimmed = request.negative_prompt.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
-/// A LoRA spec's strength (`weight`, default 0.8 — matches the image path). Shared by both
+/// A LoRA spec's strength (`weight`, default 1.0 — matches the image path). Shared by both
 /// backends (sc-8830; formerly the byte-identical `lora_scale` / `candle_scail2_lora_scale`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn lora_scale(lora: &Value) -> f32 {
-    lora.get("weight")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        // Last resort only — see `image_jobs::lora_weight`; matches the API/web default.
-        .unwrap_or(1.0) as f32
+    crate::adapter_resolution::lora_weight(lora) as f32
 }
 
-/// Resolve a LoRA spec's file (a directory → its first `.safetensors`, recursively via core's
-/// [`first_safetensors_path`]), verifying it exists. The `path` originates from
-/// attacker-controllable job payload, so it is first confined to an app-managed root
-/// (sc-5723 / WKA-002) via [`normalize_app_managed_lora_path`] before any on-disk use.
-///
-/// Shared by both backends (sc-8830). The old candle twin `candle_resolve_lora_file`
-/// re-implemented the directory scan with a shallow (non-recursive) case-sensitive `read_dir`,
-/// which missed nested `subdir/model.safetensors` snapshots and uppercase `.SAFETENSORS`
-/// extensions that the macOS path (core `first_safetensors_path`) resolved. Converging on the
-/// core helper fixes that latent candle-lane bug; path confinement is preserved identically.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+/// Compatibility test access to the shared directory resolver. Production video resolution pins
+/// each selected entry before inspecting its header and carries that token through cache/load.
+#[cfg(native_lane)]
+#[cfg(test)]
 fn resolve_lora_file(
     settings: &Settings,
     path: PathBuf,
     declared: Option<&str>,
 ) -> WorkerResult<PathBuf> {
-    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
-    let file = if path.is_dir() {
-        // Prefer the manifest-declared adapter over an arbitrary directory scan so a
-        // trained LoRA loads its final adapter, not a step checkpoint (sc-10221).
-        crate::resolve_adapter_in_dir(&path, declared).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                path.display()
-            ))
-        })?
-    } else {
-        path
-    };
-    if !file.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "LoRA file is missing: {}",
-            file.display()
-        )));
-    }
-    Ok(file)
+    let lora = json!({"path": path, "files": declared.map(|name| vec![name])});
+    crate::adapter_resolution::resolve_adapter_file(&lora, settings, "")
 }
 
 /// Build the adapter specs for a **dense** (single-transformer) video family — Wan-VACE and
@@ -2107,32 +1557,21 @@ fn resolve_lora_file(
 /// engine sniffs the format and merges it. `classify_adapter` tags SceneWorks peft LoKr as
 /// `Lokr` and everything else (incl. third-party LyCORIS) as `Lora`. Parameterized by the
 /// per-family max-LoRA cap so the confinement + count guard lives in one place (sc-8830).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_dense_adapters(
     settings: &Settings,
     request: &VideoRequest,
     max_loras: usize,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     if request.loras.len() > max_loras {
         return Err(WorkerError::InvalidPayload(format!(
             "Generation supports at most {max_loras} LoRAs per job."
         )));
     }
-    let mut specs: Vec<AdapterSpec> = Vec::new();
+    let mut specs = PreparedVideoAdapters::default();
     for lora in &request.loras {
-        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = resolve_lora_file(
-            settings,
-            path,
-            crate::image_jobs::declared_adapter_file(lora),
-        )?;
-        let kind = crate::image_jobs::classify_adapter(&file)?;
-        specs.push(AdapterSpec {
+        let (file, kind) = specs.user(settings, lora, &request.model)?;
+        specs.specs.push(AdapterSpec {
             path: file,
             scale: lora_scale(lora),
             kind,
@@ -2169,15 +1608,10 @@ fn resolve_dense_adapters(
 /// / `resolve_scail2_quant`).
 #[cfg(target_os = "macos")]
 fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
-    match request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
-        Some(bits) if bits <= 0 => None,
-        Some(bits) if bits <= 4 => Some(Quant::Q4),
-        Some(_) => Some(Quant::Q8),
-        None => Some(Quant::Q4),
+    match crate::payload::tier_for_bits(request.quant_bits(), "q4") {
+        "bf16" => None,
+        "q4" => Some(Quant::Q4),
+        _ => Some(Quant::Q8),
     }
 }
 
@@ -2185,10 +1619,7 @@ fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
 /// driving frames. Each reference is independently segmented into its paired color mask; the
 /// backend-specific SAM3 module and background convention stay at the call site while this
 /// orchestration remains shared between MLX and Candle.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn assemble_scail2_animate_conditioning<FR, FD>(
     api: &ApiClient,
     settings: &Settings,
@@ -2225,3 +1656,58 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(native_lane)]
+#[derive(Clone, Debug, Default)]
+struct PreparedVideoAdapters {
+    specs: Vec<AdapterSpec>,
+    pins: BTreeMap<PathBuf, gen_core::PinnedWeightsFile>,
+}
+#[cfg(native_lane)]
+impl std::ops::Deref for PreparedVideoAdapters {
+    type Target = Vec<AdapterSpec>;
+    fn deref(&self) -> &Self::Target {
+        &self.specs
+    }
+}
+#[cfg(native_lane)]
+impl PreparedVideoAdapters {
+    fn push(&mut self, settings: &Settings, mut spec: AdapterSpec) -> WorkerResult<()> {
+        let pin = crate::paths::pin_app_managed_model_file(settings, &spec.path, "video adapter")?;
+        spec.path = pin.loader_path().to_path_buf();
+        crate::adapter_resolution::retain_adapter_pin(&mut self.pins, pin)?;
+        self.specs.push(spec);
+        Ok(())
+    }
+    fn append(&mut self, other: Self) -> WorkerResult<()> {
+        for pin in other.pins.into_values() {
+            crate::adapter_resolution::retain_adapter_pin(&mut self.pins, pin)?;
+        }
+        self.specs.extend(other.specs);
+        Ok(())
+    }
+    fn user(
+        &mut self,
+        settings: &Settings,
+        lora: &Value,
+        model: &str,
+    ) -> WorkerResult<(PathBuf, gen_core::AdapterKind)> {
+        let pin = crate::adapter_resolution::resolve_prepared_adapter_file(lora, settings, model)?;
+        let pin = crate::adapter_resolution::retain_adapter_pin(&mut self.pins, pin)?;
+        let kind = crate::image_jobs::classify_prepared_adapter(pin)?;
+        let file = pin.loader_path().to_path_buf();
+        Ok((file, kind))
+    }
+    fn install(&self, spec: &mut gen_core::LoadSpec) -> gen_core::Result<()> {
+        if self.specs.is_empty() {
+            return Ok(());
+        }
+        for pin in self.pins.values() {
+            spec.set_prepared_file_pin(pin.loader_path(), pin.clone())?;
+        }
+        spec.prepare_file_sources()
+    }
+}
+
+mod dispatch;
+use dispatch::VideoRouteOutcome;

@@ -50,12 +50,7 @@ fn synthetic_rgb(w: u32, h: u32) -> Image {
 }
 
 fn env_path(key: &str) -> PathBuf {
-    // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`.
-    PathBuf::from(
-        std::env::var(key)
-            .unwrap_or_else(|_| panic!("set ${key}"))
-            .trim(),
-    )
+    super::smoke_support::env_path(key)
 }
 
 fn file_sha256(path: &Path) -> String {
@@ -254,6 +249,9 @@ fn flux2_dev_edit_candle_gpu_smoke() {
         width: w,
         height: h,
         steps,
+        sampler: None,
+        scheduler: None,
+        scheduler_shift: None,
         guidance: 4.0,
         seed: 42,
         // No caption upsampling on this smoke — the prompt is used verbatim, matching candle-gen
@@ -349,6 +347,9 @@ fn flux2_dev_control_candle_gpu_smoke() {
         width: w,
         height: h,
         steps,
+        sampler: None,
+        scheduler: None,
+        scheduler_shift: None,
         guidance: 4.0,
         control_scale: 0.75,
         seed: 42,

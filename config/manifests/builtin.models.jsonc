@@ -335,6 +335,10 @@
     },
     {
       "id": "mage_flow_edit_base",
+      "image": {
+        "supportsSchedulerShift": true,
+        "negativePromptRequiresGuidance": true
+      },
       "name": "Mage-Flow Edit-Base",
       "family": "mage-flow",
       "type": "image",
@@ -643,6 +647,10 @@
     },
     {
       "id": "mage_flow_edit",
+      "image": {
+        "supportsSchedulerShift": true,
+        "negativePromptRequiresGuidance": true
+      },
       "name": "Mage-Flow Edit",
       "family": "mage-flow",
       "type": "image",
@@ -948,8 +956,10 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
-        "supportsGuidance": false,
-        "supportsNegativePrompt": false
+        "supportsSchedulerShift": true,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": true,
+        "negativePromptRequiresGuidance": true
       },
       "name": "Mage-Flow Edit-Turbo",
       "family": "mage-flow",
@@ -1255,6 +1265,9 @@
       // choices over that same dense snapshot, not independently provisioned on-disk artifacts;
       // consequently every logical tier intentionally declares the same complete file predicate.
       "id": "mage_flow_base",
+      "image": {
+        "negativePromptRequiresGuidance": true
+      },
       "name": "Mage-Flow Base",
       "family": "mage-flow",
       "type": "image",
@@ -1532,6 +1545,9 @@
       // Mage-Flow RL: reward-optimized full-CFG sibling. This mirror has the same complete
       // snapshot layout as Base but owns a distinct DiT; all three logical tiers quantize at load.
       "id": "mage_flow",
+      "image": {
+        "negativePromptRequiresGuidance": true
+      },
       "name": "Mage-Flow RL",
       "family": "mage-flow",
       "type": "image",
@@ -1806,7 +1822,7 @@
       }
     },
     {
-      // Mage-Flow Turbo: few-step distilled, CFG-free sibling. Its SceneWorks mirror is flat and
+      // Mage-Flow Turbo: few-step distilled sibling with CFG off by default. Its SceneWorks mirror is flat and
       // complete; q4/q8/bf16 remain load-time choices over the same installed snapshot.
       "id": "mage_flow_turbo",
       // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
@@ -1814,8 +1830,9 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
-        "supportsGuidance": false,
-        "supportsNegativePrompt": false
+        "supportsGuidance": true,
+        "supportsNegativePrompt": true,
+        "negativePromptRequiresGuidance": true
       },
       "name": "Mage-Flow Turbo",
       "family": "mage-flow",
@@ -2093,13 +2110,15 @@
     {
       "id": "z_image_turbo",
       // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
-      // `video` sub-block sc-8445 added for Krea Realtime. Z-Image-Turbo is guidance-distilled: `mlx-gen-z-image`'s descriptor sets
-      // supports_guidance/supports_negative_prompt=false on BOTH lanes.
+      // `video` sub-block sc-8445 added for Krea Realtime. Z-Image Turbo keeps CFG off by default; both native lanes allow experimental CFG and negatives.
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
-        "supportsGuidance": false,
-        "supportsNegativePrompt": false
+        "supportsSchedulerShift": true,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": true,
+        "negativePromptRequiresGuidance": true,
+        "guidanceOffValue": 0
       },
       // `recommended` flags the curated "getting started" set surfaced in the Setup
       // Wizard, the Models page Recommended section, and per-Studio availability gates.
@@ -2575,6 +2594,9 @@
       // engine path (`z_image`), distinct from Turbo. The base ships its own fast
       // tokenizer, so no derived-tokenizer overlay is needed.
       "id": "z_image",
+      "image": {
+        "negativePromptRequiresGuidance": true
+      },
       "name": "Z-Image",
       "family": "z-image",
       "type": "image",
@@ -2921,8 +2943,11 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
-        "supportsGuidance": false,
-        "supportsNegativePrompt": false
+        "supportsSchedulerShift": true,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": true,
+        "negativePromptRequiresGuidance": true,
+        "guidanceOffValue": 0
       },
       "name": "Z-Image-Edit",
       "family": "z-image",
@@ -3976,7 +4001,7 @@
       //
       // ⚠️ THIS BLOCK ARMS A PRE-LOAD ADMISSION REFUSAL. `candle.minMemoryGb` and
       // `candle.minMemoryGbByTier` are `x-sceneworks-contract: binding` and are read by
-      // crates/sceneworks-worker/src/vram_gate.rs (`predicted_peak_gb`). With NO `candle` block the
+      // crates/sceneworks-worker/src/vram_gate/budget.rs (`predicted_peak_gb`). With NO `candle` block the
       // fit gate is skipped ENTIRELY and a too-small card discovers it is too small by OOMing
       // mid-load; with one, the gate REFUSES the load before it starts on any card with less free
       // VRAM than the resolved floor. A refusal that names the number is the intended behaviour; a
@@ -5452,6 +5477,7 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
+        "supportsSchedulerShift": true,
         "supportsNegativePrompt": false
       },
       "name": "SenseNova-U1 8B",
@@ -5964,6 +5990,7 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
+        "supportsSchedulerShift": true,
         "supportsNegativePrompt": false
       },
       "name": "SenseNova-U1 8B Fast",
@@ -7577,6 +7604,7 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
+        "supportsSchedulerShift": true,
         "supportsGuidance": false,
         "supportsNegativePrompt": false
       },
@@ -7895,6 +7923,7 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
+        "supportsSchedulerShift": true,
         "supportsNegativePrompt": false
       },
       "name": "FLUX.1 [dev]",
@@ -8185,6 +8214,7 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
+        "supportsSchedulerShift": false,
         "supportsNegativePrompt": false
       },
       "name": "Ideogram 4",
@@ -8440,6 +8470,7 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
+        "supportsSchedulerShift": false,
         "supportsGuidance": false,
         "supportsNegativePrompt": false
       },
@@ -8681,7 +8712,9 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
-        "supportsNegativePrompt": false
+        "negativePromptRequiresGuidance": true,
+        "supportsSchedulerShift": true,
+        "supportsNegativePrompt": true
       },
       // Available (render quality validated real-weight in S5, sc-6402), but no longer in the curated
       // Recommended set. autoDownload:false because the Q8 turnkey is ~23 GB/variant — users opt in.
@@ -8881,12 +8914,15 @@
     {
       "id": "boogu_image_turbo",
       // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
-      // `video` sub-block sc-8445 added for Krea Realtime. DMD few-step student, CFG-free by construction; `boogu_image_turbo` is false/false.
+      // `video` sub-block sc-8445 added for Krea Realtime. DMD few-step student with CFG off by default; Advanced can enable the negative branch.
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
-        "supportsGuidance": false,
-        "supportsNegativePrompt": false
+        "negativePromptRequiresGuidance": true,
+        "guidanceOffValue": 0,
+        "supportsSchedulerShift": true,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": true
       },
       // Available: the fast few-step variant (S5-validated); same autoDownload:false opt-in as Base.
       // No longer in the curated Recommended set. Edit stays Edit-tab-only.
@@ -9040,7 +9076,9 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
-        "supportsNegativePrompt": false
+        "negativePromptRequiresGuidance": true,
+        "supportsSchedulerShift": true,
+        "supportsNegativePrompt": true
       },
       "name": "Boogu Image Edit",
       "family": "boogu",
@@ -9174,8 +9212,11 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
-        "supportsGuidance": false,
-        "supportsNegativePrompt": false
+        "supportsSchedulerShift": true,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": true,
+        "negativePromptRequiresGuidance": true,
+        "guidanceOffValue": 0
       },
       // Krea 2 Turbo (epic 7565) — Krea AI's from-scratch foundation image model, TDM-distilled to a
       // few-step (~8), CFG-free rectified-flow student: a Qwen3-VL-4B text encoder (12-layer learned
@@ -10995,6 +11036,11 @@
     },
     {
       "id": "krea_2_raw",
+      "image": {
+        "supportsSchedulerShift": true,
+        "negativePromptRequiresGuidance": true,
+        "guidanceOffValue": 0
+      },
       // Krea 2 Raw (epic 9992) — the UNDISTILLED 12B single-stream DiT, now a first-class text-to-image
       // GENERATION model (TRUE classifier-free guidance: a real guidance scale + optional negative
       // prompt, 52 steps, resolution-dynamic mu) alongside the distilled CFG-free Krea 2 Turbo — the
@@ -12692,6 +12738,7 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
+        "supportsSchedulerShift": true,
         "supportsNegativePrompt": false
       },
       "name": "FLUX.2 [dev]",
@@ -14674,6 +14721,8 @@
       "id": "kolors",
       "name": "Kolors",
       "family": "kolors",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "kolors_diffusers",
       "capabilities": ["text_to_image", "edit_image", "character_image"],
@@ -15467,6 +15516,10 @@
     },
     {
       "id": "sd3_5_large",
+      "image": {
+        "supportsSchedulerShift": true,
+        "negativePromptRequiresGuidance": true
+      },
       "name": "Stable Diffusion 3.5 Large",
       "family": "sd3",
       "type": "image",
@@ -15616,8 +15669,10 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
-        "supportsGuidance": false,
-        "supportsNegativePrompt": false
+        "supportsSchedulerShift": true,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": true,
+        "negativePromptRequiresGuidance": true
       },
       // Available: the few-step distilled flagship, but no longer in the curated Recommended set.
       // autoDownload:false because it is a gated, large turnkey (mirrors the Boogu / krea_2 opt-in
@@ -15749,6 +15804,10 @@
     },
     {
       "id": "sd3_5_medium",
+      "image": {
+        "supportsSchedulerShift": true,
+        "negativePromptRequiresGuidance": true
+      },
       "name": "Stable Diffusion 3.5 Medium",
       "family": "sd3",
       "type": "image",
@@ -16067,6 +16126,7 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
+        "supportsSchedulerShift": false,
         "supportsNegativePrompt": false
       },
       // SANA-Sprint 1.6B 1024px (epic 8485 / sc-8490) — NVIDIA's few-step distillation of SANA, ported
@@ -16242,6 +16302,10 @@
     },
     {
       "id": "anima_base",
+      "image": {
+        "supportsSchedulerShift": true,
+        "negativePromptRequiresGuidance": true
+      },
       // Anima 2B (epic 10512 / sc-10523) — CircleStone Labs' anime text-to-image model, ported natively
       // to mlx-gen (engine id `anima_base`). The Cosmos-Predict2 `CosmosTransformer3DModel` DiT (28
       // layers, 17-channel patch-embed, 3-axis NTK RoPE) + the bundled `AnimaTextConditioner` (T5 query
@@ -16557,6 +16621,10 @@
     },
     {
       "id": "anima_aesthetic",
+      "image": {
+        "supportsSchedulerShift": true,
+        "negativePromptRequiresGuidance": true
+      },
       // Anima 2B Aesthetic (epic 10512 / sc-10523) — the aesthetic fine-tune of Anima 2B. Same
       // architecture, sampler/scheduler menu, convert-at-install (mac) / dense candle (off-Mac) flow, and
       // NC posture as `anima_base`; differs only in the DiT weights file (same 30 steps / guidance 4.5).
@@ -16798,8 +16866,10 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
-        "supportsGuidance": false,
-        "supportsNegativePrompt": false
+        "supportsSchedulerShift": true,
+        "supportsGuidance": true,
+        "supportsNegativePrompt": true,
+        "negativePromptRequiresGuidance": true
       },
       // Anima 2B Turbo (epic 10512 / sc-10523) — the merged CFG-free few-step student of Anima 2B. Same
       // architecture + convert-at-install flow + NC posture as the base; the guidance-distilled merged DiT
@@ -17043,6 +17113,8 @@
       "recommended": true,
       "name": "Stable Diffusion XL",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // character_image: h94/IP-Adapter plus-face for Character Studio reference
@@ -18258,6 +18330,8 @@
       "id": "realvisxl",
       "name": "RealVisXL (photoreal SDXL)",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // Photoreal SDXL finetune with the full SDXL feature set (t2i + edit +
@@ -19292,6 +19366,8 @@
       "id": "realvisxl_lightning",
       "name": "RealVisXL Lightning (fast photoreal SDXL)",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // Few-step distilled sibling of RealVisXL_V5.0 (sc-6075). A STANDALONE checkpoint
@@ -20287,6 +20363,8 @@
       "id": "illustrious_xl_v1",
       "name": "Illustrious-XL v1.0 (anime)",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // Danbooru-tag anime SDXL finetune (OnomaAI). Architecturally vanilla SDXL — identical UNet,
@@ -21253,6 +21331,8 @@
       "id": "illustrious_xl_v2",
       "name": "Illustrious-XL v2.0 (anime)",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // The `v2.0-STABLE` last-annealing-phase snapshot of a cosine-annealing run. A SEPARATE
@@ -22220,6 +22300,8 @@
       "id": "instantid_realvisxl",
       "name": "InstantID (RealVisXL)",
       "family": "sdxl",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "instantid_sdxl",
       // Reference-driven only: identity comes from an insightface ArcFace embedding
@@ -22494,6 +22576,7 @@
       // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
       // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
       "image": {
+        "supportsSchedulerShift": true,
         "supportsNegativePrompt": false
       },
       "name": "PuLID-FLUX (FLUX.1 [dev])",
@@ -22766,7 +22849,8 @@
       // baked in, while dev uses the fixed multimodal guider parameters from its checkpoint row.
       // The default distilled variant also has no negative branch. Video Studio reopens only the
       // negative prompt when the user explicitly selects dev; guidance stays provider-owned.
-      "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      "video": {
+        "supportsSchedulerShift": false, "supportsGuidance": false, "supportsNegativePrompt": false },
       // One rehost, two transformer identities. Every selected quant tier downloads both nested
       // variants and the worker selects exactly one root. Sizes are measured from the finalized
       // public bundle and every runtime resolver binds the immutable verified revision below.
@@ -22848,7 +22932,7 @@
         "requiresDimensionsMultipleOf": 64,
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
-      "loraCompatibility": { "families": ["ltx-video"], "types": ["style", "motion", "character", "enhance"] },
+      "loraCompatibility": { "generation": "2.5", "families": ["ltx-video"], "types": ["style", "motion", "character", "enhance"] },
       "mlx": {
         "minMemoryGb": 31,
         "repo": "SceneWorks/ltx-2.5-mlx",
@@ -23062,7 +23146,7 @@
         // curated set (candle also keeps the legacy `rectified-flow` alias). No scheduler axis.
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "generation": "2.3",
         "families": ["ltx-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -23203,7 +23287,7 @@
         // Eros has no Candle route after SC-18902 acceptance. No scheduler axis.
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "generation": "2.3",
         "families": ["ltx-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -23261,6 +23345,7 @@
       // branch to steer. `promptless` already hid the prompt field; without this block the Guidance
       // and Negative prompt controls stayed visible and permanently dead.
       "video": {
+        "supportsSchedulerShift": false,
         "supportsGuidance": false,
         "supportsNegativePrompt": false
       },
@@ -23507,7 +23592,7 @@
         "samplers": ["default", "uni_pc", "euler", "euler_ancestral", "heun", "dpmpp_sde", "ddim"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "5b", "imageConditionedBackbone": true,
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -23780,7 +23865,7 @@
         "samplers": ["default", "uni_pc", "euler"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "14b", "imageConditionedBackbone": false,
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -24064,7 +24149,7 @@
         "samplers": ["default", "uni_pc", "euler"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "14b", "imageConditionedBackbone": true,
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -24245,7 +24330,7 @@
         "samplers": ["default", "uni_pc", "euler", "dpmpp_2m"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "14b", "imageConditionedBackbone": false,
         "families": ["wan-video"],
         "types": ["style", "motion", "character", "enhance"]
       },
@@ -24497,6 +24582,8 @@
       "id": "bernini_image",
       "name": "Bernini (Image)",
       "family": "bernini",
+      // This native route has no flow-schedule Shift parameter.
+      "image": { "supportsSchedulerShift": false },
       "type": "image",
       "adapter": "bernini",
       "capabilities": ["text_to_image", "edit_image"],
@@ -24822,7 +24909,7 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "14b", "imageConditionedBackbone": true,
         // SCAIL-2 LoRA is wired (sc-5451, mlx-gen #462): the engine descriptor reports
         // supports_lora/supports_lokr and installs a standard lora_down/up adapter as a
         // forward-time residual over the Q4 base; the worker routes request.loras via
@@ -24925,6 +25012,7 @@
       // is the correct default for the majority AND leaves those eight behaving exactly as they did
       // before this block existed. The schema says the same thing.
       "video": {
+        "supportsSchedulerShift": false,
         "supportsGuidance": false,
         "supportsNegativePrompt": false
       },
@@ -25100,7 +25188,7 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      "loraCompatibility": {
+      "loraCompatibility": { "sizeClass": "14b", "imageConditionedBackbone": false,
         // Krea Realtime gets its OWN family token. The DiT is Wan 2.1 T2V 14B weight-for-weight,
         // so Wan-family style/motion LoRAs do install on it (sc-15015 wired the dense
         // forward-time residual path, tier-agnostic over the packed Q4/Q8 bases) — but declaring
@@ -25242,7 +25330,8 @@
       // `negative_prompt`**, so both axes are declared false and Video Studio hides the controls
       // rather than offering knobs the worker would discard. ABSENT would mean TRUE here (the video
       // block's polarity is the opposite of `audio`'s), which is why silence is not an option.
-      "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      "video": {
+        "supportsSchedulerShift": true, "supportsGuidance": false, "supportsNegativePrompt": false },
       // sc-17227 — LICENCE ACKNOWLEDGMENT WITHOUT A CREDENTIAL. `gated` is deliberately ABSENT:
       // `MiniMaxAI/MiniMax-H3` is a PUBLIC repo, so there is no Hugging Face token to add and no
       // "Request access" page to visit. Declaring `gated: true` here to get the acknowledgment
@@ -26106,7 +26195,8 @@
       // `negative_prompt`**, so both axes are declared false and Video Studio hides the controls
       // rather than offering knobs the worker would discard. ABSENT would mean TRUE here (the video
       // block's polarity is the opposite of `audio`'s), which is why silence is not an option.
-      "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      "video": {
+        "supportsSchedulerShift": true, "supportsGuidance": false, "supportsNegativePrompt": false },
       // sc-17227 — same licence gate as `minimax_h3`, and it must be declared HERE too: the
       // acknowledgment is keyed per model id, and this is a separate entry the user can install
       // on its own. See the sibling entry for why `gated` is absent (the HF repo is public, so
@@ -26538,7 +26628,8 @@
           // Reclaiming them is tracked on sc-17636 (S11), which owns delete/size coverage.
           //
           // `resources.imageUpscalers.real-esrgan.x{2,4}` still records the `.pth` provenance —
-          // `scripts/spikes/sc3489_export_reference.py` reproduces these ONNX files from it —
+          // Restore `scripts/spikes/sc3489_export_reference.py` from
+          // docs/archive/historical-artifacts.md to reproduce these ONNX files from it —
           // but provenance is metadata, not something every user needs on disk.
           //
           // The revision is byte-for-byte the worker's own `ONNX_REVISION`
@@ -28232,11 +28323,15 @@
     },
     {
       "id": "moss_sfx_v2",
+      "defaults": {"schedulerShift": 5, "steps": 100, "guidanceScale": 4},
       "name": "MOSS SoundEffect v2 (SFX)",
       "family": "moss_soundeffect",
       "type": "audio",
       "macOnly": false,
       "audio": {
+        "supportsGuidance": true,
+        "supportsNegativePrompt": true,
+        "supportsSchedulerShift": true,
         "languages": [
           "en",
           "zh"
@@ -28302,11 +28397,13 @@
     },
     {
       "id": "acestep_v15_turbo",
+      "defaults": {"schedulerShift": 3, "steps": 8},
       "name": "ACE-Step v1.5 XL Turbo (Music)",
       "family": "acestep",
       "type": "audio",
       "macOnly": false,
       "audio": {
+        "supportsSchedulerShift": true,
         "languages": [
           "en",
           "zh",

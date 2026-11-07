@@ -192,13 +192,8 @@ async fn inspect_creates_no_asset_no_job_and_no_project_mutation() {
     let data_dir = settings.data_dir.clone();
     let app = create_app(settings).expect("app creates");
 
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Inspect Purity" }),
-    )
-    .await;
+    let (status, project) =
+        crate::tests::support::create_project(app.clone(), &"Inspect Purity").await;
     assert_eq!(status, StatusCode::CREATED);
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
@@ -795,13 +790,7 @@ async fn project_with_imported_image(
     filename: &str,
     bytes: &[u8],
 ) -> (String, String) {
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": name }),
-    )
-    .await;
+    let (status, project) = crate::tests::support::create_project(app.clone(), &(name)).await;
     assert_eq!(status, StatusCode::CREATED);
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (status, asset) = request_multipart_upload(
@@ -819,6 +808,80 @@ async fn project_with_imported_image(
 
 fn asset_workflow_route(project_id: &str, asset_id: &str) -> String {
     format!("/api/v1/projects/{project_id}/assets/{asset_id}/workflow")
+}
+
+#[tokio::test]
+async fn tensor_portable_companion_is_downloadable_and_inspected_with_its_identity() {
+    use sha2::{Digest, Sha256};
+
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let project = state
+        .project_store
+        .create_project("Tensor workflow")
+        .unwrap();
+    let relative = "assets/tensors/genset/0000.sceneworks-workflow.json";
+    let share = sceneworks_core::workflow_share::parse_workflow_share_json(
+        r#"{
+            "sceneworksWorkflow": "image", "schemaVersion": 1,
+            "producer": {"name": "SceneWorks", "url": "https://example.invalid", "version": "0.8.1"},
+            "mode": "edit_image", "model": "moss_image_sft", "prompt": "edit",
+            "count": 2, "advanced": {"mossImageSampleIndex": 0,
+                "mossImageAdvanced": {"output": "latents"}}
+        }"#,
+    )
+    .unwrap();
+    let bytes = serde_json::to_vec(&share).unwrap();
+    let path = std::path::Path::new(&project.path).join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let tensor_path = path.with_file_name("0000.npy");
+    std::fs::write(
+        &tensor_path,
+        sceneworks_core::tensor_artifact::encode_f32(&[1, 128, 1, 1], &[0.; 128]).unwrap(),
+    )
+    .unwrap();
+    let tensor = sceneworks_core::tensor_artifact::inspect(&tensor_path).unwrap();
+    let asset = state
+        .project_store
+        .persist_generated_asset(
+            &project.id,
+            "job",
+            "genset",
+            &json!({"assetId": "latent", "type": "tensor",
+                "mediaPath": "assets/tensors/genset/0000.npy", "mimeType": "application/x-npy",
+                "tensor": tensor, "displayName": "MOSS sampled latents 1", "createdAt": "2026-11-03T00:00:00Z",
+                "mode": "edit_image", "model": "moss_image_sft", "prompt": "edit", "count": 2,
+                "extra": {"workflowCompanion": {"path": relative,
+                    "sha256": format!("{:x}", Sha256::digest(&bytes))}}}),
+        )
+        .unwrap();
+    let (status, headers, downloaded) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{}/files/{relative}", project.id),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(downloaded, bytes);
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    let route = asset_workflow_route(&project.id, asset["id"].as_str().unwrap());
+    let (status, inspected) = request(app.clone(), "GET", &route, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{inspected}");
+    assert_eq!(inspected["status"], "workflow");
+    assert_eq!(inspected["workflow"], serde_json::to_value(share).unwrap());
+
+    // A public authoring document is still bound to the asset's recorded identity.
+    let mut changed = bytes;
+    changed.push(b'\n');
+    std::fs::write(path, changed).unwrap();
+    let (status, error) = request(app, "GET", &route, Value::Null).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{error}");
+    assert_eq!(error["detail"], "An internal error occurred");
+    assert!(uuid::Uuid::parse_str(error["correlationId"].as_str().unwrap()).is_ok());
 }
 
 #[tokio::test]
@@ -1199,13 +1262,8 @@ async fn the_asset_route_404s_for_an_asset_that_does_not_exist() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Missing Asset" }),
-    )
-    .await;
+    let (status, project) =
+        crate::tests::support::create_project(app.clone(), &"Missing Asset").await;
     assert_eq!(status, StatusCode::CREATED);
     let project_id = project["id"].as_str().expect("project id");
     let (status, _) = request(

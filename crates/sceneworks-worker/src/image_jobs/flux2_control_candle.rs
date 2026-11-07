@@ -1,18 +1,45 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
-use super::{
-    apply_candle_image_load_shape, attach_manifest_text_encoder, candle_certified_artifact_path,
-    candle_certified_hf_artifact_path, candle_quant_for_resolved_tier, candle_resolved_tier_key,
-    pid_effective_dims, pid_output_tier, pose_entries, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
-    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
-    CandleStrictControl, Flux2Control, Flux2ControlPaths, Flux2ControlRequest, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Quant, Settings, Value,
-    WorkerError, WorkerResult,
-};
-use super::{
-    resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
-};
+use super::adapters::resolve_adapters;
+use super::conditioning::pose_entries;
+use super::load_policy::apply_candle_image_load_shape;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::candle_certified_artifact_path;
+use super::load_spec::candle_certified_hf_artifact_path;
+use super::memory::candle_quant_for_resolved_tier;
+use super::memory::candle_resolved_tier_key;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::resolve_pid_weights;
+use super::run_candle_strict_control;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::standard_tier_subdir;
+use super::strict_control::trusted_control_weight_revision;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use super::Flux2Control;
+use super::Flux2ControlPaths;
+use super::Flux2ControlRequest;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::Progress;
+use super::Quant;
+use crate::advanced;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 pub(super) fn flux2_control_adapter_source_bytes(
@@ -93,20 +120,13 @@ fn resolve_flux2_control_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "FLUX.2 control modelPath")
             .map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model)
                 .unwrap_or(FLUX2_CONTROL_CANDLE_BASE_REPO)
@@ -175,9 +195,7 @@ pub(super) fn flux2_control_candle_repo_file(
         .and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(default)
             .to_owned()
     };
@@ -281,6 +299,7 @@ pub(super) struct Flux2StrictControl {
     width: u32,
     height: u32,
     steps: u32,
+    sampling: gen_core::GenerationRequest,
     guidance: f32,
     control_scale: f32,
     memory: gen_core::GenerationMemory,
@@ -305,6 +324,7 @@ pub(super) fn flux2_strict_control_test_fixture(path: PathBuf) -> Flux2StrictCon
         width: 512,
         height: 512,
         steps: 28,
+        sampling: gen_core::GenerationRequest::default(),
         guidance: 4.0,
         control_scale: 0.75,
         memory: gen_core::GenerationMemory::default(),
@@ -348,7 +368,7 @@ impl CandleStrictControl for Flux2StrictControl {
             let transformer = self.base.join("transformer");
             let vae = self.base.join("vae");
             if transformer.is_dir() && vae.is_dir() {
-                overlays.push(crate::conditioning_fit::weights_source_path(text_encoder));
+                overlays.push(crate::weights_source::WeightsSourceExt::path(text_encoder));
                 overlays.push(vae.as_path());
                 return ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
                     "FLUX.2-dev",
@@ -414,6 +434,9 @@ impl CandleStrictControl for Flux2StrictControl {
             width: self.width,
             height: self.height,
             steps: self.steps as usize,
+            sampler: self.sampling.sampler.clone(),
+            scheduler: self.sampling.scheduler.clone(),
+            scheduler_shift: self.sampling.scheduler_shift,
             guidance: self.guidance,
             control_scale: self.control_scale,
             seed,
@@ -468,12 +491,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         FLUX2_CONTROL_CANDLE_DEFAULT_SCALE,
         0.0..=2.0,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model)
                 .unwrap_or(FLUX2_CONTROL_CANDLE_BASE_REPO)
@@ -515,10 +533,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         settings,
     )?;
     let strategy_spec = attached_strategy_spec.into_load_spec();
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
@@ -599,6 +614,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         width,
         height,
         steps,
+        sampling: super::sampling::explicit_sampling_request(request),
         guidance,
         control_scale,
         memory: generation_memory,

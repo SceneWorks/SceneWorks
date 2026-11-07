@@ -2,7 +2,7 @@
 //
 // A recipe is the only record of what a user asked for, and both studios replay one, so the
 // field readers live here rather than privately in either. The recipe shape is assembled by
-// `build_video_sidecar_parts` / its image twin in `crates/sceneworks-core/src/project_store.rs`:
+// `build_video_sidecar_parts` / its image twin in `crates/sceneworks-core/src/project_store/asset_sidecars.rs`:
 // `normalizedSettings` holds the values the app RESOLVED, `rawAdapterSettings` holds the
 // `advanced` block the client sent verbatim. That split is why the two resolution readers below
 // disagree on purpose — see `recipeRequestedResolution`.

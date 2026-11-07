@@ -2,7 +2,7 @@
   "$schema": "../../packages/schemas/styles.schema.json",
   "schemaVersion": 1,
   "source": "documents/style.txt",
-  "promptTemplate": "Subject: {subject}\nStyle: {style}",
+  "promptTemplate": "Description: {subject}\nStyle: {style}",
   "groups": [
     {
       "id": "anime-style",

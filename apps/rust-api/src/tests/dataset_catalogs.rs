@@ -19,6 +19,12 @@ use tower::ServiceExt as _;
 
 use super::support::*;
 
+// Catalog host-path selection is a local operation. Explicit remote regressions
+// use request_with_peer_headers instead of this local UI fixture.
+async fn request(app: axum::Router, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
+    request_with_peer(app, method, uri, body, "127.0.0.1:50000").await
+}
+
 fn catalog_scan_hook_test_lock() -> &'static TestSerializationLock {
     static LOCK: OnceLock<TestSerializationLock> = OnceLock::new();
     LOCK.get_or_init(|| {
@@ -274,11 +280,10 @@ async fn materialization_replaces_invalid_cache_deterministically_and_survives_c
     drop(catalog);
 
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Catalog materialization"}),
+        &"Catalog materialization",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -531,11 +536,10 @@ async fn materialization_none_policy_allows_identical_verified_content() {
     let catalog_id = catalog.descriptor().id.clone();
     drop(catalog);
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Duplicate policy"}),
+        &"Duplicate policy",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -664,11 +668,10 @@ async fn timed_out_cache_verifier_case(verifier_delay: Duration) {
     drop(catalog);
 
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({"name": "Late cache replacement"}),
+        &"Late cache replacement",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -1812,9 +1815,13 @@ async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
         .await;
         if current["processing"]["state"] == "running" {
             state
+                .test_hooks
                 .catalog_scan_before_terminal_exit_once
                 .store(true, Ordering::SeqCst);
-            let terminal = state.catalog_scan_terminal_exit_reached.notified();
+            let terminal = state
+                .test_hooks
+                .catalog_scan_terminal_exit_reached
+                .notified();
             let (pause_status, paused) = request(
                 app.clone(),
                 "POST",
@@ -1832,9 +1839,13 @@ async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
                 break;
             }
             state
+                .test_hooks
                 .catalog_scan_before_terminal_exit_once
                 .store(false, Ordering::SeqCst);
-            state.catalog_scan_terminal_exit_release.notify_waiters();
+            state
+                .test_hooks
+                .catalog_scan_terminal_exit_release
+                .notify_waiters();
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
@@ -1855,7 +1866,10 @@ async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
         1,
         "the terminal generation remains registered while restart is queued"
     );
-    state.catalog_scan_terminal_exit_release.notify_waiters();
+    state
+        .test_hooks
+        .catalog_scan_terminal_exit_release
+        .notify_waiters();
 
     wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 100_000).await;
     let (_, completed) = request(
@@ -2003,6 +2017,7 @@ async fn transient_sqlite_contention_retries_and_completes_exactly() {
     let (app, state) =
         create_app_with_state(test_settings(&temporary)).expect("app and state create");
     state
+        .test_hooks
         .catalog_scan_injected_sqlite_busy_failures
         .store(2, std::sync::atomic::Ordering::SeqCst);
 
@@ -2035,6 +2050,7 @@ async fn transient_sqlite_contention_retries_and_completes_exactly() {
     assert_eq!(completed["counts"]["recordCount"], 1_000);
     assert_eq!(
         state
+            .test_hooks
             .catalog_scan_injected_sqlite_busy_failures
             .load(std::sync::atomic::Ordering::SeqCst),
         0
@@ -2049,10 +2065,13 @@ async fn exhausted_sqlite_contention_is_visible_and_actionable() {
     write_catalog_parquet(&source, 10);
     let (app, state) =
         create_app_with_state(test_settings(&temporary)).expect("app and state create");
-    state.catalog_scan_injected_sqlite_busy_failures.store(
-        u64::from(crate::catalogs::CATALOG_SCAN_MAX_CONTENTION_RETRIES) + 1,
-        std::sync::atomic::Ordering::SeqCst,
-    );
+    state
+        .test_hooks
+        .catalog_scan_injected_sqlite_busy_failures
+        .store(
+            u64::from(crate::catalogs::CATALOG_SCAN_MAX_CONTENTION_RETRIES) + 1,
+            std::sync::atomic::Ordering::SeqCst,
+        );
 
     let (status, created) = request(
         app.clone(),
@@ -2151,9 +2170,13 @@ async fn shutdown_during_contention_backoff_preserves_paused_resume_boundary() {
     assert_eq!(durable_pause["processing"]["state"], "paused");
 
     state
+        .test_hooks
         .catalog_scan_injected_sqlite_busy_failures
         .store(1, std::sync::atomic::Ordering::SeqCst);
-    let backoff_started = state.catalog_scan_contention_backoff_started.notified();
+    let backoff_started = state
+        .test_hooks
+        .catalog_scan_contention_backoff_started
+        .notified();
     tokio::pin!(backoff_started);
     backoff_started.as_mut().enable();
     let (resume_status, resumed) = request(
@@ -2190,6 +2213,7 @@ async fn interrupted_bounded_driver_is_automatically_recovered_from_its_checkpoi
     let (app, state) =
         create_app_with_state(test_settings(&temporary)).expect("app and state create");
     state
+        .test_hooks
         .catalog_scan_stop_after_pass_once
         .store(true, Ordering::SeqCst);
 
@@ -2241,6 +2265,7 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
     let (app, state) =
         create_app_with_state(test_settings(&temporary)).expect("app and state create");
     state
+        .test_hooks
         .catalog_scan_stop_after_pass_once
         .store(true, Ordering::SeqCst);
 
@@ -2265,7 +2290,10 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
     wait_for_catalog_scan_idle(&state.catalog_scan_supervisor, 80_000).await;
 
     let before_recovered_start = Arc::new(tokio::sync::Barrier::new(2));
-    *state.catalog_scan_before_driver_start_once.lock() = Some(Arc::clone(&before_recovered_start));
+    *state
+        .test_hooks
+        .catalog_scan_before_driver_start_once
+        .lock() = Some(Arc::clone(&before_recovered_start));
     let (_, first_recovery) = request(
         app.clone(),
         "GET",
@@ -2276,6 +2304,7 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
     assert_eq!(first_recovery["processing"]["processedCount"], 25_000);
     assert_eq!(state.catalog_scan_supervisor.active_count().await, 1);
     state
+        .test_hooks
         .catalog_scan_stop_after_pass_once
         .store(true, Ordering::SeqCst);
     tokio::time::timeout(Duration::from_secs(60), before_recovered_start.wait())
@@ -2324,6 +2353,7 @@ async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
     let (app, state) =
         create_app_with_state(test_settings(&temporary)).expect("app and state create");
     state
+        .test_hooks
         .catalog_scan_stop_after_pass_once
         .store(true, Ordering::SeqCst);
 
@@ -2421,7 +2451,10 @@ async fn transient_prestart_read_lease_cannot_strand_scheduled_processing() {
     let (app, state) =
         create_app_with_state(test_settings(&temporary)).expect("app and state create");
     let before_start = Arc::new(tokio::sync::Barrier::new(2));
-    *state.catalog_scan_before_driver_start_once.lock() = Some(Arc::clone(&before_start));
+    *state
+        .test_hooks
+        .catalog_scan_before_driver_start_once
+        .lock() = Some(Arc::clone(&before_start));
 
     let (status, created) = request(
         app.clone(),
@@ -2671,9 +2704,10 @@ async fn slow_parquet_preflight_keeps_health_responsive() {
     let (app, state) =
         create_app_with_state(test_settings(&temporary)).expect("app and state create");
     state
+        .test_hooks
         .catalog_scan_preflight_delay_ms_once
         .store(250, Ordering::SeqCst);
-    let preflight_started = state.catalog_scan_preflight_started.notified();
+    let preflight_started = state.test_hooks.catalog_scan_preflight_started.notified();
     let create = tokio::spawn(request(
         app.clone(),
         "POST",
@@ -2911,7 +2945,10 @@ async fn resume_waits_through_long_prestart_lease_contention_and_completes() {
     catalog.close();
 
     let before_start = Arc::new(tokio::sync::Barrier::new(2));
-    *state.catalog_scan_before_driver_start_once.lock() = Some(before_start.clone());
+    *state
+        .test_hooks
+        .catalog_scan_before_driver_start_once
+        .lock() = Some(before_start.clone());
     let (status, resumed) = request(
         app.clone(),
         "POST",
@@ -3001,7 +3038,10 @@ async fn resume_after_busy_retry_terminal_decision_is_handed_to_a_successor() {
     catalog.close();
 
     let before_start = Arc::new(tokio::sync::Barrier::new(2));
-    *state.catalog_scan_before_driver_start_once.lock() = Some(before_start.clone());
+    *state
+        .test_hooks
+        .catalog_scan_before_driver_start_once
+        .lock() = Some(before_start.clone());
     let (status, running) = request(
         app.clone(),
         "POST",
@@ -3021,9 +3061,13 @@ async fn resume_after_busy_retry_terminal_decision_is_handed_to_a_successor() {
         })
         .expect("active progress publishes");
     state
+        .test_hooks
         .catalog_scan_before_terminal_exit_once
         .store(true, Ordering::SeqCst);
-    let terminal = state.catalog_scan_terminal_exit_reached.notified();
+    let terminal = state
+        .test_hooks
+        .catalog_scan_terminal_exit_reached
+        .notified();
     before_start.wait().await;
 
     let (pause_status, paused_again) = request(
@@ -3052,7 +3096,10 @@ async fn resume_after_busy_retry_terminal_decision_is_handed_to_a_successor() {
     )
     .await;
     assert_eq!(resume_status, StatusCode::OK, "{resumed}");
-    state.catalog_scan_terminal_exit_release.notify_waiters();
+    state
+        .test_hooks
+        .catalog_scan_terminal_exit_release
+        .notify_waiters();
 
     let mut completed = None;
     for _ in 0..1_000 {
@@ -3121,7 +3168,10 @@ async fn new_appstate_recovers_after_shutdown_lease_contention_clears() {
     catalog.close();
 
     let before_start = Arc::new(tokio::sync::Barrier::new(2));
-    *state.catalog_scan_before_driver_start_once.lock() = Some(before_start.clone());
+    *state
+        .test_hooks
+        .catalog_scan_before_driver_start_once
+        .lock() = Some(before_start.clone());
     let (status, resumed) = request(
         app.clone(),
         "POST",
@@ -3277,7 +3327,10 @@ async fn cancellation_while_waiting_for_busy_lease_is_restartable() {
     write_catalog_parquet(&source, 100);
     let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
     let before_start = Arc::new(tokio::sync::Barrier::new(2));
-    *state.catalog_scan_before_driver_start_once.lock() = Some(before_start.clone());
+    *state
+        .test_hooks
+        .catalog_scan_before_driver_start_once
+        .lock() = Some(before_start.clone());
     let (status, created) = request(
         app.clone(),
         "POST",
@@ -3299,12 +3352,18 @@ async fn cancellation_while_waiting_for_busy_lease_is_restartable() {
     let contended = registry.open_attached(&id).expect("catalog opens");
     let mut held_lease = Some(CatalogProcessingLease::try_acquire(&contended).expect("test lease"));
     let cancellation_ack = Arc::new(tokio::sync::Barrier::new(2));
-    *state.catalog_scan_busy_lease_cancel_barrier_once.lock() = Some(cancellation_ack.clone());
+    *state
+        .test_hooks
+        .catalog_scan_busy_lease_cancel_barrier_once
+        .lock() = Some(cancellation_ack.clone());
     before_start.wait().await;
     assert!(
         tokio::time::timeout(
             Duration::from_secs(30),
-            state.catalog_scan_contention_backoff_started.notified(),
+            state
+                .test_hooks
+                .catalog_scan_contention_backoff_started
+                .notified(),
         )
         .await
         .is_ok(),
@@ -3385,7 +3444,10 @@ async fn cancellation_while_waiting_for_global_scan_permit_is_restartable() {
     write_catalog_parquet(&source, 100);
     let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
     let before_start = Arc::new(tokio::sync::Barrier::new(2));
-    *state.catalog_scan_before_driver_start_once.lock() = Some(before_start.clone());
+    *state
+        .test_hooks
+        .catalog_scan_before_driver_start_once
+        .lock() = Some(before_start.clone());
     let (status, created) = request(
         app.clone(),
         "POST",
@@ -3498,6 +3560,7 @@ async fn saturated_preflight_admission_rejects_extra_work_without_blocking_catal
         .await
         .expect("second slot");
     state
+        .test_hooks
         .catalog_scan_preflight_admission_timeout_ms
         .store(50, Ordering::SeqCst);
     let rejected_root = temporary.path().join("rejected");
@@ -3551,12 +3614,14 @@ async fn timed_out_preflight_cancels_remaining_validation_work() {
     let (app, state) =
         create_app_with_state(test_settings(&temporary)).expect("app and state create");
     state
+        .test_hooks
         .catalog_scan_preflight_delay_ms_once
         .store(500, Ordering::SeqCst);
     state
+        .test_hooks
         .catalog_scan_preflight_execution_timeout_ms
         .store(50, Ordering::SeqCst);
-    let started = state.catalog_scan_preflight_started.notified();
+    let started = state.test_hooks.catalog_scan_preflight_started.notified();
     let catalog_root = temporary.path().join("timed-out");
     let request_task = tokio::spawn(request(
         app,
@@ -3589,11 +3654,13 @@ async fn timed_out_preflight_cancels_remaining_validation_work() {
 
     tokio::time::sleep(Duration::from_millis(30)).await;
     let stopped_ticks = state
+        .test_hooks
         .catalog_scan_preflight_test_ticks
         .load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert_eq!(
         state
+            .test_hooks
             .catalog_scan_preflight_test_ticks
             .load(Ordering::SeqCst),
         stopped_ticks,

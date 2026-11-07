@@ -61,7 +61,7 @@ impl Session {
         self.post_with_control(api, payload, false).await
     }
 
-    #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+    #[cfg(any(test, native_lane))]
     pub(crate) async fn post_cancelling(
         &self,
         api: &ApiClient,
@@ -311,7 +311,7 @@ pub(crate) fn generator_progress(progress: &gen_core::Progress) {
     );
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) fn training_progress(progress: &gen_core::TrainingProgress) {
     let (message, stage) = match progress {
         gen_core::TrainingProgress::Preparing => {
@@ -357,7 +357,7 @@ pub(crate) fn text_observer() -> gen_core::core_llm::GenerationProgressObserver 
 
 /// Universal text execution starts with preparation; the request's phase observer supplies actual
 /// tokenization/prefill/decode boundaries. Token counts use the same current-state slot.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) fn generate_text(
     model: &dyn gen_core::core_llm::TextLlm,
     request: &gen_core::core_llm::TextLlmRequest,
@@ -584,7 +584,7 @@ pub(crate) fn generator_phase(phase: gen_core::LoadPhase) -> &'static str {
 
 /// Coalesced process bridge. Used by rank workers whose I/O reports cross stdout, rather than
 /// sharing the coordinator's observer. The sink runs on its own thread; it never blocks readers.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) struct ProcessBridge {
     state: Arc<Mutex<(bool, Option<Option<LoadActivity>>)>>,
     wake: std::sync::mpsc::SyncSender<()>,
@@ -592,7 +592,7 @@ pub(crate) struct ProcessBridge {
     thread: Option<std::thread::JoinHandle<()>>,
     _observer: LoadActivityObserver,
 }
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 impl ProcessBridge {
     pub(crate) fn new(sink: impl Fn(Option<LoadActivity>) + Send + 'static) -> Self {
         let state = Arc::new(Mutex::new((false, None)));
@@ -640,7 +640,7 @@ impl ProcessBridge {
         write()
     }
 }
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 impl Drop for ProcessBridge {
     fn drop(&mut self) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).0 = true;
@@ -724,7 +724,8 @@ mod tests {
             .lock()
             .unwrap()
             .push((job.clone(), payload, std::time::Instant::now()));
-        state.changed.notify_one();
+        // Job-specific predicates share this signal, so every waiter must recheck its own posts.
+        state.changed.notify_waiters();
         Json(crate::tests::job_snapshot_json(&job, false))
     }
     async fn api() -> (ApiClient, Recorded, tokio::task::JoinHandle<()>) {
@@ -1506,6 +1507,54 @@ mod tests {
             posts.len()
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn each_job_waiter_observes_its_recorded_progress() {
+        fn poll_once<F: Future<Output = ()>>(future: std::pin::Pin<&mut F>) -> std::task::Poll<()> {
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            future.poll(&mut context)
+        }
+
+        let state = Recorded::default();
+        let mut b = Box::pin(wait_for(&state, |posts| {
+            posts.iter().any(|post| post.0 == "job-b")
+        }));
+        let mut a = Box::pin(wait_for(&state, |posts| {
+            posts.iter().any(|post| post.0 == "job-a")
+        }));
+        // Register B first, so a single-consumer notification for A wakes the wrong predicate.
+        assert!(poll_once(b.as_mut()).is_pending());
+        assert!(poll_once(a.as_mut()).is_pending());
+        let _ = receive(
+            Path("job-a".to_owned()),
+            State(state.clone()),
+            Json(serde_json::json!({"message":"alpha"})),
+        )
+        .await;
+        assert!(
+            poll_once(b.as_mut()).is_pending(),
+            "job B has not reported yet"
+        );
+        let _ = receive(
+            Path("job-b".to_owned()),
+            State(state.clone()),
+            Json(serde_json::json!({"message":"beta"})),
+        )
+        .await;
+        assert_eq!(
+            state.posts.lock().unwrap().len(),
+            2,
+            "both progress callbacks arrived"
+        );
+        assert!(
+            poll_once(a.as_mut()).is_ready(),
+            "job A must observe its recorded post"
+        );
+        assert!(
+            poll_once(b.as_mut()).is_ready(),
+            "job B must observe its recorded post after its earlier wake was for job A"
+        );
     }
 
     async fn isolation() {

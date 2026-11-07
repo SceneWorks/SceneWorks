@@ -230,13 +230,13 @@ const GENERATION_CAPABILITIES = new Set([
 ]);
 
 /** A `&[&str]` Rust const, read as text. The matrix generator reads the same two pose-family lists the
- *  same way; `image_jobs/base.rs` compiles only under macOS or `backend-candle`, so a text read is the
+ *  same way; `image_jobs/routing.rs` compiles only under macOS or `backend-candle`, so a text read is the
  *  only way for a portable script to see them at all. */
 export function rustStringSlice(source, name) {
   const match = source.match(
     new RegExp(`const\\s+${name}:\\s*&\\[&str\\]\\s*=\\s*&\\[([\\s\\S]*?)\\];`),
   );
-  if (!match) throw new Error(`could not derive ${name} from image_jobs/base.rs`);
+  if (!match) throw new Error(`could not derive ${name} from image_jobs/routing.rs`);
   return new Set([...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]));
 }
 

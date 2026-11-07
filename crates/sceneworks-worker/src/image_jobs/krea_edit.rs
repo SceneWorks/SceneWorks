@@ -1,3 +1,45 @@
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::artifact_resolution::resolved_mlx_artifact_tier;
+use super::conditioning::edit_reference_ids;
+use super::conditioning::load_reference_image;
+use super::conditioning::resolve_text_style_gain;
+use super::events::consume_gen_events;
+use super::flux2::build_edit_conditioning;
+use super::flux2::fit_edit_references;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::attach_selected_decoder;
+use super::load_spec::load_spec;
+use super::mlx_model;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::resolve_pid_weights;
+use super::quantization::mlx_load_quant_for_resolved_artifact;
+use super::quantization::resolve_quant;
+use super::resolve_seed;
+use super::sampling::resolve_guidance;
+use super::sampling::resolve_negative_prompt;
+use super::sampling::resolve_steps;
+use super::stream::drive_gen_items;
+use super::stream::start_cached_gen_stream_with_request_state;
+use super::CancelFlag;
+use super::Conditioning;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::Progress;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // ---------------------------------------------------------------------------
 // Krea 2 image-edit (macOS, epic 10871): the Kontext-style dual-conditioned edit
 // surface. Routed here from `ImageRoute::KreaEdit` — an `edit_image` job on
@@ -56,7 +98,7 @@ fn request_has_image_edit_lora(request: &ImageRequest) -> bool {
 /// variants edit: **Raw** on the full-CFG `krea_2_edit` (epic 10871) and **Turbo** on the CFG-free
 /// distilled `krea_2_turbo_edit` (sc-11640); both drive the same `krea2_identity_edit` LoRA. Keyed on
 /// `edit_image` mode + a source asset. Mirrors the core router's `krea_mlx_eligible` edit branch.
-fn krea_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn krea_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     matches!(request.model.as_str(), "krea_2_raw" | "krea_2_turbo")
         && request.mode == "edit_image"
         && !edit_reference_ids(request).is_empty()
@@ -96,8 +138,9 @@ fn krea_edit_raw_settings(
 /// the negative prompt + `guidance`. The `krea_2_edit` generator routes the `Reference` to the Kontext
 /// edit entrypoint. Mirrors [`flux2_edit_generate_one`].
 #[allow(clippy::too_many_arguments)]
-fn krea_edit_generate_one(
+pub(super) fn krea_edit_generate_one(
     generator: &dyn Generator,
+    sampling_controls: &GenerationRequest,
     prompt: &str,
     negative_prompt: Option<String>,
     width: u32,
@@ -128,7 +171,7 @@ fn krea_edit_generate_one(
         memory: Some(memory_evaluation.memory),
         preview,
         cancel: cancel.clone(),
-        ..Default::default()
+        ..sampling_controls.clone()
     };
     let output = crate::memory_strategy::generate_with_scope(
         generator,
@@ -136,7 +179,7 @@ fn krea_edit_generate_one(
         Some(&memory_evaluation.context),
         on_progress,
     )
-        .map_err(|error| WorkerError::Engine(format!("Krea edit generation failed: {error}")))?;
+    .map_err(|error| WorkerError::Engine(format!("Krea edit generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {
@@ -155,7 +198,7 @@ fn krea_edit_generate_one(
 /// [`generate_flux2_edit_stream`]'s blocking-thread + streamed-events shape and reuses
 /// [`consume_gen_events`]; differs in the required edit LoRA (R5) and the two-reference edit
 /// conditioning (one `Reference` or a two-source `MultiReference`, epic 10871 P1.3).
-async fn generate_krea_edit_stream(
+pub(super) async fn generate_krea_edit_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -165,6 +208,7 @@ async fn generate_krea_edit_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
@@ -251,12 +295,7 @@ async fn generate_krea_edit_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
-    let spec = attach_selected_decoder(
-        spec,
-        engine_id,
-        request,
-        settings,
-    )?;
+    let spec = attach_selected_decoder(spec, engine_id, request, settings)?;
     let unattached_spec = spec;
     let attached_spec =
         attach_manifest_text_encoder(unattached_spec, engine_id, request, settings)?;
@@ -275,9 +314,7 @@ async fn generate_krea_edit_stream(
             has_phases: false,
         },
     );
-    if let Some(warning) =
-        crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
-    {
+    if let Some(warning) = crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec) {
         tracing::warn!(
             event = "mlx_load_shape_declaration_warning",
             provider = engine_id,
@@ -331,43 +368,48 @@ async fn generate_krea_edit_stream(
             // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
             // multi-image job settles exactly one decision and emits exactly one event.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
-            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
-                    generator,
-                    &memory_plan,
-                    &memory_inputs,
-                    request_cache_state,
-                    loaded_policy.offload_policy,
-                    warm_policy.take(),
-                    external_committed_bytes,
-                )?;
-                request_cache_state = gen_core::MemoryCacheState::Warm;
-                let _request_memory_limit = memory_evaluation
-                    .process_limit_bytes
-                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                let conditioning = build_edit_conditioning(&sources);
-                let (out_w, out_h, pixels) = krea_edit_generate_one(
-                    generator,
-                    &prompt,
-                    negative_prompt.clone(),
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    use_pid,
-                    conditioning,
-                    text_style_gain,
-                    &memory_evaluation,
-                    preview,
-                    &cancel,
-                    on_progress,
-                )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
-            })
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
+                    }
+                    let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                        generator,
+                        &memory_plan,
+                        &memory_inputs,
+                        request_cache_state,
+                        loaded_policy.offload_policy,
+                        warm_policy.take(),
+                        external_committed_bytes,
+                    )?;
+                    request_cache_state = gen_core::MemoryCacheState::Warm;
+                    let _request_memory_limit = memory_evaluation
+                        .process_limit_bytes
+                        .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                    let conditioning = build_edit_conditioning(&sources);
+                    let (out_w, out_h, pixels) = krea_edit_generate_one(
+                        generator,
+                        &sampling_controls,
+                        &prompt,
+                        negative_prompt.clone(),
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        use_pid,
+                        conditioning,
+                        text_style_gain,
+                        &memory_evaluation,
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    Ok(Some((seed, out_w, out_h, pixels)))
+                },
+            )
         },
     );
 

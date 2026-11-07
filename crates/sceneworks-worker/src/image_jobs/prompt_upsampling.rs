@@ -1,7 +1,15 @@
 //! Tensor-neutral FLUX 3 prompt-upsampling composition and provenance. The same functions run
 //! in both native production lanes; CPU tests exercise them without linking a CUDA/MLX bundle.
 
-use super::{parse_prompt_enhancement_fields, ImageRequest, Settings, WorkerError, WorkerResult};
+#[cfg(all(test, native_lane))]
+use super::events::consume_gen_events;
+use super::parse_prompt_enhancement_fields;
+#[cfg(all(test, native_lane))]
+use super::stream::GenEvent;
+use super::ImageRequest;
+use crate::Settings;
+use crate::WorkerError;
+use crate::WorkerResult;
 use gen_core::{LoadSpec, WeightsSource};
 use gen_core_flux3::pup::{
     UpsampleMode, MAX_EFFECTIVE_CAPTION_CHARS as PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS,
@@ -802,11 +810,11 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn native_progress_bridge_keeps_upsampling_separate_from_denoise_steps() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-        super::super::send_gen_progress(
+        crate::image_jobs::stream::send_gen_progress(
             &tx,
             3,
             gen_core::Progress::Upsampling {
@@ -815,7 +823,7 @@ mod tests {
             },
         );
         match rx.try_recv().unwrap() {
-            super::super::GenEvent::Upsampling {
+            crate::image_jobs::stream::GenEvent::Upsampling {
                 index: 3,
                 tokens: 17,
                 max_tokens: 73,
@@ -826,7 +834,7 @@ mod tests {
     }
 
     // Production image consumer + HTTP API seam, with tensor-free provider events.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn flux3_saved_provenance_and_progress_use_only_the_per_image_provider_report() {
         use crate::image_jobs::*;
@@ -922,7 +930,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn native_aspect_fallback_with_layout_survives_real_consumer_but_not_annotation_tampering(
     ) {
@@ -1053,7 +1061,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn flux3_prefill_cancellation_stops_before_denoising_or_asset_writes() {
         use crate::image_jobs::*;

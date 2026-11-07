@@ -379,11 +379,7 @@ pub fn iris_plan_memory_error(
 /// small-Mac emulation. `None` off macOS.
 #[cfg(target_os = "macos")]
 pub(crate) fn mlx_training_capacity_gb() -> Option<f64> {
-    crate::mlx_fit_gate::resolve_budget(
-        crate::mlx_fit_gate::probe_total_unified_memory_gib(),
-        crate::mlx_fit_gate::mlx_memory_cap_gb(),
-    )
-    .map(|budget| budget.total_gb)
+    crate::fit_gate::unified_total_gb()
 }
 
 /// The VRAM (GB) one rank can count on, on the NVIDIA card(s) this worker owns, honoring the
@@ -394,11 +390,7 @@ pub(crate) fn mlx_training_capacity_gb() -> Option<f64> {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) async fn candle_training_capacity_gb(gpu_id: &str) -> Result<f64, String> {
     worker_card_capacity_gb(gpu_id, |id| async move {
-        crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb(&id).await,
-            crate::vram_gate::cuda_vram_cap_gb(),
-        )
-        .map(|budget| budget.total_gb)
+        crate::fit_gate::lane_total_gb(&id).await
     })
     .await
 }
@@ -974,20 +966,10 @@ mod tests {
 /// consumer and the completion/cancel result — with only the trainer injected. A plan built by the
 /// real `sceneworks_core` target registry is what the job executes, so these pin that every
 /// offered option reaches `Trainer::train`, and what the job API sees, per backend.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod job_tests {
     use crate::api_client::ApiClient;
     use crate::error::{WorkerError, WorkerResult};
-    use axum::extract::{Path as AxumPath, State};
-    use axum::response::{IntoResponse, Response};
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
     use gen_core::{
         LoadSpec, Trainer, TrainerDescriptor, TrainingOutput, TrainingProgress, TrainingRequest,
         WeightsSource,
@@ -1180,43 +1162,16 @@ mod job_tests {
     }
 
     async fn spawn_job_api(cancel_requested: CancelSwitch) -> (String, Posts) {
-        async fn job_route(
-            State((_, cancel)): State<(Posts, CancelSwitch)>,
-            AxumPath(job_id): AxumPath<String>,
-        ) -> Response {
-            Json(crate::tests::job_snapshot_json(&job_id, requested(&cancel))).into_response()
-        }
-        async fn progress_route(
-            State((posts, cancel)): State<(Posts, CancelSwitch)>,
-            AxumPath(job_id): AxumPath<String>,
-            Json(body): Json<Value>,
-        ) -> Response {
-            posts.lock().unwrap().push(body);
-            Json(crate::tests::job_snapshot_json(&job_id, requested(&cancel))).into_response()
-        }
-        async fn heartbeat_route(AxumPath(worker_id): AxumPath<String>) -> Response {
-            Json(json!({
-                "id": worker_id, "gpuId": "cpu", "gpuName": null, "status": "busy",
-                "currentJobId": "job-iris-train", "capabilities": [], "loadedModels": [],
-                "registeredAt": "2026-07-01T00:00:00Z", "lastSeenAt": "2026-07-01T00:00:00Z"
-            }))
-            .into_response()
-        }
-        let posts: Posts = Arc::default();
-        let app = Router::new()
-            .route("/api/v1/jobs/:job_id", get(job_route))
-            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-            .route(
-                "/api/v1/workers/:worker_id/heartbeat",
-                post(heartbeat_route),
-            )
-            .with_state((posts.clone(), cancel_requested));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        crate::load_progress::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("http://{address}"), posts)
+        let posts = Posts::default();
+        let app = crate::test_api_stub::routes(
+            |state: &(Posts, CancelSwitch), id, _| {
+                crate::tests::job_snapshot_json(id, requested(&state.1))
+            },
+            |state, _, value| state.0.lock().unwrap().push(value),
+            |_, id| crate::tests::worker_snapshot_json(id),
+        )
+        .with_state((posts.clone(), cancel_requested));
+        (crate::test_api_stub::serve(app).await, posts)
     }
 
     fn stage(root: &Path, repo: &str, revision: &str, file: &str) -> PathBuf {
@@ -1407,9 +1362,7 @@ mod job_tests {
                 let mut seen = loader_seen.lock().unwrap();
                 seen.loads += 1;
                 for (id, source) in &spec.components {
-                    let path = match source {
-                        WeightsSource::Dir(path) | WeightsSource::File(path) => path.clone(),
-                    };
+                    let path = crate::weights_source::WeightsSourceExt::path(source).to_path_buf();
                     seen.components.push((id.clone(), path));
                 }
                 if let WeightsSource::Dir(dir) = &spec.weights {

@@ -219,9 +219,8 @@ async fn malformed_manifest_returns_stable_server_error() {
     let (status, error) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(error["detail"]
-        .as_str()
-        .is_some_and(|detail| detail.starts_with("Failed to parse manifest")));
+    assert_eq!(error["detail"], "An internal error occurred");
+    assert!(uuid::Uuid::parse_str(error["correlationId"].as_str().unwrap()).is_ok());
 }
 
 #[test]
@@ -549,13 +548,8 @@ async fn upload_route_accepts_body_larger_than_json_cap() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Large Upload Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Large Upload Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // 12 MiB PNG payload — over the 10 MiB JSON cap, under the 2 GiB upload cap.

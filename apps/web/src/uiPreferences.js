@@ -1,3 +1,5 @@
+import { systemApi } from "./api/systemResources.js";
+import { backoffDelay } from "./retry.js";
 // The single client seam for writing the durable UI-preferences blob (sc-15136).
 //
 // `/api/v1/ui-preferences` is METHOD-ASYMMETRIC on the server (sc-8869, F-067 —
@@ -21,7 +23,6 @@
 // deliberately NOT routed here — it stays credential-less in `App.jsx` because it runs
 // before the gate has a token to send, and the server exempts it.
 
-import { apiFetch } from "./api.js";
 import { readAccessToken } from "./accessToken.js";
 
 // PUT a partial preferences patch. The endpoint MERGES, so a caller sends only the field it
@@ -54,7 +55,7 @@ import { readAccessToken } from "./accessToken.js";
 // Returns the `apiFetch` promise so a caller that reports failure (SettingsScreen) can await
 // it; the fire-and-forget callers attach their own `.catch`.
 export function putUiPreferences(patch) {
-  return apiFetch("/api/v1/ui-preferences", readAccessToken(), {
+  return systemApi.uiPreferences(readAccessToken(), {
     method: "PUT",
     body: JSON.stringify(patch),
   });
@@ -69,10 +70,7 @@ const NAVIGATION_WRITE_RETRY_BASE_DELAY_MS = 100;
 const NAVIGATION_WRITE_RETRY_MAX_DELAY_MS = 1000;
 
 function navigationWriteRetryDelay(attempt) {
-  return Math.min(
-    NAVIGATION_WRITE_RETRY_MAX_DELAY_MS,
-    NAVIGATION_WRITE_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
-  );
+  return backoffDelay(attempt - 1, { baseMs: NAVIGATION_WRITE_RETRY_BASE_DELAY_MS, maxMs: NAVIGATION_WRITE_RETRY_MAX_DELAY_MS });
 }
 
 function waitForNavigationWriteRetry(attempt) {

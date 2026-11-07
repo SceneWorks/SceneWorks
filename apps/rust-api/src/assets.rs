@@ -209,7 +209,7 @@ pub(crate) async fn import_asset(
     .await;
     if let Err(error) = collect_result {
         if let Some((_, _, temp_path)) = file.as_ref() {
-            let _ = tokio::fs::remove_file(temp_path).await;
+            crate::uploads::cleanup_staged_upload(temp_path).await;
         }
         return Err(error);
     }
@@ -229,11 +229,11 @@ pub(crate) async fn import_asset(
             },
         )
     })
-    .await
-    .inspect_err(|_| {
-        let _ = std::fs::remove_file(&temp_path);
-    })?;
-    Ok((StatusCode::CREATED, Json(asset)))
+    .await;
+    if asset.is_err() {
+        crate::uploads::cleanup_staged_upload(&temp_path).await;
+    }
+    Ok((StatusCode::CREATED, Json(asset?)))
 }
 
 pub(crate) async fn write_upload_field_to_temp_file(
@@ -278,24 +278,10 @@ async fn write_upload_field_to_dir_bounded(
     subdir: &str,
     limit: usize,
 ) -> Result<PathBuf, ApiError> {
-    let upload_dir = state.settings.data_dir.join("cache").join(subdir);
-    tokio::fs::create_dir_all(&upload_dir)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let temp_path = upload_dir.join(format!("upload-{}.tmp", Uuid::new_v4().simple()));
-    // sc-8886 (F-084): shared streaming writer. Cleanup removes only the temp file —
-    // the `cache/<subdir>` staging dir is shared, not per-upload, so it is left in place.
-    stream_multipart_field_to_file(
-        field,
-        &temp_path,
-        limit,
-        || "Uploaded file is too large".to_owned(),
-        || async {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-        },
-    )
-    .await?;
-    Ok(temp_path)
+    crate::uploads::stage_upload(state, field, subdir, None, limit, || {
+        "Uploaded file is too large".to_owned()
+    })
+    .await
 }
 
 pub(crate) async fn update_asset_status(

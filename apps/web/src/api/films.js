@@ -1,3 +1,4 @@
+import { modelsApi } from "./modelsResources.js";
 import { apiFetch } from "../api.js";
 
 function base(projectId, draftId) {
@@ -15,8 +16,8 @@ export function getFilmPlannerAvailability(projectId, draftId, token, options = 
   return apiFetch(`${base(projectId, draftId)}/planners`, token, options);
 }
 
-export function getFilmPlanning(projectId, draftId, token) {
-  return apiFetch(`${base(projectId, draftId)}/planning`, token);
+export function getFilmPlanning(projectId, draftId, token, options = {}) {
+  return apiFetch(`${base(projectId, draftId)}/planning`, token, options);
 }
 
 export function startFilmPlanning(projectId, draftId, maxRepairRounds, llmTimeoutSeconds, token) {
@@ -38,14 +39,15 @@ export function applyFilmPlanning(projectId, draftId, operationId, token) {
 }
 
 export function installFilmPlanner(modelId, token) {
-  return apiFetch(`/api/v1/models/${encodeURIComponent(modelId)}/download`, token, {
+  return modelsApi.download(modelId, token, {
     method: "POST",
     body: JSON.stringify({}),
   });
 }
 
-export function preflightFilm(projectId, draftId, selectedShotIds, token, expectedDraftRevision) {
+export function preflightFilm(projectId, draftId, selectedShotIds, token, expectedDraftRevision, options = {}) {
   return apiFetch(`${base(projectId, draftId)}/preflight`, token, {
+    ...options,
     method: "POST",
     body: JSON.stringify({ selectedShotIds, expectedDraftRevision }),
   });
@@ -75,8 +77,28 @@ export function addFilmSound(projectId, draftId, payload, token) {
   });
 }
 
-export function exportFilmRun(projectId, runId, token) {
+export function exportFilmRun(projectId, runId, token, options = {}) {
   return apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/film-runs/${encodeURIComponent(runId)}/export`, token, {
+    ...options,
     method: "POST",
   });
+}
+
+export function filmRequest(projectId, draftId, token, options = {}, suffix = "") {
+  const path = draftId == null
+    ? `/api/v1/projects/${encodeURIComponent(projectId)}/films`
+    : base(projectId, draftId);
+  return apiFetch(`${path}${suffix}`, token, options);
+}
+
+export function listFilmRuns(projectId, token, options = {}) {
+  return apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/film-runs`, token, options);
+}
+
+export function getFilmRun(projectId, runId, token, options = {}) {
+  return apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/film-runs/${encodeURIComponent(runId)}`, token, options);
+}
+
+export function startFilmRun(projectId, runId, action, token, options = {}) {
+  return apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/film-runs/${encodeURIComponent(runId)}/${encodeURIComponent(action)}`, token, { ...options, method: "POST" });
 }

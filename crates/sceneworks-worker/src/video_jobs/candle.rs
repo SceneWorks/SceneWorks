@@ -1,3 +1,5 @@
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::dispatch::VideoRouteOutcome;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -160,13 +162,7 @@ pub(super) fn candle_video_default_repo(engine_id: &str) -> &'static str {
 /// fetches — so a candle Wan-14B job errored "snapshot not found" even with the q4 tier present (sc-10539).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
-    if let Some(repo) = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(repo) = crate::payload::trimmed_string(request.model_manifest_entry.get("repo")) {
         return repo.to_owned();
     }
     if let Some(repo) = candle_wan_tier_repo_from_downloads(request, engine_id) {
@@ -194,7 +190,7 @@ fn candle_wan_tier_repo_from_downloads(request: &VideoRequest, engine_id: &str) 
     } else {
         "linux"
     };
-    let order: &[&str] = match candle_wan_quant_bits(request) {
+    let order: &[&str] = match request.quant_bits() {
         None => &["q8", "q4"],
         Some(bits) if bits <= 0 => &["bf16", "q8", "q4"],
         Some(bits) if bits >= 8 => &["q8", "q4"],
@@ -214,12 +210,7 @@ fn candle_wan_tier_repo_from_downloads(request: &VideoRequest, engine_id: &str) 
             if !on_platform {
                 return None;
             }
-            download
-                .get("repo")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
+            crate::payload::trimmed_string(download.get("repo")).map(str::to_owned)
         })
     })
 }
@@ -233,16 +224,6 @@ fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<Pa
             "candle video weights snapshot not found for {repo}"
         ))
     })
-}
-
-/// (sc-10027) The `advanced.mlxQuantize` bits for a candle wan tier-select — a number or numeric string;
-/// `None` when unset.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_wan_quant_bits(request: &VideoRequest) -> Option<i64> {
-    request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
 }
 
 /// (sc-10027) Whether `dir` is a complete candle wan tier — a diffusers-layout snapshot with the DiT
@@ -313,9 +294,7 @@ fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
     let Some(value) = request.advanced.get("mlxQuantize") else {
         return Some(CandleLtxTier::Q4);
     };
-    let bits = value
-        .as_i64()
-        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?;
+    let bits = crate::payload::quant_int(value)?;
     match bits {
         i64::MIN..=0 => Some(CandleLtxTier::Bf16),
         4 => Some(CandleLtxTier::Q4),
@@ -439,10 +418,12 @@ pub(super) fn candle_wan_tier_subdir(
     if !engine_id.starts_with("wan2_2") {
         return None;
     }
-    // Tier preference by requested bits (mirrors the macOS `wan_tier_order`): no explicit pick → q8
+    // Candle deliberately retains its q8-first installed-tier default. macOS `wan_tier_order`
+    // is q4-first for video runtime safety (sc-10859); only explicit selections share an order.
+    // No explicit pick → q8
     // (the app-wide default, clamped to the installed tier, so q4-only installs still resolve q4);
     // explicit ≤4 → q4. `bf16` stays out of the default order (never auto-loaded on a default job).
-    let order: &[&str] = match candle_wan_quant_bits(request) {
+    let order: &[&str] = match request.quant_bits() {
         None => &["q8", "q4"],
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
@@ -880,10 +861,7 @@ fn vace_fun_cold_load_admission(
                 &model_dir,
                 adapter_stage_bytes,
             )?;
-            let budget = crate::vram_gate::apply_vram_cap(
-                crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&gpu_id),
-                crate::vram_gate::cuda_vram_cap_gb(),
-            )
+            let budget = crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "Wan2.2 VACE-Fun admission could not read free GPU VRAM from nvidia-smi; refusing the uncalibrated dual-expert load."
@@ -1009,10 +987,7 @@ async fn admit_candle_ltx(
 pub(crate) async fn candle_video_vram_budget(
     settings: &Settings,
 ) -> Option<crate::vram_gate::VramBudget> {
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     budget.map(|budget| {
         crate::vram_gate::with_reclaimable(
             budget,
@@ -1048,10 +1023,7 @@ pub(super) fn scail2_cold_load_plan(
         // This executes on the dedicated cache OS thread, after a different resident has been
         // dropped. The helper owns a private bounded runtime, so it cannot deadlock the async worker
         // that is awaiting this cache job, and it deliberately bypasses the heartbeat's stale cache.
-        let budget = crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&gpu_id),
-            crate::vram_gate::cuda_vram_cap_gb(),
-        );
+        let budget = crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id);
         match crate::vram_gate::scail2_video_fit_error_with_adapter_bytes(
             &manifest_entry,
             tier_key,
@@ -1094,7 +1066,7 @@ pub(super) async fn generate_candle_video(
     request: &VideoRequest,
     project_path: &Path,
     backend: &str,
-) -> WorkerResult<(DecodedVideo, &'static str, Value, Option<Value>)> {
+) -> WorkerResult<VideoRouteOutcome> {
     generate_candle_video_using(
         api,
         settings,
@@ -1126,7 +1098,67 @@ pub(super) async fn generate_candle_video_using(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
-) -> WorkerResult<(DecodedVideo, &'static str, Value, Option<Value>)> {
+) -> WorkerResult<VideoRouteOutcome> {
+    let prepared = prepare_candle_video_route(api, settings, job, request).await?;
+    let (conditioning, replacement_status) = resolve_candle_video_route_conditioning(
+        api,
+        settings,
+        job,
+        request,
+        project_path,
+        &prepared,
+    )
+    .await?;
+    if prepared.engine_id == "svd_xt" {
+        execute_candle_svd_route(
+            api,
+            settings,
+            job,
+            request,
+            backend,
+            prepared,
+            conditioning,
+            replacement_status,
+            load_generator,
+        )
+        .await
+    } else {
+        execute_candle_registry_video_route(
+            api,
+            settings,
+            job,
+            request,
+            backend,
+            prepared,
+            conditioning,
+            replacement_status,
+            load_generator,
+        )
+        .await
+    }
+}
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+struct PreparedCandleVideoRoute {
+    engine_id: &'static str,
+    adapter: &'static str,
+    repo: String,
+    is_mochi: bool,
+    is_ltx: bool,
+    svd_preflight: Option<SvdVramPreflight>,
+    model_dir: PathBuf,
+    wan_quant: Option<Quant>,
+    ltx25_options: Option<super::ltx::Ltx25GenerationOptions>,
+    frames: u32,
+    ltx_gemma_dir: Option<PathBuf>,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn prepare_candle_video_route(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<PreparedCandleVideoRoute> {
     let engine_id = candle_video_engine_id(&request.model).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("{} is not a candle video engine", request.model))
     })?;
@@ -1235,7 +1267,7 @@ pub(super) async fn generate_candle_video_using(
             request.model
         )));
     }
-    let (mut model_dir, wan_quant) = if is_mochi {
+    let (model_dir, wan_quant) = if is_mochi {
         // `resolve_mochi_model_dir` already returned the TIER dir. The VRAM fit gate (sc-12306) runs
         // here, and the quant marker comes back OUT of it — see `mochi_vram_preflight` for why the
         // marker is bundled into the gated return rather than read alongside a free-standing check.
@@ -1285,9 +1317,35 @@ pub(super) async fn generate_candle_video_using(
     } else {
         None
     };
+    Ok(PreparedCandleVideoRoute {
+        engine_id,
+        adapter,
+        repo,
+        is_mochi,
+        is_ltx,
+        svd_preflight,
+        model_dir,
+        wan_quant,
+        ltx25_options,
+        frames,
+        ltx_gemma_dir,
+    })
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn resolve_candle_video_route_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    prepared: &PreparedCandleVideoRoute,
+) -> WorkerResult<(Vec<Conditioning>, Option<Value>)> {
+    let engine_id = prepared.engine_id;
+    let is_ltx = prepared.is_ltx;
     // Resolve the exact native conditioning lane: LTX replace/clip modes are asynchronous; I2V/FLF
     // and the older Wan14/SVD reference lanes use the synchronous helper.
-    let (conditioning, replacement_status) = if is_ltx && request.mode == "replace_person" {
+    Ok(if is_ltx && request.mode == "replace_person" {
         let (conditioning, status) = resolve_ltx_replace_conditioning(
             api,
             settings,
@@ -1308,38 +1366,97 @@ pub(super) async fn generate_candle_video_using(
             resolve_candle_video_conditioning(settings, request, project_path, engine_id)?,
             None,
         )
-    };
+    })
+}
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+// Preserve the existing borrowed job context and one-shot loader ownership.
+#[allow(clippy::too_many_arguments)]
+async fn execute_candle_svd_route(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    backend: &str,
+    prepared: PreparedCandleVideoRoute,
+    conditioning: Vec<Conditioning>,
+    replacement_status: Option<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<VideoRouteOutcome> {
+    let PreparedCandleVideoRoute {
+        engine_id,
+        model_dir,
+        svd_preflight,
+        repo,
+        adapter,
+        ..
+    } = prepared;
     // SVD-XT (sc-5493): image→video only — no prompt / negative / guidance (the engine uses its
     // frame-wise CFG ramp), a model-fixed burst (≤25 frames), the user `fps` as the playback cadence,
     // and the motion micro-conditioning knobs (motion_bucket_id / noise_aug_strength / decode_chunk /
     // conditioning_fps). Mirrors the MLX `generate_svd`; the conditioning is the source `Reference`
     // resolved above.
-    if engine_id == "svd_xt" {
-        let input = candle_svd_input(
-            engine_id,
-            model_dir,
-            conditioning,
-            request,
-            svd_preflight.expect("svd_xt must pass its VRAM preflight before model resolution"),
-        );
-        let mut raw_settings = svd_raw_settings(request);
-        if let Value::Object(map) = &mut raw_settings {
-            map.insert("repo".to_owned(), Value::String(repo.clone()));
-        }
-        let decoded = generate_video_using(
-            api,
-            settings,
-            job,
-            backend,
-            &request.advanced,
-            input,
-            load_generator,
-        )
-        .await?;
-        return Ok((decoded, adapter, raw_settings, replacement_status));
-    }
 
+    let input = candle_svd_input(
+        engine_id,
+        model_dir,
+        conditioning,
+        request,
+        svd_preflight.expect("svd_xt must pass its VRAM preflight before model resolution"),
+    );
+    let mut raw_settings = svd_raw_settings(request);
+    if let Value::Object(map) = &mut raw_settings {
+        map.insert("repo".to_owned(), Value::String(repo.clone()));
+    }
+    let decoded = generate_video_using(
+        api,
+        settings,
+        job,
+        backend,
+        &request.advanced,
+        input,
+        load_generator,
+    )
+    .await?;
+    Ok(VideoRouteOutcome {
+        decoded,
+        adapter,
+        raw_settings,
+        replacement_status,
+    })
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+// Preserve the existing borrowed job context and one-shot loader ownership.
+#[allow(clippy::too_many_arguments)]
+async fn execute_candle_registry_video_route(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    backend: &str,
+    prepared: PreparedCandleVideoRoute,
+    conditioning: Vec<Conditioning>,
+    replacement_status: Option<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<VideoRouteOutcome> {
+    let PreparedCandleVideoRoute {
+        engine_id,
+        adapter,
+        repo,
+        is_mochi,
+        is_ltx,
+        mut model_dir,
+        wan_quant,
+        ltx25_options,
+        frames,
+        ltx_gemma_dir,
+        ..
+    } = prepared;
     let is_wan = engine_id == "wan2_2_ti2v_5b"
         || engine_id == "wan2_2_t2v_14b"
         || engine_id == "wan2_2_i2v_14b";
@@ -1355,7 +1472,7 @@ pub(super) async fn generate_candle_video_using(
     } else if is_ltx {
         resolve_ltx_adapters(settings, request)?
     } else {
-        Vec::new()
+        PreparedVideoAdapters::default()
     };
     if is_wan {
         let built_in = if wan_lightning_on(engine_id, request)
@@ -1483,7 +1600,12 @@ pub(super) async fn generate_candle_video_using(
         load_generator,
     )
     .await?;
-    Ok((decoded, adapter, raw_settings, replacement_status))
+    Ok(VideoRouteOutcome {
+        decoded,
+        adapter,
+        raw_settings,
+        replacement_status,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1591,8 +1713,8 @@ pub(super) fn comfyui_wan_vram_preflight(
     if bytes == 0 {
         return Ok(paths);
     }
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    const CUDA_HEADROOM_GB: f64 = 2.0;
+    const GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
+    const CUDA_HEADROOM_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
     let needed = bytes as f64 / GIB + CUDA_HEADROOM_GB;
     if budget.free_gb + f64::EPSILON < needed {
         return Err(WorkerError::InvalidPayload(format!(
@@ -1608,21 +1730,17 @@ pub(super) fn comfyui_wan_vram_preflight(
 
 /// Peek a safetensors header (8-byte length + JSON) and return the `patch_embedding.weight`
 /// in-channels (`shape[1]`) — the T2V(16)/I2V(36) discriminator. `None` on any read/parse miss.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 fn wan_expert_in_channels(path: &Path) -> Option<u64> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut len = [0u8; 8];
-    file.read_exact(&mut len).ok()?;
-    let header_len = u64::from_le_bytes(len) as usize;
-    // Guard against a corrupt/huge length before allocating (headers are KB-scale).
-    if header_len == 0 || header_len > 64 * 1024 * 1024 {
-        return None;
-    }
-    let mut buf = vec![0u8; header_len];
-    file.read_exact(&mut buf).ok()?;
-    let header: Value = serde_json::from_slice(&buf).ok()?;
+    // Preserve this discriminator's existing 64 MiB bound; it inspects only the descriptor.
+    let header = sceneworks_core::safetensors::read_file_header(
+        path,
+        64 * 1024 * 1024,
+        sceneworks_core::safetensors::HeaderJsonPolicy::Standard,
+    )
+    .ok()?;
     header
+        .value
         .get("patch_embedding.weight")?
         .get("shape")?
         .as_array()?
@@ -2019,15 +2137,12 @@ pub(super) fn resolve_candle_scail2_tier(
         // packed weights merely because they happen to be installed.
         None | Some(Value::Null) => Scail2CandleTier::Bf16,
         Some(value) => {
-            let bits = value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
-                            .to_owned(),
-                    )
-                })?;
+            let bits = crate::payload::quant_int(value).ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
+                        .to_owned(),
+                )
+            })?;
             match bits {
                 ..=0 => Scail2CandleTier::Bf16,
                 4 => Scail2CandleTier::Q4,
@@ -2630,7 +2745,7 @@ pub(super) async fn generate_candle_wan_vace(
         "wan_vace",
         resolve_candle_wan_vace_model_dir(settings)?,
         CANDLE_WAN_VACE_ADAPTER,
-        Vec::new(),
+        PreparedVideoAdapters::default(),
     )
     .await
 }
@@ -2671,7 +2786,7 @@ async fn generate_candle_wan_vace_engine(
     engine_id: &'static str,
     model_dir: PathBuf,
     adapter: &'static str,
-    adapters: Vec<AdapterSpec>,
+    adapters: PreparedVideoAdapters,
 ) -> WorkerResult<(DecodedVideo, Value)> {
     let track_id = request.person_track_id.as_deref().ok_or_else(|| {
         WorkerError::InvalidPayload(
@@ -3015,7 +3130,7 @@ mod plan_backed_wan_tests {
                 .prefix(&format!("wan-roles-lib-{label}-{}-", std::process::id()))
                 .tempdir()
                 .unwrap();
-            let mut settings = Settings::from_env();
+            let mut settings = crate::test_env::offline_settings();
             settings.data_dir = data.path().to_path_buf();
             settings.external_model_roots = Vec::new();
             let library_dir = std::fs::canonicalize(library.path()).unwrap();
@@ -3241,5 +3356,34 @@ mod adapter_fit_tests {
 
         let missing = vec![adapter(root.path().join("missing.safetensors"), None)];
         assert!(wan_user_adapter_resident_bytes(&missing, true, "q4").is_err());
+    }
+}
+
+#[cfg(test)]
+mod safetensors_header_tests {
+    use super::*;
+
+    #[test]
+    fn wan_expert_descriptor_preserves_channel_detection_and_header_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("expert.safetensors");
+        for channels in [16, 36] {
+            let raw = serde_json::json!({"patch_embedding.weight":{"shape":[1,channels,1,1]}})
+                .to_string();
+            let mut bytes = (raw.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(raw.as_bytes());
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(wan_expert_in_channels(&path), Some(channels));
+        }
+        let length = 64 * 1024 * 1024 + 1_u64;
+        // A valid channel descriptor padded with JSON whitespace makes this discriminate the
+        // caller's 64 MiB limit from the general reader's larger model limit.
+        let mut oversized = length.to_le_bytes().to_vec();
+        oversized.extend_from_slice(br#"{"patch_embedding.weight":{"shape":[1,16,1,1]}}"#);
+        oversized.resize((length + 8) as usize, b' ');
+        std::fs::write(&path, oversized).unwrap();
+        assert_eq!(wan_expert_in_channels(&path), None);
+        std::fs::write(&path, 0_u64.to_le_bytes()).unwrap();
+        assert_eq!(wan_expert_in_channels(&path), None);
     }
 }

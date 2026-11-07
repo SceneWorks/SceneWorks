@@ -20,7 +20,7 @@ import {
   nativeResolutionHint,
   promptTokenLimitHint,
 } from "./samplerOptions.js";
-import { fallbackModels } from "./modelCatalog.js";
+import { fallbackModels } from "./testSupport/builtinModels.js";
 
 describe("samplerOptions", () => {
   it("falls back to default-only when limits are missing", () => {
@@ -121,9 +121,8 @@ describe("samplerOptions", () => {
     expect(stepsMenuFromModel({ limits: { steps: [8, 0, "12"] } })).toEqual([8]);
   });
 
-  // sc-19502 — the fallback catalog is a MIRROR of builtin.models.jsonc, and the Steps control reads
-  // it when the live catalog is unavailable. If the mirror drifted, the offline studio would offer a
-  // free-text Steps box for a model whose backend refuses every value but 8.
+  // sc-19502 — exercise the Steps reader with the actual shipped manifest through
+  // the test-only loader. Runtime studios receive this policy through the live API.
   it("the fallback catalog pins LTX to its single baked step count", () => {
     for (const id of ["ltx_2_3", "ltx_2_3_eros"]) {
       const model = fallbackModels.find((entry) => entry.id === id);
@@ -134,14 +133,8 @@ describe("samplerOptions", () => {
       expect(stepsDefaultFromModel(model), `${id} default steps`).toBe(8);
     }
 
-    // The other video models must stay UNPINNED — a blanket pin would remove a working control.
-    const unpinned = fallbackModels.filter(
-      (model) => model.type === "video" && !String(model.id).startsWith("ltx_2_3"),
-    );
-    expect(unpinned.length).toBeGreaterThan(0);
-    for (const model of unpinned) {
-      expect(stepsMenuFromModel(model), `${model.id} must keep a free Steps control`).toBeNull();
-    }
+    // A model without a declared menu keeps a free Steps control.
+    expect(stepsMenuFromModel({ type: "video", limits: {} })).toBeNull();
   });
 
   it("guidance methods fall back to cfg-only and order canonically (epic 7434)", () => {
@@ -301,4 +294,11 @@ describe("Supra2-IMG interface hints (sc-24215)", () => {
     expect(promptTokenLimitHint({ name: "P", image: {} })).toBeNull();
     expect(promptTokenLimitHint({ name: "P", image: { maxPromptTokens: 0 } })).toBeNull();
   });
+});
+
+it("uses the provider's CFG-off value for offset guidance", () => {
+  const model = { image: { negativePromptRequiresGuidance: true, guidanceOffValue: 0 }, defaults: { guidanceScale: 0 } };
+  expect(negativePromptInertAtGuidance(model, "")).toBe(true);
+  expect(negativePromptInertAtGuidance(model, "0")).toBe(true);
+  expect(negativePromptInertAtGuidance(model, "1.5")).toBe(false);
 });

@@ -12,32 +12,19 @@ pub(crate) async fn list_styles(State(state): State<AppState>) -> Result<Json<Va
 /// Load the built-in Style catalog object (`schemaVersion`, `source`, `promptTemplate`, `groups`)
 /// from `config_dir/manifests/builtin.styles.jsonc`. A missing manifest yields an empty catalog so
 /// the endpoint/fold degrade gracefully rather than 500 (the builtin is seeded on startup, so this
-/// is only the never-seeded edge). JSONC comments are stripped before parsing, matching the other
-/// manifest loaders.
+/// is only the never-seeded edge). The shared manifest loader parses JSONC and rejects non-object
+/// roots; the on-disk catalog is reloaded so local overrides remain fresh.
 pub(crate) async fn styles_catalog(state: &AppState) -> Result<Value, ApiError> {
     let path = state
         .settings
         .config_dir
         .join("manifests")
         .join("builtin.styles.jsonc");
-    let payload = match tokio::fs::read_to_string(&path).await {
-        Ok(payload) => payload,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(json!({ "schemaVersion": 1, "groups": [] }));
-        }
-        Err(error) => {
-            return Err(ApiError::internal(format!(
-                "Failed to load styles manifest {}: {error}",
-                path.display()
-            )));
-        }
-    };
-    serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&payload)).map_err(|error| {
-        ApiError::internal(format!(
-            "Failed to parse styles manifest {}: {error}",
-            path.display()
-        ))
-    })
+    let catalog = crate::manifest::load_manifest_root(&path).await?;
+    if catalog.is_empty() && !path.exists() {
+        return Ok(json!({ "schemaVersion": 1, "groups": [] }));
+    }
+    Ok(Value::Object(catalog))
 }
 
 /// Resolve a `styleId` to its catalog style text — the exact bridge the web's `styleTextForId`
@@ -78,8 +65,8 @@ pub(crate) fn style_text_for_id(catalog: &Value, id: &str) -> Option<String> {
 /// when the request carries a top-level `styleId` AND the client did NOT already compose the prompt
 /// (mirrors the `presetPromptResolvedClientSide` skip in `apply_recipe_preset_to_image_payload`),
 /// resolve the id to its catalog style text and apply it to the current `prompt`. A prose prompt is
-/// spliced into the `Subject:`/`Style:` template with `compose_styled_prompt`; a structured
-/// JSON-caption prompt (Ideogram 4) has the style MERGED into `style_description.aesthetics` via
+/// composed with the Description/Style fallback or existing directives by `compose_styled_prompt`;
+/// a structured JSON-caption prompt (Ideogram 4) has the style MERGED into `style_description.aesthetics` via
 /// `merge_style_into_caption` and re-serialized. Both are the Rust twins of the web path, so a
 /// headless/MCP client gets a byte-identical result to the studio.
 ///
@@ -92,6 +79,21 @@ pub(crate) async fn apply_style_to_image_payload(
     payload: &ImageJobRequest,
     job_payload: &mut JsonObject,
 ) -> Result<(), ApiError> {
+    if let Some(selection) = payload
+        .appearance
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        return apply_appearance_to_payload(
+            state,
+            &payload.model,
+            selection,
+            payload.style_id.as_deref(),
+            payload.preset_prompt_resolved_client_side.unwrap_or(false),
+            job_payload,
+        )
+        .await;
+    }
     let Some(style_id) = payload
         .style_id
         .as_deref()
@@ -153,7 +155,7 @@ pub(crate) async fn apply_style_to_image_payload(
 /// unit-tested without an `AppState`. A structured JSON-caption prompt (Ideogram 4, sc-13224) gets the
 /// style MERGED into `style_description.aesthetics` and re-serialized (the server twin of the web's
 /// `injectStyleIntoCaption` → `serializeCaption`); a prose prompt is spliced into the
-/// `Subject:`/`Style:` template. Byte-identical to the web path in either branch.
+/// Description/Style fallback or structured directives. Byte-identical to the web path in either branch.
 fn apply_style_text_to_prompt(style_text: &str, prompt: &str) -> String {
     if let Ok(caption) = serde_json::from_str::<Value>(prompt) {
         if sceneworks_core::ideogram_caption::is_caption(&caption) {
@@ -165,9 +167,169 @@ fn apply_style_text_to_prompt(style_text: &str, prompt: &str) -> String {
     compose_styled_prompt(style_text, prompt)
 }
 
+/// The same built-in catalog is imported by the browser and available to headless clients.
+pub(crate) async fn list_appearance() -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::from_str(sceneworks_core::appearance::CATALOG_JSON)
+            .map_err(|err| ApiError::internal(err.to_string()))?,
+    ))
+}
+
+pub(crate) async fn apply_appearance_to_payload(
+    state: &AppState,
+    fallback_model: &str,
+    selection: &sceneworks_core::appearance::AppearanceSelection,
+    style_id: Option<&str>,
+    already_resolved: bool,
+    job_payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    use sceneworks_core::{
+        appearance::{compose_negative_prompt, resolve_appearance_for_family},
+        style_composer::compose_prompt_with_directives,
+    };
+    if selection.is_empty() {
+        return Ok(());
+    }
+    let model_id = job_payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(fallback_model)
+        .to_owned();
+    let model_entry = crate::models::resolve_model_manifest_entry(state, &model_id).await?;
+    if model_entry.get("captionStyle").and_then(Value::as_str) == Some("tags") {
+        return Err(ApiError::bad_request(
+            "Appearance recipes require a prose-prompt model.",
+        ));
+    }
+    let resolved = resolve_appearance_for_family(
+        &model_id,
+        model_entry.get("family").and_then(Value::as_str),
+        selection,
+    )
+    .map_err(ApiError::bad_request)?;
+    if let Some(inputs) = job_payload
+        .get("advanced")
+        .and_then(|value| value.get("mossImageAdvanced"))
+    {
+        if ["positive", "negative"]
+            .iter()
+            .any(|key| inputs.get(*key).is_some_and(|value| !value.is_null()))
+            || inputs
+                .get("negativePrompts")
+                .and_then(Value::as_array)
+                .is_some_and(|values| !values.is_empty())
+        {
+            return Err(ApiError::bad_request("Appearance recipes cannot replace supplied MOSS embedding or per-prompt negative inputs."));
+        }
+    }
+
+    // Validate model/IDs even on already composed web requests; skip only the text fold.
+    if already_resolved {
+        return Ok(());
+    }
+    let style = if let Some(id) = style_id.filter(|id| !id.trim().is_empty()) {
+        style_text_for_id(&styles_catalog(state).await?, id)
+            .ok_or_else(|| ApiError::bad_request(format!("Style not found: {id}")))?
+    } else {
+        String::new()
+    };
+    let raw_prompt = job_payload
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let raw_batch = job_payload.get("prompts").cloned();
+    let raw_negative = job_payload
+        .get("negativePrompt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let compose = |prompt: &str| -> Result<Value, ApiError> {
+        let text = compose_prompt_with_directives(&style, prompt, &resolved.directives);
+        if text.chars().count() > 4000 {
+            return Err(ApiError::bad_request(
+                "Appearance-composed prompt must be at most 4000 characters.",
+            ));
+        }
+        Ok(Value::String(text))
+    };
+    job_payload.insert("prompt".into(), compose(&raw_prompt)?);
+    if let Some(Value::Array(prompts)) = job_payload.get_mut("prompts") {
+        for prompt in prompts {
+            if let Some(text) = prompt.as_str() {
+                *prompt = compose(text)?;
+            }
+        }
+    }
+    job_payload.insert(
+        "negativePrompt".into(),
+        Value::String(compose_negative_prompt(
+            &raw_negative,
+            if job_payload
+                .get("advanced")
+                .and_then(|value| value.get("mossImage"))
+                .and_then(|value| value.get("acceleration"))
+                .and_then(Value::as_str)
+                .is_some_and(|mode| mode != "off")
+            {
+                ""
+            } else {
+                &resolved.negative
+            },
+        )),
+    );
+    let advanced = job_payload.entry("advanced").or_insert_with(|| json!({}));
+    let advanced = advanced
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+    advanced.insert(
+        "appearance".into(),
+        serde_json::to_value(selection).map_err(|err| ApiError::internal(err.to_string()))?,
+    );
+    if let Some(batch) = raw_batch {
+        advanced.insert("appearancePromptBatch".into(), batch);
+    }
+    if let Some(id) = style_id {
+        advanced.insert("styleId".into(), Value::String(id.to_owned()));
+        advanced.insert("stylePrompt".into(), Value::String(raw_prompt.clone()));
+    }
+    advanced.insert("appearancePrompt".into(), Value::String(raw_prompt));
+    advanced.insert(
+        "appearanceNegativePrompt".into(),
+        Value::String(raw_negative),
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn filesystem_style_catalog_stays_fresh_and_rejects_invalid_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, state) =
+            create_app_with_state(crate::tests::support::test_settings(&temp)).unwrap();
+        let path = state
+            .settings
+            .config_dir
+            .join("manifests/builtin.styles.jsonc");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, catalog().to_string()).unwrap();
+        assert_eq!(styles_catalog(&state).await.unwrap(), catalog());
+        let changed = json!({"schemaVersion": 2, "groups": []});
+        std::fs::write(&path, format!("// local override\n{changed}")).unwrap();
+        assert_eq!(styles_catalog(&state).await.unwrap(), changed);
+        for raw in ["[]", "null", "not JSON"] {
+            std::fs::write(&path, raw).unwrap();
+            assert!(styles_catalog(&state).await.is_err());
+        }
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            styles_catalog(&state).await.unwrap(),
+            json!({"schemaVersion":1,"groups":[]})
+        );
+    }
 
     fn catalog() -> Value {
         json!({
@@ -207,11 +369,11 @@ mod tests {
     }
 
     #[test]
-    fn prose_prompt_gets_the_subject_style_template() {
-        // A non-caption prompt keeps the sc-13134 prose fold: Subject leads, Style trails.
+    fn prose_prompt_gets_the_description_style_template() {
+        // An unstructured prose prompt uses Description followed by the selected Style.
         assert_eq!(
             apply_style_text_to_prompt("cinematic watercolor", "a fox in the snow"),
-            "Subject: a fox in the snow\nStyle: cinematic watercolor"
+            "Description: a fox in the snow\nStyle: cinematic watercolor"
         );
     }
 
@@ -246,5 +408,93 @@ mod tests {
             out,
             r#"{"style_description": {"aesthetics": "bold ink linework", "medium": "paint", "art_style": "watercolor"}, "compositional_deconstruction": {"background": "a meadow", "elements": []}}"#
         );
+    }
+    #[tokio::test]
+    async fn appearance_headless_fold_matches_core_and_records_raw_inputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, state) =
+            create_app_with_state(crate::tests::support::test_settings(&temp)).unwrap();
+        let selection = sceneworks_core::appearance::AppearanceSelection {
+            film: Some("film-kodak-tri-x-400".into()),
+            looks: vec!["look-moody-dark".into()],
+            ..Default::default()
+        };
+        let mut body = json!({"model":"moss_image_base","prompt":"a dancer","prompts":["a dancer","a fox"],"negativePrompt":"authored","advanced":{}}).as_object().unwrap().clone();
+        apply_appearance_to_payload(
+            &state,
+            "moss_image_base",
+            &selection,
+            None,
+            false,
+            &mut body,
+        )
+        .await
+        .unwrap();
+        assert!(body["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("Description: a dancer\nFilm:"));
+        assert_eq!(body["prompt"], body["prompts"][0]);
+        assert!(body["prompts"][1]
+            .as_str()
+            .unwrap()
+            .starts_with("Description: a fox\nFilm:"));
+        assert!(body["negativePrompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("authored, chromatic color"));
+        assert_eq!(body["advanced"]["appearancePrompt"], "a dancer");
+        assert_eq!(body["advanced"]["appearanceNegativePrompt"], "authored");
+        assert_eq!(
+            body["advanced"]["appearancePromptBatch"],
+            json!(["a dancer", "a fox"])
+        );
+        let mut too_long = body.clone();
+        too_long.insert("prompt".into(), json!("x".repeat(3999)));
+        assert!(apply_appearance_to_payload(
+            &state,
+            "moss_image_base",
+            &selection,
+            None,
+            false,
+            &mut too_long
+        )
+        .await
+        .is_err());
+        let before = body.clone();
+        apply_appearance_to_payload(&state, "moss_image_base", &selection, None, true, &mut body)
+            .await
+            .unwrap();
+        assert_eq!(body, before);
+        body.insert("model".into(), json!("z_image_turbo"));
+        let incompatible = sceneworks_core::appearance::AppearanceSelection {
+            looks: vec!["look-light-leaks".into()],
+            ..Default::default()
+        };
+        assert!(apply_appearance_to_payload(
+            &state,
+            "z_image_turbo",
+            &incompatible,
+            None,
+            true,
+            &mut body
+        )
+        .await
+        .is_err());
+        body.insert(
+            "advanced".into(),
+            json!({"mossImageAdvanced":{"positive":{}}}),
+        );
+        body.insert("model".into(), json!("moss_image_base"));
+        assert!(apply_appearance_to_payload(
+            &state,
+            "moss_image_base",
+            &selection,
+            None,
+            true,
+            &mut body
+        )
+        .await
+        .is_err());
     }
 }

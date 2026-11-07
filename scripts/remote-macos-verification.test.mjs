@@ -139,6 +139,7 @@ const faults = {
   "dispatcher code": f => { f.alteredControl = `${DISPATCHER}:${CONTROLLER}`; },
   "workflow code": f => { f.alteredControl = `${DISPATCHER}:${WORKFLOW}`; },
   "parser dependency code": f => { f.alteredControl = `${DISPATCHER}:scripts/lib/jsonc.mjs`; },
+  "digest dependency code": f => { f.alteredControl = `${DISPATCHER}:scripts/lib/file-sha256.mjs`; },
   "unit sandbox dependency code": f => { f.alteredControl = `${DISPATCHER}:${UNIT_SANDBOX}`; },
   "assertion driver code": f => { f.alteredControl = `${DISPATCHER}:${ASSERTION_DRIVER}`; },
   "case registry code": f => { f.alteredControl = `${DISPATCHER}:${REGISTRY_PATH}`; },
@@ -589,7 +590,7 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       mkdirSync(path.join(scratch, "scripts/lib"), { recursive: true });
       const mutated = path.join(scratch, CONTROLLER);
       writeFileSync(mutated, controller.replace(old, replacement)); utimesSync(mutated, new Date(), new Date());
-      for (const file of [UNIT_SANDBOX, "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH]) writeFileSync(path.join(scratch, file), readFileSync(path.join(ROOT, file)));
+      for (const file of [UNIT_SANDBOX, "scripts/lib/jsonc.mjs", "scripts/lib/file-sha256.mjs", ASSERTION_DRIVER, REGISTRY_PATH]) writeFileSync(path.join(scratch, file), readFileSync(path.join(ROOT, file)));
       const childEnv = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_CONTROLLER_UNDER_TEST: mutated };
       // A new test-runner process must not inherit the outer worker's private IPC protocol.
       delete childEnv.NODE_TEST_CONTEXT;

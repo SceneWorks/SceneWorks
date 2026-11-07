@@ -15,11 +15,9 @@
 //! module reaches them through `crate::`.
 
 use std::collections::HashMap;
-use std::future::{Future, IntoFuture};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -56,7 +54,7 @@ use crate::{
     DEFAULT_CORS_ORIGINS,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Settings {
     pub app_version: String,
     pub host: String,
@@ -159,15 +157,10 @@ pub struct Settings {
     /// `SCENEWORKS_EXTERNAL_MODEL_ROOTS`; empty (feature off) by default and always empty
     /// on macOS — see `sceneworks_core::external_roots`.
     pub external_model_roots: Vec<PathBuf>,
-    /// F-040 (sc-11236) — operator-declared extra Host-header authorities the
-    /// `/mcp` DNS-rebinding defense accepts, on top of the always-allowed loopback
-    /// set. Read from `SCENEWORKS_MCP_ALLOWED_HOSTS` (comma-separated `host` or
-    /// `host:port` entries). Only needed for the wildcard LAN bind
-    /// (`SCENEWORKS_API_HOST=0.0.0.0`), whose reachable interface addresses can't
-    /// be enumerated: set it to the machine's LAN hostname/IP(s) to keep the
-    /// Host check ON for remote clients. Empty by default; irrelevant for a
-    /// loopback bind (loopback is always allowed) — see
-    /// [`sceneworks_mcp::mcp_allowed_hosts`].
+    /// Additional allowed HTTP authorities for API and MCP, read from
+    /// SCENEWORKS_MCP_ALLOWED_HOSTS. Loopback and concrete bind addresses always
+    /// remain allowed; wildcard listeners also enumerate interface addresses.
+    /// Configure proxy/LAN hostnames here. An empty override never disables checks.
     pub mcp_allowed_hosts_extra: Vec<String>,
 }
 
@@ -211,8 +204,51 @@ where
     }
 }
 
+/// A redacting view prevents accidental secret formatting without changing the
+/// public settings construction contract used by API embedders.
+struct RedactedSecret<'a>(&'a str);
+impl std::fmt::Debug for RedactedSecret<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let _ = self.0;
+        f.write_str("[REDACTED]")
+    }
+}
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("app_version", &self.app_version)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("data_dir", &self.data_dir)
+            .field("resolved_cache", &self.resolved_cache)
+            .field("config_dir", &self.config_dir)
+            .field("credentials_dir", &self.credentials_dir)
+            .field("access_token", &RedactedSecret(&self.access_token))
+            .field("cors_origins", &self.cors_origins)
+            .field("worker_timeout_seconds", &self.worker_timeout_seconds)
+            .field("jobs_db_path", &self.jobs_db_path)
+            .field("jobs_retention_days", &self.jobs_retention_days)
+            .field("run_utility_inprocess", &self.run_utility_inprocess)
+            .field("mlx_required", &self.mlx_required)
+            .field("mlx_enforce_unsupported", &self.mlx_enforce_unsupported)
+            .field("candle_required", &self.candle_required)
+            .field(
+                "candle_enforce_unsupported",
+                &self.candle_enforce_unsupported,
+            )
+            .field("trust_loopback", &self.trust_loopback)
+            .field("host_os", &self.host_os)
+            .field("mcp_api_url", &self.mcp_api_url)
+            .field("mcp_job_poll_interval", &self.mcp_job_poll_interval)
+            .field("mcp_job_timeout", &self.mcp_job_timeout)
+            .field("external_model_roots", &self.external_model_roots)
+            .field("mcp_allowed_hosts_extra", &self.mcp_allowed_hosts_extra)
+            .finish()
+    }
+}
+
 impl Settings {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
         let data_dir = env_path_or("SCENEWORKS_DATA_DIR", &defaults.data_dir);
         let jobs_db_path = std::env::var("SCENEWORKS_JOBS_DB_PATH")
@@ -220,14 +256,23 @@ impl Settings {
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("cache").join("jobs.db"));
-        let port: u16 = std::env::var("SCENEWORKS_API_PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(8000);
+        let port = u16::try_from(sceneworks_core::env_util::env_u64_any(
+            &["SCENEWORKS_API_PORT"],
+            8000,
+            false,
+        )?)
+        .map_err(|_| {
+            tracing::warn!(
+                event = "invalid_env",
+                key = "SCENEWORKS_API_PORT",
+                "port is out of range"
+            );
+            "SCENEWORKS_API_PORT must be in the range 0..=65535".to_owned()
+        })?;
         let host = env_string("SCENEWORKS_API_HOST", DEFAULT_API_HOST);
         let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);
         let credentials_dir = sceneworks_core::credentials::credentials_dir(&config_dir);
-        Self {
+        Ok(Self {
             app_version: env_string("SCENEWORKS_APP_VERSION", "0.2.0"),
             host: host.clone(),
             port,
@@ -246,33 +291,19 @@ impl Settings {
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned)
                 .collect(),
-            worker_timeout_seconds: std::env::var("SCENEWORKS_WORKER_TIMEOUT_SECONDS")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(90),
+            worker_timeout_seconds: sceneworks_core::env_util::env_u64_any(&["SCENEWORKS_WORKER_TIMEOUT_SECONDS"], 90, false)?,
             jobs_db_path,
-            jobs_retention_days: std::env::var("SCENEWORKS_JOBS_RETENTION_DAYS")
-                .ok()
-                .and_then(|value| value.trim().parse().ok())
-                .unwrap_or(90),
-            run_utility_inprocess: std::env::var("SCENEWORKS_RUN_UTILITY_INPROCESS")
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-                .unwrap_or(false),
-            mlx_required: std::env::var("SCENEWORKS_MLX_REQUIRED")
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-                .unwrap_or(false),
+            jobs_retention_days: u32::try_from(sceneworks_core::env_util::env_u64_any(&["SCENEWORKS_JOBS_RETENTION_DAYS"], 90, true)?).map_err(|_| { tracing::warn!(event = "invalid_env", key = "SCENEWORKS_JOBS_RETENTION_DAYS", "retention is out of range"); "SCENEWORKS_JOBS_RETENTION_DAYS exceeds the supported range".to_owned() })?,
+            run_utility_inprocess: sceneworks_core::env_util::env_flag("SCENEWORKS_RUN_UTILITY_INPROCESS", false),
+            mlx_required: sceneworks_core::env_util::env_flag("SCENEWORKS_MLX_REQUIRED", false),
             mlx_enforce_unsupported: std::env::var("SCENEWORKS_MLX_UNSUPPORTED_MODE")
                 .map(|value| value.trim().eq_ignore_ascii_case("enforce"))
                 .unwrap_or(false),
-            candle_required: std::env::var("SCENEWORKS_CANDLE_REQUIRED")
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-                .unwrap_or(false),
+            candle_required: sceneworks_core::env_util::env_flag("SCENEWORKS_CANDLE_REQUIRED", false),
             candle_enforce_unsupported: std::env::var("SCENEWORKS_CANDLE_UNSUPPORTED_MODE")
                 .map(|value| value.trim().eq_ignore_ascii_case("enforce"))
                 .unwrap_or(false),
-            trust_loopback: std::env::var("SCENEWORKS_TRUST_LOOPBACK")
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-                .unwrap_or(false),
+            trust_loopback: sceneworks_core::env_util::env_flag("SCENEWORKS_TRUST_LOOPBACK", false),
             // Always the real host OS in production — never an env override. The field exists to
             // be substitutable in a test, not configurable in a deployment: a deployment that
             // could claim to be Windows would re-open the exact hang sc-19570 closes.
@@ -287,11 +318,11 @@ impl Settings {
             mcp_job_poll_interval: env_secs(
                 "SCENEWORKS_MCP_JOB_POLL_INTERVAL",
                 sceneworks_mcp::JobWaitConfig::default().poll_interval,
-            ),
+            )?,
             mcp_job_timeout: env_secs(
                 "SCENEWORKS_MCP_JOB_TIMEOUT",
                 sceneworks_mcp::JobWaitConfig::default().timeout,
-            ),
+            )?,
             external_model_roots: sceneworks_core::external_roots::external_model_roots_from_env(),
             // F-040: extra Host authorities for the /mcp DNS-rebinding allow-list.
             mcp_allowed_hosts_extra: env_string("SCENEWORKS_MCP_ALLOWED_HOSTS", "")
@@ -300,7 +331,7 @@ impl Settings {
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned)
                 .collect(),
-        }
+        })
     }
 
     pub fn projects_dir(&self) -> PathBuf {
@@ -352,14 +383,10 @@ fn mcp_api_url_for_bound_listener(
         .unwrap_or_else(|| default_mcp_api_url(host, bound_port))
 }
 
-/// Parse a whole-seconds env var into a [`Duration`], keeping `default` when the
-/// variable is unset or not a non-negative integer (sc-10277).
-fn env_secs(name: &str, default: Duration) -> Duration {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
+/// Parse whole seconds; only an absent variable uses the caller's default.
+fn env_secs(name: &str, default: Duration) -> Result<Duration, String> {
+    sceneworks_core::env_util::env_u64_any(&[name], default.as_secs(), true)
         .map(Duration::from_secs)
-        .unwrap_or(default)
 }
 
 #[derive(Clone)]
@@ -386,6 +413,7 @@ pub struct AppState {
     pub(crate) workflow_strip_slots: Arc<Semaphore>,
     // sc-8870 (F-068): per-peer-IP failed-token throttle for the auth oracle.
     pub(crate) auth_throttle: Arc<AuthThrottle>,
+    pub(crate) allowed_hosts: Arc<Vec<String>>,
     /// The ONE resolved-model cache session this API process holds (sc-19711).
     ///
     /// `ResolvedCacheStore::open` takes a session slot — a `sessions/<id>/` directory plus its own
@@ -407,12 +435,8 @@ pub struct AppState {
     pub(crate) model_catalog_cache: Arc<ModelCatalogCache>,
     pub(crate) model_size_cache: Arc<Mutex<ModelSizeCache>>,
     #[cfg(test)]
-    pub(crate) model_size_estimate_test_hook:
-        Arc<Mutex<Option<crate::models::ModelSizeEstimateTestHook>>>,
-    #[cfg(test)]
-    pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
-    #[cfg(test)]
-    pub(crate) video_platform_override: Arc<Mutex<Option<&'static str>>>,
+    pub(crate) test_hooks: Arc<crate::test_hooks::TestHooks>,
+
     /// sc-10452 — memoized family detection for adapters scanned out of the operator's
     /// external model roots, keyed by each file's size + mtime. `lora_catalog` runs on
     /// every job-create; without this, every generation would re-parse every ComfyUI
@@ -424,6 +448,7 @@ pub struct AppState {
     /// generation would re-parse every ComfyUI base file's safetensors header.
     pub(crate) external_base_model_cache: Arc<Mutex<ExternalBaseModelCache>>,
     pub(crate) http_client: reqwest::Client,
+    pub(crate) planner_http_client: reqwest::Client,
     pub(crate) interrupted_jobs_on_startup: usize,
     /// Safe, path-free status for bounded stale-upload cleanup that starts
     /// after the listener is bound and readiness-critical initialization ends.
@@ -452,54 +477,6 @@ pub struct AppState {
     /// asynchronously before entering Tokio's shared blocking pool, reserving
     /// capacity for status/query database work even when many catalogs run.
     pub(crate) catalog_scan_work_slots: Arc<Semaphore>,
-    /// Deterministic catalog scheduler seams. Production has no hook fields or
-    /// branch overhead.
-    #[cfg(test)]
-    pub(crate) catalog_scan_before_driver_start_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_stop_after_pass_once: Arc<AtomicBool>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_before_terminal_exit_once: Arc<AtomicBool>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_terminal_exit_reached: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_terminal_exit_release: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_preflight_delay_ms_once: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_preflight_started: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_preflight_admission_timeout_ms: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_preflight_execution_timeout_ms: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_preflight_test_ticks: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_injected_sqlite_busy_failures: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub(crate) catalog_scan_contention_backoff_started: Arc<tokio::sync::Notify>,
-    /// Two-phase cancellation acknowledgment before reconciling a busy lease.
-    #[cfg(test)]
-    pub(crate) catalog_scan_busy_lease_cancel_barrier_once:
-        Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    /// Deterministic race hook for progress acceptance tests. Production builds
-    /// contain no hook or synchronization overhead.
-    #[cfg(test)]
-    pub(crate) progress_before_accept_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    /// Deterministic rendezvous after an SSE snapshot is read but before its
-    /// live subscription is installed. Production builds contain no hook.
-    #[cfg(test)]
-    pub(crate) sse_snapshot_before_subscribe_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    /// One-shot failure after terminal acceptance, used to prove the durable
-    /// pending handoff survives an error and resumes on the owner's retry.
-    #[cfg(test)]
-    pub(crate) progress_side_effects_fail_once: Arc<Mutex<bool>>,
-    /// Persistent per-job failures and attempt counts for recovery fairness
-    /// tests. Production builds contain neither field.
-    #[cfg(test)]
-    pub(crate) progress_side_effects_fail_job_ids: Arc<Mutex<std::collections::HashSet<String>>>,
-    #[cfg(test)]
-    pub(crate) progress_side_effects_attempts: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 #[derive(Clone)]
@@ -672,7 +649,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let explicit_mcp_api_url = std::env::var("SCENEWORKS_API_URL").ok();
-    let mut settings = Settings::from_env();
+    let mut settings = Settings::from_env()?;
     // A populated builtin catalog is mandatory — model->file resolution depends on
     // it. The desktop wrapper and the Compose bind mount normally provide it; seed
     // any missing manifests here so launching the API binary directly works too,
@@ -830,12 +807,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let serve_shutdown = film_controller_shutdown.clone();
     let signal_shutdown = api_shutdown.clone();
     let serve = bounded_server_drain(
-        axum::serve(
+        crate::http_boundary::serve(
             listener,
-            bootstrap.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown_signal(serve_shutdown, signal_shutdown))
-        .into_future(),
+            bootstrap,
+            shutdown_signal(serve_shutdown, signal_shutdown),
+        ),
         api_shutdown.clone(),
         API_CONNECTION_DRAIN_TIMEOUT,
     );
@@ -981,20 +957,62 @@ mod server_tests {
         // A unique name so this never collides with a real SCENEWORKS_* var.
         let name = "SCENEWORKS_TEST_ENV_SECS_SC10277";
         let default = Duration::from_secs(1800);
+        let _env = sceneworks_core::test_env::EnvVars::set(&[(name, "")]);
 
         std::env::remove_var(name);
-        assert_eq!(env_secs(name, default), default, "unset → default");
+        assert_eq!(env_secs(name, default).unwrap(), default, "unset → default");
 
         std::env::set_var(name, "42");
-        assert_eq!(env_secs(name, default), Duration::from_secs(42));
+        assert_eq!(env_secs(name, default).unwrap(), Duration::from_secs(42));
 
         std::env::set_var(name, "  7  ");
-        assert_eq!(env_secs(name, default), Duration::from_secs(7), "trimmed");
+        assert_eq!(
+            env_secs(name, default).unwrap(),
+            Duration::from_secs(7),
+            "trimmed"
+        );
 
         std::env::set_var(name, "notanumber");
-        assert_eq!(env_secs(name, default), default, "unparseable → default");
+        assert!(env_secs(name, default).unwrap_err().contains(name));
 
         std::env::remove_var(name);
+    }
+
+    #[test]
+    fn settings_refuse_invalid_numeric_environment_values() {
+        use sceneworks_core::test_env::EnvVars;
+        let keys = [
+            "SCENEWORKS_API_PORT",
+            "SCENEWORKS_WORKER_TIMEOUT_SECONDS",
+            "SCENEWORKS_JOBS_RETENTION_DAYS",
+            "SCENEWORKS_MCP_JOB_POLL_INTERVAL",
+            "SCENEWORKS_MCP_JOB_TIMEOUT",
+        ];
+        for invalid in keys {
+            let entries: Vec<_> = keys
+                .iter()
+                .map(|key| (*key, if *key == invalid { "bad" } else { "" }))
+                .collect();
+            let _env = EnvVars::set(&entries);
+            let error = match super::Settings::from_env() {
+                Ok(_) => panic!("invalid setting accepted"),
+                Err(error) => error,
+            };
+            assert!(error.contains(invalid), "{error}");
+        }
+        let _env = EnvVars::set(&[("SCENEWORKS_API_PORT", "65536")]);
+        let error = match super::Settings::from_env() {
+            Ok(_) => panic!("out-of-range port accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("SCENEWORKS_API_PORT"));
+        drop(_env);
+        let _env = EnvVars::set(&[("SCENEWORKS_JOBS_RETENTION_DAYS", "4294967296")]);
+        let error = match super::Settings::from_env() {
+            Ok(_) => panic!("out-of-range retention accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("SCENEWORKS_JOBS_RETENTION_DAYS"));
     }
 
     #[tokio::test]
@@ -1311,5 +1329,19 @@ mod server_tests {
             "https://api.internal.example/base",
             "an explicit proxy/container URL remains authoritative"
         );
+    }
+}
+
+#[cfg(test)]
+mod secret_debug_tests {
+    use super::*;
+    #[test]
+    fn settings_debug_redacts_access_token_and_retains_useful_fields() {
+        let mut settings = Settings::from_env().expect("valid API settings");
+        settings.access_token = "never-log-this-token".to_owned();
+        let debug = format!("{settings:?}");
+        assert!(!debug.contains("never-log-this-token"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("data_dir"));
     }
 }

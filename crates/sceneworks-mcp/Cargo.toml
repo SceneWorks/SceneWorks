@@ -17,23 +17,24 @@ publish = false
 [dependencies]
 # Inline tool results: generated images come back as base64 `ImageContent` blocks
 # (sc-10234), so MCP clients can render them without another fetch.
-base64 = "0.22"
-futures-util = "0.3"
+base64 = { workspace = true }
+futures-util = { workspace = true, default-features = true }
 # Read the incoming MCP request's Host header (via the `http::request::Parts` the
 # rmcp streamable-HTTP transport injects into the request extensions) so
 # get_job_result's ticket URLs point at the host the client actually used (sc-10290).
 # Pinned to rmcp's `http` major so the injected `Parts` type unifies.
 http = "1"
+if-addrs.workspace = true
 # Per-segment percent-encoding of project-relative media paths before they are
 # spliced into `/files/*relative_path` URLs (sc-10279 defensive hardening).
 percent-encoding = "2.3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { workspace = true, features = ["json", "stream"] }
 # Pinned exact (sc-10233): the official MCP Rust SDK moves fast and its
 # streamable-HTTP server surface (StreamableHttpService / tool_router macros) has
 # broken across minor bumps before — bump deliberately, with the round-trip tests.
 # `transport-streamable-http-server` adds the tower service the API mounts at
 # `/mcp`; default features keep `server` + `macros` (tool router derive).
-rmcp = { version = "=2.2.0", features = ["transport-streamable-http-server"] }
+rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 # sc-19574: ONE pure predicate — `video_request::classify_reference_set`, which decides whether a
 # `reference_to_video` reference set can condition the visual stream. This is the documented
 # exception to the thin-client rule above and it does not weaken it: the function takes three
@@ -44,24 +45,24 @@ rmcp = { version = "=2.2.0", features = ["transport-streamable-http-server"] }
 # sc-22988 adds one pure CONSTANT on the same terms: `yue2_score::REGENERATION_NOTICE`, the sentence
 # every YuE2 render answer must carry, read from its one home rather than copied.
 sceneworks-core = { path = "../sceneworks-core" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
 # `time` for the blocking generate_image submit→poll wait (sc-10234); the async
 # runtime itself is the API app's (this crate is a library mounted into it).
-tokio = { version = "1.40", features = ["time"] }
+tokio = { workspace = true, features = ["time"], default-features = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 # Minimal stub `/api/v1` server on an ephemeral port for the client round-trip
 # tests; matches the axum the API app itself uses.
-axum = "0.7"
+axum = { workspace = true }
 image = { workspace = true }
 # The round-trip test drives the mounted service through a REAL MCP client
 # (initialize → tools/list → tools/call over streamable HTTP), not hand-rolled
 # JSON-RPC — client features are additive on the same pinned version.
-rmcp = { version = "=2.2.0", features = ["client", "transport-streamable-http-client-reqwest"] }
-tempfile = "3.13"
-tokio = { version = "1.40", features = ["macros", "net", "rt-multi-thread"] }
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"], default-features = true }
 
 [lints]
 workspace = true

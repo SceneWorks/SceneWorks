@@ -60,12 +60,12 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 
 use crate::{WorkerError, WorkerResult};
 
 /// The `task` discriminator that selects this path on a `prompt_refine` job.
-pub(crate) const REWRITE_TASK: &str = "qwen_image_rewrite";
+#[cfg(any(test, native_lane))]
+pub(crate) use sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK as REWRITE_TASK;
 
 /// Whether the rewriters apply to `model`: the base 2.1 model and its distilled Turbo sibling
 /// (sc-25907) — one prompt format, one template — and nothing else. A rewrite request naming any
@@ -267,8 +267,7 @@ pub(crate) fn verify_system_prompt_digest(
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 /// A parsed rewriter reply.

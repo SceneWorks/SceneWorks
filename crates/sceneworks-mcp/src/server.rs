@@ -121,6 +121,12 @@ impl JobWaitConfig {
     }
 }
 
+/// A domain failure remains an MCP tool result; transport failures remain JSON-RPC errors.
+enum JobWaitOutcome {
+    Completed(Value),
+    Stopped(CallToolResult),
+}
+
 #[derive(Clone)]
 pub struct SceneWorksMcp {
     api: ApiClient,
@@ -130,6 +136,104 @@ pub struct SceneWorksMcp {
 }
 
 impl SceneWorksMcp {
+    /// Await one submitted job using the existing cancellation, outage and deadline policy.
+    async fn wait_for_job(
+        &self,
+        job_id: &str,
+        ctx: &RequestContext<RoleServer>,
+        reporter: &mut ProgressReporter,
+    ) -> Result<JobWaitOutcome, ErrorData> {
+        let started = tokio::time::Instant::now();
+        let mut poll_outage_started: Option<tokio::time::Instant> = None;
+        let job = loop {
+            // Cooperative cancellation (sc-10276): rmcp cancels `ctx.ct` when the
+            // client sends `notifications/cancelled` (it does NOT abort the tool
+            // future, so a drop-guard would never fire). Catch it at the top of the
+            // wait and ask the job to stop, freeing the worker/GPU instead of
+            // letting a canceled render run to completion.
+            tokio::select! {
+                biased;
+                () = ctx.ct.cancelled() => {
+                    // Best-effort: the job may already be terminal, in which case the
+                    // cancel route is a harmless no-op.
+                    let _ = self
+                        .api
+                        .post_json(&format!("/api/v1/jobs/{job_id}/cancel"), &json!({}))
+                        .await;
+                    return tool_error(format!(
+                        "Image job {job_id} was canceled: the client canceled the \
+                         request, so the job was asked to stop."
+                    )).map(JobWaitOutcome::Stopped);
+                }
+                () = tokio::time::sleep(self.job_wait.poll_interval) => {}
+            }
+            // Tolerate transient poll failures (sc-10279): the render keeps running
+            // server-side, so a single blip must not abort the whole tool call.
+            let job = match self
+                .api
+                .get_json(&format!("/api/v1/jobs/{job_id}"), &[])
+                .await
+            {
+                Ok(job) => {
+                    poll_outage_started = None;
+                    job
+                }
+                Err(error) => {
+                    let now = tokio::time::Instant::now();
+                    let outage_started = *poll_outage_started.get_or_insert(now);
+                    if poll_outage_exceeded(outage_started, now) {
+                        return Err(api_error(error));
+                    }
+                    if started.elapsed() >= self.job_wait.timeout {
+                        return tool_error(format!(
+                            "Image job {job_id} status polling kept failing (last error: \
+                             {error}) and the {}s deadline elapsed. The job may still be \
+                             running; it was not canceled.",
+                            self.job_wait.timeout.as_secs()
+                        ))
+                        .map(JobWaitOutcome::Stopped);
+                    }
+                    continue;
+                }
+            };
+            reporter.report(&job).await;
+            let status = job.get("status").and_then(Value::as_str).unwrap_or("");
+            match status {
+                "completed" => break job,
+                "failed" => {
+                    let detail = job_error_detail(&job);
+                    return tool_error(format!("Image job {job_id} failed: {detail}"))
+                        .map(JobWaitOutcome::Stopped);
+                }
+                "canceled" => {
+                    return tool_error(format!(
+                        "Image job {job_id} was canceled before it finished."
+                    ))
+                    .map(JobWaitOutcome::Stopped);
+                }
+                "interrupted" => {
+                    return tool_error(format!(
+                        "Image job {job_id} was interrupted (worker restarted mid-run); \
+                         call generate_image again to retry."
+                    ))
+                    .map(JobWaitOutcome::Stopped);
+                }
+                _ => {}
+            }
+            if started.elapsed() >= self.job_wait.timeout {
+                return tool_error(format!(
+                    "Image job {job_id} did not reach a terminal state within {}s \
+                     (last status: {status}). The job may still be running; it was \
+                     not canceled.",
+                    self.job_wait.timeout.as_secs()
+                ))
+                .map(JobWaitOutcome::Stopped);
+            }
+        };
+
+        Ok(JobWaitOutcome::Completed(job))
+    }
+
     pub fn new(api: ApiClient) -> Self {
         Self {
             api,
@@ -174,6 +278,12 @@ pub struct ListLorasArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateImageArgs {
+    #[schemars(
+        schema_with = "appearance_schema",
+        description = "Camera, film, multiple looks and lighting recipe IDs from list_appearance. The API resolves model-specific prompt directives and MOSS negatives; incompatible selections are refused."
+    )]
+    pub appearance: Option<Value>,
+
     #[schemars(description = "Project to generate into (from list_projects).")]
     pub project_id: String,
     #[schemars(
@@ -274,6 +384,12 @@ fn moss_image_edit_options_schema(_: &mut schemars::SchemaGenerator) -> schemars
     sceneworks_core::moss_image::edit_options_schema()
         .try_into()
         .expect("MOSS edit options schema object")
+}
+
+fn appearance_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    sceneworks_core::appearance::selection_schema()
+        .try_into()
+        .expect("appearance schema")
 }
 
 fn moss_image_advanced_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -579,6 +695,18 @@ impl SceneWorksMcp {
     }
 
     #[tool(
+        description = "List model-aware Camera, Film, Looks and Lighting recipes. Returns profile model IDs, descriptive prompts, MOSS negatives, provenance and limitations. Select IDs for generate_image.appearance; unsupported model/recipe combinations are refused."
+    )]
+    async fn list_appearance(&self) -> Result<CallToolResult, ErrorData> {
+        let catalog = self
+            .api
+            .get_json("/api/v1/appearance", &[])
+            .await
+            .map_err(api_error)?;
+        json_result(catalog)
+    }
+
+    #[tool(
         description = "List the LoRA adapter catalog (built-in, imported and trained). Returns compact entries: id, name, family, compatibleFamilies, triggerWords, defaultWeight, installState, checkpoint identity baseModel / baseRevision / networkType when recorded, and for an Iris adapter its irisTask (an Iris image job accepts only generation adapters trained on its engine — a trained full Iris checkpoint runs on iris_3b, so iris_3b adapters apply to it). Optionally filter by model family and/or project."
     )]
     async fn list_loras(
@@ -630,87 +758,9 @@ impl SceneWorksMcp {
         let mut reporter = ProgressReporter::new(ctx.peer.clone(), progress_token);
         reporter.report(&submitted).await;
 
-        let started = tokio::time::Instant::now();
-        let mut poll_outage_started: Option<tokio::time::Instant> = None;
-        let job = loop {
-            // Cooperative cancellation (sc-10276): rmcp cancels `ctx.ct` when the
-            // client sends `notifications/cancelled` (it does NOT abort the tool
-            // future, so a drop-guard would never fire). Catch it at the top of the
-            // wait and ask the job to stop, freeing the worker/GPU instead of
-            // letting a canceled render run to completion.
-            tokio::select! {
-                biased;
-                () = ctx.ct.cancelled() => {
-                    // Best-effort: the job may already be terminal, in which case the
-                    // cancel route is a harmless no-op.
-                    let _ = self
-                        .api
-                        .post_json(&format!("/api/v1/jobs/{job_id}/cancel"), &json!({}))
-                        .await;
-                    return tool_error(format!(
-                        "Image job {job_id} was canceled: the client canceled the \
-                         request, so the job was asked to stop."
-                    ));
-                }
-                () = tokio::time::sleep(self.job_wait.poll_interval) => {}
-            }
-            // Tolerate transient poll failures (sc-10279): the render keeps running
-            // server-side, so a single blip must not abort the whole tool call.
-            let job = match self
-                .api
-                .get_json(&format!("/api/v1/jobs/{job_id}"), &[])
-                .await
-            {
-                Ok(job) => {
-                    poll_outage_started = None;
-                    job
-                }
-                Err(error) => {
-                    let now = tokio::time::Instant::now();
-                    let outage_started = *poll_outage_started.get_or_insert(now);
-                    if poll_outage_exceeded(outage_started, now) {
-                        return Err(api_error(error));
-                    }
-                    if started.elapsed() >= self.job_wait.timeout {
-                        return tool_error(format!(
-                            "Image job {job_id} status polling kept failing (last error: \
-                             {error}) and the {}s deadline elapsed. The job may still be \
-                             running; it was not canceled.",
-                            self.job_wait.timeout.as_secs()
-                        ));
-                    }
-                    continue;
-                }
-            };
-            reporter.report(&job).await;
-            let status = job.get("status").and_then(Value::as_str).unwrap_or("");
-            match status {
-                "completed" => break job,
-                "failed" => {
-                    let detail = job_error_detail(&job);
-                    return tool_error(format!("Image job {job_id} failed: {detail}"));
-                }
-                "canceled" => {
-                    return tool_error(format!(
-                        "Image job {job_id} was canceled before it finished."
-                    ));
-                }
-                "interrupted" => {
-                    return tool_error(format!(
-                        "Image job {job_id} was interrupted (worker restarted mid-run); \
-                         call generate_image again to retry."
-                    ));
-                }
-                _ => {}
-            }
-            if started.elapsed() >= self.job_wait.timeout {
-                return tool_error(format!(
-                    "Image job {job_id} did not reach a terminal state within {}s \
-                     (last status: {status}). The job may still be running; it was \
-                     not canceled.",
-                    self.job_wait.timeout.as_secs()
-                ));
-            }
+        let job = match self.wait_for_job(&job_id, &ctx, &mut reporter).await? {
+            JobWaitOutcome::Completed(job) => job,
+            JobWaitOutcome::Stopped(response) => return Ok(response),
         };
 
         // The job row is authoritative for the project id (mirrors the API).
@@ -773,6 +823,13 @@ impl SceneWorksMcp {
             let Some(media_path) = asset_media_path(asset) else {
                 continue;
             };
+            // F-041 (sc-11236): an over-cap result must not be inlined — the
+            // base64 JSON-RPC payload (held twice in memory) would exceed MCP
+            // client message limits / the model context. Above EITHER the
+            // per-image or running-total cap, switch the WHOLE response to the
+            // get_job_result ticketed-link shape (bytes downloaded so far are
+            // simply dropped). The ticket links reach the same media without
+            // inlining, so no result is lost.
             let remaining_total = MAX_INLINE_TOTAL_BYTES.saturating_sub(total_bytes);
             let body_limit = MAX_INLINE_IMAGE_BYTES.min(remaining_total);
             let media_url = format!(
@@ -800,13 +857,6 @@ impl SceneWorksMcp {
                 asset.pointer("/file/mimeType").and_then(Value::as_str),
                 header_mime.as_deref(),
             );
-            // F-041 (sc-11236): an over-cap result must not be inlined — the
-            // base64 JSON-RPC payload (held twice in memory) would exceed MCP
-            // client message limits / the model context. Above EITHER the
-            // per-image or running-total cap, switch the WHOLE response to the
-            // get_job_result ticketed-link shape (bytes downloaded so far are
-            // simply dropped). The ticket links reach the same media without
-            // inlining, so no result is lost.
             total_bytes += bytes.len();
             summary_assets.push(json!({
                 "id": asset.get("id").cloned().unwrap_or(Value::Null),
@@ -1421,6 +1471,7 @@ pub(crate) fn image_job_body(args: &GenerateImageArgs) -> Result<Value, String> 
     body.insert("prompt".to_owned(), json!(args.prompt));
     body.insert("count".to_owned(), json!(args.count.unwrap_or(1)));
     let optional = [
+        ("appearance", args.appearance.clone()),
         (
             "negativePrompt",
             args.negative_prompt.as_ref().map(|v| json!(v)),
@@ -1839,11 +1890,7 @@ pub(crate) fn job_error_detail(job: &Value) -> &str {
 /// `[A-Za-z0-9_-]` (path separators, query metacharacters …) is rejected.
 pub(crate) fn valid_job_id(job_id: &str) -> Result<&str, String> {
     let job_id = job_id.trim();
-    if job_id.is_empty()
-        || !job_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-    {
+    if !sceneworks_core::ids::is_safe_id(job_id) {
         return Err(format!(
             "\"{job_id}\" is not a valid job id (expected letters, digits, '-' or '_')"
         ));
@@ -1952,10 +1999,7 @@ pub(crate) fn encode_media_path(path: &str) -> String {
 /// inline file request or a ticket-bearing result URL. Rejecting `%` also prevents a downstream
 /// decoder from turning single- or double-encoded traversal into route separators.
 pub(crate) fn valid_project_id(project_id: &str) -> bool {
-    !project_id.trim().is_empty()
-        && project_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    sceneworks_core::ids::is_safe_id(project_id)
 }
 
 /// Percent-encode one untrusted media-path segment.
@@ -1978,19 +2022,45 @@ fn encode_path_segment(segment: &str) -> String {
 
 /// The project-relative media path of a result asset, normalized for the
 /// `/files/*relative_path` route: prefers the sidecar's `file.path`, falls back
-/// to a top-level `path`, converts backslashes and strips any leading slash.
+/// to a top-level `path`, rejects absolute, parent and encoded traversal paths.
 pub(crate) fn asset_media_path(asset: &Value) -> Option<String> {
     let path = asset
         .pointer("/file/path")
         .and_then(Value::as_str)
         .or_else(|| asset.get("path").and_then(Value::as_str))?;
+    // Legacy Windows sidecars may use native separators; preserve relative nested filenames,
+    // while refusing leading roots, drive prefixes and parent components after normalization.
     let normalized = path.replace('\\', "/");
-    let trimmed = normalized.trim_start_matches('/');
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
+    let path = normalized.as_str();
+    sceneworks_core::safe_path::portable_relative_path_parts(path).ok()?;
+    // Decode nested percent escapes with a stack: each reduction removes two bytes, so even
+    // deeply encoded hostile paths are checked in linear time. Retain the original filename.
+    let mut decoded = Vec::with_capacity(path.len());
+    for byte in path.bytes() {
+        decoded.push(byte);
+        while decoded.len() >= 3 {
+            let end = decoded.len();
+            if decoded[end - 3] != b'%' {
+                break;
+            }
+            let Some(high) = (decoded[end - 2] as char).to_digit(16) else {
+                break;
+            };
+            let Some(low) = (decoded[end - 1] as char).to_digit(16) else {
+                break;
+            };
+            decoded.truncate(end - 3);
+            decoded.push((high * 16 + low) as u8);
+        }
     }
+    if decoded.iter().filter(|&&byte| byte == b'/').count()
+        != path.bytes().filter(|&byte| byte == b'/').count()
+    {
+        return None;
+    }
+    sceneworks_core::safe_path::portable_relative_path_parts(&String::from_utf8_lossy(&decoded))
+        .ok()?;
+    Some(path.to_owned())
 }
 
 /// The mime type for an inline image block: the asset sidecar's recorded
@@ -2601,6 +2671,17 @@ mod tests {
         }
     }
     #[test]
+    fn appearance_recipe_ids_reach_the_typed_api_boundary() {
+        let selection = json!({"camera":null,"film":"film-kodak-portra-400","looks":["look-moody-dark"],"lighting":null});
+        let args = args_from(
+            json!({"projectId":"p1","prompt":"a fox","model":"krea_2_turbo","appearance":selection}),
+        );
+        assert_eq!(image_job_body(&args).unwrap()["appearance"], selection);
+        let schema = serde_json::to_value(schemars::schema_for!(GenerateImageArgs)).unwrap();
+        assert!(schema["properties"].get("appearance").is_some());
+    }
+
+    #[test]
     fn image_job_body_maps_every_optional_field() {
         let args = args_from(json!({
             "projectId": "p1",
@@ -2757,19 +2838,42 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn asset_media_path_prefers_file_path_and_normalizes() {
+    fn asset_media_path_prefers_file_path_and_confines_url_components() {
         // The persisted sidecar shape: the path lives at file.path.
         let sidecar = json!({ "id": "a1", "file": { "path": "assets/images/g1/img_0001.png" } });
         assert_eq!(
             asset_media_path(&sidecar).as_deref(),
             Some("assets/images/g1/img_0001.png")
         );
-        // Fallback to a top-level path; backslashes and a leading slash normalize.
-        let flat = json!({ "path": "\\assets\\images\\g1\\img_0001.png" });
         assert_eq!(
-            asset_media_path(&flat).as_deref(),
-            Some("assets/images/g1/img_0001.png")
+            asset_media_path(&json!({ "path": "assets/images/nested.png" })).as_deref(),
+            Some("assets/images/nested.png")
         );
+        assert_eq!(
+            asset_media_path(&json!({"path": "assets\\images\\nested.png"})).as_deref(),
+            Some("assets/images/nested.png")
+        );
+        assert_eq!(
+            asset_media_path(&json!({"path": "assets/50% done.png"})).as_deref(),
+            Some("assets/50% done.png")
+        );
+        for path in [
+            "../secret",
+            "a/../secret",
+            "a\\..\\secret",
+            "/assets/x.png",
+            "\\assets\\x.png",
+            "C:/secret",
+            "%2e%2e/secret",
+            "%252e%252e/secret",
+            "%25%32%65%25%32%65/secret",
+            "a/%25252fsecret",
+            "a/%255csecret",
+            "a/%2500secret",
+            "a/%2fsecret",
+        ] {
+            assert_eq!(asset_media_path(&json!({ "path": path })), None, "{path}");
+        }
         assert_eq!(asset_media_path(&json!({ "id": "a1" })), None);
         assert_eq!(asset_media_path(&json!({ "path": "/" })), None);
     }
@@ -3216,54 +3320,26 @@ mod tests {
     /// Both sides are read from the real thing. The REACHABLE set is collected by CALLING
     /// `video_job_body` for every `VIDEO_TOOL_MODES` entry and recording the wire mode it actually
     /// emitted — so a name with no `match` arm, or an arm that emits the wrong string, is red. The
-    /// ADMITTED set is parsed out of the shipped `apps/rust-api/src/lib.rs` bytes, because
-    /// `VIDEO_JOB_MODES` is `pub(crate)` to that crate and this one cannot link it; retyping the
-    /// twelve here would be a guard asserting against its own copy, which is precisely the
-    /// false-green shape that let GH #2074 ship and let this tool sit at 7 of 12 unnoticed.
+    /// ADMITTED set comes from the core contract consumed by the API, so refactoring
+    /// or formatting an application file cannot change this reachability guard.
     ///
     /// The shipped comment that made this necessary claimed `reference_to_video` was "the ONLY one
     /// of the twelve this tool could not reach" while five others were also unreachable. A comment
     /// asserting completeness stops the next reader from checking; this does the checking.
     #[test]
     fn video_job_body_reaches_every_mode_the_api_admits() {
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/rust-api/src/lib.rs"),
-        )
-        .expect("the API crate's lib.rs is readable from the workspace");
-        let start = source
-            .find("pub(crate) const VIDEO_JOB_MODES: &[&str] = &[")
-            .expect("VIDEO_JOB_MODES is declared in apps/rust-api/src/lib.rs");
-        let body = &source[start..];
-        let end = body.find("\n];").expect("VIDEO_JOB_MODES terminates");
-        // Every quoted literal on the line, not the first. The per-line parser this replaces had
-        // exactly one open-failure mode among the realistic edits: TWO entries on one source line
-        // (`"a", "b",`). Rename, re-visibility, reformat, added or dropped entry all fail CLOSED
-        // (the parse breaks or the set changes and the `assert_eq!` reds), but a second literal on
-        // a taken line silently vanished from `admitted` — and if it also had no MCP arm it
-        // vanished from `reachable` too, so both sets missed it and the guard stayed green. The
-        // vacuity floor cannot catch that either once the list is longer than the floor. rustfmt
-        // normally forbids that layout, which is why the risk was low and the fix is cheap.
-        let admitted: BTreeSet<String> = body[..end]
-            .lines()
-            .skip(1)
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .flat_map(|line| {
-                let mut found = Vec::new();
-                let mut rest = line;
-                while let Some(open) = rest.find('"') {
-                    let after = &rest[open + 1..];
-                    let Some(close) = after.find('"') else { break };
-                    found.push(after[..close].to_owned());
-                    rest = &after[close + 1..];
-                }
-                found
-            })
+        let admitted: BTreeSet<String> = sceneworks_core::video_request::VIDEO_JOB_MODES
+            .iter()
+            .map(|mode| (*mode).to_owned())
             .collect();
         assert!(
             admitted.len() >= 12,
-            "only {} modes were parsed out of VIDEO_JOB_MODES — the parse is wrong and this guard \
-             is vacuous: {admitted:?}",
-            admitted.len()
+            "the admitted mode contract must retain every shipped mode: {admitted:?}"
+        );
+        assert_eq!(
+            admitted.len(),
+            sceneworks_core::video_request::VIDEO_JOB_MODES.len(),
+            "the admitted mode contract must not contain duplicate modes"
         );
 
         let mut reachable: BTreeSet<String> = BTreeSet::new();

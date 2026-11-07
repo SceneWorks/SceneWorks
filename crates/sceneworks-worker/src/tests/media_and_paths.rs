@@ -111,9 +111,8 @@ fn missing_crossfade_duration_defaults_to_python_mux_duration() {
 fn path_and_error_helpers_are_bounded_and_defensive() {
     let temp = tempdir().expect("tempdir creates");
     let error = safe_project_path(temp.path(), "").expect_err("empty relative path rejects");
-    assert!(error
-        .to_string()
-        .contains("Project-relative path is required"));
+    assert!(matches!(error, WorkerError::InvalidPayload(message)
+        if message == "Project-relative path is required."));
 
     // sc-4278 / F-MLXW-14: load_reference_image and resolve_clip_media_path route
     // sidecar-sourced media paths through safe_project_path, so a traversal or
@@ -129,7 +128,8 @@ fn path_and_error_helpers_are_bounded_and_defensive() {
     }
     // A normal project-relative media path still resolves under the project root.
     let safe = safe_project_path(temp.path(), "assets/images/x.png").expect("safe path resolves");
-    assert!(safe.starts_with(temp.path()));
+    let canonical_root = temp.path().canonicalize().expect("project root resolves");
+    assert_eq!(safe, canonical_root.join("assets/images/x.png"));
     assert!(safe.ends_with("assets/images/x.png"));
 
     let noisy = (0..100)
@@ -1128,8 +1128,7 @@ async fn spawn_ffmpeg_lifecycle_stub(state: FfmpegLifecycleStubState) -> String 
             "/api/v1/workers/:worker_id/heartbeat",
             post(heartbeat_route),
         )
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .merge(crate::test_api_stub::job_progress_routes(job_route, progress_route))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1418,10 +1417,7 @@ async fn ffmpeg_probe_timeout_kills_and_reaps_the_real_helper_process() {
     assert!(!temp.path().join("completed").exists());
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test]
 async fn ffmpeg_frame_count_probe_wrapper_preserves_timeout_but_not_ordinary_failure() {
     let temp = tempdir().expect("tempdir creates");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { assertFixtureChildSucceeded } from "./test-platform-capabilities.mjs";
@@ -1442,11 +1442,13 @@ test("contract v4/v5 multiTurnPromptCache is teacher-forced on a cache-hit turn 
 
 
 test("CLI entrypoint executes from a space/Unicode path and imports without running main", async () => {
-  // Normal Node dependency resolution finds the repository dependencies. Copy
-  // only the actual module and its static inputs, not any CLI implementation.
-  const root = await mkdtemp(path.join(path.resolve("scripts"), "kv CLI 雪-"));
+  // Keep the copied fixture outside production source audits while retaining normal Node
+  // dependency resolution. Copy the actual module and static inputs, not a CLI implementation.
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "kv CLI 雪-")));
   try {
-    for (const file of ["scripts/kv-baseline-harness.mjs", "config/kv-baseline-quality-contract.json",
+    await symlink(path.resolve("node_modules"), path.join(root, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir");
+    for (const file of ["scripts/kv-baseline-harness.mjs", "scripts/lib/canonical-json.mjs", "scripts/lib/file-sha256.mjs", "config/kv-baseline-quality-contract.json",
       "config/kv-baseline-quality-contract.json.sha256", "packages/schemas/kv-baseline-receipt.schema.json"]) {
       const destination = path.join(root, file);
       await mkdir(path.dirname(destination), { recursive: true });

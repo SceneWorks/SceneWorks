@@ -183,7 +183,7 @@ async fn make_references_writes_a_pack_the_courier_plan_validates() {
         assert!(!generation.prompt.trim().is_empty());
         assert_eq!(
             generation.negative_prompt, None,
-            "krea_2_turbo declares supportsNegativePrompt: false, so none was sent"
+            "the reference spec leaves negative conditioning unset at the native CFG-off default"
         );
         assert!(
             generation.seed.is_some(),
@@ -481,13 +481,7 @@ async fn every_mid_run_failure_is_refused_by_name_and_publishes_nothing() {
 
 /// An empty project for a run to generate into, so its dispatches can be counted.
 async fn new_project(harness: &Harness, name: &str) -> String {
-    let (_, project) = crate::tests::support::request(
-        harness.app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": name }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(harness.app.clone(), &(name)).await;
     project["id"].as_str().expect("project id").to_owned()
 }
 
@@ -541,10 +535,10 @@ async fn the_catalog_gates_are_checked_before_the_first_render() {
         "{findings:#?}"
     );
 
-    // A negative prompt for a model that declares it does not take one. Krea 2 Turbo is CFG-free:
-    // the engine never forwards the text, so a spec that declares one is refused rather than
-    // rendered against a prompt the model never saw.
+    // A negative prompt for a provider that genuinely does not support negative conditioning.
+    // Krea Turbo supports experimental CFG now, so use FLUX Schnell for this capability refusal.
     let spec = edited_spec(&harness, "negative-prompt", |spec| {
+        spec["model"]["id"] = json!("flux_schnell");
         spec["model"]["negativePrompt"] = json!("blurry, text, watermark");
     });
     let error = make_references(&harness.transport, &options(&harness, spec, "negative-out"))

@@ -10,15 +10,9 @@
 
 use super::*;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const JOY_CAPTION_MODEL: &str = "fancyfeast/llama-joycaption-beta-one-hf-llava";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CANCEL_MESSAGE: &str = "Training captioning canceled by user.";
 
 // Coalesced per-step progress-post cadence (sc-11189, F-016 — the sc-8840 F-038 pattern the refine
@@ -27,34 +21,19 @@ const CANCEL_MESSAGE: &str = "Training captioning canceled by user.";
 // multi-image dataset emits a handful of `update_job` POSTs per second instead of hundreds of
 // sequential per-token POSTs (which also throttled decode to API latency). 250 ms keeps the progress
 // bar visibly smooth while bounding API load and decoupling decode speed from API latency.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
 
 // epic 3720 (sc-3724): the backend-neutral captioner contract types come from `gen_core`; the
 // selected runtime bundle explicitly includes its JoyCaption implementation.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 use gen_core::CAPTION_TRIGGER_WORD_CONFORMANCE;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use gen_core::{
     apply_caption_trigger_words, CancelFlag, CaptionOptions, CaptionRequest, CaptionSampling,
     Captioner, Image, LoadSpec, Progress, WeightsSource,
 };
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::training::CaptionMode;
 
 /// The JoyCaption prompt a `subjectOnly` caption job sends (epic 2123, sc-24829). It keeps the
@@ -62,20 +41,14 @@ use sceneworks_core::training::CaptionMode;
 /// accessories) and leaves out the background and the fixed identity traits, so a character LoRA
 /// binds that identity to the trigger words (still prepended after generation) instead of to
 /// caption tokens.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) const SUBJECT_ONLY_CAPTION_PROMPT: &str = "Write a short caption that describes only \
 the changeable parts of the main subject in this image: their clothing, facial expression, pose, \
 and any accessories they wear or hold. Do not describe the background, setting, location, \
 lighting, or camera. Do not describe fixed identity traits such as facial features or face \
 shape, eye color, hair (color, length, or style), skin tone, ethnicity, age, or body type. Do not \
 name the subject.";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct CaptionItem {
     item_id: String,
@@ -83,10 +56,7 @@ struct CaptionItem {
     trigger_words: Vec<String>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug)]
 struct CaptionJobOptions {
     options: CaptionOptions,
@@ -95,10 +65,7 @@ struct CaptionJobOptions {
 
 /// The job's caption mode (sc-24829). An absent `mode` is `default` (jobs queued before modes
 /// existed); an unrecognised one is refused rather than captioned as `default`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_job_mode(payload: &JsonObject) -> WorkerResult<CaptionMode> {
     match payload.get("mode") {
         None | Some(Value::Null) => Ok(CaptionMode::Default),
@@ -119,10 +86,7 @@ fn caption_job_mode(payload: &JsonObject) -> WorkerResult<CaptionMode> {
 /// The prompt actually sent to the captioner for `mode`: the subject-only prompt for
 /// `subjectOnly`, otherwise the caller's prompt override (empty means the provider renders its
 /// type/length template, today's behaviour). `triggerOnly` never reaches a captioner.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_prompt_for_mode(mode: &CaptionMode, options: &CaptionOptions) -> String {
     match mode {
         CaptionMode::SubjectOnly => SUBJECT_ONLY_CAPTION_PROMPT.to_owned(),
@@ -132,10 +96,7 @@ fn caption_prompt_for_mode(mode: &CaptionMode, options: &CaptionOptions) -> Stri
 
 /// One stored caption as the `/caption-sidecars` route takes it: auto-sourced, stamped with the
 /// mode that produced it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_sidecar_item(
     item_id: &str,
     text: &str,
@@ -153,10 +114,7 @@ fn caption_sidecar_item(
     })
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 // The meaningful per-image result streamed on the bounded mpsc channel (sc-11189, F-016). Per-STEP
 // token progress no longer rides this channel — it is coalesced through a latest-wins watch channel
 // (see `run_training_caption_job`) — so only the finished caption for each image is sent here, one
@@ -169,10 +127,7 @@ struct CaptionedItem {
     trigger_words: Vec<String>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_destination(payload: &JsonObject) -> WorkerResult<(String, String)> {
     Ok((
         required_payload_string(payload, "projectId")?.to_owned(),
@@ -180,10 +135,7 @@ fn caption_destination(payload: &JsonObject) -> WorkerResult<(String, String)> {
     ))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_training_caption_job(
     api: &ApiClient,
     settings: &Settings,
@@ -195,10 +147,7 @@ pub(crate) async fn run_training_caption_job(
 
 /// [`run_training_caption_job`] with the captioner loader injected (sc-24829), so a test drives the
 /// REAL job path against a stub [`Captioner`] and can prove a `triggerOnly` job never calls it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn run_training_caption_job_using(
     api: &ApiClient,
     settings: &Settings,
@@ -235,12 +184,7 @@ async fn run_training_caption_job_using(
             .await;
     }
     let options = caption_job_options(&job.payload);
-    let model_name_or_path = job
-        .payload
-        .get("modelNameOrPath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let model_name_or_path = crate::payload::trimmed_string(job.payload.get("modelNameOrPath"))
         .unwrap_or(JOY_CAPTION_MODEL)
         .to_owned();
     let weights_dir = resolve_caption_weights_dir(settings, &model_name_or_path)?;
@@ -389,122 +333,82 @@ async fn run_training_caption_job_using(
         Ok(())
     });
 
-    // Bind the blocking captioner task to its cancel flag (sc-8804, F-003): every `update_job`/
-    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
-    // reclaim); on that early return this guard trips `cancel` and aborts the captioner thread
-    // instead of leaving it running on a job nobody is consuming. `cancel` is kept alongside (it's
-    // `Clone`) for the in-loop cancel poll; the guard drives only the drop-time teardown.
-    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
-    // Heartbeat + poll-cancel cadence (the shared 5–15 s worker interval).
-    let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
-    heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // Coalesced per-step progress cadence (sc-11189, F-016): a fixed short tick that drains ONLY the
-    // newest token count from the watch channel — hundreds of per-token POSTs collapse to a few, and
-    // decode is never back-pressured by API latency. Decoupled from the (coarser) heartbeat interval
-    // so per-step progress stays smooth without the token stream driving the API.
-    let mut progress_interval = tokio::time::interval(PROGRESS_POST_INTERVAL);
-    progress_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // Skip a redundant post when the token count has not advanced since the last one (the watch holds
-    // the same value between ticks), so a stalled decode does not re-POST identical progress.
+    let mut supervisor = StreamSupervisor::new(
+        cancel,
+        blocking,
+        progress_report_interval(settings),
+        Some(PROGRESS_POST_INTERVAL),
+    );
     let mut last_posted: Option<(usize, u32, u32)> = None;
-    // Defer the terminal `Canceled` until the blocking captioner has actually stopped (sc-11189,
-    // F-017): a cancel poll here only TRIPS the engine flag (`cancel_requested_peek`, no terminal
-    // write) and latches `canceled`; the terminal `Canceled` — which frees the worker row — is posted
-    // below only AFTER `into_handle().await` returns, so the scheduler never sees a free worker while
-    // the captioner is still on the GPU (mirrors `run_batched_analysis_job` sc-8917/F-115 + the
-    // training path). The old path called `check_cancel` on the tick, which posted the terminal
-    // `Canceled` at acknowledgement time.
-    let mut canceled = false;
     let mut captions = Vec::with_capacity(items.len());
-    // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
-    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
-    let loop_result: WorkerResult<()> = async {
+    let handling: WorkerResult<()> = async {
         loop {
-        tokio::select! {
-            event = rx.recv() => {
-                match event {
-                    Some(CaptionedItem { index, item_id, text, trigger_words }) => {
-                        captions.push(caption_sidecar_item(&item_id, &text, &trigger_words, &mode));
-                        let progress = 0.12 + 0.76 * ((index + 1) as f64 / items.len() as f64);
-                        update_job(
-                            api,
-                            &job.id,
-                            caption_progress(
-                                JobStatus::Running,
-                                ProgressStage::Running,
-                                progress,
-                                &format!("Captioned image {} of {}.", index + 1, items.len()),
-                                None,
-                                backend,
-                            ),
-                        )
-                        .await?;
-                    }
-                    None => break,
-                }
-            }
-            _ = progress_interval.tick() => {
-                // Coalesced per-step progress: post ONLY the latest `(index, current, total)`, and
-                // only if it moved since the last post (a stalled decode holds the same value between
-                // ticks → no redundant re-POST). Copy the `(usize, u32, u32)` out of the borrow first
-                // so the non-`Send` `watch::Ref` is not held across the `.await` (keeps the enclosing
-                // job future `Send` for rust-api's `tokio::spawn`).
-                let latest = *progress_rx.borrow();
-                if let Some((index, current, total)) = next_caption_step_post(latest, last_posted) {
+            match supervisor
+                .next(api, settings, &job.id, Some(&mut rx))
+                .await?
+            {
+                StreamSignal::Event(CaptionedItem {
+                    index,
+                    item_id,
+                    text,
+                    trigger_words,
+                }) => {
+                    captions.push(caption_sidecar_item(&item_id, &text, &trigger_words, &mode));
+                    let progress = 0.12 + 0.76 * ((index + 1) as f64 / items.len() as f64);
                     update_job(
                         api,
                         &job.id,
                         caption_progress(
                             JobStatus::Running,
                             ProgressStage::Running,
-                            caption_step_progress(index, current, total, items.len()),
-                            &format!("Captioning image {} of {}.", index + 1, items.len()),
+                            progress,
+                            &format!("Captioned image {} of {}.", index + 1, items.len()),
                             None,
                             backend,
                         ),
                     )
                     .await?;
-                    last_posted = Some((index, current, total));
                 }
-            }
-            _ = heartbeat_interval.tick() => {
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API poll
-                // (a local flag read) so a quit trips the captioner flag at its next per-item check
-                // instead of waiting out the grace window, exactly like a user cancel does. Here we
-                // only TRIP the engine flag and latch `canceled`; the terminal `Canceled` is posted
-                // below once the task has actually stopped (sc-11189, F-017).
-                if !canceled && (shutdown_requested() || cancel_requested_peek(api, &job.id).await) {
-                    cancel.cancel();
-                    canceled = true;
+                StreamSignal::ProgressTick => {
+                    // Coalesced per-step progress: post ONLY the latest `(index, current, total)`, and
+                    // only if it moved since the last post (a stalled decode holds the same value between
+                    // ticks → no redundant re-POST). Copy the `(usize, u32, u32)` out of the borrow first
+                    // so the non-`Send` `watch::Ref` is not held across the `.await` (keeps the enclosing
+                    // job future `Send` for rust-api's `tokio::spawn`).
+                    let latest = *progress_rx.borrow();
+                    if let Some((index, current, total)) =
+                        next_caption_step_post(latest, last_posted)
+                    {
+                        update_job(
+                            api,
+                            &job.id,
+                            caption_progress(
+                                JobStatus::Running,
+                                ProgressStage::Running,
+                                caption_step_progress(index, current, total, items.len()),
+                                &format!("Captioning image {} of {}.", index + 1, items.len()),
+                                None,
+                                backend,
+                            ),
+                        )
+                        .await?;
+                        last_posted = Some((index, current, total));
+                    }
                 }
+                StreamSignal::CancelRequested => {}
+                StreamSignal::Finished => break,
             }
-        }
         }
         Ok(())
     }
     .await;
-    if let Err(error) = loop_result {
-        // A progress/heartbeat POST failed (transient error or 409 stale-sweep reclaim): trip the
-        // flag and bounded-join the captioner before returning so it isn't left running (sc-8804).
-        guard.cancel_and_join().await;
-        return Err(error);
-    }
-
-    // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
-    let join_result = guard
-        .into_handle()
-        .await
-        .map_err(|error| task_join_error("caption task join", error))?;
+    let (canceled, result) = supervisor.finish_stream(handling, &mut rx).await?;
+    let result = result.map_err(|error| task_join_error("caption task join", error))?;
     if canceled {
-        // The captioner has actually stopped now, so post the TERMINAL `Canceled` here (not at the
-        // earlier cancel poll, which only tripped the flag) — this terminal write frees the worker row
-        // as the worker returns to its claim loop, so the next queued job waits only until the GPU is
-        // genuinely free (sc-11189, F-017; mirrors `run_batched_analysis_job` + the training path).
         mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
-    join_result?;
+    result?;
 
     save_caption_results(
         api,
@@ -522,10 +426,7 @@ async fn run_training_caption_job_using(
 }
 
 /// Where and how a finished caption job's captions are saved.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct CaptionSave<'a> {
     project_id: &'a str,
     dataset_id: &'a str,
@@ -536,10 +437,7 @@ struct CaptionSave<'a> {
 
 /// POST the captions to the dataset's `/caption-sidecars` route and complete the job: the shared
 /// tail of the captioner and trigger-only paths.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn save_caption_results(
     api: &ApiClient,
     job: &JobSnapshot,
@@ -599,10 +497,7 @@ async fn save_caption_results(
 
 /// A `triggerOnly` caption job (sc-24829): every image's caption is exactly its trigger words,
 /// written without resolving weights or loading a captioner.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn run_trigger_only_caption_job(
     api: &ApiClient,
     settings: &Settings,
@@ -650,10 +545,7 @@ async fn run_trigger_only_caption_job(
 /// The trigger-only sidecar items: each caption is the item's trigger words joined by the shared
 /// gen-core trigger policy over an empty caption. An item with no trigger words would get an empty
 /// caption, so it is refused (the API refuses the same job before queuing it).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn trigger_only_captions(items: &[CaptionItem], mode: &CaptionMode) -> WorkerResult<Vec<Value>> {
     items
         .iter()
@@ -675,10 +567,7 @@ fn trigger_only_captions(items: &[CaptionItem], mode: &CaptionMode) -> WorkerRes
         .collect()
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_training_caption_job(
     _api: &ApiClient,
     _settings: &Settings,
@@ -691,10 +580,7 @@ pub(crate) async fn run_training_caption_job(
     ))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_progress(
     status: JobStatus,
     stage: ProgressStage,
@@ -703,27 +589,10 @@ fn caption_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        // Stamped by update_job before posting (sc-4172).
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_result(
     model_name_or_path: &str,
     dataset_id: &str,
@@ -758,53 +627,16 @@ fn caption_result(
     result
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<CaptionItem>> {
-    let dataset_root = payload
-        .get("datasetRoot")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Caption payload.datasetRoot must be an app-managed dataset path.".to_owned(),
-            )
-        })?;
-    let items = payload
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload("Caption payload.items must be an array.".to_owned())
-        })?;
-    items
-        .iter()
-        .map(|item| {
-            let object = item.as_object().ok_or_else(|| {
-                WorkerError::InvalidPayload("Caption item must be an object.".to_owned())
-            })?;
-            let item_id = object
-                .get("itemId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload("Caption item is missing itemId.".to_owned())
-                })?
-                .to_owned();
-            let image_path = object
-                .get("imagePath")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Caption item {item_id} is missing imagePath."
-                    ))
-                })?;
-            let trigger_words = object
+    parse_dataset_items(
+        settings,
+        payload,
+        "Caption",
+        DatasetItemPolicy::Strict,
+        |item| {
+            let trigger_words = item
+                .object
                 .get("triggerWords")
                 .and_then(Value::as_array)
                 .map(|values| {
@@ -814,28 +646,19 @@ fn caption_items(settings: &Settings, payload: &JsonObject) -> WorkerResult<Vec<
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
                         .map(str::to_owned)
-                        .collect::<Vec<_>>()
+                        .collect()
                 })
                 .unwrap_or_default();
-            let image_path = resolve_dataset_item_path(
-                settings,
-                dataset_root,
-                image_path,
-                &format!("Caption item {item_id} imagePath"),
-            )?;
             Ok(CaptionItem {
-                item_id,
-                image_path,
+                item_id: item.item_id.to_owned(),
+                image_path: item.image_path()?,
                 trigger_words,
             })
-        })
-        .collect()
+        },
+    )
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_job_options(payload: &JsonObject) -> CaptionJobOptions {
     let options = payload
         .get("options")
@@ -885,10 +708,7 @@ fn caption_job_options(payload: &JsonObject) -> CaptionJobOptions {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn option_string(options: &JsonObject, key: &str, default: &str) -> String {
     options
         .get(key)
@@ -897,10 +717,7 @@ fn option_string(options: &JsonObject, key: &str, default: &str) -> String {
         .to_owned()
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_caption_weights_dir(
     settings: &Settings,
     model_name_or_path: &str,
@@ -908,10 +725,7 @@ fn resolve_caption_weights_dir(
     resolve_app_managed_model_dir(settings, model_name_or_path, "JoyCaption model path")
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn load_caption_image(path: &Path) -> WorkerResult<Image> {
     let decoded = crate::image_decode::decode_image_any(path)
         .map_err(|error| {
@@ -932,10 +746,7 @@ fn load_caption_image(path: &Path) -> WorkerResult<Image> {
 /// identical progress). Pure so the coalescing invariant — intermediate repeats dropped, every
 /// distinct value posted exactly once — is unit-testable without an API or real weights (the caption
 /// test module, like the whole caption path, is gated on the macOS/candle backends).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn next_caption_step_post(
     latest: (usize, u32, u32),
     last_posted: Option<(usize, u32, u32)>,
@@ -943,10 +754,7 @@ fn next_caption_step_post(
     (last_posted != Some(latest)).then_some(latest)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn caption_step_progress(index: usize, current: u32, total: u32, item_count: usize) -> f64 {
     let item_count = item_count.max(1) as f64;
     let within = if total > 0 {
@@ -957,39 +765,21 @@ fn caption_step_progress(index: usize, current: u32, total: u32, item_count: usi
     (0.12 + 0.76 * ((index as f64 + within) / item_count)).min(0.9)
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod tests {
     use super::*;
 
     fn test_settings(data_dir: &Path) -> Settings {
         Settings {
             api_url: "http://127.0.0.1".to_owned(),
-            access_token: None,
-            data_dir: data_dir.to_path_buf(),
             config_dir: data_dir.join("config"),
             worker_id: "test-worker".to_owned(),
             gpu_id: "gpu-0".to_owned(),
-            is_child_worker: false,
-            poll_seconds: 1,
-            heartbeat_seconds: 1,
-            shutdown_timeout_seconds: 1,
             huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
-            huggingface_token: None,
-            credentials: Vec::new(),
             max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
             max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
-            allow_private_lora_urls: false,
-            utility_workers: 1,
             backend_mlx_enabled: true,
-            backend_candle_enabled: false,
-            gpu_memory_limit_bytes: 0,
-            external_model_roots: Vec::new(),
+            ..crate::Settings::for_test(data_dir.to_path_buf())
         }
     }
 
@@ -1205,10 +995,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use axum::{
-        extract::{Path as AxumPath, State},
+        extract::State,
         response::{IntoResponse, Response},
-        routing::{get, post},
-        Json, Router,
+        routing::post,
+        Json,
     };
     use gen_core::{CaptionCapabilities, CaptionOutput, CaptionerDescriptor};
 
@@ -1233,20 +1023,6 @@ mod tests {
     }
 
     async fn spawn_caption_api() -> (String, CaptionApi) {
-        async fn job_route(AxumPath(job_id): AxumPath<String>) -> Response {
-            Json(caption_job_value(&job_id, json!({}))).into_response()
-        }
-        async fn progress_route(
-            State(state): State<CaptionApi>,
-            AxumPath(job_id): AxumPath<String>,
-            Json(body): Json<Value>,
-        ) -> Response {
-            state.progress.lock().expect("progress lock").push(body);
-            Json(caption_job_value(&job_id, json!({}))).into_response()
-        }
-        async fn heartbeat_route() -> Response {
-            Json(json!({})).into_response()
-        }
         async fn sidecars_route(
             State(state): State<CaptionApi>,
             Json(body): Json<Value>,
@@ -1255,26 +1031,17 @@ mod tests {
             Json(json!({ "dataset": { "version": 2 }, "sidecars": [] })).into_response()
         }
         let state = CaptionApi::default();
-        let app = Router::new()
-            .route("/api/v1/jobs/:job_id", get(job_route))
-            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-            .route(
-                "/api/v1/workers/:worker_id/heartbeat",
-                post(heartbeat_route),
-            )
-            .route(
-                "/api/v1/projects/:project_id/training/datasets/:dataset_id/caption-sidecars",
-                post(sidecars_route),
-            )
-            .with_state(state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener binds");
-        let address = listener.local_addr().expect("listener has address");
-        crate::load_progress::spawn(async move {
-            axum::serve(listener, app).await.expect("stub serves");
-        });
-        (format!("http://{address}"), state)
+        let app = crate::test_api_stub::routes(
+            |_: &CaptionApi, id, _| caption_job_value(id, json!({})),
+            |state, _, body| state.progress.lock().expect("progress lock").push(body),
+            |_, _| json!({}),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/caption-sidecars",
+            post(sidecars_route),
+        )
+        .with_state(state.clone());
+        (crate::test_api_stub::serve(app).await, state)
     }
 
     /// A captioner that records the prompt of every request and answers a fixed caption.

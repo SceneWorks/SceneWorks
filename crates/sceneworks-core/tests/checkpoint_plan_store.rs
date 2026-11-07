@@ -1,12 +1,14 @@
 //! Persisted checkpoint plans + approved roots (sc-20634): compile determinism, locator
 //! independence, and every typed refusal a resolve can raise before a loader exists.
 
+mod common;
+use common::{tree_snapshot, write_krea_native_file, write_safetensors};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -61,43 +63,6 @@ fn fixture_dir(label: &str) -> TempDir {
         .prefix(&format!("plan-store-{label}-{}-", std::process::id()))
         .tempdir()
         .unwrap()
-}
-
-/// A minimal single-file Krea 2 native DiT: the `txtfusion.` marker the family detector keys on,
-/// every tensor dense bf16, bytes deterministic.
-fn write_krea_native_file(path: &Path, fill: u8) {
-    write_safetensors(
-        path,
-        &[
-            ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
-            ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
-            ("model.diffusion_model.first.weight", "BF16"),
-        ],
-        fill,
-    );
-}
-
-fn write_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
-    let mut header = Map::new();
-    let mut offset = 0_u64;
-    for (name, dtype) in entries {
-        let width = match *dtype {
-            "F16" | "BF16" => 2,
-            "F32" => 4,
-            _ => 1,
-        };
-        header.insert(
-            (*name).to_owned(),
-            json!({"dtype": dtype, "shape": [1], "data_offsets": [offset, offset + width]}),
-        );
-        offset += width;
-    }
-    let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
-    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
-    bytes.extend(encoded);
-    bytes.resize(bytes.len() + offset as usize, fill);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, bytes).unwrap();
 }
 
 struct Fixture {
@@ -1391,6 +1356,7 @@ fn unknown_families_and_malformed_sources_refuse_at_compile_with_typed_diagnosti
     write_safetensors(
         &fx.library_dir.join("mystery.safetensors"),
         &[("foo.weight", "BF16"), ("bar.bias", "BF16")],
+        None,
         0x01,
     );
     match fx
@@ -1837,34 +1803,6 @@ use sceneworks_core::checkpoint_plan_store::{
     parse_linked_checkpoint_id, validate_linked_relative_path, LinkedCheckpointStateV1,
 };
 use std::collections::BTreeMap;
-use std::time::SystemTime;
-
-/// Every file under `root` as `(size, mtime, bytes)`. A lifecycle action that leaves this equal
-/// wrote nothing, deleted nothing and re-stamped nothing.
-fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, SystemTime, Vec<u8>)> {
-    let mut snapshot = BTreeMap::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(directory) = stack.pop() {
-        for entry in fs::read_dir(&directory).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).unwrap();
-            if metadata.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            snapshot.insert(
-                path.strip_prefix(root).unwrap().to_path_buf(),
-                (
-                    metadata.len(),
-                    metadata.modified().unwrap(),
-                    fs::read(&path).unwrap_or_default(),
-                ),
-            );
-        }
-    }
-    snapshot
-}
 
 /// A library holding two Krea checkpoints, one of them compiled.
 fn library_fixture(label: &str) -> (Fixture, String, String) {
@@ -2782,6 +2720,7 @@ fn a_wan_tree_with_an_in_place_umt5_encoder_compiles_to_named_expert_and_encoder
                 ("blocks.0.modulation", "BF16"),
                 ("patch_embedding.weight", "BF16"),
             ],
+            None,
             0x5a,
         );
     };
@@ -2797,6 +2736,7 @@ fn a_wan_tree_with_an_in_place_umt5_encoder_compiles_to_named_expert_and_encoder
             ("encoder.block.0.layer.0.SelfAttention.q.weight", "BF16"),
             ("encoder.block.0.layer.1.DenseReluDense.wi.weight", "BF16"),
         ],
+        None,
         0x5a,
     );
 

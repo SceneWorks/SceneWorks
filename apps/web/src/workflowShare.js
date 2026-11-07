@@ -105,7 +105,7 @@ export async function looksLikeWorkflowCandidate(file) {
 
 // ---- The envelope an already-imported asset is carrying -------------------------------------
 
-// `IMPORTED_WORKFLOW_KEY` in `crates/sceneworks-core/src/project_store.rs`, mirrored.
+// `IMPORTED_WORKFLOW_KEY` in `crates/sceneworks-core/src/project_store/uploads.rs`, mirrored.
 //
 // Import clears this key unconditionally before writing its own, so what is under it is either the
 // envelope THIS install's reader parsed and sanitized, or nothing — a caller-supplied
@@ -175,6 +175,11 @@ function styleIdResolved(report) {
   const styles = Array.isArray(report?.styles) ? report.styles : [];
   const live = styles.find((style) => style.field === "styleId");
   return live ? requirementResolved(live) : false;
+}
+
+const APPEARANCE_REPLAY_KEYS = new Set(["appearance", "appearancePrompt", "appearanceNegativePrompt", "appearancePromptBatch"]);
+function appearanceNeedsComposedStyle(share, report) {
+  return Boolean(share?.advanced?.appearance && (share.styleId || share.advanced.styleId)) && !styleIdResolved(report);
 }
 
 // Every requirement that BLOCKS replay, as the sentences the report already wrote. The panel
@@ -307,6 +312,10 @@ export const ADVANCED_PREFILL = {
   controlScale: { label: "Control strength", prefill: PREFILL_CONTROL },
   styleId: { label: "Style", prefill: PREFILL_CONTROL },
   stylePrompt: { label: "Pre-style prompt", prefill: PREFILL_PROMPT },
+  appearance: { label: "Appearance", prefill: PREFILL_CONTROL },
+  appearancePrompt: { label: "Pre-appearance prompt", prefill: PREFILL_PROMPT },
+  appearanceNegativePrompt: { label: "Authored negative prompt", prefill: PREFILL_CONTROL },
+  appearancePromptBatch: { label: "Pre-appearance prompt batch", prefill: PREFILL_CONTROL },
   phases: { label: "Multi-phase denoise", prefill: PREFILL_CONTROL },
   // Shared by Image Studio substitutions and the older LTX video selector. Image workflow replay
   // restores the opaque authored id even when this install no longer lists it; Image Studio keeps
@@ -485,7 +494,7 @@ export function workflowReplaySeed(share) {
 
 // A `WorkflowShare` (plus this install's resolution report) as a studio recipe.
 //
-// The shape is the one `crates/sceneworks-core/src/project_store.rs` writes for a generated
+// The shape is the one `crates/sceneworks-core/src/project_store/asset_sidecars.rs` writes for a generated
 // asset, because that is what the ImageStudio injection effect reads — this returns the same
 // object the "Use this recipe" path hands it, so there is exactly one prefill path.
 //
@@ -529,6 +538,12 @@ export function recipeFromWorkflowShare(
   if (!styleIdResolved(report)) {
     delete rawSettings.styleId;
     delete rawSettings.stylePrompt;
+  }
+  const appearanceAsText = appearanceNeedsComposedStyle(share, report);
+  if (appearanceAsText) {
+    // The raw appearance carriers predate the missing style too. Keep the effective
+    // positive/negative prompts and native batch, without reapplying either picker.
+    for (const key of APPEARANCE_REPLAY_KEYS) delete rawSettings[key];
   }
   if (rawSettings.mossImageAdvanced) rawSettings.mossImageAdvanced = reacquireMossTensors(rawSettings.mossImageAdvanced, report?.tensors ?? [], tensorPicks, assets);
   // The multi-phase schedule, reindexed onto the LoRA stack this install will actually hold.
@@ -578,6 +593,7 @@ export function recipeFromWorkflowShare(
     loras: workflowLoras(report),
     normalizedSettings,
     rawAdapterSettings: rawSettings,
+    ...(appearanceAsText ? { uiPreserveComposedPrompt: true } : {}),
   };
   // The model the RECIPE named, when this install resolved it — otherwise the one the user picked
   // in the panel, and otherwise nothing at all. The resolved id wins because it is what the file
@@ -715,6 +731,7 @@ export function workflowSettingRows(share, report = null) {
     return [];
   }
   const styleResolvedHere = styleIdResolved(report);
+  const appearanceAsText = appearanceNeedsComposedStyle(share, report);
   return Object.keys(settings)
     .filter((key) => prefillDisposition(key, share) !== PREFILL_PROMPT)
     .map((key) => ({ key, value: settings[key] }))
@@ -727,16 +744,19 @@ export function workflowSettingRows(share, report = null) {
     )
     .map((row) => {
       const styleUnavailable = row.key === "styleId" && !styleResolvedHere;
+      const appearanceUnavailable = appearanceAsText && APPEARANCE_REPLAY_KEYS.has(row.key);
       return {
         key: row.key,
         label: ADVANCED_PREFILL[row.key]?.label ?? row.key,
         value: settingValueLabel(row.key, row.value),
-        restored: prefillDisposition(row.key, share) === PREFILL_CONTROL && !styleUnavailable,
-        detail: styleUnavailable
-          ? "This install does not have that style, so the prompt is used exactly as it was already composed."
-          : row.key === "veda" && share.sceneworksWorkflow !== "video"
-            ? "Video Studio only."
-            : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
+        restored: prefillDisposition(row.key, share) === PREFILL_CONTROL && !styleUnavailable && !appearanceUnavailable,
+        detail: appearanceUnavailable
+          ? "The style is unavailable here. Style and appearance text are kept in the composed prompts; appearance picker values are not restored."
+          : styleUnavailable
+            ? "This install does not have that style, so the prompt is used exactly as it was already composed."
+            : row.key === "veda" && share.sceneworksWorkflow !== "video"
+              ? "Video Studio only."
+              : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
       };
     });
 }

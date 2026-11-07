@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use parking_lot::Mutex;
 use rusqlite::{
-    params, params_from_iter, Connection, OptionalExtension, Row, ToSql, TransactionBehavior,
+    params, params_from_iter, Connection, OptionalExtension, Row, ToSql, Transaction,
+    TransactionBehavior,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Number, Value};
@@ -69,23 +69,17 @@ pub use routing::{
     QWEN_IMAGE_2_1_MODEL_IDS,
 };
 
-pub const ACTIVE_STATUSES: &[&str] = &[
-    "preparing",
-    "downloading",
-    "loading_model",
-    "running",
-    "saving",
-];
+pub const ACTIVE_STATUSES: &[&str] = &JobStatus::active_statuses();
 
 const PROGRESS_SIDE_EFFECT_RETRY_BASE_SECONDS: i64 = 5;
 const PROGRESS_SIDE_EFFECT_RETRY_MAX_SECONDS: i64 = 5 * 60;
-pub const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
+pub const TERMINAL_STATUSES: &[&str] = &JobStatus::terminal_statuses();
 /// Pending (accepted-but-not-yet-worker-owned) statuses: a job in one of these is
 /// waiting in the queue with no worker to acknowledge a cancel, so it can be
-/// terminated immediately. Exactly the two statuses the `cancel_job` fast path — and
+/// terminated immediately. These are the statuses the `cancel_job` fast path — and
 /// the bulk [`JobsStore::cancel_pending_jobs`] — flip straight to terminal `canceled`.
 /// Kept in lockstep with that fast-path branch and the web `pendingStatuses` set.
-pub const PENDING_STATUSES: &[&str] = &["queued", "pending_caption", "pending_workflow"];
+pub const PENDING_STATUSES: &[&str] = &JobStatus::pending_statuses();
 /// Ceiling on one jobs listing: `JobsStore::list_jobs` and
 /// `JobsStore::list_jobs_recently_updated` both clamp their caller's `limit` to this.
 ///
@@ -96,24 +90,7 @@ pub const PENDING_STATUSES: &[&str] = &["queued", "pending_caption", "pending_wo
 /// snapshot and the web client's retained-terminal cap) so a fresh load, a reconnect
 /// and a long-lived Queue screen all see the same history.
 pub const MAX_LISTED_JOBS: u32 = 1000;
-pub const JOB_STATUSES: &[&str] = &[
-    "queued",
-    // Accepted-but-not-yet-claimable: awaiting the API-side async payload rewrite (Ideogram 4
-    // auto-caption, sc-9120) before it becomes `queued`. Deliberately absent from both
-    // ACTIVE_STATUSES and TERMINAL_STATUSES (like `queued`) so the claim SELECT ignores it and
-    // the queue summary counts it as an in-flight, non-terminal job. See JobStatus::PendingCaption.
-    "pending_caption",
-    "pending_workflow",
-    "preparing",
-    "downloading",
-    "loading_model",
-    "running",
-    "saving",
-    "completed",
-    "failed",
-    "canceled",
-    "interrupted",
-];
+pub const JOB_STATUSES: &[&str] = JobStatus::known_values();
 pub const NON_GPU_JOB_TYPES: &[&str] = &[
     "model_download",
     "model_import",
@@ -161,6 +138,36 @@ fn platform_reachability_video_job_types_sql() -> &'static str {
     })
 }
 
+/// The sole queued-to-failed sweep transition. Callers own eligibility, grace
+/// windows and diagnostics; this helper owns guarded writes and affected IDs.
+fn fail_queued_jobs(
+    transaction: &Transaction<'_>,
+    now: &str,
+    candidates: impl IntoIterator<Item = (String, &'static str, String)>,
+) -> JobsStoreResult<Vec<String>> {
+    let mut failed_ids = Vec::new();
+    for (id, message, error) in candidates {
+        let changed = transaction.execute(
+            "update jobs set status = 'failed', stage = 'failed', message = ?4,
+                error = ?2, completed_at = ?1, updated_at = ?1, worker_id = null
+              where id = ?3 and status = 'queued'",
+            params![now, error, id, message],
+        )?;
+        if changed != 0 {
+            failed_ids.push(id);
+        }
+    }
+    Ok(failed_ids)
+}
+
+fn status_sql_list(statuses: &[&str]) -> String {
+    statuses
+        .iter()
+        .map(|status| format!("'{}'", status.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The active (non-terminal, non-queued) statuses as a quoted SQL list for
 /// `status in (...)` stale-sweep / claim-guard filters, derived once from
 /// [`ACTIVE_STATUSES`] — same anti-drift rationale as [`non_gpu_job_types_sql`]
@@ -169,13 +176,7 @@ fn platform_reachability_video_job_types_sql() -> &'static str {
 /// constants, never user input, so direct interpolation is safe.
 fn active_statuses_sql() -> &'static str {
     static SQL: OnceLock<String> = OnceLock::new();
-    SQL.get_or_init(|| {
-        ACTIVE_STATUSES
-            .iter()
-            .map(|status| format!("'{status}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
+    SQL.get_or_init(|| status_sql_list(ACTIVE_STATUSES))
 }
 
 /// The terminal statuses as a quoted SQL list for `status not in (...)` filters,
@@ -185,13 +186,7 @@ fn active_statuses_sql() -> &'static str {
 /// never user input, so direct interpolation is safe.
 fn terminal_statuses_sql() -> &'static str {
     static SQL: OnceLock<String> = OnceLock::new();
-    SQL.get_or_init(|| {
-        TERMINAL_STATUSES
-            .iter()
-            .map(|status| format!("'{status}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
+    SQL.get_or_init(|| status_sql_list(TERMINAL_STATUSES))
 }
 
 /// The pending statuses as a quoted SQL list for `status in (...)` filters, derived
@@ -201,13 +196,7 @@ fn terminal_statuses_sql() -> &'static str {
 /// user input, so direct interpolation is safe.
 fn pending_statuses_sql() -> &'static str {
     static SQL: OnceLock<String> = OnceLock::new();
-    SQL.get_or_init(|| {
-        PENDING_STATUSES
-            .iter()
-            .map(|status| format!("'{status}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
+    SQL.get_or_init(|| status_sql_list(PENDING_STATUSES))
 }
 const DISPATCH_MEMORY_NOT_WORSE_TOLERANCE_MB: f64 = 512.0;
 const DISPATCH_MEMORY_RELIEF_THRESHOLD_MB: f64 = 1024.0;
@@ -270,6 +259,21 @@ pub enum JobsStoreError {
     /// legal pre-worker statuses (`queued` / `pending_caption`), e.g. a
     /// mid-lifecycle or terminal status. A programmer error, not user input.
     InvalidInitialStatus(String),
+}
+
+/// Permit the existing retry freshness control while keeping the authorized source immutable.
+pub fn download_binding_matches_payload(
+    binding: &Value,
+    payload: &serde_json::Map<String, Value>,
+) -> bool {
+    let Some(saved) = binding.get("payload").and_then(Value::as_object) else {
+        return false;
+    };
+    let mut saved = saved.clone();
+    let mut candidate = payload.clone();
+    saved.remove("downloadAction");
+    candidate.remove("downloadAction");
+    saved == candidate
 }
 
 impl std::fmt::Display for JobsStoreError {
@@ -690,6 +694,7 @@ impl JobsStore {
         // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
         // Only the API's validated-plan handoff may freeze this write-once column.
         ensure_column(&transaction, "jobs", "model_provenance_json", "text")?;
+        ensure_column(&transaction, "jobs", "download_binding_json", "text")?;
         // Durable worker-queue priority. Zero is the normal FIFO lane; positive ranks are
         // assigned monotonically whenever a job jumps to the front. Prompt-refinement jobs get a
         // rank automatically at creation, while the Queue screen can rank any still-pending jobs
@@ -816,14 +821,15 @@ impl JobsStore {
             "progress_side_effects_retry_at",
             "integer not null default 0",
         )?;
-        transaction.execute_batch(
+        transaction.execute_batch(&format!(
             "
             create index if not exists idx_jobs_pending_side_effect_retry
               on jobs(progress_side_effects_retry_at, updated_at, id)
              where progress_side_effects_pending = 1
-               and status in ('completed', 'failed', 'canceled', 'interrupted');
+               and status in ({terminal});
             ",
-        )?;
+            terminal = terminal_statuses_sql(),
+        ))?;
         // Soft-hide marker for the "Clear completed" queue action (sc-12231, issue #1556).
         // A cleared job is dropped from the operator's queue list + counts (see
         // `list_jobs` / `queue_summary`) but the row is deliberately kept: the
@@ -1151,12 +1157,53 @@ impl JobsStore {
         request: CreateJob,
         provenance: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_download_binding(request, provenance, None)
+    }
+
+    /// The binding is a server-validated typed-download selection, never request metadata.
+    pub fn create_job_with_download_binding(
+        &self,
+        request: CreateJob,
+        provenance: Option<&Value>,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.create_job_on_connection(&transaction, request, None, provenance)?;
+        Self::write_download_binding(&transaction, &job.id, binding)?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    fn write_download_binding(
+        connection: &Connection,
+        job_id: &str,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<()> {
+        if let Some(binding) = binding {
+            connection.execute(
+                "update jobs set download_binding_json = ?1 where id = ?2",
+                params![dumps(binding)?, job_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Private authorization context, intentionally excluded from JobSnapshot.
+    pub fn download_binding(&self, job_id: &str) -> JobsStoreResult<Option<Value>> {
+        let connection = self.open_connection()?;
+        let encoded: Option<String> = connection
+            .query_row(
+                "select download_binding_json from jobs where id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+        encoded
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
     }
 
     /// Create a job under a caller-supplied id. Used when the payload must
@@ -2035,6 +2082,16 @@ impl JobsStore {
         request: RetryJob,
         provenance: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.retry_job_with_download_binding(job_id, request, provenance, None)
+    }
+
+    pub fn retry_job_with_download_binding(
+        &self,
+        job_id: &str,
+        request: RetryJob,
+        provenance: Option<&Value>,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2057,6 +2114,13 @@ impl JobsStore {
         });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
+        if let Some(binding) = binding {
+            if !download_binding_matches_payload(binding, &payload) {
+                return Err(JobsStoreError::InvalidStatus(
+                    "Download binding changed during replay".to_owned(),
+                ));
+            }
+        }
         let job = self.create_job_on_connection(
             &transaction,
             CreateJob {
@@ -2076,6 +2140,7 @@ impl JobsStore {
             None,
             source_provenance.as_ref(),
         )?;
+        Self::write_download_binding(&transaction, &job.id, binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2119,6 +2184,17 @@ impl JobsStore {
         request: DuplicateJob,
         provenance: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_download_binding(id, job_id, request, provenance, None)
+    }
+
+    pub fn duplicate_job_with_download_binding(
+        &self,
+        id: Option<String>,
+        job_id: &str,
+        request: DuplicateJob,
+        provenance: Option<&Value>,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2136,6 +2212,13 @@ impl JobsStore {
         });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
+        if let Some(binding) = binding {
+            if !download_binding_matches_payload(binding, &payload) {
+                return Err(JobsStoreError::InvalidStatus(
+                    "Download binding changed during replay".to_owned(),
+                ));
+            }
+        }
         // A duplicated YuE2 job is a new take with its own run directory (sc-22999).
         crate::yue2_score::jobs::refresh_block_for_duplicate(&mut payload);
         let job = self.create_job_on_connection(
@@ -2156,6 +2239,7 @@ impl JobsStore {
             id,
             source_provenance.as_ref(),
         )?;
+        Self::write_download_binding(&transaction, &job.id, binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2622,29 +2706,17 @@ impl JobsStore {
         let candidates = collect_jobs(statement.query_map(params![cutoff], row_to_job)?)?;
         drop(statement);
 
-        let now_text = format_unix_seconds(now);
-        let mut failed_ids = Vec::new();
-        for job in candidates {
-            if !job_is_any_mlx_eligible(&job) {
-                continue;
-            }
-            let error = mlx_unavailable_error(&job, grace_seconds);
-            transaction.execute(
-                "
-                update jobs
-                   set status = 'failed',
-                       stage = 'failed',
-                       message = 'MLX worker unavailable.',
-                       error = ?2,
-                       completed_at = ?1,
-                       updated_at = ?1,
-                       worker_id = null
-                 where id = ?3 and status = 'queued'
-                ",
-                params![now_text, error, job.id],
-            )?;
-            failed_ids.push(job.id.clone());
-        }
+        let failed_ids = fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now),
+            candidates.into_iter().filter_map(|job| {
+                if !job_is_any_mlx_eligible(&job) {
+                    return None;
+                }
+                let error = mlx_unavailable_error(&job, grace_seconds);
+                Some((job.id, "MLX worker unavailable.", error))
+            }),
+        )?;
         let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(failed)
@@ -2680,32 +2752,25 @@ impl JobsStore {
         let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
         drop(statement);
 
-        let now_text = format_unix_seconds(now_unix_seconds());
-        let mut failed = Vec::new();
-        for job in candidates {
-            let Err(reason) = mac_rust_supported(&job) else {
-                continue;
-            };
-            transaction.execute(
-                "
-                update jobs
-                   set status = 'failed',
-                       stage = 'failed',
-                       message = 'Not supported by the MLX flow on macOS.',
-                       error = ?2,
-                       completed_at = ?1,
-                       updated_at = ?1,
-                       worker_id = null
-                 where id = ?3 and status = 'queued'
-                ",
-                params![now_text, reason.error_message(), job.id],
-            )?;
-            failed.push((job.id, reason));
-        }
-        let failed_ids = failed
-            .iter()
-            .map(|(job_id, _reason)| job_id.clone())
+        let failed = candidates
+            .into_iter()
+            .filter_map(|job| {
+                mac_rust_supported(&job)
+                    .err()
+                    .map(|reason| (job.id, reason))
+            })
             .collect::<Vec<_>>();
+        let failed_ids = fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now_unix_seconds()),
+            failed.iter().map(|(id, reason)| {
+                (
+                    id.clone(),
+                    "Not supported by the MLX flow on macOS.",
+                    reason.error_message(),
+                )
+            }),
+        )?;
         let updated_jobs = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(updated_jobs
@@ -2778,29 +2843,17 @@ impl JobsStore {
         let candidates = collect_jobs(statement.query_map(params![cutoff], row_to_job)?)?;
         drop(statement);
 
-        let now_text = format_unix_seconds(now);
-        let mut failed_ids = Vec::new();
-        for job in candidates {
-            if !job_is_any_candle_eligible(&job) {
-                continue;
-            }
-            let error = candle_unavailable_error(&job, grace_seconds);
-            transaction.execute(
-                "
-                update jobs
-                   set status = 'failed',
-                       stage = 'failed',
-                       message = 'Candle worker unavailable.',
-                       error = ?2,
-                       completed_at = ?1,
-                       updated_at = ?1,
-                       worker_id = null
-                 where id = ?3 and status = 'queued'
-                ",
-                params![now_text, error, job.id],
-            )?;
-            failed_ids.push(job.id.clone());
-        }
+        let failed_ids = fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now),
+            candidates.into_iter().filter_map(|job| {
+                if !job_is_any_candle_eligible(&job) {
+                    return None;
+                }
+                let error = candle_unavailable_error(&job, grace_seconds);
+                Some((job.id, "Candle worker unavailable.", error))
+            }),
+        )?;
         let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(failed)
@@ -2874,29 +2927,17 @@ impl JobsStore {
             snapshots_hydrated: candidates.len(),
         };
 
-        let now_text = format_unix_seconds(now);
-        let mut failed_ids = Vec::new();
-        for job in candidates {
-            if !video_job_is_platform_unreachable(&job, host_os) {
-                continue;
-            }
-            let error = platform_unreachable_error(&job, host_os);
-            transaction.execute(
-                "
-                update jobs
-                   set status = 'failed',
-                       stage = 'failed',
-                       message = 'This mode has no backend on this platform.',
-                       error = ?2,
-                       completed_at = ?1,
-                       updated_at = ?1,
-                       worker_id = null
-                 where id = ?3 and status = 'queued'
-                ",
-                params![now_text, error, job.id],
-            )?;
-            failed_ids.push(job.id.clone());
-        }
+        let failed_ids = fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now),
+            candidates.into_iter().filter_map(|job| {
+                if !video_job_is_platform_unreachable(&job, host_os) {
+                    return None;
+                }
+                let error = platform_unreachable_error(&job, host_os);
+                Some((job.id, "This mode has no backend on this platform.", error))
+            }),
+        )?;
         let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         *self.last_platform_reachability_sweep.lock() = sweep_stats;
@@ -2934,32 +2975,21 @@ impl JobsStore {
         let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
         drop(statement);
 
-        let now_text = format_unix_seconds(now_unix_seconds());
-        let mut failed = Vec::new();
-        for job in candidates {
-            let Err(reason) = candle_supported(&job) else {
-                continue;
-            };
-            transaction.execute(
-                "
-                update jobs
-                   set status = 'failed',
-                       stage = 'failed',
-                       message = 'Not supported by the candle/CUDA flow off-Mac.',
-                       error = ?2,
-                       completed_at = ?1,
-                       updated_at = ?1,
-                       worker_id = null
-                 where id = ?3 and status = 'queued'
-                ",
-                params![now_text, reason.candle_error_message(), job.id],
-            )?;
-            failed.push((job.id, reason));
-        }
-        let failed_ids = failed
-            .iter()
-            .map(|(job_id, _reason)| job_id.clone())
+        let failed = candidates
+            .into_iter()
+            .filter_map(|job| candle_supported(&job).err().map(|reason| (job.id, reason)))
             .collect::<Vec<_>>();
+        let failed_ids = fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now_unix_seconds()),
+            failed.iter().map(|(id, reason)| {
+                (
+                    id.clone(),
+                    "Not supported by the candle/CUDA flow off-Mac.",
+                    reason.candle_error_message(),
+                )
+            }),
+        )?;
         let updated_jobs = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(updated_jobs
@@ -3421,15 +3451,16 @@ impl JobsStore {
         limit: usize,
     ) -> JobsStoreResult<Vec<String>> {
         let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
+        let mut statement = connection.prepare(&format!(
             "select id
                from jobs
               where progress_side_effects_pending = 1
-                and status in ('completed', 'failed', 'canceled', 'interrupted')
+                and status in ({terminal})
                 and progress_side_effects_retry_at <= ?1
               order by progress_side_effects_retry_at asc, updated_at asc, id asc
               limit ?2",
-        )?;
+            terminal = terminal_statuses_sql(),
+        ))?;
         let ids = statement
             .query_map(
                 params![as_of, i64::try_from(limit).unwrap_or(i64::MAX)],
@@ -3638,36 +3669,12 @@ impl JobsStore {
             fs::create_dir_all(parent)?;
         }
         let connection = Connection::open(&self.db_path)?;
-        // Wait (instead of failing instantly) when another connection/process holds the
-        // database lock. rusqlite's default busy timeout is 0ms, so any cross-process
-        // overlap — e.g. a sidecar restart where the old process hasn't fully released the
-        // db, or a concurrent claim/heartbeat — surfaces as `database is locked` and the
-        // job loses its claim (the job then remains available for another capable worker).
-        // A 5s wait lets the holder finish; paired with BEGIN IMMEDIATE on write
-        // transactions (below), writers queue cleanly rather than deadlocking on lock upgrade.
-        connection.busy_timeout(Duration::from_millis(5000))?;
-        match connection.pragma_update(None, "journal_mode", "wal") {
-            Ok(()) => {}
-            Err(error) => {
-                // WAL almost always succeeds. When it can't be set, do NOT delete
-                // the `-wal`/`-shm` sidecars: they may belong to a live connection
-                // in another process, and removing them can corrupt that
-                // connection's view. Nor do we silently force `delete` mode — the
-                // 5s busy_timeout reasoning above assumes WAL lets writers queue,
-                // so a silent drop to rollback-journal would change concurrency
-                // semantics for the rest of the process with no signal. Leave the
-                // connection in whatever mode it opened with and warn loudly
-                // instead (sc-4275 / F-CORE-16).
-                tracing::warn!(
-                    event = "sqlite_wal_enable_failed",
-                    dbPath = %self.db_path.display(),
-                    error = %error,
-                    "could not enable SQLite WAL mode; continuing in the default rollback-journal \
-                     mode — cross-process write concurrency will be more serialized than usual"
-                );
-            }
-        }
-        connection.pragma_update(None, "foreign_keys", "on")?;
+        crate::store_util::configure_connection(
+            &connection,
+            crate::store_util::Profile::Jobs {
+                database_path: &self.db_path,
+            },
+        )?;
         Ok(connection)
     }
 
@@ -3781,11 +3788,7 @@ impl JobsStore {
         if statuses.is_empty() {
             return Ok(Vec::new());
         }
-        let status_list = statuses
-            .iter()
-            .map(|status| format!("'{status}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let status_list = status_sql_list(statuses);
         let mut statement = connection.prepare(&format!(
             "select * from jobs where status in ({status_list}) order by created_at desc"
         ))?;
