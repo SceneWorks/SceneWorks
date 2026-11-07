@@ -22,6 +22,7 @@ pub(crate) fn has_bound_aux_paths(advanced: &JsonObject) -> bool {
 
 /// A verified portable attempt must use its leased strict-control copy even when an operator
 /// env override is present. Legacy, unbound jobs retain the operator override behavior.
+#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
 pub(crate) fn selected_krea_control_override(
     advanced: &JsonObject,
     env_override: Option<&str>,
@@ -37,42 +38,6 @@ pub(crate) fn selected_krea_control_override(
         .map(str::trim)
         .map(PathBuf::from)
         .filter(|path| path.is_file()))
-}
-
-#[cfg(test)]
-mod strict_control_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn admitted_overlay_precedes_krea_env_override() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let bound = temp.path().join("bound.safetensors");
-        let override_file = temp.path().join("override.safetensors");
-        std::fs::write(&bound, b"admitted").unwrap();
-        std::fs::write(&override_file, b"other").unwrap();
-        let advanced = json!({"__portableAuxPaths":{"strict_control":bound}})
-            .as_object()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            selected_krea_control_override(&advanced, override_file.to_str())
-                .unwrap()
-                .as_deref(),
-            Some(bound.as_path())
-        );
-        let missing = json!({"__portableAuxPaths":{}})
-            .as_object()
-            .unwrap()
-            .clone();
-        assert!(selected_krea_control_override(&missing, override_file.to_str()).is_err());
-        assert_eq!(
-            selected_krea_control_override(&JsonObject::new(), override_file.to_str())
-                .unwrap()
-                .as_deref(),
-            Some(override_file.as_path())
-        );
-    }
 }
 
 /// The native PuLID providers take a single face directory although the three selected
@@ -425,5 +390,41 @@ mod identity_tests {
         map.remove("pulid_arcface");
         advanced.insert("__portableAuxPaths".to_owned(), Value::Object(map));
         assert!(bound_pulid_weights(&advanced).is_err());
+    }
+}
+
+#[cfg(test)]
+mod strict_control_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn admitted_overlay_precedes_krea_env_override() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let bound = temp.path().join("bound.safetensors");
+        let override_file = temp.path().join("override.safetensors");
+        std::fs::write(&bound, b"admitted").unwrap();
+        std::fs::write(&override_file, b"other").unwrap();
+        let advanced = json!({"__portableAuxPaths":{"strict_control":bound}})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            selected_krea_control_override(&advanced, override_file.to_str())
+                .unwrap()
+                .as_deref(),
+            Some(bound.as_path())
+        );
+        let missing = json!({"__portableAuxPaths":{}})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(selected_krea_control_override(&missing, override_file.to_str()).is_err());
+        assert_eq!(
+            selected_krea_control_override(&JsonObject::new(), override_file.to_str())
+                .unwrap()
+                .as_deref(),
+            Some(override_file.as_path())
+        );
     }
 }
