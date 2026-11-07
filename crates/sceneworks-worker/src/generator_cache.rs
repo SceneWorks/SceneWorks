@@ -3518,12 +3518,19 @@ mod tests {
                 }
             }
             let marker = dir.join("dropped");
-            let result = cache
-                .prepare_on_owner(move || -> WorkerResult<()> {
+            let result = with_cached_generator_for_request_using_cache_prepared(
+                cache,
+                "sc3724_stub",
+                LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/stub"))),
+                "prepare panic proof",
+                move || -> WorkerResult<()> {
                     let _local = DropMarker(marker);
                     panic!("owner preparation fault");
-                })
-                .await;
+                },
+                |_engine_id, spec| stub_load(spec),
+                |_generator, _state, _policy, _warm, _external, _resident, ()| Ok(()),
+            )
+            .await;
             std::fs::write(dir.join("caught"), format!("{result:?}")).unwrap();
             return;
         }
