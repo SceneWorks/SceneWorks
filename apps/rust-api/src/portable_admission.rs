@@ -357,8 +357,24 @@ fn api_local_digests_match(
         else {
             return false;
         };
+        let local_entry_members = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+            .then(|| capture_local_model_entry(state, entry, &model.slot).ok())
+            .flatten();
         for member in &model.members {
             if !matches!(member.source, PortableSourceIdentity::Digest { .. }) {
+                continue;
+            }
+            if let Some(local) = local_entry_members.as_ref().and_then(|members| {
+                members.iter().find(|local| {
+                    local.role == member.role && local.component_id == member.component_id
+                })
+            }) {
+                if local.files != member.files {
+                    return false;
+                }
                 continue;
             }
             let locator = match member.role {
