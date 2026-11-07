@@ -408,6 +408,16 @@ pub fn registered_digest_member_claim_id(
             };
             (kind, id, None)
         }
+        ArtifactMemberRole::RequiredComponent => {
+            let component = member
+                .component_id
+                .as_deref()
+                .ok_or_else(|| error("component has no frozen id"))?;
+            let stable = component
+                .strip_prefix(&format!("{}/", model.slot))
+                .unwrap_or(component);
+            ("component", model.model_id.as_str(), Some(stable))
+        }
         _ => (
             "component",
             model.model_id.as_str(),
@@ -1090,6 +1100,54 @@ fn error(message: impl Into<String>) -> ArtifactContractError {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn registered_component_claim_id_is_stable_across_payload_slots() {
+        let files = vec![PortableArtifactFile {
+            relative_path: "vae/weights.safetensors".into(),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        }];
+        let source = PortableSourceIdentity::Digest {
+            sha256: portable_closure_sha256(&files).unwrap(),
+        };
+        let make = |slot: &str| {
+            PortableModelBinding::new(
+                slot,
+                "registered_model",
+                "mlx",
+                "local",
+                None,
+                canonical_authored_options_sha256(&serde_json::json!({})).unwrap(),
+                vec![
+                    PortableArtifactMember {
+                        role: ArtifactMemberRole::Primary,
+                        component_id: None,
+                        source: source.clone(),
+                        tier: None,
+                        files: files.clone(),
+                    },
+                    PortableArtifactMember {
+                        role: ArtifactMemberRole::RequiredComponent,
+                        component_id: Some(format!("{slot}/paths/vae")),
+                        source: source.clone(),
+                        tier: None,
+                        files: files.clone(),
+                    },
+                ],
+            )
+            .unwrap()
+        };
+        let first = make("modelManifestEntry");
+        let second = make("modelManifestEntries/0");
+        let first_id =
+            registered_digest_member_claim_id(&first, &first.members[1], &serde_json::json!({}))
+                .unwrap();
+        let second_id =
+            registered_digest_member_claim_id(&second, &second.members[1], &serde_json::json!({}))
+                .unwrap();
+        assert_eq!(first_id, second_id);
+    }
 
     fn local(root: &std::path::Path, component: bool, bytes: &[u8]) -> LocalArtifactMember {
         let name = if component {
