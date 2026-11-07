@@ -2131,303 +2131,6 @@ mod tests {
         }
     }
 
-    /// Assert a table-derived list reproduces its pre-collapse snapshot EXACTLY as a set: same
-    /// membership, same length (so no id was dropped, added, or duplicated). Order is intentionally
-    /// not compared — see the module doc.
-    fn assert_membership_parity(name: &str, derived: &[&str], expected: &[&str]) {
-        let derived_set: BTreeSet<&str> = derived.iter().copied().collect();
-        let expected_set: BTreeSet<&str> = expected.iter().copied().collect();
-        assert_eq!(
-            derived_set, expected_set,
-            "{name}: table-derived membership must equal the pre-collapse snapshot (sc-9495 zero-diff)"
-        );
-        assert_eq!(
-            derived.len(),
-            derived_set.len(),
-            "{name}: derived list has duplicate ids"
-        );
-        assert_eq!(
-            derived.len(),
-            expected.len(),
-            "{name}: derived list length must equal the pre-collapse snapshot length"
-        );
-    }
-
-    const EXPECTED_MLX_ROUTED_MODELS: &[&str] = &[
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-        "z_image_turbo",
-        "z_image",
-        "z_image_edit",
-        "flux_schnell",
-        "flux_dev",
-        "qwen_image",
-        "qwen_image_2_1",
-        "qwen_image_2_1_turbo",
-        "qwen_image_edit",
-        "qwen_image_edit_2509",
-        "qwen_image_edit_2511",
-        "qwen_image_edit_2511_lightning",
-        "flux2_klein_9b",
-        "flux2_klein_9b_kv",
-        "flux2_klein_9b_true_v2",
-        "flux2_dev",
-        "sdxl",
-        "realvisxl",
-        "illustrious_xl_v1",
-        "illustrious_xl_v2",
-        "realvisxl_lightning",
-        "instantid_realvisxl",
-        "pulid_flux_dev",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
-        "sensenova_u1_8b",
-        "sensenova_u1_8b_fast",
-        "sensenova_u1_8b_infographic_v2",
-        "sensenova_u1_8b_infographic_v2_fast",
-        "sensenova_u1_8b_infographic_v3",
-        "sensenova_u1_8b_infographic_v3_fast",
-        "kolors",
-        "lens",
-        "lens_turbo",
-        "bernini_image",
-        "ideogram_4",
-        "ideogram_4_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
-        "krea_2_turbo",
-        "krea_2_raw",
-        "sd3_5_large",
-        "sd3_5_large_turbo",
-        "sd3_5_medium",
-        "sana_1600m",
-        "sana_sprint_1600m",
-        "anima_base",
-        "anima_aesthetic",
-        "anima_turbo",
-        "iris_3b",
-        "flux3_klein",
-        "flux3_klein_base",
-        "moss_image_base",
-        "moss_image_sft",
-        "supra2_img",
-    ];
-
-    const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
-        "flux3_klein",
-        "flux3_klein_base",
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-        "sdxl",
-        "realvisxl",
-        "illustrious_xl_v1",
-        "illustrious_xl_v2",
-        "realvisxl_lightning",
-        "z_image_turbo",
-        "z_image",
-        "flux_schnell",
-        "flux_dev",
-        "flux2_klein_9b",
-        "flux2_klein_9b_kv",
-        "flux2_klein_9b_true_v2",
-        "flux2_dev",
-        "qwen_image",
-        // sc-24109: the native Candle/CUDA port of Qwen-Image 2.1. Its own id, right after the
-        // 2512 row it shares nothing with.
-        "qwen_image_2_1",
-        // sc-25907: its distilled Turbo sibling, registered by the same Candle crate.
-        "qwen_image_2_1_turbo",
-        "lens",
-        "lens_turbo",
-        // sc-10996 (epic 6562): the candle Bernini still-image companion joins the routed set.
-        "bernini_image",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
-        "kolors",
-        "sensenova_u1_8b",
-        "sensenova_u1_8b_infographic_v2",
-        "sensenova_u1_8b_infographic_v3",
-        "sensenova_u1_8b_fast",
-        "sensenova_u1_8b_infographic_v2_fast",
-        "sensenova_u1_8b_infographic_v3_fast",
-        "ideogram_4",
-        "ideogram_4_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
-        "krea_2_turbo",
-        "krea_2_raw",
-        "sd3_5_large",
-        "sd3_5_large_turbo",
-        "sd3_5_medium",
-        // sc-11780 (epic 8485): the candle SANA 1600M provider (candle-gen #495) joins the routed set —
-        // true-CFG txt2img plus singular-reference img2img on the whole
-        // `Efficient-Large-Model/Sana_1600M_1024px_diffusers` snapshot.
-        "sana_1600m",
-        // sc-11781 (epic 8485): the candle SANA-Sprint provider (candle-gen #498) joins the routed set too —
-        // CFG-free 1–4 step SCM/TrigFlow txt2img plus singular-reference img2img on the whole
-        // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` snapshot.
-        "sana_sprint_1600m",
-        "anima_base",
-        "anima_aesthetic",
-        "anima_turbo",
-        "iris_3b",
-        "moss_image_base",
-        "moss_image_sft",
-        "supra2_img",
-    ];
-
-    // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its
-    // `supported_quants` to [Q4, Q8]; it already advertised inference LoRA via sc-7836). sc-9994 adds the
-    // Raw variant (candle-gen #350) with the same both-set advertisement. sc-10767: the SDXL family
-    // (sdxl/realvisxl/illustrious v1+v2) joins the both-set — the candle packed q4/q8 tier (sc-9416/9527)
-    // + adapter-on-packed fold (sc-9528) are wired and now advertised. sc-10812: realvisxl_lightning (the
-    // few-step distilled sibling on the SAME `sdxl` engine / descriptor) joins the both-set too — quant +
-    // LoRA stay on candle for its plain txt2img shape.
-    const EXPECTED_CANDLE_QUANT_LORA_MODELS: &[&str] = &[
-        "bernini_image",
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-        "z_image_turbo",
-        "z_image",
-        "qwen_image",
-        // sc-24158: the candle 2.1 provider applies LoRA/LoKr on dense AND packed tiers.
-        "qwen_image_2_1",
-        // sc-25907: the same adapter path under the Turbo id.
-        "qwen_image_2_1_turbo",
-        "flux2_klein_9b",
-        "flux2_klein_9b_kv",
-        "flux2_dev",
-        // sc-26239 + sc-26241: additive LoRA on every native FLUX 3 package.
-        "flux3_klein",
-        "flux3_klein_base",
-        "sdxl",
-        "realvisxl",
-        "illustrious_xl_v1",
-        "illustrious_xl_v2",
-        "realvisxl_lightning",
-        "lens",
-        "lens_turbo",
-        "krea_2_turbo",
-        "krea_2_raw",
-        "kolors",
-        "ideogram_4",
-        "ideogram_4_turbo",
-        "sd3_5_large",
-        "sd3_5_large_turbo",
-        "sd3_5_medium",
-        "iris_3b",
-    ];
-
-    // Z-Image Turbo/base select already-packed q4/q8/bf16 directories; this is not on-the-fly quant,
-    // but it is still a valid `mlxQuantize` request and therefore belongs in the quant routing set.
-    // The adapter-capable packed families moved to `EXPECTED_CANDLE_QUANT_LORA_MODELS` above;
-    // this list retains families that accept quant requests without user adapters. Historically,
-    // these rows covered Ideogram, Kolors, Qwen, FLUX.2, SD3.5, and Z-Image as quant-only.
-    const EXPECTED_CANDLE_QUANT_MODELS: &[&str] = &[
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
-        "flux_schnell",
-        "flux_dev",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
-        // sc-11020: qwen_image's turnkey q4/q8/bf16 packed tiers (sc-8669, measured sc-10969) load on
-        // the candle txt2img lane, so a tier-select stays on candle. Qwen now appears in the combined
-        // quant+adapter list above.
-        // sc-10222: FLUX.2-klein 9B/`_kv` + FLUX.2-dev — the same missed router half, for the last
-        // `STANDARD_TIER_MODELS` families still carrying it. `_true_v2` is deliberately absent (a flat
-        // convert-at-install dir with no tier matrix); see the caps rows for the full reasoning.
-        // sc-14249: the whole SenseNova-U1 family, once `candle-gen-sensenova` gained the packed
-        // q4/q8 load path (it was dense-f32-only, and only the bf16 tier was readable at all).
-        //
-        // sc-24112 added `qwen_image_2_1` here once `candle-gen-qwen-image-2-1` gained the packed
-        // load path (inference #1007); sc-24158 moved it to the combined quant+adapter list above
-        // once the same provider gained LoRA/LoKr on those tiers (inference sc-24157).
-        "sensenova_u1_8b",
-        "sensenova_u1_8b_fast",
-        "sensenova_u1_8b_infographic_v2",
-        "sensenova_u1_8b_infographic_v2_fast",
-        "sensenova_u1_8b_infographic_v3",
-        "sensenova_u1_8b_infographic_v3_fast",
-    ];
-
-    // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
-    // family — the off-Mac engine dense-folds a LoRA/LoKr onto the split_files/ DiT, but advertises NO
-    // candle quant (no packed tier off-Mac), so it is LoRA-only rather than BOTH.
-    const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &[
-        "flux_schnell",
-        "flux_dev",
-        "flux2_klein_9b_true_v2",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
-        "anima_base",
-        "anima_aesthetic",
-        "anima_turbo",
-        "moss_image_base",
-        "moss_image_sft",
-    ];
-
-    const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
-        "wan_2_2",
-        "ltx_2_5",
-        "ltx_2_3",
-        "wan_2_2_t2v_14b",
-        "wan_2_2_i2v_14b",
-        "svd",
-        // Bernini VIDEO lane (sc-10997, epic 6562): the full candle planner+renderer serves t2v + the
-        // editing/reference/multi-source modes. Not in the i2v/VACE subsets (a distinct engine).
-        "bernini",
-        // Mochi 1 (sc-11991): the candle descriptor is `mac_only: false` and ingests the same hosted
-        // mlx-affine tiers, so the off-Mac t2v lane is real. Not in the i2v/VACE subsets (t2v only).
-        "mochi_1",
-        // MiniMax-H3 partitions: base t2va/fl2va (sc-20755) plus Ref2VA (sc-20756), both using
-        // the dedicated provider route and accepted q4/q8/bf16 admission ceilings.
-        "minimax_h3",
-        "minimax_h3_ref",
-    ];
-
-    const EXPECTED_CANDLE_VIDEO_I2V_ROUTED_MODELS: &[&str] = &["wan_2_2_i2v_14b", "svd"];
-
-    const EXPECTED_CANDLE_VIDEO_VACE_MODELS: &[&str] =
-        &["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"];
-
-    const EXPECTED_VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
-        "ltx_2_5",
-        "ltx_2_3",
-        "ltx_2_3_eros",
-        "wan_2_2",
-        "wan_2_2_t2v_14b",
-        "wan_2_2_i2v_14b",
-        "svd",
-        "bernini",
-        "scail2_14b",
-        "mochi_1",
-        "krea_realtime_14b",
-        // sc-17159 — three ids that had a worker dispatch arm and/or a shipped macOS download but
-        // no row in the table, so nothing on the MLX lane could claim them.
-        "wan_2_2_vace_fun_14b",
-        "minimax_h3",
-        "minimax_h3_ref",
-    ];
-
     const EXPECTED_MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
         "moss_image_lora",
         "z_image_lora",
@@ -2497,55 +2200,39 @@ mod tests {
     ];
 
     #[test]
-    fn routed_model_lists_match_snapshot() {
-        // The nine model lists are table-DERIVED (sc-9495): assert each reproduces the pre-collapse
-        // snapshot EXACTLY as a set (zero membership diff) — this is the guardrail that proves the
-        // collapse changed no routing decision.
-        assert_membership_parity(
-            "MLX_ROUTED_MODELS",
-            MLX_ROUTED_MODELS,
-            EXPECTED_MLX_ROUTED_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_ROUTED_MODELS",
-            CANDLE_ROUTED_MODELS,
-            EXPECTED_CANDLE_ROUTED_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_QUANT_LORA_MODELS",
-            CANDLE_QUANT_LORA_MODELS,
-            EXPECTED_CANDLE_QUANT_LORA_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_QUANT_MODELS",
-            CANDLE_QUANT_MODELS,
-            EXPECTED_CANDLE_QUANT_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_LORA_MODELS",
-            CANDLE_LORA_MODELS,
-            EXPECTED_CANDLE_LORA_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_VIDEO_ROUTED_MODELS",
-            CANDLE_VIDEO_ROUTED_MODELS,
-            EXPECTED_CANDLE_VIDEO_ROUTED_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_VIDEO_I2V_ROUTED_MODELS",
-            CANDLE_VIDEO_I2V_ROUTED_MODELS,
-            EXPECTED_CANDLE_VIDEO_I2V_ROUTED_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_VIDEO_VACE_MODELS",
-            CANDLE_VIDEO_VACE_MODELS,
-            EXPECTED_CANDLE_VIDEO_VACE_MODELS,
-        );
-        assert_membership_parity(
-            "VIDEO_MLX_ROUTED_MODELS",
-            VIDEO_MLX_ROUTED_MODELS,
-            EXPECTED_VIDEO_MLX_ROUTED_MODELS,
-        );
+    fn routed_model_lists_match_typed_policy() {
+        // The generated compatibility lists must be exact projections of the sole authored
+        // route policy, including its legacy aliases. No second model-ID snapshot is needed.
+        let policy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../config/manifests/registry/route-policy.json"
+        ))
+        .unwrap();
+        for (rows, field, list) in [
+            ("image", "mlxRouted", MLX_ROUTED_MODELS),
+            ("image", "candleRouted", CANDLE_ROUTED_MODELS),
+            ("image", "candleQuantLora", CANDLE_QUANT_LORA_MODELS),
+            ("image", "candleQuant", CANDLE_QUANT_MODELS),
+            ("image", "candleLora", CANDLE_LORA_MODELS),
+            ("video", "candleVideoRouted", CANDLE_VIDEO_ROUTED_MODELS),
+            ("video", "candleVideoI2v", CANDLE_VIDEO_I2V_ROUTED_MODELS),
+            ("video", "candleVideoVace", CANDLE_VIDEO_VACE_MODELS),
+            ("video", "videoMlxRouted", VIDEO_MLX_ROUTED_MODELS),
+        ] {
+            let expected: BTreeSet<_> = policy[rows]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row[field] == true)
+                .map(|row| row["id"].as_str().unwrap())
+                .collect();
+            let actual: BTreeSet<_> = list.iter().copied().collect();
+            assert_eq!(actual, expected, "{rows}/{field} route-policy projection");
+            assert_eq!(
+                actual.len(),
+                list.len(),
+                "{rows}/{field} duplicate route id"
+            );
+        }
         // The training-kernel lists are keyed by kernel id (a separate namespace) and were NOT
         // collapsed into the per-model tables (sc-9495); they stay hand-written, still order-pinned.
         assert_eq!(
