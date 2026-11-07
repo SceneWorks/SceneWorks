@@ -7597,6 +7597,8 @@
       }
     },
     {
+      // Compatibility projection for readers of the v1 manifest. Product and evidence
+      // for this row are owned by config/manifests/registry; the native projection test checks equality.
       "id": "flux_schnell",
       // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
       // `video` sub-block sc-8445 added for Krea Realtime. FLUX.1 [schnell] is the 4-step timestep-distilled student: the `flux1_schnell`

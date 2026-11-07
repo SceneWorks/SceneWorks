@@ -98,6 +98,9 @@ fn table() -> Result<&'static PreviewTable, &'static str> {
 /// facts file has not been dumped. Never conflate it with `Some(false)` ("this route is wired and
 /// does not preview") — the whole point of the story is that those are different states.
 pub fn supports_preview(model_id: &str, backend: &str) -> Option<bool> {
+    if let Some(spec) = crate::registry::builtin_model_spec(model_id) {
+        return spec.routes.get(backend).map(|route| route.supports_preview);
+    }
     table().ok()?.get(model_id)?.get(backend).copied()
 }
 
@@ -109,10 +112,22 @@ pub fn supports_preview(model_id: &str, backend: &str) -> Option<bool> {
 /// generated artifact must never take down `/api/v1/models`. The vitest drift guard is what makes
 /// the artifact correct; this is the serving seam, not a second validator.
 pub fn apply_to_model_entry(object: &mut serde_json::Map<String, Value>) {
-    let Ok(table) = table() else { return };
     let Some(model_id) = object.get("id").and_then(Value::as_str) else {
         return;
     };
+    if let Some(spec) = crate::registry::builtin_model_spec(model_id) {
+        let by_backend: BTreeMap<_, _> = spec
+            .routes
+            .iter()
+            .map(|(backend, route)| (backend, route.supports_preview))
+            .collect();
+        object.insert(
+            PREVIEW_FIELD.to_owned(),
+            serde_json::json!({ BY_BACKEND_FIELD: by_backend }),
+        );
+        return;
+    }
+    let Ok(table) = table() else { return };
     let Some(by_backend) = table.get(model_id) else {
         return;
     };

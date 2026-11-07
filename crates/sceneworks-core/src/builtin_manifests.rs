@@ -74,7 +74,8 @@ fn parse_builtin_manifest(name: &str, contents: &str) -> Result<serde_json::Valu
     };
     let raw = crate::jsonc::strip_jsonc_comments(contents);
     crate::jsonc::reject_duplicate_keys(&raw).map_err(|error| format!("{name}: {error}"))?;
-    let value: Value = serde_json::from_str(&raw).map_err(|error| format!("{name}: {error}"))?;
+    let mut value: Value =
+        serde_json::from_str(&raw).map_err(|error| format!("{name}: {error}"))?;
     let entries = value
         .get(field)
         .and_then(Value::as_array)
@@ -114,6 +115,16 @@ fn parse_builtin_manifest(name: &str, contents: &str) -> Result<serde_json::Valu
             .is_some_and(|compat| !compat.is_object())
         {
             return Err(format!("{name} loraCompatibility must be an object"));
+        }
+    }
+    if name == "builtin.models.jsonc" {
+        for model in value[field].as_array_mut().expect("validated model array") {
+            if let Some(spec) = model["id"]
+                .as_str()
+                .and_then(crate::registry::builtin_model_spec)
+            {
+                *model = spec.project(None);
+            }
         }
     }
     Ok(value)
