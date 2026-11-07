@@ -211,7 +211,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # — the Windows host build uses schannel instead, so this only surfaces here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential pkg-config libssl-dev \
+        ca-certificates curl git build-essential pkg-config libssl-dev procps \
     && rm -rf /var/lib/apt/lists/*
 # Rust toolchain. The default rustup profile ships rustfmt+clippy; the COPY'd
 # rust-toolchain.toml (a pinned concrete version + those components) is what any
@@ -299,6 +299,12 @@ COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
+    set -eu; \
+    (while sleep 120; do \
+      date -u; free -m; df -h /app; \
+      ps -eo pid,etime,pcpu,pmem,rss,comm --sort=-rss | head -16; \
+    done) & monitor=$!; \
+    trap 'kill "$monitor" 2>/dev/null || true' EXIT; \
     cargo fetch --locked \
     && cargo build --locked --offline -p sceneworks-rust-worker --release \
         --features sceneworks-worker/backend-candle \

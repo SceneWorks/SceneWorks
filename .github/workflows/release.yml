@@ -357,6 +357,7 @@ jobs:
           "ARTIFACT_SIGNING_LOG=$(Join-Path $dir 'sign.log')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "config=--config windows-signing.release.conf.json" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
       - name: Build Windows candle installers (NSIS + MSI)
+        shell: pwsh
         env:
           # Same minisign keypair as the macos job — signs the NSIS updater
           # payload so the shipped app verifies it against plugins.updater.pubkey
@@ -369,7 +370,15 @@ jobs:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-        run: npm --prefix apps/desktop run build -- --bundles nsis,msi --config updater.release.conf.json ${{ steps.signing.outputs.config }}
+        run: |
+          $monitor = Start-Process pwsh -NoNewWindow -PassThru -ArgumentList @('-NoProfile', '-File', 'scripts/release-compile-telemetry.ps1')
+          try {
+            npm --prefix apps/desktop run build -- --bundles nsis,msi --config updater.release.conf.json ${{ steps.signing.outputs.config }}
+            $buildExit = $LASTEXITCODE
+          } finally {
+            Stop-Process -Id $monitor.Id -ErrorAction SilentlyContinue
+          }
+          exit $buildExit
       # Tauri hides a sign command's output unless --verbose, so a failed signature
       # surfaces only as "failed to run node"; print sign-windows.mjs's transcript.
       - name: Show Authenticode signing transcript
