@@ -16,6 +16,65 @@ pub struct ShippedControlWeight {
     pub revision: &'static str,
 }
 
+/// Pinned defaults for worker-opened auxiliary sources outside a model's hard closure.
+/// The worker may select an operator override only for an ID whose loader already permits it;
+/// a private source claim freezes its exact bytes and provenance before admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShippedAuxiliarySource {
+    pub source_id: &'static str,
+    pub repo: &'static str,
+    pub revision: &'static str,
+    pub files: &'static [&'static str],
+}
+
+pub const SHIPPED_AUXILIARY_SOURCES: &[ShippedAuxiliarySource] = &[
+    ShippedAuxiliarySource {
+        source_id: "flux_ip_adapter",
+        repo: "XLabs-AI/flux-ip-adapter",
+        revision: "18f6940238ab5dc3744df7a8e30315892279d5f9",
+        files: &["ip_adapter.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "flux_ip_encoder",
+        repo: "openai/clip-vit-large-patch14",
+        revision: "32bd64288804d66eefd0ccbe215aa642df71cc41",
+        files: &["model.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "sdxl_ip_adapter",
+        repo: "h94/IP-Adapter",
+        revision: "018e402774aeeddd60609b4ecdb7e298259dc729",
+        files: &["sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "sdxl_ip_encoder",
+        repo: "h94/IP-Adapter",
+        revision: "018e402774aeeddd60609b4ecdb7e298259dc729",
+        files: &[
+            "models/image_encoder/config.json",
+            "models/image_encoder/model.safetensors",
+        ],
+    },
+    ShippedAuxiliarySource {
+        source_id: "sdxl_detail_tile_control",
+        repo: "xinsir/controlnet-tile-sdxl-1.0",
+        revision: "1ae8d9529efe58f7362a987363ff86a7904dc84f",
+        files: &["config.json", "diffusion_pytorch_model.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "depth_anything_v2_small",
+        repo: "depth-anything/Depth-Anything-V2-Small-hf",
+        revision: "5426e4f0f36572d16453bbda7a8389317b1bef99",
+        files: &["model.safetensors"],
+    },
+];
+
+pub fn shipped_auxiliary_source(source_id: &str) -> Option<&'static ShippedAuxiliarySource> {
+    SHIPPED_AUXILIARY_SOURCES
+        .iter()
+        .find(|source| source.source_id == source_id)
+}
+
 /// Exact shipped control-weight allow-list.
 ///
 /// Z-Image base has distinct MLX and Candle filenames in the upstream repo, and

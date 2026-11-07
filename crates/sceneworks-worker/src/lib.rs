@@ -407,6 +407,7 @@ mod worker_loop;
 pub use worker_loop::run_worker_loop;
 mod converted_install;
 mod model_jobs;
+mod portable_aux_sources;
 pub use model_jobs::recover_stranded_model_conversions;
 // The convert pre-flight the rust-api calls before queueing a `model_convert` job, so a convert
 // requested against a still-downloading source is refused at the request boundary instead of failing

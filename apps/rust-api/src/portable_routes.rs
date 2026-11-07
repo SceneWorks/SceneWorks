@@ -24,6 +24,16 @@ pub(crate) struct SelectedRouteSource {
     pub selected_tier: Option<String>,
 }
 
+fn push_operator_source(rows: &mut Vec<SelectedRouteSource>, slot: &str, source_id: &'static str) {
+    rows.push(SelectedRouteSource {
+        model_slot: slot.to_owned(),
+        component_id: source_id.to_owned(),
+        role: ArtifactMemberRole::OptionalComponent,
+        source: SelectedSourceLocation::OperatorCachedRepo(source_id),
+        selected_tier: None,
+    });
+}
+
 /// Source additions opened by a route but omitted from its always-required model closure.
 /// A missing selected declaration is an admission refusal, never an implicit worker download.
 pub(crate) fn selected_route_source_rows(
@@ -35,6 +45,45 @@ pub(crate) fn selected_route_source_rows(
 ) -> Result<Vec<SelectedRouteSource>, String> {
     let mut rows = Vec::new();
     let advanced = payload.get("advanced").and_then(Value::as_object);
+    let has_reference = payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    let character_reference =
+        payload.get("mode").and_then(Value::as_str) == Some("character_image") && has_reference;
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        let plan: sceneworks_core::training::TrainingPlan = serde_json::from_value(
+            payload
+                .get("plan")
+                .cloned()
+                .ok_or("training job lacks resolved plan")?,
+        )
+        .map_err(|error| format!("invalid resolved training plan: {error}"))?;
+        if plan.target.base_model == "ltx_2_3" {
+            push_operator_source(&mut rows, "trainingBase", "ltx_training_text_encoder");
+        }
+        if sceneworks_core::training::iris::is_iris_training_kernel(&plan.target.kernel) {
+            let options = sceneworks_core::training::iris::iris_options(&plan.config)
+                .map_err(|error| error.to_string())?;
+            if sceneworks_core::training::iris::curricula::iris_repa_enabled(&options) {
+                let manifest =
+                    sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+                        .map_err(str::to_owned)?;
+                let teacher = manifest.get("models").and_then(Value::as_array)
+                    .and_then(|models| models.iter().find(|entry| entry.get("id").and_then(Value::as_str) == Some(sceneworks_core::training::iris::curricula::IRIS_REPA_TEACHER_MODEL_ID)))
+                    .and_then(|entry| entry.get("downloads")).and_then(Value::as_array)
+                    .and_then(|downloads| downloads.first())
+                    .ok_or("missing pinned Iris REPA teacher declaration")?;
+                rows.push(SelectedRouteSource {
+                    model_slot: "trainingBase".to_owned(),
+                    component_id: "repa_teacher".to_owned(),
+                    role: ArtifactMemberRole::OptionalComponent,
+                    source: SelectedSourceLocation::ManifestDownload(teacher.clone()),
+                    selected_tier: None,
+                });
+            }
+        }
+    }
     for (slot, entry) in entries {
         let id = entry
             .get("id")
@@ -60,6 +109,19 @@ pub(crate) fn selected_route_source_rows(
             Ok(())
         };
         if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+            if character_reference && matches!(id, "flux_dev" | "flux_schnell") {
+                push_operator_source(&mut rows, slot, "flux_ip_adapter");
+                push_operator_source(&mut rows, slot, "flux_ip_encoder");
+            }
+            if character_reference
+                && matches!(
+                    id,
+                    "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2"
+                )
+            {
+                push_operator_source(&mut rows, slot, "sdxl_ip_adapter");
+                push_operator_source(&mut rows, slot, "sdxl_ip_encoder");
+            }
             if let Some(decoder) = advanced
                 .and_then(|value| value.get("decoder"))
                 .and_then(Value::as_str)
@@ -147,7 +209,17 @@ pub(crate) fn selected_route_source_rows(
                     source,
                     selected_tier: tier,
                 });
+                if advanced
+                    .and_then(|value| value.get("controlMode"))
+                    .and_then(Value::as_str)
+                    == Some("depth")
+                {
+                    push_operator_source(&mut rows, slot, "depth_anything_v2_small");
+                }
             }
+        }
+        if *job_type == JobType::ImageDetail && slot == "modelManifestEntry" {
+            push_operator_source(&mut rows, slot, "sdxl_detail_tile_control");
         }
         if payload.get("editMode").and_then(Value::as_str) == Some("cover")
             && id.starts_with("acestep")
@@ -431,5 +503,49 @@ mod tests {
             "linux"
         )
         .is_err());
+    }
+
+    #[test]
+    fn auxiliary_source_rows_follow_route_specific_request_shape() {
+        let flux = json!({"id":"flux_dev"});
+        let entries = [("modelManifestEntry".to_owned(), &flux)];
+        let character =
+            json!({"model":"flux_dev","mode":"character_image","referenceAssetId":"asset"});
+        let rows = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            character.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.component_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["flux_ip_adapter", "flux_ip_encoder"]
+        );
+        let plain = json!({"model":"flux_dev","mode":"text_to_image"});
+        assert!(selected_route_source_rows(
+            &JobType::ImageGenerate,
+            plain.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos"
+        )
+        .unwrap()
+        .is_empty());
+        let detail = json!({"model":"sdxl"});
+        let sdxl = json!({"id":"sdxl"});
+        let entries = [("modelManifestEntry".to_owned(), &sdxl)];
+        let rows = selected_route_source_rows(
+            &JobType::ImageDetail,
+            detail.as_object().unwrap(),
+            &entries,
+            "candle",
+            "linux",
+        )
+        .unwrap();
+        assert_eq!(rows[0].component_id, "sdxl_detail_tile_control");
     }
 }
