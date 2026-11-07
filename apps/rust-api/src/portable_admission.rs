@@ -567,23 +567,34 @@ async fn capture_model_slot(
         selected_primary_override(payload, entry, owns_request_overlays, training.is_some())
     {
         let files = capture_local_source_files(&path, &allowed_local_roots(state))?;
-        let digest =
-            portable_closure_sha256(&files).map_err(|error| incomplete(error.to_string()))?;
-        let override_member = PortableArtifactMember {
-            role: ArtifactMemberRole::Primary,
-            component_id: None,
-            source: PortableSourceIdentity::Digest { sha256: digest },
-            tier: tier.clone(),
-            files,
-        };
-        override_member
-            .validate()
-            .map_err(|error| incomplete(error.to_string()))?;
         let primary = members
             .iter_mut()
             .find(|member| member.role == ArtifactMemberRole::Primary)
             .ok_or_else(|| incomplete(format!("{slot} has no primary source to override")))?;
-        *primary = override_member;
+        if matches_pinned_closure(&files, &primary.files) {
+            // This host can locate the exact publisher bytes under a different approved root.
+            // The portable identity remains the trusted immutable revision.
+        } else if (if path.is_file() {
+            path.parent().unwrap_or(&path)
+        } else {
+            &path
+        })
+        .join(".sceneworks-produced-artifact.json")
+        .is_file()
+        {
+            verify_produced_local_source(state, entry, &path)?;
+            *primary = capture_local_member(
+                &path,
+                &allowed_local_roots(state),
+                ArtifactMemberRole::Primary,
+                None,
+                tier.clone(),
+            )?;
+        } else {
+            return Err(incomplete(format!(
+                "{slot} override is neither pinned publisher bytes nor a verified produced source"
+            )));
+        }
     }
     // The first model carrier owns selected request adapters and controls. Other carriers retain
     // their own component closures but never duplicate an adapter under a second logical slot.
@@ -694,6 +705,41 @@ async fn capture_model_slot(
         members,
     )
     .map_err(|error| incomplete(error.to_string()))
+}
+
+fn matches_pinned_closure(
+    actual: &[PortableArtifactFile],
+    pinned: &[PortableArtifactFile],
+) -> bool {
+    let Some(first) = pinned.first() else {
+        return false;
+    };
+    let mut prefix = PathBuf::new();
+    let mut candidates = vec![prefix.clone()];
+    if let Some(parent) = first.relative_path.parent() {
+        for component in parent.components() {
+            prefix.push(component.as_os_str());
+            candidates.push(prefix.clone());
+        }
+    }
+    candidates.into_iter().any(|prefix| {
+        let mut expected = Vec::with_capacity(pinned.len());
+        for file in pinned {
+            let Ok(relative) = file.relative_path.strip_prefix(&prefix) else {
+                return false;
+            };
+            if relative.as_os_str().is_empty() {
+                return false;
+            }
+            expected.push(PortableArtifactFile {
+                relative_path: relative.to_path_buf(),
+                size_bytes: file.size_bytes,
+                sha256: file.sha256.clone(),
+            });
+        }
+        expected.sort();
+        expected == actual
+    })
 }
 
 async fn capture_dynamic_detail_file(
@@ -1532,6 +1578,11 @@ fn capture_selected_request_overlays(
     let value = Value::Object(payload.clone());
     let allowed_roots = allowed_local_roots(state);
     for (slot, record) in enumerate_portable_array_slots(&value, &["loras", "lokrs", "controls"]) {
+        if slot.starts_with("lokrs/") || slot.contains("/lokrs/") {
+            return Err(incomplete(format!(
+                "selected LoKr source {slot} has no registered native loader contract"
+            )));
+        }
         let role = if slot.contains("/controls/") || slot.starts_with("controls/") {
             ArtifactMemberRole::Control
         } else {
@@ -1670,6 +1721,24 @@ mod tests {
         )
         .unwrap();
         assert_ne!(first_files, changed);
+    }
+
+    #[test]
+    fn alternate_local_root_must_match_the_complete_pinned_tier() {
+        let file = |path: &str, digest: &str| PortableArtifactFile {
+            relative_path: PathBuf::from(path),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", digest.repeat(64)),
+        };
+        let pinned = vec![
+            file("bf16/config.json", "a"),
+            file("bf16/model.safetensors", "b"),
+        ];
+        let alternate = vec![file("config.json", "a"), file("model.safetensors", "b")];
+        assert!(matches_pinned_closure(&alternate, &pinned));
+        assert!(!matches_pinned_closure(&alternate[..1], &pinned));
+        let substituted = vec![file("config.json", "a"), file("model.safetensors", "c")];
+        assert!(!matches_pinned_closure(&substituted, &pinned));
     }
 
     #[test]
