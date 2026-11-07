@@ -596,6 +596,12 @@ pub(super) async fn consume_gen_events_with_disclosure(
         .into_handle()
         .await
         .map_err(|error| task_join_error("generation task join", error))?;
+    // A cancel can race an in-flight owner fault. The poisoned process must report its
+    // truthful failure through handle_job_failure, which persists it before recycling;
+    // a terminal Canceled write would hide the fault and leave the worker quarantined.
+    if canceled && matches!(&task_result, Err(WorkerError::ProcessPoisoned(_))) {
+        return task_result;
+    }
     if canceled {
         // The generation has now actually stopped, so post the TERMINAL Canceled here
         // (not at the earlier cancel poll, which only tripped the flag + showed
@@ -652,4 +658,78 @@ pub(super) async fn consume_gen_events_with_disclosure(
     }
     crate::job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     task_result
+}
+
+#[cfg(all(test, native_lane))]
+mod tests {
+    use super::super::ImageRequest;
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_fault_after_cancel_reaches_terminal_failure_reconciliation() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = ImageRequest::from_payload(
+            serde_json::json!({
+                "projectId": "p", "model": "flux_schnell", "mode": "text_to_image",
+                "prompt": "a fox", "count": 1
+            })
+            .as_object()
+            .unwrap(),
+        );
+        let plan = ImagePlan::with_count(&request, 1, None);
+        let (url, posts) = crate::tests::spawn_analysis_cancel_stub().await;
+        let mut settings = crate::tests::test_settings(url.clone(), None);
+        settings.api_url = url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot =
+            serde_json::from_value(crate::tests::job_snapshot_json("job-1", false)).unwrap();
+        let cancel = CancelFlag::new();
+        let producer_cancel = cancel.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let blocking = crate::load_progress::spawn(async move {
+            while !producer_cancel.is_cancelled() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            drop(tx);
+            Err(WorkerError::ProcessPoisoned("owner device lost".into()))
+        });
+        let mut assets = Vec::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            consume_gen_events(
+                &api,
+                &settings,
+                &job,
+                &plan,
+                dir.path(),
+                "mlx",
+                "flux1",
+                &request.advanced,
+                1,
+                rx,
+                cancel.clone(),
+                blocking,
+                &mut assets,
+            ),
+        )
+        .await
+        .expect("cancel poll completes");
+        assert!(cancel.is_cancelled(), "the user cancellation was observed");
+        assert!(
+            matches!(&result, Err(WorkerError::ProcessPoisoned(detail)) if detail == "owner device lost"),
+            "{result:?}"
+        );
+        assert!(assets.is_empty());
+        let posts = posts.lock().unwrap();
+        assert!(
+            posts
+                .iter()
+                .any(|post| post["message"] == "Cancelling — finishing the current image…"),
+            "the cancel acknowledgement must precede the fault"
+        );
+        assert!(
+            !posts.iter().any(|post| post["status"] == "canceled"),
+            "the supervisor must own the fatal terminal write"
+        );
+    }
 }
