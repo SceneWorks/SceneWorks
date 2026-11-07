@@ -16,6 +16,9 @@ use crate::contracts::{
     JobType, ProgressStage, QueueSummary, WorkerCapability, WorkerSnapshot, WorkerStatus,
     WorkerUtilizationSnapshot,
 };
+use crate::model_artifacts::portable_binding::{
+    validate_portable_source_claims, PortableSourceClaim,
+};
 use crate::store_util::{ensure_column, parse_string_enum, random_hex};
 use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
 
@@ -692,6 +695,13 @@ impl JobsStore {
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
         ensure_column(&transaction, "workers", "platform", "text")?;
+        // Authenticated worker source proofs remain private; WorkerSnapshot never reads this.
+        ensure_column(
+            &transaction,
+            "workers",
+            "portable_source_claims_json",
+            "text",
+        )?;
         // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
         // Only the API's validated-plan handoff may freeze this write-once column.
         ensure_column(&transaction, "jobs", "model_provenance_json", "text")?;
@@ -2447,6 +2457,18 @@ impl JobsStore {
         request: RegisterWorker,
         platform: Option<&str>,
     ) -> JobsStoreResult<WorkerSnapshot> {
+        self.register_worker_with_portable_sources(request, platform, None)
+    }
+
+    pub fn register_worker_with_portable_sources(
+        &self,
+        request: RegisterWorker,
+        platform: Option<&str>,
+        portable_source_claims: Option<&[PortableSourceClaim]>,
+    ) -> JobsStoreResult<WorkerSnapshot> {
+        let portable_source_claims = portable_source_claims.unwrap_or(&[]);
+        validate_portable_source_claims(portable_source_claims)
+            .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2455,8 +2477,9 @@ impl JobsStore {
             "
             insert into workers (
               id, gpu_id, gpu_name, status, current_job_id, capabilities_json,
-              loaded_models_json, utilization_json, platform, registered_at, last_seen_at
-            ) values (?1, ?2, ?3, 'idle', null, ?4, ?5, ?6, ?7, ?8, ?8)
+              loaded_models_json, utilization_json, platform, portable_source_claims_json,
+              registered_at, last_seen_at
+            ) values (?1, ?2, ?3, 'idle', null, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
             on conflict(id) do update set
               gpu_id = excluded.gpu_id,
               gpu_name = excluded.gpu_name,
@@ -2472,6 +2495,7 @@ impl JobsStore {
               loaded_models_json = excluded.loaded_models_json,
               utilization_json = excluded.utilization_json,
               platform = excluded.platform,
+              portable_source_claims_json = excluded.portable_source_claims_json,
               last_seen_at = excluded.last_seen_at
             ",
             params![
@@ -2482,6 +2506,7 @@ impl JobsStore {
                 dumps(&request.loaded_models)?,
                 optional_dumps(request.utilization.as_ref())?,
                 platform,
+                dumps(portable_source_claims)?,
                 now,
             ],
         )?;
@@ -2494,6 +2519,17 @@ impl JobsStore {
         &self,
         request: WorkerHeartbeat,
     ) -> JobsStoreResult<WorkerHeartbeatOutcome> {
+        self.heartbeat_worker_with_portable_sources(request, None)
+    }
+
+    pub fn heartbeat_worker_with_portable_sources(
+        &self,
+        request: WorkerHeartbeat,
+        portable_source_claims: Option<&[PortableSourceClaim]>,
+    ) -> JobsStoreResult<WorkerHeartbeatOutcome> {
+        let portable_source_claims = portable_source_claims.unwrap_or(&[]);
+        validate_portable_source_claims(portable_source_claims)
+            .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2541,8 +2577,9 @@ impl JobsStore {
                    loaded_models_json = ?3,
                    utilization_json = ?4,
                    status_reason = ?5,
-                   last_seen_at = ?6
-             where id = ?7
+                   portable_source_claims_json = ?6,
+                   last_seen_at = ?7
+             where id = ?8
             ",
             params![
                 request.status.as_str(),
@@ -2553,6 +2590,7 @@ impl JobsStore {
                 // very next heartbeat rather than carrying a stale remedy for a fixed host
                 // (sc-16260 AC 4). `None` on every non-unhealthy heartbeat.
                 request.status_reason,
+                dumps(portable_source_claims)?,
                 now,
                 request.worker_id,
             ],
@@ -2579,6 +2617,51 @@ impl JobsStore {
             worker,
             interrupted_job,
         })
+    }
+
+    /// Authenticated registrations may advertise logical, exact-byte source claims. This private
+    /// view is used only during admission; stale or unhealthy workers cannot establish authority.
+    pub fn portable_source_claims_for_route(
+        &self,
+        backend: &str,
+        platform: &str,
+        requested_gpu: &str,
+        worker_timeout_seconds: u64,
+    ) -> JobsStoreResult<Vec<PortableSourceClaim>> {
+        let connection = self.open_connection()?;
+        let cutoff = format_unix_seconds(
+            now_unix_seconds().saturating_sub(worker_timeout_seconds.min(i64::MAX as u64) as i64),
+        );
+        let mut statement = connection.prepare(
+            "select * from workers where platform = ?1 and last_seen_at >= ?2 and status != 'unhealthy'",
+        )?;
+        let workers =
+            collect_workers(statement.query_map(params![platform, cutoff], row_to_worker)?)?;
+        drop(statement);
+        let mut claims = Vec::new();
+        for worker in workers {
+            let backend_matches = match backend {
+                "mlx" => worker.gpu_id.eq_ignore_ascii_case("mlx"),
+                "candle" => worker_is_candle(&worker),
+                "cpu" => worker.gpu_id.eq_ignore_ascii_case("cpu"),
+                _ => false,
+            };
+            if !backend_matches || (requested_gpu != "auto" && requested_gpu != worker.gpu_id) {
+                continue;
+            }
+            let raw: Option<String> = connection.query_row(
+                "select portable_source_claims_json from workers where id = ?1",
+                params![worker.id],
+                |row| row.get(0),
+            )?;
+            if let Some(raw) = raw {
+                let worker_claims: Vec<PortableSourceClaim> = serde_json::from_str(&raw)?;
+                validate_portable_source_claims(&worker_claims)
+                    .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+                claims.extend(worker_claims);
+            }
+        }
+        Ok(claims)
     }
 
     pub fn mark_stale_workers_interrupted(

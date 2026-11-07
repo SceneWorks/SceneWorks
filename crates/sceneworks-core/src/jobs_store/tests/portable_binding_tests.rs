@@ -1,7 +1,8 @@
 use super::*;
 use crate::model_artifacts::portable_binding::{
     canonical_authored_options_sha256, PortableArtifactFile, PortableArtifactMember,
-    PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
+    PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceClaim,
+    PortableSourceIdentity, PortableSourceProvenance,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -236,4 +237,61 @@ fn retry_and_duplicate_cannot_replace_a_frozen_portable_binding() {
         store.portable_model_binding(&retried.id).unwrap(),
         Some(binding)
     );
+}
+
+#[test]
+fn worker_source_claims_are_private_fresh_and_explicitly_cleared() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let claim = PortableSourceClaim::new(
+        "ltx/encoder",
+        PortableSourceProvenance::OperatorOverride,
+        vec![PortableArtifactFile {
+            relative_path: "encoder.safetensors".into(),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        }],
+    )
+    .unwrap();
+    let worker = store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "worker".into(),
+                gpu_id: "cpu".into(),
+                gpu_name: None,
+                capabilities: vec![],
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some(std::env::consts::OS),
+            Some(std::slice::from_ref(&claim)),
+        )
+        .unwrap();
+    assert!(!serde_json::to_string(&worker)
+        .unwrap()
+        .contains("ltx/encoder"));
+    assert_eq!(
+        store
+            .portable_source_claims_for_route("cpu", std::env::consts::OS, "auto", 90)
+            .unwrap(),
+        vec![claim]
+    );
+    store
+        .heartbeat_worker_with_portable_sources(
+            WorkerHeartbeat {
+                worker_id: "worker".into(),
+                status: WorkerStatus::Idle,
+                current_job_id: None,
+                loaded_models: vec![],
+                utilization: None,
+                status_reason: None,
+            },
+            Some(&[]),
+        )
+        .unwrap();
+    assert!(store
+        .portable_source_claims_for_route("cpu", std::env::consts::OS, "auto", 90)
+        .unwrap()
+        .is_empty());
 }

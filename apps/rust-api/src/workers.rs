@@ -164,7 +164,7 @@ pub(crate) async fn register_worker(
     ApiJson(payload): ApiJson<WorkerRegisterRequest>,
 ) -> Result<Json<WorkerSnapshot>, ApiError> {
     let worker = store_call(state.clone(), move |store, _timeout| {
-        store.register_worker_with_platform(
+        store.register_worker_with_portable_sources(
             RegisterWorker {
                 worker_id: payload.worker_id,
                 gpu_id: payload.gpu_id,
@@ -174,6 +174,7 @@ pub(crate) async fn register_worker(
                 utilization: payload.utilization,
             },
             payload.platform.as_deref(),
+            payload.portable_source_claims.as_deref(),
         )
     })
     .await?;
@@ -188,14 +189,17 @@ pub(crate) async fn heartbeat_worker(
     ApiJson(payload): ApiJson<WorkerHeartbeatRequest>,
 ) -> Result<Json<WorkerSnapshot>, ApiError> {
     let outcome = store_call(state.clone(), move |store, _timeout| {
-        store.heartbeat_worker(WorkerHeartbeat {
-            worker_id,
-            status: payload.status,
-            current_job_id: payload.current_job_id,
-            loaded_models: payload.loaded_models,
-            utilization: payload.utilization,
-            status_reason: payload.status_reason,
-        })
+        store.heartbeat_worker_with_portable_sources(
+            WorkerHeartbeat {
+                worker_id,
+                status: payload.status,
+                current_job_id: payload.current_job_id,
+                loaded_models: payload.loaded_models,
+                utilization: payload.utilization,
+                status_reason: payload.status_reason,
+            },
+            payload.portable_source_claims.as_deref(),
+        )
     })
     .await?;
     // An idle heartbeat from a restarted worker terminates the job its previous
