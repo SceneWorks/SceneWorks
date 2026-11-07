@@ -606,17 +606,12 @@ async fn capture_model_slot(
             }
             SelectedSourceLocation::DynamicHfRepo(repo) => {
                 let revision = resolve_dynamic_hf_revision(state, repo).await?;
-                let download = serde_json::json!({
-                    "provider":"huggingface",
-                    "repo":repo,
-                    "revision":revision,
-                    "files":["*"]
-                });
-                capture_download_member(
+                capture_dynamic_detail_file(
                     state,
-                    &download,
+                    repo,
+                    &revision,
                     source.role.clone(),
-                    Some(source.component_id.clone()),
+                    source.component_id.clone(),
                 )
                 .await?
             }
@@ -662,6 +657,47 @@ async fn capture_model_slot(
         members,
     )
     .map_err(|error| incomplete(error.to_string()))
+}
+
+async fn capture_dynamic_detail_file(
+    state: &AppState,
+    repo: &str,
+    revision: &str,
+    role: ArtifactMemberRole,
+    component_id: String,
+) -> Result<PortableArtifactMember, ApiError> {
+    let files =
+        resolve_trusted_pinned_files(state, repo, revision, &["*.safetensors".to_owned()]).await?;
+    let file = selected_detail_weight_file(&files)
+        .ok_or_else(|| incomplete("custom Detail repository has no selected safetensors file"))?;
+    let identity = ArtifactIdentity::pinned(repo, revision, "default")
+        .map_err(|error| incomplete(error.to_string()))?;
+    let member = PortableArtifactMember {
+        role,
+        component_id: Some(component_id),
+        source: PortableSourceIdentity::Revision { identity },
+        tier: Some("default".to_owned()),
+        files: vec![file.clone()],
+    };
+    member
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    Ok(member)
+}
+
+fn selected_detail_weight_file(files: &[PortableArtifactFile]) -> Option<&PortableArtifactFile> {
+    files
+        .iter()
+        .filter(|file| {
+            file.relative_path
+                .extension()
+                .is_some_and(|extension| extension == "safetensors")
+                && file
+                    .relative_path
+                    .components()
+                    .all(|component| !component.as_os_str().to_string_lossy().starts_with('.'))
+        })
+        .min_by(|a, b| a.relative_path.cmp(&b.relative_path))
 }
 
 /// Resolve a mutable, user-selected repository to a publisher commit once, at admission.
@@ -1747,6 +1783,28 @@ mod tests {
         server.await.unwrap();
         assert_eq!(first_revision, first);
         assert_eq!(second_revision, second);
-        assert_ne!(first_files, second_files);
+        assert_ne!(
+            selected_detail_weight_file(&first_files).unwrap(),
+            selected_detail_weight_file(&second_files).unwrap()
+        );
+    }
+
+    #[test]
+    fn detail_custom_source_freezes_one_deterministic_visible_weight_file() {
+        let file = |path: &str| PortableArtifactFile {
+            relative_path: PathBuf::from(path),
+            size_bytes: 4,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        };
+        let files = [
+            file("z/model.safetensors"),
+            file("._sidecar.safetensors"),
+            file("a/model.safetensors"),
+            file("config.json"),
+        ];
+        assert_eq!(
+            selected_detail_weight_file(&files).unwrap().relative_path,
+            PathBuf::from("a/model.safetensors")
+        );
     }
 }
