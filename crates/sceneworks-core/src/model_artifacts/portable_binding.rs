@@ -430,8 +430,19 @@ pub struct PortableJobBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PortableSourceIdentity {
-    Revision { identity: ArtifactIdentity },
-    Digest { sha256: String },
+    Revision {
+        identity: ArtifactIdentity,
+    },
+    Digest {
+        sha256: String,
+    },
+    /// A server-authorized reference to a private worker advertisement. This is distinct from a
+    /// portable imported digest: only a worker with the matching source claim may take the job.
+    WorkerClaim {
+        source_id: String,
+        provenance: PortableSourceProvenance,
+        closure_sha256: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -552,6 +563,34 @@ impl PortableSourceClaim {
         if self != &expected {
             return Err(error(
                 "worker source claim differs from authorized identity",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn matches_worker_claim_member(
+        &self,
+        member: &PortableArtifactMember,
+    ) -> Result<(), ArtifactContractError> {
+        self.validate()?;
+        member.validate()?;
+        let PortableSourceIdentity::WorkerClaim {
+            source_id,
+            provenance,
+            closure_sha256,
+        } = &member.source
+        else {
+            return Err(error(
+                "artifact member is not bound to a worker source claim",
+            ));
+        };
+        if self.source_id != *source_id
+            || self.provenance != *provenance
+            || self.closure_sha256 != *closure_sha256
+            || self.files != member.files
+        {
+            return Err(error(
+                "worker source claim differs from route-bound artifact",
             ));
         }
         Ok(())
@@ -902,6 +941,20 @@ impl PortableArtifactMember {
                     ));
                 }
             }
+            PortableSourceIdentity::WorkerClaim {
+                source_id,
+                provenance,
+                closure_sha256,
+            } => {
+                validate_logical_name("worker source id", source_id)?;
+                provenance.validate()?;
+                validate_sha256(closure_sha256)?;
+                if *closure_sha256 != portable_file_ledger_sha256(&self.files)? {
+                    return Err(error(
+                        "worker source reference differs from its file closure",
+                    ));
+                }
+            }
         }
         if self.role == ArtifactMemberRole::Primary {
             if self.component_id.is_some() {
@@ -1248,6 +1301,44 @@ mod tests {
             vec![file]
         )
         .is_err());
+    }
+
+    #[test]
+    fn worker_claim_member_requires_exact_private_claim_reference() {
+        let file = PortableArtifactFile {
+            relative_path: PathBuf::from("encoder.safetensors"),
+            size_bytes: 4,
+            sha256: format!("sha256:{}", crate::hashing::sha256_bytes(b"data")),
+        };
+        let claim = PortableSourceClaim::new(
+            "ltx/alternate-encoder",
+            PortableSourceProvenance::OperatorOverride,
+            vec![file.clone()],
+        )
+        .unwrap();
+        let mut member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::WorkerClaim {
+                source_id: claim.source_id.clone(),
+                provenance: claim.provenance.clone(),
+                closure_sha256: claim.closure_sha256.clone(),
+            },
+            tier: None,
+            files: vec![file],
+        };
+        assert!(claim.matches_worker_claim_member(&member).is_ok());
+        if let PortableSourceIdentity::WorkerClaim { provenance, .. } = &mut member.source {
+            *provenance = PortableSourceProvenance::PinnedRepo {
+                repository: "owner/encoder".to_owned(),
+                revision: "a".repeat(40),
+            };
+        }
+        assert!(claim.matches_worker_claim_member(&member).is_err());
+        if let PortableSourceIdentity::WorkerClaim { closure_sha256, .. } = &mut member.source {
+            *closure_sha256 = format!("sha256:{}", "b".repeat(64));
+        }
+        assert!(member.validate().is_err());
     }
 
     #[tokio::test]
