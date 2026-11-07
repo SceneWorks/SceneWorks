@@ -97,6 +97,8 @@ jobs:
           pin="$(node -e 'const fs=require("fs");const m=fs.readFileSync("Cargo.toml","utf8").match(/candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/);if(!m)throw new Error("no inference pin");process.stdout.write(m[1])')"
           git init -q "$RUNNER_TEMP/inference"
           git -C "$RUNNER_TEMP/inference" remote add origin https://github.com/SceneWorks/inference
+          git -C "$RUNNER_TEMP/inference" config gc.auto 0
+          git -C "$RUNNER_TEMP/inference" config maintenance.auto false
           git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$pin"
           while read -r rev; do
             [ -n "$rev" ] || continue
