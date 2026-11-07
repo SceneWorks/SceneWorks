@@ -78,7 +78,7 @@ on:
         type: string
         default: "{}"
       profile:
-        description: "Catalog by default; Qwen/FLUX3 app lifecycle profiles run only their reusable app proof, with no catalog walk or publication."
+        description: "Catalog by default; app/worker proof profiles run only their reusable proof, with no catalog walk or publication."
         required: false
         type: choice
         options:
@@ -86,6 +86,7 @@ on:
           - load-progress-acceptance
           - qwen-image-2-1-app-lifecycle
           - flux3-image-klein-app-lifecycle
+          - flux1-owner-worker-proof
           - flux3-image-klein-terminal-host
           - flux3-image-klein-terminal-queue
           - iris-mlx-real-weights
@@ -107,7 +108,7 @@ on:
           - secondary
         default: primary
       flux3_app_runner_target:
-        description: "FLUX3 app smoke only: secondary=rw-mage; primary=rw-starvector. Reserve an idle physical Mac before dispatch."
+        description: "FLUX3 app or FLUX.1 owner proof: secondary=rw-mage; primary=rw-starvector. Reserve an idle physical Mac before dispatch."
         required: false
         type: choice
         options:
@@ -410,6 +411,16 @@ jobs:
     # One ordinary installed-model/API/worker/saved-asset smoke. No catalog jobs,
     # measurements, pin edits, branch publication or PR. Relative call = exact SHA.
     uses: ./.github/workflows/flux3-image-klein-app-lifecycle.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      runner_target: ${{ inputs.flux3_app_runner_target }}
+  flux1-owner-worker-proof:
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'flux1-owner-worker-proof' }}
+    needs: moss-selector-preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/flux1-owner-worker-proof.yml
     with:
       source_sha: ${{ inputs.ref }}
       inference_sha: ${{ inputs.inference_sha }}

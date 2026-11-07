@@ -44,10 +44,20 @@ test("retained artifact verifier detects changed image bytes and missing provide
       await writeFile(path.join(evidence, file), bytes);
       (kind === "isolated" ? isolated : queued).push({ ...entry(seed, kind, file), job_id: `${id}-${kind}-${seed}`, sha256: sha256(Buffer.from(bytes)) });
     }
-    models.push({ id, repo: id === "flux_dev" ? "SceneWorks/flux1-dev-mlx" : "SceneWorks/flux1-schnell-mlx", revision: id === "flux_dev" ? "323fd12d79f78ad444e882e8d8e871914584f2b9" : "bba3ae01dfd94089f173c05edd4e1a4c551f2599", variant: "q4", isolated, queued, observations: [{ [`${id}-queued-33111`]: "running", [`${id}-queued-33122`]: "queued" }], active: { job_id: `${id}-active` }, cancel: { status: "canceled", job_id: `${id}-cancel` } });
+    const activeFile = `${id}-active-33133.png`, activeBytes = `${id}-33133`;
+    await writeFile(path.join(evidence, activeFile), activeBytes);
+    const active = { ...entry(33133, "active", activeFile), job_id: `${id}-active`, sha256: sha256(Buffer.from(activeBytes)) };
+    const recoveryFile = `${id}-recovery-33166.png`, recoveryBytes = `${id}-33166`;
+    await writeFile(path.join(evidence, recoveryFile), recoveryBytes);
+    const recovery = { ...entry(33166, "recovery", recoveryFile), job_id: `${id}-recovery`, sha256: sha256(Buffer.from(recoveryBytes)) };
+    models.push({ id, repo: id === "flux_dev" ? "SceneWorks/flux1-dev-mlx" : "SceneWorks/flux1-schnell-mlx", revision: id === "flux_dev" ? "323fd12d79f78ad444e882e8d8e871914584f2b9" : "bba3ae01dfd94089f173c05edd4e1a4c551f2599", variant: "q4", isolated, queued, observations: [{ [`${id}-queued-33111`]: "running", [`${id}-queued-33122`]: "queued" }], active, cancel: { status: "canceled", job_id: `${id}-cancel` }, cancel_active: { status: "canceled", job_id: `${id}-cancel-active` }, recovery });
   }
   const ownerTrace = []; let sequence = 0;
-  for (const model of models) for (const entry of [...model.isolated, ...model.queued, model.active]) for (const phase of ["prepare_begin", "prepare_end", "drive_begin", "drive_end"]) ownerTrace.push({ job_id: entry.job_id, engine_id: model.id === "flux_dev" ? "flux1_dev" : "flux1_schnell", phase, owner_thread: "ThreadId(7)", sequence: ++sequence });
+  for (const model of models) {
+    for (const entry of [...model.isolated, ...model.queued, model.active]) for (const phase of ["prepare_begin", "prepare_end", "drive_begin", "drive_end"]) ownerTrace.push({ job_id: entry.job_id, engine_id: model.id === "flux_dev" ? "flux1_dev" : "flux1_schnell", phase, owner_thread: "ThreadId(7)", sequence: ++sequence });
+    for (const phase of ["prepare_begin", "prepare_end", "drive_begin", "drive_failed"]) ownerTrace.push({ job_id: model.cancel_active.job_id, engine_id: model.id === "flux_dev" ? "flux1_dev" : "flux1_schnell", phase, owner_thread: "ThreadId(7)", sequence: ++sequence });
+    for (const phase of ["prepare_begin", "prepare_end", "drive_begin", "drive_end"]) ownerTrace.push({ job_id: model.recovery.job_id, engine_id: model.id === "flux_dev" ? "flux1_dev" : "flux1_schnell", phase, owner_thread: "ThreadId(7)", sequence: ++sequence });
+  }
   const receipt = { schema_version: 1, kind: "flux1_native_owner_worker_proof", status: "passed", identity: { source_sha: sha, inference_sha: sha, dispatch_sha: sha, binary_sha256: "b".repeat(64), flux_dev_model_index_sha256: "c".repeat(64), flux_schnell_model_index_sha256: "d".repeat(64) }, worker: { id: worker, gpuId: "mlx", capabilities: ["gpu"] }, models, owner_trace: ownerTrace, cleanup: [{ exited: true }, { exited: true }] };
   const file = path.join(evidence, "receipt.json"); await writeFile(file, JSON.stringify(receipt));
   await verifyArtifact(output);
@@ -59,10 +69,14 @@ test("retained artifact verifier detects changed image bytes and missing provide
 });
 
 test("native owner trace parser and verifier reject cross-thread or interleaved work", () => {
-  const model = { id: "flux_dev", isolated: [{ job_id: "a" }, { job_id: "b" }], queued: [{ job_id: "c" }, { job_id: "d" }], active: { job_id: "e" }, cancel: { job_id: "f" } };
-  const other = { ...model, id: "flux_schnell", isolated: [{ job_id: "g" }, { job_id: "h" }], queued: [{ job_id: "i" }, { job_id: "j" }], active: { job_id: "k" }, cancel: { job_id: "l" } };
+  const model = { id: "flux_dev", isolated: [{ job_id: "a" }, { job_id: "b" }], queued: [{ job_id: "c" }, { job_id: "d" }], active: { job_id: "e" }, cancel: { job_id: "f" }, cancel_active: { job_id: "m" }, recovery: { job_id: "n" } };
+  const other = { ...model, id: "flux_schnell", isolated: [{ job_id: "g" }, { job_id: "h" }], queued: [{ job_id: "i" }, { job_id: "j" }], active: { job_id: "k" }, cancel: { job_id: "l" }, cancel_active: { job_id: "o" }, recovery: { job_id: "p" } };
   const trace = []; let sequence = 0;
-  for (const [row, engine] of [[model, "flux1_dev"], [other, "flux1_schnell"]]) for (const entry of [...row.isolated, ...row.queued, row.active]) for (const phase of ["prepare_begin", "prepare_end", "drive_begin", "drive_end"]) trace.push({ job_id: entry.job_id, engine_id: engine, phase, owner_thread: "ThreadId(7)", sequence: ++sequence });
+  for (const [row, engine] of [[model, "flux1_dev"], [other, "flux1_schnell"]]) {
+    for (const entry of [...row.isolated, ...row.queued, row.active]) for (const phase of ["prepare_begin", "prepare_end", "drive_begin", "drive_end"]) trace.push({ job_id: entry.job_id, engine_id: engine, phase, owner_thread: "ThreadId(7)", sequence: ++sequence });
+    for (const phase of ["prepare_begin", "prepare_end", "drive_begin", "drive_failed"]) trace.push({ job_id: row.cancel_active.job_id, engine_id: engine, phase, owner_thread: "ThreadId(7)", sequence: ++sequence });
+    for (const phase of ["prepare_begin", "prepare_end", "drive_begin", "drive_end"]) trace.push({ job_id: row.recovery.job_id, engine_id: engine, phase, owner_thread: "ThreadId(7)", sequence: ++sequence });
+  }
   const log = trace.map((fields) => JSON.stringify({ level: "INFO", fields: { event: "flux1_owner_turn", ...fields } })).join("\n");
   assert.deepEqual(parseOwnerTrace(log), trace);
   assert.doesNotThrow(() => assertOwnerTrace([model, other], trace));
@@ -73,8 +87,12 @@ test("native owner trace parser and verifier reject cross-thread or interleaved 
 
 test("proof workflow is manual and retains evidence only", async () => {
   const workflow = await readFile(new URL("../.github/workflows/flux1-owner-worker-proof.yml", import.meta.url), "utf8");
-  assert.match(workflow, /workflow_dispatch:/);
-  assert.doesNotMatch(workflow, /^\s+(push|pull_request|workflow_call):/m);
+  const dispatcher = await readFile(new URL("../.github/workflows/memory-catalog-campaign.yml", import.meta.url), "utf8");
+  assert.match(workflow, /workflow_call:/);
+  assert.doesNotMatch(workflow, /^\s+(push|pull_request|workflow_dispatch):/m);
+  assert.match(dispatcher, /workflow_dispatch:/);
+  assert.match(dispatcher, /inputs\.profile == 'flux1-owner-worker-proof'/);
+  assert.match(dispatcher, /uses: \.\/\.github\/workflows\/flux1-owner-worker-proof\.yml/);
   assert.match(workflow, /--verify-artifact/);
   assert.match(workflow, /\/evidence\//);
 });

@@ -1,7 +1,7 @@
-# Manual AC3 proof. Never called by push, pull_request, or the ordinary CI gate.
+# Manual AC3 proof called by the existing Memory catalog campaign dispatcher only.
 name: FLUX.1 native owner worker proof
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       source_sha:
         description: Exact clean SceneWorks commit containing the paired inference pin
@@ -14,8 +14,7 @@ on:
       runner_target:
         description: "Physical Mac target: primary or secondary"
         required: true
-        type: choice
-        options: [primary, secondary]
+        type: string
 permissions:
   contents: read
 jobs:
@@ -32,7 +31,6 @@ jobs:
       FLUX1_OWNER_SOURCE_SHA: ${{ inputs.source_sha }}
       FLUX1_OWNER_INFERENCE_SHA: ${{ inputs.inference_sha }}
       FLUX1_OWNER_RUNNER_TARGET: ${{ inputs.runner_target }}
-      FLUX1_OWNER_OUTPUT: ${{ runner.temp }}/flux1-owner-${{ github.run_id }}-${{ github.run_attempt }}
       CARGO_PROFILE_RELEASE_STRIP: "none"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,6 +41,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      - name: Set attempt-owned output directory
+        run: echo "FLUX1_OWNER_OUTPUT=$RUNNER_TEMP/flux1-owner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
       - name: Refuse wrong source, pin, runner or inaccessible pinned q4 source
         run: node scripts/flux1-owner-worker-proof.mjs --preflight-only
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
@@ -61,7 +61,9 @@ jobs:
             exit "$rc"
           fi
       - name: Run ordinary FLUX.1 dev and Schnell API jobs on owned native worker
-        run: node scripts/flux1-owner-worker-proof.mjs
+        run: |
+          source scripts/ci/metal_execution_entry.sh
+          metal_execution_entry 18000 node scripts/flux1-owner-worker-proof.mjs
       - name: Independently verify retained receipt and image hashes
         run: node scripts/flux1-owner-worker-proof.mjs --verify-artifact
       - name: Retain redacted receipt and generated PNGs only

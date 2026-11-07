@@ -82,7 +82,7 @@ export function assertOwnerTrace(models, trace) {
   for (const model of models) {
     const expectedEngine = MODELS.find((entry) => entry.id === model.id)?.engine;
     fact(expectedEngine, "unknown FLUX.1 model in trace");
-    const completed = [...model.isolated, ...model.queued, model.active];
+    const completed = [...model.isolated, ...model.queued, model.active, model.recovery];
     for (const entry of completed) {
       const events = trace.filter((event) => event.job_id === entry.job_id);
       fact(events.length === 4 && events.every((event) => event.engine_id === expectedEngine), `${model.id} owner event set incomplete`);
@@ -90,11 +90,16 @@ export function assertOwnerTrace(models, trace) {
       fact(events.every((event, index) => index === 0 || events[index - 1].sequence < event.sequence), "owner event order changed");
     }
     fact(!trace.some((event) => event.job_id === model.cancel.job_id), `${model.id} canceled queued job reached the owner`);
+    const canceledActive = trace.filter((event) => event.job_id === model.cancel_active.job_id);
+    fact(canceledActive.length === 4 && canceledActive.every((event) => event.engine_id === expectedEngine), `${model.id} active cancellation owner trace incomplete`);
+    assert.deepEqual(canceledActive.map((event) => event.phase), ["prepare_begin", "prepare_end", "drive_begin", "drive_failed"], `${model.id} active cancellation did not leave the owner drive`);
+    const recoveryBegin = trace.find((event) => event.job_id === model.recovery.job_id && event.phase === "prepare_begin");
+    fact(canceledActive[3].sequence < recoveryBegin?.sequence, `${model.id} recovery overlapped canceled owner work`);
     const firstEnd = trace.find((event) => event.job_id === model.queued[0].job_id && event.phase === "drive_end");
     const secondBegin = trace.find((event) => event.job_id === model.queued[1].job_id && event.phase === "prepare_begin");
     fact(firstEnd.sequence < secondBegin.sequence, `${model.id} queued trajectories interleaved on the owner`);
   }
-  fact(trace.length === models.reduce((count, model) => count + (model.isolated.length + model.queued.length + 1) * 4, 0), "unexpected FLUX.1 owner work in isolated proof process");
+  fact(trace.length === models.reduce((count, model) => count + (model.isolated.length + model.queued.length + 3) * 4, 0), "unexpected FLUX.1 owner work in isolated proof process");
 }
 
 export function parseOwnerTrace(logText) {
@@ -120,9 +125,9 @@ export async function verifyArtifact(output) {
   for (const [index, model] of receipt.models.entries()) {
     fact(model.repo === MODELS[index].repo && model.revision === MODELS[index].revision && model.variant === "q4", "pinned model provenance changed");
     fact(/^[a-f0-9]{64}$/.test(receipt.identity[`${model.id}_model_index_sha256`]), "pinned model index digest missing");
-    fact(model.isolated?.length === 2 && model.queued?.length === 2 && model.cancel?.status === "canceled", "complete isolated, queued and cancel cases required");
+    fact(model.isolated?.length === 2 && model.queued?.length === 2 && model.cancel?.status === "canceled" && model.cancel_active?.status === "canceled" && model.recovery?.job_id, "complete isolated, queued, owner cancel and recovery cases required");
     assertSerializedTrajectory(model.isolated, model.queued, model.observations);
-    for (const entry of [...model.isolated, ...model.queued]) {
+    for (const entry of [...model.isolated, ...model.queued, model.active, model.recovery]) {
       fact(entry.worker_id === receipt.worker.id && entry.backend === "mlx" && entry.asset_id && entry.generation_set_id, "saved native worker provenance missing");
       fact(/^[a-z0-9_-]+\.png$/.test(entry.file), "unsafe proof filename");
       fact((await fileSha256(path.join(evidence, entry.file))) === entry.sha256, "saved proof PNG digest mismatch");
@@ -261,14 +266,26 @@ async function run(env, preflightOnly) {
       }
       assertSerializedTrajectory(record.isolated, record.queued, record.observations); await save();
       const cancelBody = imageBody(project.id, model, 33144, 8);
-      const active = await must("POST", "/api/v1/image/jobs", imageBody(project.id, model, 33133, 8));
+      const activeBody = imageBody(project.id, model, 33133, 8);
+      const active = await must("POST", "/api/v1/image/jobs", activeBody);
       await wait(async () => (await observe(active.id))?.status === "running", 300, "active owner render before cancel");
       const cancel = await must("POST", "/api/v1/image/jobs", cancelBody);
       await must("POST", `/api/v1/jobs/${cancel.id}/cancel`, {});
       const canceled = await wait(async () => { const job = await observe(cancel.id); fact(job.status !== "completed" && job.status !== "failed", "queued cancellation did not stop the job"); return job.status === "canceled" && job; }, 300, "queued cancellation");
-      await complete(active, null, "active render after queued cancellation");
-      record.active = { job_id: active.id };
+      const completedActive = await complete(active, null, "active render after queued cancellation");
+      record.active = await image(completedActive, activeBody, "active-33133");
       record.cancel = { job_id: canceled.id, status: canceled.status, worker_id: canceled.workerId ?? null }; await save();
+      const cancelActiveBody = imageBody(project.id, model, 33155, 8);
+      const cancelActive = await must("POST", "/api/v1/image/jobs", cancelActiveBody);
+      await wait(async () => parseOwnerTrace(await readFile(path.join(logs, "worker.log"), "utf8")).some((event) => event.job_id === cancelActive.id && event.phase === "drive_begin"), 300, "active render to enter owner drive before cancellation");
+      await must("POST", `/api/v1/jobs/${cancelActive.id}/cancel`, {});
+      const canceledActive = await wait(async () => { const job = await observe(cancelActive.id); fact(job.status !== "completed" && job.status !== "failed", "active cancellation missed its owner run"); return job.status === "canceled" && job; }, 300, "active owner cancellation");
+      await wait(async () => parseOwnerTrace(await readFile(path.join(logs, "worker.log"), "utf8")).some((event) => event.job_id === cancelActive.id && event.phase === "drive_failed"), 300, "owner drive to exit after cancellation");
+      record.cancel_active = { job_id: canceledActive.id, status: canceledActive.status };
+      const recoveryBody = imageBody(project.id, model, 33166);
+      const recovery = await must("POST", "/api/v1/image/jobs", recoveryBody);
+      record.recovery = await image(await complete(recovery, null, "owner recovery after cancellation"), recoveryBody, "recovery-33166");
+      await save();
     }
     receipt.owner_trace = parseOwnerTrace(await readFile(path.join(logs, "worker.log"), "utf8"));
     assertOwnerTrace(receipt.models, receipt.owner_trace);
@@ -279,7 +296,7 @@ async function run(env, preflightOnly) {
     clearTimeout(deadline); process.removeListener("SIGTERM", abort); process.removeListener("SIGINT", abort);
     for (const child of children.reverse()) {
       if (!child.pid) continue;
-      try { if (child.exitCode === null && child.signalCode === null) { process.kill(-child.pid, "SIGTERM"); await Promise.race([child.done.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 15_000))]); if (child.exitCode === null && child.signalCode === null) { process.kill(-child.pid, "SIGKILL"); await child.done.catch(() => {}); } } receipt.cleanup.push({ pid: child.pid, exited: true }); }
+      try { if (child.exitCode === null && child.signalCode === null) { process.kill(-child.pid, "SIGTERM"); await Promise.race([child.done.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 15_000))]); if (child.exitCode === null && child.signalCode === null) { process.kill(-child.pid, "SIGKILL"); await child.done.catch(() => {}); } } const exited = child.exitCode !== null || child.signalCode !== null; receipt.cleanup.push({ pid: child.pid, exited }); if (!exited) receipt.status = "failed"; }
       catch { receipt.status = "failed"; receipt.cleanup.push({ pid: child.pid, exited: false }); process.exitCode = 1; }
     }
     await Promise.all(handles.map((handle) => handle.close())); endpoint?.close();
