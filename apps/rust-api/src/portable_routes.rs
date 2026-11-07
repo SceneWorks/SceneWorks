@@ -63,15 +63,6 @@ pub(crate) fn selected_route_source_rows(
     backend: &str,
     _platform: &str,
 ) -> Result<Vec<SelectedRouteSource>, String> {
-    if matches!(
-        job_type,
-        JobType::KpsExtract | JobType::DatasetFaceAnalysis | JobType::FaceLikenessCompare
-    ) {
-        return Err(format!(
-            "{} identity detector sources are not yet bound",
-            job_type.as_str()
-        ));
-    }
     let mut rows = Vec::new();
     let advanced = payload.get("advanced").and_then(Value::as_object);
     let has_reference = payload
@@ -160,13 +151,35 @@ pub(crate) fn selected_route_source_rows(
             .get("id")
             .and_then(Value::as_str)
             .ok_or("model entry lacks id")?;
+        if id == "instantid_face_stack"
+            && matches!(
+                job_type,
+                JobType::KpsExtract
+                    | JobType::DatasetFaceAnalysis
+                    | JobType::FaceLikenessCompare
+                    | JobType::CatalogAnalysis
+            )
+        {
+            let download = entry
+                .get("downloads")
+                .and_then(Value::as_array)
+                .and_then(|rows| rows.first())
+                .ok_or("face stack lacks pinned download")?;
+            rows.push(SelectedRouteSource {
+                model_slot: slot.clone(),
+                component_id: "utility_face_stack".to_owned(),
+                role: ArtifactMemberRole::OptionalComponent,
+                source: SelectedSourceLocation::ManifestDownload(download.clone()),
+                selected_tier: None,
+            });
+        }
         if id == "instantid_realvisxl" {
             push_operator_source(&mut rows, slot, "instantid_mlx");
             push_operator_source(&mut rows, slot, "instantid_controlnet");
             if advanced
                 .and_then(|value| value.get("poses"))
                 .and_then(Value::as_array)
-                .is_some_and(|poses| !poses.is_empty())
+                .is_some_and(|poses| poses.iter().any(Value::is_object))
             {
                 push_operator_source(&mut rows, slot, "instantid_openpose");
             }
@@ -231,31 +244,35 @@ pub(crate) fn selected_route_source_rows(
                 .and_then(|value| value.get("pidCheckpoint"))
                 .and_then(Value::as_object);
             let checkpoint_source = if let Some(config) = checkpoint_override {
-                let repo = config
+                let authored_repo = config
                     .get("repo")
                     .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        checkpoint.get("repo").and_then(Value::as_str).unwrap_or("")
-                    });
-                let file = config
-                    .get("filename")
-                    .and_then(Value::as_str)
-                    .ok_or("PiD checkpoint override requires filename")?;
-                if file.is_empty()
-                    || file == "."
-                    || file == ".."
-                    || file.contains(['/', '\\'])
-                    || !file.ends_with(".safetensors")
-                {
-                    return Err(
-                        "PiD checkpoint filename must be a plain safetensors name".to_owned()
-                    );
+                    .filter(|value| !value.trim().is_empty());
+                let authored_file = config.get("filename").and_then(Value::as_str);
+                if let Some(file) = authored_file {
+                    if file.is_empty()
+                        || file == "."
+                        || file == ".."
+                        || file.contains(['/', '\\'])
+                        || !file.ends_with(".safetensors")
+                    {
+                        return Err(
+                            "PiD checkpoint filename must be a plain safetensors name".to_owned()
+                        );
+                    }
                 }
-                SelectedSourceLocation::DynamicHfFiles {
-                    repo: repo.to_owned(),
-                    reference: "main".to_owned(),
-                    files: vec![file.to_owned()],
+                if let Some(repo) = authored_repo {
+                    SelectedSourceLocation::DynamicHfFiles {
+                        repo: repo.to_owned(),
+                        reference: "main".to_owned(),
+                        files: vec![authored_file.unwrap_or("*").to_owned()],
+                    }
+                } else if let Some(file) = authored_file {
+                    let mut pinned = checkpoint.clone();
+                    pinned["files"] = serde_json::json!([file]);
+                    SelectedSourceLocation::ManifestDownload(pinned)
+                } else {
+                    SelectedSourceLocation::ManifestDownload(checkpoint.clone())
                 }
             } else {
                 SelectedSourceLocation::ManifestDownload(checkpoint.clone())
@@ -615,6 +632,29 @@ fn entries_support_route(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn face_utilities_bind_the_catalog_face_stack_download() {
+        let entry = json!({"id":"instantid_face_stack","type":"utility","componentOnly":true,
+            "downloads":[{"provider":"huggingface","repo":"SceneWorks/instantid-mlx",
+                "revision":"bca0cacf8e5e04529bb2b326a521361b02be84fd",
+                "files":["scrfd_10g.safetensors","arcface_iresnet100.safetensors"]}]});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let payload = JsonObject::new();
+        for job in [
+            JobType::KpsExtract,
+            JobType::DatasetFaceAnalysis,
+            JobType::FaceLikenessCompare,
+        ] {
+            let rows =
+                selected_route_source_rows(&job, &payload, &entries, "candle", "linux").unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].component_id, "utility_face_stack");
+            assert!(
+                matches!(&rows[0].source, SelectedSourceLocation::ManifestDownload(row) if row["repo"] == "SceneWorks/instantid-mlx")
+            );
+        }
+    }
 
     fn routes(job_type: JobType, payload: Value, entry: Value) -> Vec<(String, String)> {
         let entry_ref = [("modelManifestEntry".to_owned(), &entry)];

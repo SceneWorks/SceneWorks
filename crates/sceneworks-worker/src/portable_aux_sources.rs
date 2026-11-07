@@ -151,7 +151,19 @@ pub(crate) fn resolve_selected_aux_source(
             }
             if let Some(dir) = std::env::var_os("SCENEWORKS_PULID_WEIGHTS")
                 .map(PathBuf::from)
-                .filter(|dir| dir.join(file).is_file())
+                .filter(|dir| {
+                    dir.join(file).is_file()
+                        && (cfg!(target_os = "macos")
+                            || [
+                                "pulid_flux_v0.9.1.safetensors",
+                                "eva02_clip_l_336.safetensors",
+                                "bisenet_parsing.safetensors",
+                                "scrfd_10g.safetensors",
+                                "arcface_iresnet100.safetensors",
+                            ]
+                            .iter()
+                            .all(|file| dir.join(file).is_file()))
+                })
             {
                 return Some((dir.join(file), true));
             }
@@ -305,5 +317,43 @@ pub(crate) fn resolve_selected_aux_source(
                 .then_some((dir, false))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pulid_composition_reads_only_bound_files_and_requires_every_source() {
+        let source = tempfile::tempdir().unwrap();
+        let mut map = serde_json::Map::new();
+        for (id, name) in [
+            ("pulid_adapter", "adapter"),
+            ("pulid_eva", "eva"),
+            ("pulid_bisenet", "bisenet"),
+            ("pulid_scrfd", "scrfd"),
+            ("pulid_arcface", "arcface"),
+        ] {
+            let file = source.path().join(name);
+            std::fs::write(&file, name).unwrap();
+            map.insert(id.to_owned(), json!(file));
+        }
+        let mut advanced = JsonObject::new();
+        advanced.insert("__portableAuxPaths".to_owned(), Value::Object(map.clone()));
+        let (adapter, eva, face, _lease) = bound_pulid_weights(&advanced).unwrap();
+        assert_eq!(std::fs::read_to_string(adapter).unwrap(), "adapter");
+        assert_eq!(std::fs::read_to_string(eva).unwrap(), "eva");
+        for (file, expected) in [
+            ("bisenet_parsing.safetensors", "bisenet"),
+            ("scrfd_10g.safetensors", "scrfd"),
+            ("arcface_iresnet100.safetensors", "arcface"),
+        ] {
+            assert_eq!(std::fs::read_to_string(face.join(file)).unwrap(), expected);
+        }
+        map.remove("pulid_arcface");
+        advanced.insert("__portableAuxPaths".to_owned(), Value::Object(map));
+        assert!(bound_pulid_weights(&advanced).is_err());
     }
 }

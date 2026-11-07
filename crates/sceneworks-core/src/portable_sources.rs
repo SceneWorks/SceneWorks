@@ -34,7 +34,8 @@ pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<Porta
         | "instantid_controlnet"
         | "instantid_openpose"
         | "pid_gemma"
-        | "kolors_ip_adapter" => Some(Directory),
+        | "kolors_ip_adapter"
+        | "utility_face_stack" => Some(Directory),
         "pid_checkpoint" => Some(Directory),
         _ => entry
             .pointer("/decoders/byBackend")
@@ -99,6 +100,17 @@ pub fn required_portable_aux_source_ids(
         .get("id")
         .and_then(Value::as_str)
         .ok_or("model entry lacks id")?;
+    if id == "instantid_face_stack"
+        && matches!(
+            job_type,
+            JobType::KpsExtract
+                | JobType::DatasetFaceAnalysis
+                | JobType::FaceLikenessCompare
+                | JobType::CatalogAnalysis
+        )
+    {
+        return Ok(vec!["utility_face_stack".to_owned()]);
+    }
     let primary_model = payload.get("model").and_then(Value::as_str) == Some(id);
     let advanced = payload.get("advanced").and_then(Value::as_object);
     let mut ids = Vec::new();
@@ -114,7 +126,7 @@ pub fn required_portable_aux_source_ids(
             if advanced
                 .and_then(|value| value.get("poses"))
                 .and_then(Value::as_array)
-                .is_some_and(|poses| !poses.is_empty())
+                .is_some_and(|poses| poses.iter().any(Value::is_object))
             {
                 ids.push("instantid_openpose".to_owned());
             }
@@ -253,6 +265,91 @@ pub fn required_portable_aux_source_ids(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn identity_and_pid_sources_match_selected_native_routes() {
+        let face = json!({"id":"instantid_face_stack"});
+        let empty = json!({});
+        for job in [
+            JobType::KpsExtract,
+            JobType::DatasetFaceAnalysis,
+            JobType::FaceLikenessCompare,
+        ] {
+            assert_eq!(
+                required_portable_aux_source_ids(&job, empty.as_object().unwrap(), &face, "candle")
+                    .unwrap(),
+                vec!["utility_face_stack"]
+            );
+        }
+        assert_eq!(
+            portable_aux_source_shape("utility_face_stack", &face),
+            Some(PortableAuxSourceShape::Directory)
+        );
+        let instant = json!({"id":"instantid_realvisxl"});
+        let selected = json!({"model":"instantid_realvisxl","advanced":{"poses":[{"id":"front"}],"usePid":true}});
+        let ids = required_portable_aux_source_ids(
+            &JobType::ImageGenerate,
+            selected.as_object().unwrap(),
+            &instant,
+            "candle",
+        )
+        .unwrap();
+        for id in [
+            "instantid_mlx",
+            "instantid_controlnet",
+            "instantid_openpose",
+            "pid_checkpoint",
+            "pid_gemma",
+        ] {
+            assert!(ids.contains(&id.to_owned()), "missing {id}");
+            assert_eq!(
+                portable_aux_source_shape(id, &instant),
+                Some(PortableAuxSourceShape::Directory)
+            );
+        }
+        assert!(!ids.contains(&"strict_control".to_owned()));
+        let pulid = json!({"id":"pulid_flux_dev"});
+        let selected = json!({"model":"pulid_flux_dev","advanced":{"usePid":true}});
+        let candle = required_portable_aux_source_ids(
+            &JobType::ImageGenerate,
+            selected.as_object().unwrap(),
+            &pulid,
+            "candle",
+        )
+        .unwrap();
+        let mlx = required_portable_aux_source_ids(
+            &JobType::ImageGenerate,
+            selected.as_object().unwrap(),
+            &pulid,
+            "mlx",
+        )
+        .unwrap();
+        assert!(candle.contains(&"pid_checkpoint".to_owned()));
+        assert!(!mlx.contains(&"pid_checkpoint".to_owned()));
+        for id in [
+            "pulid_adapter",
+            "pulid_eva",
+            "pulid_bisenet",
+            "pulid_scrfd",
+            "pulid_arcface",
+        ] {
+            assert!(mlx.contains(&id.to_owned()));
+            assert_eq!(
+                portable_aux_source_shape(id, &pulid),
+                Some(PortableAuxSourceShape::File)
+            );
+        }
+        let kolors = json!({"id":"kolors"});
+        let selected = json!({"model":"kolors","referenceAssetId":"asset"});
+        assert!(required_portable_aux_source_ids(
+            &JobType::ImageGenerate,
+            selected.as_object().unwrap(),
+            &kolors,
+            "mlx"
+        )
+        .unwrap()
+        .contains(&"kolors_ip_adapter".to_owned()));
+    }
 
     #[test]
     fn selected_ids_and_shapes_follow_character_and_detail_routes() {
