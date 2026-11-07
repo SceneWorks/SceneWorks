@@ -403,6 +403,27 @@ pub fn registered_digest_member_claim_id(
     }
     let (kind, logical_id, component_id) = match member.role {
         ArtifactMemberRole::Primary => ("model", model.model_id.as_str(), None),
+        ArtifactMemberRole::Control if member.component_id.as_deref() == Some("strict_control") => {
+            let selected = payload
+                .pointer("/advanced/controlWeights")
+                .ok_or_else(|| error("registered control overlay is no longer selected"))?;
+            let id = selected
+                .get("overlayId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty() && *id == id.trim())
+                .ok_or_else(|| error("registered control overlay has no logical id"))?;
+            if selected.get("_catalogAuthorized").and_then(Value::as_bool) != Some(true)
+                || selected
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                return Err(error(
+                    "registered control overlay is not locally authorized",
+                ));
+            }
+            ("control", id, None)
+        }
         ArtifactMemberRole::Lora | ArtifactMemberRole::Control => {
             let slot = member
                 .component_id
@@ -1438,6 +1459,80 @@ mod tests {
             registered_digest_member_claim_id(&second, &second.members[1], &serde_json::json!({}))
                 .unwrap();
         assert_eq!(first_id, second_id);
+    }
+
+    #[test]
+    fn registered_pose_overlay_claim_uses_catalog_id_and_frozen_bytes() {
+        let primary_files = vec![PortableArtifactFile {
+            relative_path: "model.safetensors".into(),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        }];
+        let overlay_files = vec![PortableArtifactFile {
+            relative_path: "pose.safetensors".into(),
+            size_bytes: 2,
+            sha256: format!("sha256:{}", "b".repeat(64)),
+        }];
+        let source = |files: &[PortableArtifactFile]| PortableSourceIdentity::Digest {
+            sha256: portable_closure_sha256(files).unwrap(),
+        };
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            "krea_2_turbo",
+            "mlx",
+            "local",
+            None,
+            canonical_authored_options_sha256(&serde_json::json!({})).unwrap(),
+            vec![
+                PortableArtifactMember {
+                    role: ArtifactMemberRole::Primary,
+                    component_id: None,
+                    source: source(&primary_files),
+                    tier: None,
+                    files: primary_files,
+                },
+                PortableArtifactMember {
+                    role: ArtifactMemberRole::Control,
+                    component_id: Some("strict_control".to_owned()),
+                    source: source(&overlay_files),
+                    tier: None,
+                    files: overlay_files,
+                },
+            ],
+        )
+        .unwrap();
+        let overlay = &model.members[1];
+        let payload = serde_json::json!({"advanced":{"controlWeights":{
+            "overlayId":"pose-approved", "path":"/api-host/pose.safetensors",
+            "_catalogAuthorized":true
+        }}});
+        let ledger = portable_file_ledger_sha256(&overlay.files).unwrap();
+        let expected = crate::portable_sources::registered_digest_claim_id(
+            "control",
+            "pose-approved",
+            None,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            registered_digest_member_claim_id(&model, overlay, &payload).unwrap(),
+            expected
+        );
+        let changed = serde_json::json!({"advanced":{"controlWeights":{
+            "overlayId":"pose-substituted", "path":"/api-host/pose.safetensors",
+            "_catalogAuthorized":true
+        }}});
+        assert_ne!(
+            registered_digest_member_claim_id(&model, overlay, &changed).unwrap(),
+            expected
+        );
+        for invalid in [
+            serde_json::json!({"advanced":{"controlWeights":{"overlayId":"pose-approved","path":"/api-host/pose.safetensors"}}}),
+            serde_json::json!({"advanced":{"controlWeights":{"overlayId":"pose-approved","_catalogAuthorized":true}}}),
+            serde_json::json!({"advanced":{"controlWeights":{"path":"/api-host/pose.safetensors","_catalogAuthorized":true}}}),
+        ] {
+            assert!(registered_digest_member_claim_id(&model, overlay, &invalid).is_err());
+        }
     }
 
     fn local(root: &std::path::Path, component: bool, bytes: &[u8]) -> LocalArtifactMember {

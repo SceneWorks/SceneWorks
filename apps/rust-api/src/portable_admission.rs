@@ -2729,6 +2729,81 @@ mod tests {
     }
 
     #[test]
+    fn registered_pose_overlay_replay_requires_the_same_worker_claim() {
+        let file = |name: &str, byte: &str| PortableArtifactFile {
+            relative_path: PathBuf::from(name),
+            size_bytes: 4,
+            sha256: format!("sha256:{}", byte.repeat(64)),
+        };
+        let primary = file("model.safetensors", "a");
+        let overlay = file("pose.safetensors", "b");
+        let member =
+            |role, component_id: Option<&str>, file: PortableArtifactFile| PortableArtifactMember {
+                role,
+                component_id: component_id.map(str::to_owned),
+                source: PortableSourceIdentity::Digest {
+                    sha256: file.sha256.clone(),
+                },
+                tier: None,
+                files: vec![file],
+            };
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            "krea_2_turbo",
+            "mlx",
+            "local",
+            None,
+            canonical_authored_options_sha256(&json!({})).unwrap(),
+            vec![
+                member(ArtifactMemberRole::Primary, None, primary.clone()),
+                member(
+                    ArtifactMemberRole::Control,
+                    Some("strict_control"),
+                    overlay.clone(),
+                ),
+            ],
+        )
+        .unwrap();
+        let route = PortableRouteBinding::new("mlx", "macos", vec![model]).unwrap();
+        let claim = |kind, id, file: PortableArtifactFile| {
+            let ledger = portable_file_ledger_sha256(std::slice::from_ref(&file)).unwrap();
+            PortableSourceClaim::new(
+                sceneworks_core::portable_sources::registered_digest_claim_id(
+                    kind, id, None, &ledger,
+                )
+                .unwrap(),
+                PortableSourceProvenance::OperatorOverride,
+                vec![file],
+            )
+            .unwrap()
+        };
+        let model_claim = claim("model", "krea_2_turbo", primary);
+        let overlay_claim = claim("control", "pose-approved", overlay);
+        let payload = json!({"advanced":{"controlWeights":{
+            "overlayId":"pose-approved", "path":"/api-host/pose.safetensors",
+            "_catalogAuthorized":true
+        }}})
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(replay_route_claims_match(
+            &route,
+            &payload,
+            &[model_claim.clone(), overlay_claim.clone()]
+        )
+        .is_ok());
+        assert!(
+            replay_route_claims_match(&route, &payload, std::slice::from_ref(&model_claim))
+                .is_err()
+        );
+        let mut changed = payload.clone();
+        changed["advanced"]["controlWeights"]["overlayId"] = json!("pose-other");
+        assert!(
+            replay_route_claims_match(&route, &changed, &[model_claim, overlay_claim]).is_err()
+        );
+    }
+
+    #[test]
     fn frozen_replay_uses_original_immutable_dynamic_revision() {
         let old = "a".repeat(40);
         let file = PortableArtifactFile {

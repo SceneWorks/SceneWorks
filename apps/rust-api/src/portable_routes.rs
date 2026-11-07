@@ -1109,6 +1109,37 @@ mod tests {
     }
 
     #[test]
+    fn registered_local_pose_overlay_is_selected_as_strict_control() {
+        let entry = json!({"id":"krea_2_turbo"});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let payload = json!({
+            "model":"krea_2_turbo",
+            "advanced":{
+                "poses":[{"id":"front"}],
+                "controlWeights":{
+                    "overlayId":"pose-approved",
+                    "_catalogAuthorized":true,
+                    "path":"/api-host/pose.safetensors"
+                }
+            }
+        });
+        let rows = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            payload.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        assert!(rows.iter().any(|row| {
+            row.model_slot == "modelManifestEntry"
+                && row.component_id == "strict_control"
+                && row.role == ArtifactMemberRole::Control
+                && matches!(&row.source, SelectedSourceLocation::LocalPath(path) if path == "/api-host/pose.safetensors")
+        }));
+    }
+
+    #[test]
     fn kolors_selects_ip_only_for_the_reference_loader_and_pid_for_candle_pose() {
         let entry = json!({"id":"kolors"});
         let entries = [("modelManifestEntry".to_owned(), &entry)];
