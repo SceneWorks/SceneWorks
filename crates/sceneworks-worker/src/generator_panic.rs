@@ -60,21 +60,22 @@ fn write_diagnostic(path: &Path, payload: &str) {
 
 pub(crate) fn read_diagnostic(path: &Path) -> Option<String> {
     use std::io::Read;
-    let result = (|| {
+    (|| {
         let mut file = std::fs::File::open(path).ok()?;
         let mut bytes = Vec::new();
         std::io::Read::by_ref(&mut file)
-            .take((MAX_DIAGNOSTIC_BYTES + 1) as u64)
+            .take(MAX_DIAGNOSTIC_BYTES as u64)
             .read_to_end(&mut bytes)
             .ok()?;
-        if bytes.len() > MAX_DIAGNOSTIC_BYTES {
-            return None;
+        if bytes.is_empty() {
+            return Some("generator panic diagnostic unavailable".to_owned());
         }
-        let message = String::from_utf8(bytes).ok()?;
-        (!message.is_empty()).then_some(message)
-    })();
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    })()
+}
+
+pub(crate) fn consume_diagnostic(path: &Path) {
     let _ = std::fs::remove_file(path);
-    result
 }
 
 #[cfg(test)]
@@ -122,6 +123,7 @@ mod tests {
             read_diagnostic(&dir.path().join("diagnostic")).as_deref(),
             Some("bounded panic receipt")
         );
+        consume_diagnostic(&dir.path().join("diagnostic"));
         assert!(
             !dir.path().join("diagnostic").exists(),
             "receipt is consumed once"
@@ -137,5 +139,6 @@ mod tests {
             read_diagnostic(&path).unwrap().len(),
             MAX_DIAGNOSTIC_BYTES - 1
         );
+        consume_diagnostic(&path);
     }
 }

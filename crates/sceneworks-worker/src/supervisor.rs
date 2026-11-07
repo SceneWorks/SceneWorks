@@ -22,7 +22,19 @@ pub(crate) struct SupervisedChild {
     /// crash-looping child's delay from stalling the restart of its healthy siblings
     /// or the detection of further exits (sc-8899 / F-097).
     pub(crate) next_restart_at: Option<Instant>,
+    /// A generator panic receipt remains on disk until the API confirms its
+    /// terminal write. This child cannot restart and claim another job meanwhile.
+    pub(crate) pending_panic_report: Option<PendingPanicReport>,
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingPanicReport {
+    signal: Option<i32>,
+    exit_code: Option<i32>,
+    message: String,
+}
+
+const PANIC_REPORT_RETRY: Duration = Duration::from_secs(2);
 
 /// A child that stayed alive at least this long before exiting is treated as
 /// having had a healthy run, so its restart-backoff counter resets rather than
@@ -213,7 +225,24 @@ pub(crate) async fn supervise_children(
     specs: Vec<WorkerSpec>,
 ) -> WorkerResult<()> {
     let mut children = HashMap::new();
+    let mut pending_starts = Vec::new();
     for spec in specs {
+        if let Some(message) =
+            crate::generator_panic::read_diagnostic(&worker_panic_path(&settings, &spec.worker_id))
+        {
+            // A previous supervisor can die after the child writes its receipt.
+            // Keep that child's slot unstarted until the API accepts attribution.
+            if !report_worker_terminated(&settings, &spec.worker_id, None, None, Some(&message))
+                .await
+            {
+                pending_starts.push(spec);
+                continue;
+            }
+            crate::generator_panic::consume_diagnostic(&worker_panic_path(
+                &settings,
+                &spec.worker_id,
+            ));
+        }
         let process = start_child_worker(&settings, &spec)?;
         children.insert(
             spec.worker_id.clone(),
@@ -223,6 +252,7 @@ pub(crate) async fn supervise_children(
                 restart_attempt: 0,
                 spawned_at: Instant::now(),
                 next_restart_at: None,
+                pending_panic_report: None,
             },
         );
     }
@@ -237,9 +267,71 @@ pub(crate) async fn supervise_children(
             }
             _ = interval.tick() => {
                 restart_exited_children(&settings, &mut children).await?;
+                retry_pending_starts(&settings, &mut children, &mut pending_starts).await?;
             }
         }
     }
+}
+
+async fn retry_pending_starts(
+    settings: &Settings,
+    children: &mut HashMap<String, SupervisedChild>,
+    pending_starts: &mut Vec<WorkerSpec>,
+) -> WorkerResult<()> {
+    retry_pending_starts_with_spawner(settings, children, pending_starts, start_child_worker).await
+}
+
+pub(crate) async fn retry_pending_starts_with_spawner<F>(
+    settings: &Settings,
+    children: &mut HashMap<String, SupervisedChild>,
+    pending_starts: &mut Vec<WorkerSpec>,
+    mut spawner: F,
+) -> WorkerResult<()>
+where
+    F: FnMut(&Settings, &WorkerSpec) -> WorkerResult<Child>,
+{
+    let mut still_pending = Vec::new();
+    for spec in pending_starts.drain(..) {
+        let path = worker_panic_path(settings, &spec.worker_id);
+        if let Some(message) = crate::generator_panic::read_diagnostic(&path) {
+            if !report_worker_terminated(settings, &spec.worker_id, None, None, Some(&message))
+                .await
+            {
+                still_pending.push(spec);
+                continue;
+            }
+            crate::generator_panic::consume_diagnostic(&path);
+        }
+        let process = match spawner(settings, &spec) {
+            Ok(process) => process,
+            Err(error) => {
+                emit_event_value(
+                    Level::ERROR,
+                    json!({
+                        "event": "worker_respawn_failed",
+                        "workerId": spec.worker_id,
+                        "gpuId": spec.gpu_id,
+                        "error": error.to_string(),
+                    }),
+                );
+                still_pending.push(spec);
+                continue;
+            }
+        };
+        children.insert(
+            spec.worker_id.clone(),
+            SupervisedChild {
+                spec,
+                process,
+                restart_attempt: 0,
+                spawned_at: Instant::now(),
+                next_restart_at: None,
+                pending_panic_report: None,
+            },
+        );
+    }
+    *pending_starts = still_pending;
+    Ok(())
 }
 
 pub(crate) async fn restart_exited_children(
@@ -351,9 +443,9 @@ where
     // exited itself) and is never reported (sc-6320).
     for (worker_id, signal, exit_code) in newly_exited {
         if child_died_abnormally(signal, exit_code) {
-            let panic_message =
-                crate::generator_panic::read_diagnostic(&worker_panic_path(settings, &worker_id));
-            report_worker_terminated(
+            let path = worker_panic_path(settings, &worker_id);
+            let panic_message = crate::generator_panic::read_diagnostic(&path);
+            let reported = report_worker_terminated(
                 settings,
                 &worker_id,
                 signal,
@@ -361,6 +453,17 @@ where
                 panic_message.as_deref(),
             )
             .await;
+            if let Some(message) = panic_message {
+                if reported {
+                    crate::generator_panic::consume_diagnostic(&path);
+                } else if let Some(child) = children.get_mut(&worker_id) {
+                    child.pending_panic_report = Some(PendingPanicReport {
+                        signal,
+                        exit_code,
+                        message,
+                    });
+                }
+            }
         }
     }
 
@@ -373,6 +476,31 @@ where
         .map(|(worker_id, _)| worker_id.clone())
         .collect();
     for worker_id in ready {
+        // A failed first POST must not lose the panic cause or let a replacement
+        // claim work under the same worker id before its predecessor is terminal.
+        let pending = children
+            .get(&worker_id)
+            .and_then(|child| child.pending_panic_report.clone());
+        if let Some(pending) = pending {
+            if !report_worker_terminated(
+                settings,
+                &worker_id,
+                pending.signal,
+                pending.exit_code,
+                Some(&pending.message),
+            )
+            .await
+            {
+                if let Some(child) = children.get_mut(&worker_id) {
+                    child.next_restart_at = Some(now + PANIC_REPORT_RETRY);
+                }
+                continue;
+            }
+            crate::generator_panic::consume_diagnostic(&worker_panic_path(settings, &worker_id));
+            if let Some(child) = children.get_mut(&worker_id) {
+                child.pending_panic_report = None;
+            }
+        }
         let Some(child) = children.get_mut(&worker_id) else {
             continue;
         };
@@ -479,11 +607,13 @@ pub(crate) fn start_child_worker(settings: &Settings, spec: &WorkerSpec) -> Work
     if let Some(parent) = panic_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // A worker id has at most one live child; each spawn starts with a clean receipt.
-    match std::fs::remove_file(&panic_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+    // A retained receipt is an unreported terminal job. Never erase it just to
+    // make a new child launch; the supervisor's replay path must acknowledge it.
+    if panic_path.try_exists()? {
+        return Err(WorkerError::Engine(format!(
+            "worker {} has an unreported generator panic receipt",
+            spec.worker_id
+        )));
     }
     emit_event_value(
         Level::INFO,
@@ -512,7 +642,7 @@ pub(crate) fn start_child_worker(settings: &Settings, spec: &WorkerSpec) -> Work
     command.spawn().map_err(Into::into)
 }
 
-fn worker_panic_path(settings: &Settings, worker_id: &str) -> PathBuf {
+pub(crate) fn worker_panic_path(settings: &Settings, worker_id: &str) -> PathBuf {
     let digest = Sha256::digest(worker_id.as_bytes());
     settings
         .data_dir
@@ -535,20 +665,21 @@ pub(crate) fn terminating_signal(_status: &std::process::ExitStatus) -> Option<i
     None
 }
 
-/// Best-effort: tell the API that a worker child terminated abnormally — by
-/// `signal` (uncatchable death) or a non-zero `exit_code` (self-exit / panic) — so
+/// Tell the API that a worker child terminated abnormally — by
+/// `signal` (uncatchable death), a non-zero `exit_code` (self-exit / panic), or a
+/// durable panic receipt after a supervisor restart — so
 /// its active job is failed (attributed) rather than swept to the generic
 /// `interrupted` (sc-4881 signals; sc-6320 non-signal exits). The dying worker
-/// can't report this itself, so the supervisor does. A failure here (API down, job
-/// already terminal) must never disrupt the restart loop — the heartbeat sweep
-/// remains the backstop — so it is logged, not raised.
+/// can't report this itself, so the supervisor does. A failed POST is logged;
+/// generator-panic callers retain the receipt and retry before replacement,
+/// while legacy non-panic deaths keep best-effort attribution.
 async fn report_worker_terminated(
     settings: &Settings,
     worker_id: &str,
     signal: Option<i32>,
     exit_code: Option<i32>,
     panic_message: Option<&str>,
-) {
+) -> bool {
     let api = ApiClient::new(settings);
     let path = format!("/api/v1/workers/{worker_id}/terminated");
     let outcome = api
@@ -569,7 +700,9 @@ async fn report_worker_terminated(
                 "error": error.to_string(),
             }),
         );
+        return false;
     }
+    true
 }
 
 pub(crate) fn child_environment(
