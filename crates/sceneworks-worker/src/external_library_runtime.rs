@@ -246,7 +246,6 @@ impl RuntimeSourceGuard {
             )));
         }
 
-        let requested_variant = requested_runtime_variant(payload);
         let configured_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir)
             .root()
             .to_path_buf();
@@ -275,6 +274,14 @@ impl RuntimeSourceGuard {
         // served at all cannot be known until every entry in the job has been resolved.
         let mut plans: Vec<EntryPlan> = Vec::new();
         for entry in &model_entries {
+            let requested_variant = selected_runtime_variant(
+                job_type,
+                payload,
+                entry
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+            )?;
             let has_hf_downloads = entry
                 .get("downloads")
                 .and_then(serde_json::Value::as_array)
@@ -946,6 +953,40 @@ fn selected_portable_aux_ids(
     ids.sort();
     ids.dedup();
     Ok(ids)
+}
+
+fn selected_runtime_variant(
+    job_type: &JobType,
+    payload: &JsonObject,
+    model_id: &str,
+) -> WorkerResult<Option<String>> {
+    if !matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        return Ok(requested_runtime_variant(payload));
+    }
+    let target = payload
+        .get("plan")
+        .and_then(|plan| plan.get("target"))
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| invalid_binding("training plan has no canonical target"))?;
+    let base = target
+        .get("baseModel")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_binding("training plan has no base model"))?;
+    if base != model_id {
+        return Ok(requested_runtime_variant(payload));
+    }
+    let kernel = target
+        .get("kernel")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_binding("training plan has no native kernel"))?;
+    Ok(Some(
+        if base == "ltx_2_5" || kernel == "ltx_mlx_lora" {
+            "q4"
+        } else {
+            "bf16"
+        }
+        .to_owned(),
+    ))
 }
 
 fn prepare_portable_snapshot(
@@ -1983,6 +2024,7 @@ fn verify_portable_binding(
         .iter()
         .flat_map(|plan| plan.requirements.iter())
         .collect();
+    let requested_variant = selected_runtime_variant(job_type, payload, &binding.model_id)?;
     let source_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
     // Raw ModelConvert admission can freeze the immutable source privately while the synthetic
     // public manifest entry only carries repo/file hints. The binding is the source authority;
@@ -2022,7 +2064,7 @@ fn verify_portable_binding(
                 let selected_manifest = selected_manifest_row_covers_member(
                     member,
                     entry,
-                    payload,
+                    requested_variant.as_deref(),
                     raw_conversion_primary,
                 );
                 if !selected_auxiliary
@@ -2105,14 +2147,11 @@ fn verify_portable_binding(
     let selected = selected_requirements_for_model(
         entry,
         std::env::consts::OS,
-        requested_runtime_variant(payload).as_deref(),
+        requested_variant.as_deref(),
         &settings.data_dir,
     );
-    let selected_manifest = selected_model_artifact_closure(
-        entry,
-        std::env::consts::OS,
-        requested_runtime_variant(payload).as_deref(),
-    );
+    let selected_manifest =
+        selected_model_artifact_closure(entry, std::env::consts::OS, requested_variant.as_deref());
     let manifest_variant = selected_manifest
         .get("downloads")
         .and_then(serde_json::Value::as_array)
@@ -2131,7 +2170,7 @@ fn verify_portable_binding(
         .find(|requirement| requirement.is_primary)
         .map(|requirement| requirement.variant.clone())
         .or(manifest_variant)
-        .or_else(|| requested_runtime_variant(payload))
+        .or_else(|| requested_variant.clone())
         .unwrap_or_else(|| {
             if entry
                 .get("downloads")
@@ -2165,23 +2204,19 @@ fn verify_portable_binding(
     binding
         .verify_local(&local, &allowed_roots)
         .map_err(|error| invalid_binding(error.to_string()))?;
-    verify_manifest_globs(binding, entry, payload, settings)
+    verify_manifest_globs(binding, entry, requested_variant.as_deref(), settings)
 }
 
 fn selected_manifest_row_covers_member(
     member: &PortableArtifactMember,
     entry: &serde_json::Value,
-    payload: &JsonObject,
+    requested_variant: Option<&str>,
     raw_conversion_primary: bool,
 ) -> bool {
     let PortableSourceIdentity::Revision { identity } = &member.source else {
         return false;
     };
-    let selected = selected_model_artifact_closure(
-        entry,
-        std::env::consts::OS,
-        requested_runtime_variant(payload).as_deref(),
-    );
+    let selected = selected_model_artifact_closure(entry, std::env::consts::OS, requested_variant);
     selected
         .get("downloads")
         .and_then(serde_json::Value::as_array)
@@ -2293,12 +2328,10 @@ fn recursive_snapshot_matches(snapshot: &Path, selector: &str) -> WorkerResult<V
 fn verify_manifest_globs(
     binding: &PortableModelBinding,
     entry: &serde_json::Value,
-    payload: &JsonObject,
+    requested_variant: Option<&str>,
     settings: &Settings,
 ) -> WorkerResult<()> {
-    let requested = requested_runtime_variant(payload);
-    let selected =
-        selected_model_artifact_closure(entry, std::env::consts::OS, requested.as_deref());
+    let selected = selected_model_artifact_closure(entry, std::env::consts::OS, requested_variant);
     for download in selected
         .get("downloads")
         .and_then(serde_json::Value::as_array)
@@ -3616,6 +3649,23 @@ mod tests {
         .unwrap()
     }
 
+    fn training_payload(base_model: &str, kernel: &str, model_path: &Path) -> JsonObject {
+        json!({
+            "modelManifestEntry":{"id":base_model,"downloads":[],"paths":{"model":model_path}},
+            "plan":{
+                "schemaVersion":1,"planVersion":1,"jobId":"job",
+                "target":{"targetId":"target","kernel":kernel,"family":"training","modality":"image","outputKind":"lora","baseModel":base_model,"baseModelPath":model_path},
+                "dataset":{"datasetId":"dataset","datasetVersion":1,"rootPath":"/dataset","items":[]},
+                "config":{"rank":16,"alpha":32,"learningRate":0.0001,"steps":10,"batchSize":1,"gradientAccumulation":1,"resolution":512,"saveEvery":10,"seed":1,"optimizer":"adamw8bit","advanced":{}},
+                "output":{"loraId":"lora","outputDir":"/output","fileName":"lora.safetensors","format":"safetensors","triggerWords":[]},
+                "provenance":{"datasetId":"dataset","datasetVersion":1,"targetId":"target","baseModel":base_model,"configSnapshot":{},"outputLoraId":"lora","sourceJobId":"job","createdAt":"2026-11-07T00:00:00Z"}
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
     #[test]
     fn download_free_registered_model_uses_admitted_local_variant() {
         let temp = TempDir::new().unwrap();
@@ -3641,6 +3691,124 @@ mod tests {
             Some(&route),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn training_base_variant_follows_admitted_bf16_and_ltx_q4_tiers() {
+        for (base_model, kernel, tier) in [
+            ("z_image_turbo", "z_image_lora", "bf16"),
+            ("ltx_2_5", "ltx_mlx_lora", "q4"),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let data = temp.path().join("data");
+            let model = data.join("models/imports/base/model.safetensors");
+            std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+            std::fs::write(&model, b"training base").unwrap();
+            let payload = training_payload(base_model, kernel, &model);
+            let mut base = local_binding("modelManifestEntry", base_model, &model, None);
+            base.variant = tier.to_owned();
+            base.tier = Some(tier.to_owned());
+            base.members[0].tier = Some(tier.to_owned());
+            let route = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![base]).unwrap();
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::LoraTrain,
+                &payload,
+                &settings(data),
+                Some(&route),
+            )
+            .unwrap();
+            assert_ne!(
+                guard.dispatch_payload()["plan"]["target"]["baseModelPath"],
+                payload["plan"]["target"]["baseModelPath"]
+            );
+        }
+    }
+
+    #[test]
+    fn training_download_selection_ignores_generation_default_tier() {
+        use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+        use sceneworks_core::model_artifacts::ArtifactIdentity;
+
+        let temp = TempDir::new().unwrap();
+        let model = temp.path().join("models/base/model.safetensors");
+        let payload = training_payload("z_image_turbo", "z_image_lora", &model);
+        let entry = json!({"id":"z_image_turbo","downloads":[
+            {"provider":"huggingface","repo":"guardfx/training-base","revision":REV_A,
+             "variant":"q4","default":true,"files":["q4/model.safetensors"]},
+            {"provider":"huggingface","repo":"guardfx/training-base","revision":REV_A,
+             "variant":"bf16","files":["bf16/model.safetensors"]}
+        ]});
+        let selected =
+            selected_runtime_variant(&JobType::LoraTrain, &payload, "z_image_turbo").unwrap();
+        assert_eq!(selected.as_deref(), Some("bf16"));
+        let closure =
+            selected_model_artifact_closure(&entry, std::env::consts::OS, selected.as_deref());
+        assert_eq!(closure["downloads"][0]["variant"], "bf16");
+        let requirements = selected_requirements_for_model(
+            &entry,
+            std::env::consts::OS,
+            selected.as_deref(),
+            temp.path(),
+        );
+        assert_eq!(requirements.requirements[0].variant, "bf16");
+        assert_eq!(
+            requirements.requirements[0].files[0],
+            PathBuf::from("bf16/model.safetensors")
+        );
+        let data = temp.path().join("data");
+        let library = temp.path().join("hf");
+        with_library(&library, || {
+            let source = sceneworks_core::hf_home::model_source_library(&data)
+                .repository_root("guardfx/training-base")
+                .unwrap()
+                .join("snapshots")
+                .join(REV_A)
+                .join("bf16/model.safetensors");
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(&source, b"bf16 training base").unwrap();
+            let mut payload = training_payload("z_image_turbo", "z_image_lora", &source);
+            payload.insert("modelManifestEntry".to_owned(), entry.clone());
+            let member = PortableArtifactMember {
+                role: ArtifactMemberRole::Primary,
+                component_id: None,
+                source: PortableSourceIdentity::Revision {
+                    identity: ArtifactIdentity::pinned("guardfx/training-base", REV_A, "bf16")
+                        .unwrap(),
+                },
+                tier: Some("bf16".to_owned()),
+                files: vec![PortableArtifactFile {
+                    relative_path: "bf16/model.safetensors".into(),
+                    size_bytes: 18,
+                    sha256: format!("sha256:{:x}", Sha256::digest(b"bf16 training base")),
+                }],
+            };
+            let base = PortableModelBinding::new(
+                "modelManifestEntry",
+                "z_image_turbo",
+                "cpu",
+                "bf16",
+                Some("bf16".to_owned()),
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                vec![member],
+            )
+            .unwrap();
+            let route = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![base]).unwrap();
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::LoraTrain,
+                &payload,
+                &settings(data),
+                Some(&route),
+            )
+            .unwrap();
+            let rebound = guard.dispatch_payload()["plan"]["target"]["baseModelPath"]
+                .as_str()
+                .unwrap();
+            assert_ne!(Path::new(rebound), source);
+            assert_eq!(
+                std::fs::read(Path::new(rebound).join("model.safetensors")).unwrap(),
+                b"bf16 training base"
+            );
+        });
     }
 
     #[test]
