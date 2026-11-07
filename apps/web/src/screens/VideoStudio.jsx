@@ -253,7 +253,7 @@ export function VideoStudio() {
   // advertise the paired contract yet, so a normal catalog remains on the existing single picker
   // until the final inference-main pin makes the capability truthful.
   const scail2MultiReferenceEnabled =
-    model === "scail2_14b" && selectedModel?.ui?.scail2MultiReference === true;
+    selectedModel?.family === "scail2" && selectedModel?.type === "video" && selectedModel?.ui?.scail2MultiReference === true;
 
   // Prompt guide for the selected model; fall back to the generic video guide
   // when a model declares none, so the button is always useful (sc-1817).
