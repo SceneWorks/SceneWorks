@@ -404,9 +404,9 @@ const ANIMA_DIT_FILES: &[&str] = &[
     "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
 ];
 /// The shared dense Qwen3-0.6B text encoder, reused bf16 in every Anima tier (repo-relative).
-const ANIMA_TE_FILE: &str = "split_files/text_encoders/qwen_3_06b_base.safetensors";
+const ANIMA_TE_FILE: &str = sceneworks_core::portable_convert_sources::ANIMA_TE_FILE;
 /// The shared dense Qwen-Image VAE, reused bf16 in every Anima tier (repo-relative).
-const ANIMA_VAE_FILE: &str = "split_files/vae/qwen_image_vae.safetensors";
+const ANIMA_VAE_FILE: &str = sceneworks_core::portable_convert_sources::ANIMA_VAE_FILE;
 
 /// Test-only hardcoded regression pin for the Anima DiT quant-target partition, mirroring
 /// `runtime_macos::providers::anima::is_dit_quant_target` (`true` UNLESS the base — a key minus its `.weight` suffix — is
