@@ -277,11 +277,23 @@ pub fn required_portable_aux_source_ids(
                 .map(str::to_owned),
             );
         }
-        if id == "kolors" && has_ref {
+        if id == "kolors"
+            && has_ref
+            && (backend == "mlx"
+                || !advanced
+                    .and_then(|value| value.get("poses"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|poses| poses.iter().any(Value::is_object)))
+        {
             ids.push("kolors_ip_adapter".to_owned());
         }
         if pid_backbone_for(id).is_some()
-            && id != "kolors"
+            && (id != "kolors"
+                || (backend == "candle"
+                    && advanced
+                        .and_then(|value| value.get("poses"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|poses| poses.iter().any(Value::is_object))))
             && (id != "pulid_flux_dev" || backend == "candle")
             && advanced
                 .and_then(|value| value.get("usePid"))
@@ -499,6 +511,26 @@ mod tests {
             selected.as_object().unwrap(),
             &kolors,
             "mlx"
+        )
+        .unwrap()
+        .contains(&"kolors_ip_adapter".to_owned()));
+        let candle_pose = json!({"model":"kolors","referenceAssetId":"asset","advanced":{"poses":[{"id":"front"}]}});
+        let mut candle_pid = candle_pose.as_object().unwrap().clone();
+        candle_pid.get_mut("advanced").unwrap()["usePid"] = json!(true);
+        let ids = required_portable_aux_source_ids(
+            &JobType::ImageGenerate,
+            &candle_pid,
+            &kolors,
+            "candle",
+        )
+        .unwrap();
+        assert!(ids.contains(&"pid_checkpoint".to_owned()));
+        assert!(ids.contains(&"pid_gemma".to_owned()));
+        assert!(!required_portable_aux_source_ids(
+            &JobType::ImageGenerate,
+            candle_pose.as_object().unwrap(),
+            &kolors,
+            "candle"
         )
         .unwrap()
         .contains(&"kolors_ip_adapter".to_owned()));

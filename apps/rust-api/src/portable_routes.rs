@@ -302,7 +302,14 @@ pub(crate) fn selected_route_source_rows(
                 push_operator_source(&mut rows, slot, source_id);
             }
         }
-        if id == "kolors" && has_reference {
+        if id == "kolors"
+            && has_reference
+            && (backend == "mlx"
+                || !advanced
+                    .and_then(|value| value.get("poses"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|poses| poses.iter().any(Value::is_object)))
+        {
             rows.push(SelectedRouteSource {
                 model_slot: slot.clone(),
                 component_id: "kolors_ip_adapter".to_owned(),
@@ -312,6 +319,7 @@ pub(crate) fn selected_route_source_rows(
                     reference: "refs/pr/4",
                     files: &[
                         "ip_adapter_plus_general.safetensors",
+                        "image_encoder/config.json",
                         "image_encoder/model.safetensors",
                     ],
                 },
@@ -319,7 +327,12 @@ pub(crate) fn selected_route_source_rows(
             });
         }
         if sceneworks_core::portable_sources::pid_backbone_for(id).is_some()
-            && id != "kolors"
+            && (id != "kolors"
+                || (backend == "candle"
+                    && advanced
+                        .and_then(|value| value.get("poses"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|poses| poses.iter().any(Value::is_object))))
             && (id != "pulid_flux_dev" || backend == "candle")
             && advanced
                 .and_then(|value| value.get("usePid"))
@@ -806,6 +819,38 @@ mod tests {
             .iter()
             .any(|row| row.component_id == "instantid_openpose"));
         assert!(!rows.iter().any(|row| row.component_id == "strict_control"));
+    }
+
+    #[test]
+    fn kolors_selects_ip_only_for_the_reference_loader_and_pid_for_candle_pose() {
+        let entry = json!({"id":"kolors"});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let pure_reference = json!({"model":"kolors","referenceAssetId":"asset"});
+        let rows = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            pure_reference.as_object().unwrap(),
+            &entries,
+            "candle",
+            "linux",
+        )
+        .unwrap();
+        assert!(rows
+            .iter()
+            .any(|row| row.component_id == "kolors_ip_adapter"));
+        let pose = json!({"model":"kolors","referenceAssetId":"asset","advanced":{"poses":[{"id":"front"}],"usePid":true}});
+        let rows = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            pose.as_object().unwrap(),
+            &entries,
+            "candle",
+            "linux",
+        )
+        .unwrap();
+        assert!(!rows
+            .iter()
+            .any(|row| row.component_id == "kolors_ip_adapter"));
+        assert!(rows.iter().any(|row| row.component_id == "pid_checkpoint"));
+        assert!(rows.iter().any(|row| row.component_id == "pid_gemma"));
     }
 
     fn routes(job_type: JobType, payload: Value, entry: Value) -> Vec<(String, String)> {

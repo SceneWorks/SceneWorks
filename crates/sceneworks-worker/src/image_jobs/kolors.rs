@@ -374,7 +374,15 @@ pub(super) async fn generate_kolors_control_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("kolors model row missing".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Kolors weights not found".to_owned()))?;
-    let control_dir = resolve_kolors_controlnet_dir(settings)?;
+    let control_dir = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+            .and_then(|file| file.parent().map(Path::to_path_buf))
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("missing bound Kolors ControlNet source".to_owned())
+            })?
+    } else {
+        resolve_kolors_controlnet_dir(settings)?
+    };
     let ip_dir = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
         crate::portable_aux_sources::bound_aux_path(&request.advanced, "kolors_ip_adapter")
             .ok_or_else(|| {
