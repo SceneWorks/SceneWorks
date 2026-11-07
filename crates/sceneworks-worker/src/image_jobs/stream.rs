@@ -22,6 +22,24 @@ use crate::Settings;
 use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static FLUX_OWNER_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn trace_flux_owner(job_id: &str, engine_id: &str, phase: &'static str) {
+    if !matches!(engine_id, "flux1_dev" | "flux1_schnell") {
+        return;
+    }
+    tracing::info!(
+        event = "flux1_owner_turn",
+        job_id,
+        engine_id,
+        phase,
+        owner_thread = ?std::thread::current().id(),
+        sequence = FLUX_OWNER_TRACE_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1,
+    );
+}
+
 pub(super) enum GenEvent {
     /// An output already encoded by its producing lane, persisted through shared assetWrites.
     AssetWritten {
@@ -932,6 +950,8 @@ where
 {
     let cancel = CancelFlag::new();
     let prepare_cancel = cancel.clone();
+    let prepare_job_id = job_id.clone();
+    let drive_job_id = job_id.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
     let blocking = crate::load_progress::spawn(async move {
@@ -947,18 +967,31 @@ where
             spec,
             load_error_context,
             move || {
-                if prepare_cancel.is_cancelled() {
-                    return Err(crate::WorkerError::Canceled(
-                        "Image generation canceled before owner preparation.".to_owned(),
-                    ));
-                }
-                let prepared = prepare(&prepare_cancel)?;
-                if prepare_cancel.is_cancelled() {
-                    return Err(crate::WorkerError::Canceled(
-                        "Image generation canceled before generator load.".to_owned(),
-                    ));
-                }
-                Ok(prepared)
+                trace_flux_owner(&prepare_job_id, engine_id, "prepare_begin");
+                let result = (|| {
+                    if prepare_cancel.is_cancelled() {
+                        return Err(crate::WorkerError::Canceled(
+                            "Image generation canceled before owner preparation.".to_owned(),
+                        ));
+                    }
+                    let prepared = prepare(&prepare_cancel)?;
+                    if prepare_cancel.is_cancelled() {
+                        return Err(crate::WorkerError::Canceled(
+                            "Image generation canceled before generator load.".to_owned(),
+                        ));
+                    }
+                    Ok(prepared)
+                })();
+                trace_flux_owner(
+                    &prepare_job_id,
+                    engine_id,
+                    if result.is_ok() {
+                        "prepare_end"
+                    } else {
+                        "prepare_failed"
+                    },
+                );
+                result
             },
             factory.load,
             move |generator,
@@ -968,13 +1001,14 @@ where
                   external_committed_bytes,
                   provider_resident_bytes,
                   prepared| {
+                trace_flux_owner(&drive_job_id, engine_id, "drive_begin");
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,
                     engine_id,
                     adapter_count,
                 );
-                drive(
+                let result = drive(
                     generator,
                     cache_state,
                     loaded_policy,
@@ -984,7 +1018,17 @@ where
                     prepared,
                     tx,
                     blocking_cancel,
-                )
+                );
+                trace_flux_owner(
+                    &drive_job_id,
+                    engine_id,
+                    if result.is_ok() {
+                        "drive_end"
+                    } else {
+                        "drive_failed"
+                    },
+                );
+                result
             },
         )
         .await
