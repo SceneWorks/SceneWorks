@@ -16,6 +16,9 @@ use sceneworks_core::video_request::{
 
 use super::*;
 
+#[path = "tests/h3_cuda_memory.rs"]
+mod h3_cuda_memory;
+
 const GIB: u64 = 1024 * 1024 * 1024;
 
 #[test]
@@ -5522,7 +5525,7 @@ fn veda_queued_admission_uses_complete_bound_and_current_budget() {
             load_policy: OffloadPolicy::Resident,
             provider_resident_bytes: GIB,
         };
-        let need = floor - GIB + bound.total_bytes + GIB;
+        let need = floor - GIB + veda_device_workspace_bytes(&bound) + GIB;
         assert!(admit_veda_workspace(Some(&contract), &bound, None, Some(make(need)), GIB).is_ok());
         assert!(
             admit_veda_workspace(Some(&contract), &bound, None, Some(make(need - 1)), GIB).is_err()
@@ -5622,7 +5625,7 @@ fn veda_sparse_admission_selects_the_dense_strategy_with_the_bound_on_top() {
 }
 
 #[test]
-fn veda_cold_admission_adds_full_bound_and_preserves_off_baseline() {
+fn historical_veda_cold_fixture_prices_device_pool_and_preserves_off_baseline() {
     let dense = 43.25f64;
     assert_eq!(veda_cold_peak_gb(dense, None).to_bits(), dense.to_bits());
     let req = gen_core::GenerationRequest {
@@ -5640,7 +5643,10 @@ fn veda_cold_admission_adds_full_bound_and_preserves_off_baseline() {
             .unwrap()
             .unwrap();
     let sparse = veda_cold_peak_gb(dense, Some(&bound));
-    assert_eq!(sparse, dense + bound.total_bytes as f64 / GIB as f64);
+    assert_eq!(
+        sparse,
+        dense + bound.device_peak_bytes() as f64 / GIB as f64
+    );
     assert!(
         dense < sparse,
         "a free budget at the dense baseline must refuse sparse"

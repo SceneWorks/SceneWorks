@@ -2,12 +2,16 @@
 
 Date: 2026-11-05
 
-Status: Planned for implementation. CodeGraph filing is deferred.
+Status: **SW-F329** implementation and runtime acceptance verified. Matched-policy
+control 42335898368 produced identical Resident/window media for the original
+request. The permanent inference pin is `2b09938e33370915d4f853389961709b8bbf8bf9`.
+[PR3331](https://github.com/SceneWorks/SceneWorks/pull/3331) and the feature
+acceptance report record final CI and protected delivery status.
 
 Make MiniMax H3 render long clips on CUDA using bounded GPU residency and accurate
-request accounting. The immediate acceptance case is **1344×768, 345 frames,
-q4, with Veda enabled**, which currently fails preflight with an approximately
-106 GB requirement against approximately 95 GB available. Deliver a usable
+request accounting. At the planning baseline, the acceptance case was
+**1344×768, 345 frames, q4, with Veda enabled**, failing preflight with an
+approximately 106 GB requirement against approximately 95 GB available. Deliver a usable
 24 GiB execution configuration as well as correcting that workstation case.
 
 ## Current behavior and demonstrated gaps
@@ -75,15 +79,15 @@ historical explanation or create a new measurement-freshness requirement.
 
 ## Implementation items
 
-The item references below are local plan references, not CodeGraph keys.
+The local plan references map to the tracked CodeGraph items below.
 
-| Ref | Type | Repository | Outcome | Blocked by |
-| --- | --- | --- | --- | --- |
-| H3-1 | Story | inference | Execute H3 with bounded CUDA transformer residency | None |
-| H3-2 | Bug | inference | Account for Veda host and GPU allocations by lifetime | None |
-| H3-3 | Story | inference | Select truthful H3 CUDA memory strategies | H3-1, H3-2 |
-| H3-4 | Story | SceneWorks | Admit and run long H3 requests through the shared strategy path | H3-3 |
-| H3-5 | Task | SceneWorks | Integrate the inference pin and prove long-clip memory targets | H3-4 |
+| Ref | CodeGraph | Type | Repository | Outcome | Blocked by |
+| --- | --- | --- | --- | --- | --- |
+| H3-1 | SW-6921 | Story | inference | Execute H3 with bounded CUDA transformer residency | None |
+| H3-2 | SW-6922 | Bug | inference | Account for Veda host and GPU allocations by lifetime | None |
+| H3-3 | SW-6923 | Story | inference | Select truthful H3 CUDA memory strategies | H3-1, H3-2 |
+| H3-4 | SW-6924 | Story | SceneWorks | Admit and run long H3 requests through the shared strategy path | H3-3 |
+| H3-5 | SW-6925 | Task | SceneWorks | Integrate the inference pin and prove long-clip memory targets | H3-4 |
 
 ### H3-1 Execute H3 with bounded CUDA transformer residency
 
@@ -128,6 +132,12 @@ materialized attention according to runtime capability and dispatch. If a
 fallback can allocate more than the admitted route, bound it to the same budget
 or refuse that request before generation rather than risking a mid-render OOM.
 Keep MLX unified-memory accounting correct while changing shared types.
+
+Distinguish Veda sparse-to-dense fallback from fused-attention-unavailable
+materializing fallback: the Veda dense path can still dispatch FlashAttention.
+Force and identify both reachable routes in dedicated inference validation,
+including the selected query chunk sizes and their byte bounds. A forced Veda
+fallback alone does not establish materializing-fallback coverage.
 
 Acceptance criteria:
 
@@ -218,17 +228,65 @@ Acceptance criteria:
 Use one terminal campaign for these outcomes, reusing bounded numerical,
 cancellation, and contract evidence from earlier items. Recover the original
 job or recipe for its remaining settings when available; otherwise record the
-chosen prompt, seed, steps, and sparse controls explicitly. Start with two full
-render anchors: the workstation Veda case and a 24 GiB case with forced dense
-fallback. If the latter cannot also establish normal sparse execution within
-24 GiB, add only the focused sparse render needed to prove it. An actual 24 GiB
+chosen prompt, seed, steps, and sparse controls explicitly. The bounded campaign
+uses the workstation normal-Veda case, a 24 GiB case with forced dense fallback,
+and one focused normal-Veda24 GiB render. The third render establishes normal
+sparse fit and supplies complete media diagnostics against the workstation's
+resident Veda execution: identical creative settings, positive sparse calls on
+both, different executed residency policies, and actual video/audio comparison.
+E5 additionally requires matched-input component parity through the affected
+production paths and dtypes; independent successful renders are not parity proof.
+The forced-dense render remains a separate fallback/envelope proof. An actual 24 GiB
 GPU or an enforceable allocation cap plus whole-device peak observation can
 establish the memory envelope; a Blackwell run must not be reported as RTX 3090
 hardware or performance validation.
 
+Establish the 24 GiB proof mechanism before the terminal campaign. Use a real
+24 GiB device or an enforceable allocation cap covering the process's CUDA
+allocation routes, with whole-device peaks including context, reserve, and
+other processes. Record the enforcement mechanism and its coverage.
+`SCENEWORKS_CUDA_VRAM_CAP_GB` changes admission budgets only; sampled telemetry
+with cooperative cancellation also does not enforce an allocation limit. An
+uncapped larger-card run cannot establish this envelope.
+
+Record Veda sparse-to-dense fallback and fused-unavailable materializing
+fallback as distinct executed routes; the first can still use FlashAttention.
+Reuse focused runtime validation for the materializing route, with its selected
+query chunk sizes and byte bounds. Add a full render only when the existing
+anchor cannot establish the required envelope. All inference computation stays
+in separate dedicated validation workflows.
+
 Check video dimensions, frame count, duration, changing nonblack frames, and
-the generated audio stream. Reuse fixed-input intermediate parity checks to
-detect silent numerical regressions; file existence alone is insufficient.
+the generated audio stream. Retain full decoded RGB and native-rate stereo
+comparison diagnostics for the two normal-Veda anchors, including their
+job/media hashes and executed policy witnesses. The sc-26691
+`maximumBaselineDelta:0.001` measures sampled unchanged-repeat stability; it is
+not an established full-frame, per-channel resident/window tolerance. Do not
+promote it to that role or choose a replacement threshold after seeing outputs.
+
+Verify equivalent-route numerical semantics with identical fixed inputs through
+the affected production-dtype components, including real q4/Turbo projections,
+adapters, Q/K preprocessing, TE/DiT and audio paths as affected. Hold the CUDA
+workspace policy equivalent when comparing residency, and isolate default versus
+explicit workspace as a separate diagnostic. A workspace-policy difference is
+an unproven confound until a component witness establishes its effect. Keep the
+existing exact Q/K contract and exact Veda mask/score assertions for common
+inputs. Existing small F32 DiT parity does not certify production BF16; no
+general BF16 projection/FFN bound is established by it. Locate and explain the
+first differing intermediate, enforce applicable source-defined component
+contracts, and repair violations. Do not infer a final-media bound from those
+contracts or declare the observed media drift acceptable without this evidence.
+
+Preserve campaign 42243645213 (consumer `c8815c7cd`, inference `2ff035382`) as failed
+under its predeclared harness criterion. Its three successful fit/media children
+and cleanup remain evidence
+with their original source/device identities. The measured video RMS 0.09263595
+and later audio RMS 0.01594603 remain divergence diagnostics, not accepted
+equivalence or permission to loosen a threshold. Matched control 42335898368 now
+reproduces the enforced 24 GiB output's encoded hash and zero full RGB/stereo
+differences, alongside the accepted production-path component evidence. The
+legacy numeric regression values remain unchanged. PR3331 and the feature
+acceptance report separately record final-head checks and protected delivery.
 Record host peak separately from device peak and account for other GPU
 processes. Timing is reported to expose transfer overhead, with no invented
 latency target. Failed anchors require a focused diagnosis and repair, not a
@@ -239,9 +297,8 @@ larger routine grid or an unverified claim of fit.
 H3-1 and H3-2 are independent implementation fronts. H3-3 joins their contracts,
 H3-4 performs the product cutover, and H3-5 closes the two-repository delivery.
 Related items may share reviewed PR batches and CI runs while retaining separate
-acceptance evidence. Refresh affected source and any overlapping tracked work
-before implementation; CodeGraph availability is not required to use these local
-item references.
+acceptance evidence. Refresh affected source and reconcile the live feature,
+items and overlapping work before implementation.
 
 Follow [FEATURE_DEVELOPMENT.md](../../FEATURE_DEVELOPMENT.md) for mirrored feature
 branches, review, inference merge ordering, final pin integration, and required

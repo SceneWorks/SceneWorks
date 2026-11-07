@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { CASE_SHUTDOWN_BOUND_FILE, hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, verifyRenderedContent, compareControlMedia, isSourceCancelCase, allowedInputRoots, verifiedStagingRoot, authorized, executionCases } from './h3-finetune-terminal.mjs';
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
-import { cudaDeviceEvidence, MANUAL_CUDA_PHYSICAL_GPU } from './ci/h3-import-native-proof.mjs';
+import { cudaDeviceEvidence, manualCudaSelection } from './ci/h3-import-native-proof.mjs';
 import { privateRunRoot } from './h3-finetune-terminal-stage.mjs';
 import { OS_ASSIGNED_PORT, isServicePort, boundApiPort, portHolder, formatPortHolder, isBindFailure, liveOwnedProcesses, campaignRunRoots, formatLeftovers, legacyWeightsRunParents, legacyWeightsRunRoots } from './lib/h3-owned-processes.mjs';
 export { OS_ASSIGNED_PORT, boundApiPort };
@@ -192,10 +192,18 @@ export async function hardware(backend, deviceId, deps={}) {
     const gpu = JSON.parse((await execute('system_profiler',['SPDisplaysDataType','-json'])).stdout).SPDisplaysDataType;
     assert.ok(gpu?.length); return {device:gpu[0].sppci_model ?? gpu[0]._name,driver:`Apple Metal driver bundled with macOS ${(await execute('sw_vers',['-productVersion'])).stdout.trim()}`};
   }
+  const selection=manualCudaSelection(deps);
   const inventory=(await execute('nvidia-smi',['--query-gpu=index,uuid,pci.bus_id,name,driver_version','--format=csv,noheader'])).stdout;
-  const cuda=cudaDeviceEvidence(deps.env??process.env,inventory),row=cuda.selectedPhysicalDevice;
-  assert.equal(row.uuid,deviceId,'requested CUDA UUID must be the actual PCI-ordered manual physical device 1');
+  const cuda=cudaDeviceEvidence(deps.env??process.env,inventory,deps),row=cuda.selectedPhysicalDevice;
+  assert.equal(row.uuid,deviceId,`requested CUDA UUID must be the actual PCI-ordered manual physical device ${selection.physicalGpuIndex}`);
   return {device:row.uuid+' '+row.name,driver:row.driverVersion,cuda};
+}
+
+export function validateCudaRuntimeDevice(runtime){
+  const selection=manualCudaSelection(runtime);
+  assert.equal(String(runtime.gpuId),String(selection.physicalGpuIndex),'manual campaign GPU must match its explicit physical selection (default1)');
+  if(selection.physicalGpuUuid!==undefined)assert.equal(runtime.deviceId,selection.physicalGpuUuid,'runtime UUID differs from explicit physical selection');
+  return selection;
 }
 
 // A native test already performs the numerical comparison. Do not invent another flat-vector gate.
@@ -334,6 +342,21 @@ export function privateEnvironment(runDir,runtime,token) {
   if(runtime.backend==='mlx')env.SCENEWORKS_MLX_REQUIRED='1';
   else Object.assign(env,{SCENEWORKS_CANDLE_REQUIRED:'1',SCENEWORKS_CANDLE_UNSUPPORTED_MODE:'enforce'});
   if(runtime.memoryCap){assert.equal(runtime.memoryCap.kind,runtime.backend==='cuda'?'cuda-vram-gb':'mlx-memory-gb');assert.ok(Number.isFinite(runtime.memoryCap.value)&&runtime.memoryCap.value>0);env[runtime.backend==='cuda'?'SCENEWORKS_CUDA_VRAM_CAP_GB':'SCENEWORKS_MLX_MEMORY_CAP_GB']=String(runtime.memoryCap.value);}
+  // SW-6925 explicit validation controls only; never inherit arbitrary proof controls from the host.
+  if(runtime.cudaProofEnvironment!==undefined){
+    assert.equal(runtime.backend,'cuda');
+    const controls=runtime.cudaProofEnvironment;
+    assert.ok(controls&&typeof controls==='object'&&!Array.isArray(controls));
+    for(const [key,value] of Object.entries(controls)){
+      if(key==='SCENEWORKS_CUDA_PROOF_POOL_BYTES')assert.match(value,/^[1-9][0-9]*$/);
+      else if(key==='SCENEWORKS_H3_VEDA_FORCE_DENSE')assert.equal(value,'1');
+      else if(key==='SCENEWORKS_H3_ATTENTION_ROUTE')assert.equal(value,'materialized');
+      else throw new Error(`unsupported explicit CUDA validation control ${key}`);
+      env[key]=value;
+    }
+    // Retain source-owned block-transfer receipts for the bounded-residency proof.
+    env.RUST_LOG='info,sceneworks=debug,candle_gen_minimax_h3=trace';
+  }
   return env;
 }
 async function confinedTaskSource(p,value,{allowRoot=false}={}) {
@@ -354,8 +377,8 @@ export class OwnedService {
     assert.ok(this.c.inputs.some(i=>i.path===r?.scenario && i.role==='scenario'),'bind the actual request/action scenario as an input');
     assert.ok(r && isServicePort(r.port) && r.gpuId,'owned service port (0 = OS-assigned) and device required');
     if(!this.fake && this.c.backend==='cuda') {
-      assert.equal(String(r.gpuId),MANUAL_CUDA_PHYSICAL_GPU,'manual campaign runs on physical GPU 1 (GPU 0 is the owner display GPU)');
-      await hardware('cuda',r.deviceId); // Confirm UUID/PCI mapping before any build, listener or model load.
+      validateCudaRuntimeDevice(r);
+      await hardware('cuda',r.deviceId,{physicalGpuIndex:r.physicalGpuIndex,physicalGpuUuid:r.physicalGpuUuid}); // Before build/listener/model.
     }
     await this.refuseLeftoverOwnedProcesses();
     const services=path.join(this.p.output,'services');await mkdir(services,{recursive:true});
@@ -387,6 +410,11 @@ export class OwnedService {
     const runner=this.deps.runProcess??runProcess;
     const command=['cargo','build','--locked',...campaignProfileArgs(),'--manifest-path',path.join(this.swRoot,'Cargo.toml'),'-p','sceneworks-rust-api','--bin','sceneworks-rust-api'];
     if(this.c.backend==='cuda')command.push('--features','sceneworks-rust-api/backend-candle');
+    if(this.c.runtime.cudaProofFeatures!==undefined){
+      assert.equal(this.c.backend,'cuda');
+      assert.deepEqual(this.c.runtime.cudaProofFeatures,['sceneworks-rust-api/h3-memory-proof']);
+      command.push('--features',...this.c.runtime.cudaProofFeatures);
+    }
     const platform=runPlatform(this.deps),layout=serviceBuildLayout(this.p,this.c,platform),buildRoot=layout.buildRoot,receipt=path.join(buildRoot,'build.json');
     const target=layout.target;
     const configuration={command,flags:Object.fromEntries(['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','RUSTUP_TOOLCHAIN'].map(k=>[k,process.env[k]??null])),proof_kind:this.fake?'unit_fake':'campaign_native'};

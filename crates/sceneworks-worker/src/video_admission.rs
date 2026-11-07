@@ -657,6 +657,7 @@ pub(crate) struct LadderVideoSelector<'a> {
     /// keeps the guard's admitted ceiling identical to the one the selector graded even when the
     /// peak came from a decode profile or a warm resident credit.
     resident_floors: Vec<(VideoAdmissionGeometry, u64, Option<u64>)>,
+    refusal_phases: Vec<(VideoAdmissionGeometry, VideoBindingPhase)>,
 }
 
 #[derive(Clone, Debug)]
@@ -711,6 +712,7 @@ impl<'a> LadderVideoSelector<'a> {
             profile_error: std::cell::RefCell::new(None),
             selections: Vec::new(),
             resident_floors: Vec::new(),
+            refusal_phases: Vec::new(),
         }
     }
 
@@ -829,11 +831,12 @@ fn native_quant_adapter_overlay_bytes(
     native: &gen_core::h3_memory::NativeAllocationFacts,
     rows: gen_core::h3_memory::NativeRows,
     legacy_overlay: u64,
-) -> u64 {
+    window: Option<u32>,
+) -> gen_core::Result<u64> {
     if native.tasks.iter().any(|task| task.adapter.is_some()) {
-        native.adapter_resident_bytes(rows)
+        native.adapter_resident_bytes_windowed(rows, window)
     } else {
-        legacy_overlay
+        Ok(legacy_overlay)
     }
 }
 
@@ -883,14 +886,52 @@ fn native_quant_phase_floor(
     // methods already price the TOTAL install high-water (install peak minus resident, plus the
     // scoped forward scratch), so it is never added on top here. The route-independent global
     // overlay remains only as the legacy None-profile fallback.
-    let steady_overlay = native_quant_adapter_overlay_bytes(native, rows, facts.overlay_bytes);
+    let steady_overlay =
+        native_quant_adapter_overlay_bytes(native, rows, facts.overlay_bytes, window)?;
     // The source-owned window plan correlates root/refiner, current window, shared native
     // storage and retained tables. A full-component native floor would erase a valid rung 4.
-    let native_denoise = native
-        .precompute_peak_bytes_windowed(rows, window)?
-        .max(native.denoise_peak_bytes_windowed(rows, window)?)
-        .saturating_add(unclassified)
-        .saturating_add(steady_overlay);
+    let denoise = if matches!(
+        native.backend,
+        gen_core::h3_memory::NativeBackend::Candle { .. }
+    ) {
+        let patch = native.selected_patch(shape)?;
+        let scores = selection
+            .parameters
+            .attention_chunk_size
+            .map(u64::from)
+            .unwrap_or(gen_core_h3::veda::workspace::CUDA_DENSE_SCORE_ELEMENTS)
+            .min(gen_core_h3::veda::workspace::CUDA_DENSE_SCORE_ELEMENTS);
+        let mut limits = gen_core_h3::veda::workspace::Limits::for_backend(
+            gen_core_h3::veda::workspace::Backend::Cuda,
+        );
+        limits.attention = scores.checked_mul(16).ok_or_else(|| {
+            gen_core::Error::Unsupported("H3 CUDA attention workspace overflow".into())
+        })?;
+        match gen_core_h3::veda::workspace::for_video_request_with_patch_and_limits(
+            shape,
+            gen_core_h3::veda::workspace::Backend::Cuda,
+            patch,
+            limits,
+        )? {
+            Some(veda) => native.denoise_peak_bytes_with_veda(rows, window, &veda)?,
+            None => native.denoise_peak_bytes_windowed(rows, window)?,
+        }
+    } else {
+        native.denoise_peak_bytes_windowed(rows, window)?
+    };
+    let add = |base: u64, extra: u64| {
+        base.checked_add(extra)
+            .ok_or_else(|| gen_core::Error::Unsupported("H3 phase allocation size overflow".into()))
+    };
+    let native_denoise = add(
+        add(
+            native
+                .precompute_peak_bytes_windowed(rows, window)?
+                .max(denoise),
+            unclassified,
+        )?,
+        steady_overlay,
+    )?;
     ordinary.denoise_bytes = ordinary.denoise_bytes.max(native_denoise);
     if let Some(conditioning) = &native.conditioning {
         // Native-main late consumer delta: packed row counts follow the SELECTED partition's own
@@ -904,30 +945,31 @@ fn native_quant_phase_floor(
         if workspace.conditioning_bytes > 0 {
             // TE/vision have been released before reference VAE/audio encoding. Their existing
             // prediction remains a separate maximum, never an invented co-resident weight sum.
-            ordinary.conditioning_bytes = ordinary.conditioning_bytes.max(
-                native
-                    .conditioning_resident_bytes
-                    .saturating_add(workspace.conditioning_bytes)
-                    .max(native.conditioning_load_bytes)
-                    .saturating_add(unclassified),
-            );
+            ordinary.conditioning_bytes = ordinary.conditioning_bytes.max(add(
+                add(
+                    native.conditioning_resident_bytes,
+                    workspace.conditioning_bytes,
+                )?
+                .max(native.conditioning_load_bytes),
+                unclassified,
+            )?);
         }
-        // Video and audio decode are serial and own different resident subsets. A profile that
-        // already accounts for distinct host output buffers on unified RAM is used once as-is;
-        // CUDA's workspace excludes those host bytes rather than adding them to device demand.
-        ordinary.decode_bytes = ordinary.decode_bytes.max(
-            native
-                .video_decode_resident_bytes
-                .saturating_add(workspace.video_decode_bytes)
-                .max(native.video_decode_load_bytes)
-                .max(
-                    native
-                        .audio_decode_resident_bytes
-                        .saturating_add(workspace.audio_decode_bytes)
-                        .max(native.audio_decode_load_bytes),
-                )
-                .saturating_add(unclassified),
-        );
+        // Video and audio decode are serial, with independently resident decoder subsets.
+        ordinary.decode_bytes = ordinary.decode_bytes.max(add(
+            add(
+                native.video_decode_resident_bytes,
+                workspace.video_decode_bytes,
+            )?
+            .max(native.video_decode_load_bytes)
+            .max(
+                add(
+                    native.audio_decode_resident_bytes,
+                    workspace.audio_decode_bytes,
+                )?
+                .max(native.audio_decode_load_bytes),
+            ),
+            unclassified,
+        )?);
     }
     Ok(ordinary)
 }
@@ -1005,7 +1047,8 @@ fn video_floor_weights_bytes(
         // Same selected-task adapter rule as the phase floor: a declared profile's steady
         // residency replaces the route-independent global overlay; install high-water is priced
         // inside the native windowed peak, never added on top of it.
-        let steady_overlay = native_quant_adapter_overlay_bytes(native, rows, facts.overlay_bytes);
+        let steady_overlay =
+            native_quant_adapter_overlay_bytes(native, rows, facts.overlay_bytes, dit_window)?;
         return Ok(conditioning
             .max(encode)
             .max(native.video_decode_resident_bytes)
@@ -1018,6 +1061,91 @@ fn video_floor_weights_bytes(
     } else {
         crate::mlx_fit_gate::estimate_floor_weights_bytes(contract, engaged)
     })
+}
+
+/// H3 CUDA always stages these phases. Retain their separate source-derived weight lifetimes
+/// before adding workspace: a decode-weight maximum must never be charged again during Veda.
+fn native_cuda_phase_weights(
+    selector: &LadderVideoSelector<'_>,
+    geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
+) -> Option<gen_core::Result<PhasePeaks>> {
+    if selector.identity.lane != VideoLane::Candle {
+        return None;
+    }
+    let native = selector
+        .contract
+        .phase_facts
+        .as_ref()?
+        .native_quant
+        .as_ref()?;
+    Some((|| {
+        let request = selector.native_quant_request.ok_or_else(|| {
+            gen_core::Error::Unsupported("H3 CUDA allocation requires the resolved request".into())
+        })?;
+        let rows = request.rows_at(native, geometry)?;
+        let facts = selector.contract.asset_facts;
+        let bounded = selector
+            .contract
+            .engages_selection(&selection, MemoryStrategy::BoundedTransformerResidency);
+        let component = selection.parameters.window_component();
+        let window = if bounded && component.includes_dit() {
+            selection.parameters.transformer_window_size
+        } else {
+            None
+        };
+        let conditioning = if bounded && component.includes_text_encoder() {
+            native
+                .conditioning_stream
+                .as_ref()
+                .ok_or_else(|| {
+                    gen_core::Error::Unsupported(
+                        "H3 CUDA source omits its text-encoder window facts".into(),
+                    )
+                })?
+                .peak_bytes(selection.parameters.transformer_window_size)
+        } else {
+            facts.conditioning_bytes
+        };
+        let reference_encoders = if request.shape.conditioning.is_empty() {
+            0
+        } else {
+            native.conditioning_resident_bytes
+        };
+        let overlay =
+            native_quant_adapter_overlay_bytes(native, rows, facts.overlay_bytes, window)?;
+        let unclassified = facts
+            .base_bytes
+            .saturating_sub(facts.transformer_bytes)
+            .saturating_sub(facts.conditioning_bytes)
+            .saturating_sub(facts.decoder_bytes);
+        let add = |base: u64, extra: u64| {
+            base.checked_add(extra).ok_or_else(|| {
+                gen_core::Error::Unsupported("H3 CUDA phase allocation size overflow".into())
+            })
+        };
+        let phase = |base: u64| add(add(base, unclassified)?, selector.headroom_bytes);
+        Ok(PhasePeaks {
+            conditioning_bytes: phase(conditioning.max(reference_encoders))?,
+            denoise_bytes: phase(add(
+                native.resident_peak_bytes_windowed(rows, window)?,
+                overlay,
+            )?)?,
+            decode_bytes: {
+                let weights = native
+                    .video_decode_resident_bytes
+                    .max(native.audio_decode_resident_bytes);
+                if native.conditioning.is_some() {
+                    // The source-owned VAE graph below prices its complete serial decode workspace
+                    // and constructor. A generic transformer activation allowance describes a
+                    // different lifetime and must not shadow that complete decoder graph.
+                    add(weights, unclassified)?
+                } else {
+                    phase(weights)?
+                }
+            },
+        })
+    })())
 }
 
 /// The historical activation floor, strengthened by the provider's own decode working set when the
@@ -1408,6 +1536,27 @@ fn fitted_or_floor_phase_peaks_for_selection<'a>(
     Option<&'a str>,
     Option<&'static str>,
 ) {
+    if let Some(native) = native_cuda_phase_weights(selector, geometry, selection) {
+        let phases = match native {
+            Ok(phases) => phases,
+            Err(error) => {
+                *selector.profile_error.borrow_mut() = Some(error.to_string());
+                PhasePeaks {
+                    conditioning_bytes: 0,
+                    denoise_bytes: 0,
+                    decode_bytes: 0,
+                }
+            }
+        };
+        // The retained measurements still describe their original resident geometry. This
+        // candidate uses the provider's complete source/request estimator at the chosen policy.
+        return (
+            phases,
+            CandidateBasis::EstimateFloor,
+            None,
+            Some("h3-cuda-native-phase-estimate-v1"),
+        );
+    }
     let strategy = selection.strategy;
     let fitted = selector
         .curves
@@ -1507,8 +1656,17 @@ fn video_estimate_selections(
         .as_ref()
         .and_then(|phase| phase.native_quant.as_ref())
         .is_some();
+    let native_cuda = native && contract.backend.backend_kind() == gen_core::MemoryBackend::Candle;
     let mut selections = Vec::new();
     for strategy in MemoryStrategy::ALL {
+        // A request can require more than the smallest score budget for even one attention
+        // row. Grade the provider's finite domain rather than abandoning the entire rung.
+        if native_cuda {
+            if let Ok(domain) = contract.selection_space(strategy, tier, false) {
+                selections.extend(domain);
+            }
+            continue;
+        }
         let engaged = contract.engaged_composition(strategy);
         let Some(parameters) =
             crate::mlx_fit_gate::estimate_floor_smallest_parameters(contract, &engaged)
@@ -1580,6 +1738,14 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
         // `a_rung_whose_prerequisite_is_unmet_is_not_offered` pins that the shared exclusion is in
         // force on the video lane, rather than assuming it.
         let mut synthesized = Vec::new();
+        let mut excluded_profile_error = None;
+        let native_cuda = self.identity.lane == VideoLane::Candle
+            && self
+                .contract
+                .phase_facts
+                .as_ref()
+                .and_then(|facts| facts.native_quant.as_ref())
+                .is_some();
         for selection in video_estimate_selections(self.contract, self.identity.tier) {
             let strategy = selection.strategy;
             let engaged = self.contract.engaged_composition(strategy);
@@ -1596,12 +1762,23 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             ) {
                 Ok(peaks) => peaks,
                 Err(error) => {
-                    *self.profile_error.borrow_mut() = Some(error.to_string());
-                    return VideoRungSelection::Undecidable;
+                    if !native_cuda {
+                        *self.profile_error.borrow_mut() = Some(error.to_string());
+                        return VideoRungSelection::Undecidable;
+                    }
+                    excluded_profile_error = Some(error.to_string());
+                    self.profile_error.borrow_mut().take();
+                    continue;
                 }
             };
-            if self.profile_error.borrow().is_some() {
-                return VideoRungSelection::Undecidable;
+            let profile_error = self.profile_error.borrow_mut().take();
+            if let Some(error) = profile_error {
+                if !native_cuda {
+                    *self.profile_error.borrow_mut() = Some(error);
+                    return VideoRungSelection::Undecidable;
+                }
+                excluded_profile_error = Some(error);
+                continue;
             }
             let absolute_predicted_peak_bytes = phase_peaks.peak_bytes();
             let Some(predicted_peak_bytes) =
@@ -1674,7 +1851,15 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             ));
         }
         if synthesized.is_empty() {
+            *self.profile_error.borrow_mut() = excluded_profile_error;
             return VideoRungSelection::Undecidable;
+        }
+        if let Some(candidate) = synthesized
+            .iter()
+            .min_by_key(|candidate| candidate.2.peak_bytes())
+        {
+            self.refusal_phases
+                .push((geometry, candidate.2.binding_phase()));
         }
 
         let candidates = synthesized
@@ -2195,6 +2380,12 @@ fn admit_video_generation_with_curves_and_profiles(
     let Some(contract) = contract else {
         return VideoAdmissionOutcome::default();
     };
+    let native_cuda = request.lane == VideoLane::Candle
+        && contract
+            .phase_facts
+            .as_ref()
+            .and_then(|facts| facts.native_quant.as_ref())
+            .is_some();
     // sc-22738: a measured lower bound this host cannot carry refuses HERE — with the contract and
     // the live budget resolved, and before a single estimate is priced. See
     // [`exceeded_bound_refusal`] for why a measurement decides ahead of the ladder rather than
@@ -2289,6 +2480,7 @@ fn admit_video_generation_with_curves_and_profiles(
     }
     let resident_floors = selector.resident_floors;
     let selections = selector.selections;
+    let refusal_phases = selector.refusal_phases;
     match verdict {
         sceneworks_core::video_request::VideoAdmission::NotRouted
         | sceneworks_core::video_request::VideoAdmission::Undecidable => {
@@ -2371,7 +2563,9 @@ fn admit_video_generation_with_curves_and_profiles(
                 return VideoAdmissionOutcome {
                     memory: None,
                     context: None,
-                    refusal: None,
+                    refusal: native_cuda.then(|| format!(
+                        "H3 CUDA source cannot execute the selected memory configuration: {reason}. No tensor execution started; choose a supported residency/window configuration."
+                    )),
                 };
             }
             VideoAdmissionOutcome {
@@ -2386,6 +2580,20 @@ fn admit_video_generation_with_curves_and_profiles(
             geometry,
             ..
         } => {
+            if native_cuda {
+                let phase = refusal_phases
+                    .iter()
+                    .find_map(|(graded, phase)| (*graded == geometry).then_some(phase))
+                    .map_or("unknown", |phase| match phase {
+                        VideoBindingPhase::Conditioning => "conditioning",
+                        VideoBindingPhase::Denoise => "denoise",
+                        VideoBindingPhase::Decode => "decode",
+                    });
+                return VideoAdmissionOutcome {
+                    refusal: Some(format!("{message} Limiting pool: GPU; phase: {phase}. No supported residency/window configuration fits this request. Free GPU memory, reduce resolution or frame count, or use a GPU with more memory.")),
+                    ..Default::default()
+                };
+            }
             let Some((resident_floor_bytes, resident_floor_activation_bytes)) = resident_floors
                 .iter()
                 .find_map(|(graded, bytes, activation)| {
@@ -2793,6 +3001,13 @@ pub(crate) fn admit_video_generation_with_veda(
     )
 }
 
+fn veda_device_workspace_bytes(bound: &gen_core_h3::veda::workspace::WorkspaceBound) -> u64 {
+    match bound.backend {
+        gen_core_h3::veda::workspace::Backend::Cuda => bound.device_peak_bytes(),
+        gen_core_h3::veda::workspace::Backend::Mlx => bound.unified_peak_bytes(),
+    }
+}
+
 fn admit_with_veda_bound(
     generator: &dyn gen_core::Generator,
     mut request: VideoAdmissionInputs<'_>,
@@ -2800,13 +3015,30 @@ fn admit_with_veda_bound(
     floor_headroom_bytes: u64,
     dense: impl FnOnce(&dyn gen_core::Generator, VideoAdmissionInputs<'_>) -> VideoAdmissionOutcome,
 ) -> crate::WorkerResult<VideoAdmissionOutcome> {
+    let native_cuda = request.lane == VideoLane::Candle
+        && generator
+            .memory_strategy_contract()
+            .and_then(|contract| contract.phase_facts.as_ref())
+            .and_then(|facts| facts.native_quant.as_ref())
+            .is_some();
+    if native_cuda {
+        // The shared selector composes Veda with the selected DiT attention lifetime. Adding its
+        // scalar to all phases, or applying a resident-weight gate afterward, contradicts that plan.
+        let outcome = dense(generator, request);
+        if outcome.refusal.is_none() && outcome.context.is_none() {
+            return Err(crate::WorkerError::InvalidPayload(
+                "H3 CUDA admission could not establish a supported device-memory strategy for this request; no tensors were loaded. Check the available GPU memory and the source's supported offload/window configurations.".into(),
+            ));
+        }
+        return Ok(outcome);
+    }
     let Some(bound) = sparse else {
         return Ok(dense(generator, request));
     };
     let runtime = request.runtime;
     request.headroom_bytes = request
         .headroom_bytes
-        .checked_add(bound.total_bytes)
+        .checked_add(veda_device_workspace_bytes(bound))
         .ok_or_else(|| crate::WorkerError::InvalidPayload("Veda admission size overflow".into()))?;
     let outcome = dense(generator, request);
     if outcome.refusal.is_some() {
@@ -2860,7 +3092,7 @@ pub(crate) fn admit_veda_workspace(
     let need = base
         .checked_sub(credit)
         .and_then(|n| n.checked_add(headroom_bytes))
-        .and_then(|n| n.checked_add(bound.total_bytes))
+        .and_then(|n| n.checked_add(veda_device_workspace_bytes(bound)))
         .ok_or_else(|| crate::WorkerError::InvalidPayload("Veda admission size overflow".into()))?;
     let available = runtime
         .budget
@@ -2869,55 +3101,46 @@ pub(crate) fn admit_veda_workspace(
     if available < need {
         return Err(crate::WorkerError::InvalidPayload(format!(
             "Veda {:?} plan {} needs {} bytes (dense native floor plus complete sparse/fallback workspace {}), but {} bytes are available",
-            bound.backend,bound.plan,need,bound.total_bytes,available)));
+            bound.backend,bound.plan,need,veda_device_workspace_bytes(bound),available)));
     }
     Ok(())
 }
 
-/// Dense measured evidence is only the baseline; enabled sparse adds its explicit complete
-/// predictor/workspace/fallback bound. Shared with the Candle pre-load gate and CPU fixtures.
-#[cfg(any(not(target_os = "macos"), test))]
+/// Archived catalog baseline arithmetic, retained only to keep historical measurement fixtures
+/// meaningful. Production CUDA H3 composes source-derived per-phase allocation facts.
+#[cfg(test)]
 pub(crate) fn veda_cold_peak_gb(
     dense_baseline_gb: f64,
     sparse: Option<&gen_core_h3::veda::workspace::WorkspaceBound>,
 ) -> f64 {
     sparse.map_or(dense_baseline_gb, |bound| {
-        dense_baseline_gb + bound.total_bytes as f64 / (1024. * 1024. * 1024.)
+        dense_baseline_gb + veda_device_workspace_bytes(bound) as f64 / (1024. * 1024. * 1024.)
     })
 }
 
-/// CUDA host residency must fit independently of the device pool. Scorer/selector/gather
-/// categories contain both host and device temporaries; retaining their complete bounds here
-/// is conservative for the host, without charging device-only QKV/output/dense-score buffers.
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
-pub(crate) fn veda_host_workspace_bytes(
-    bound: &gen_core_h3::veda::workspace::WorkspaceBound,
-) -> u64 {
-    [
-        bound.predictor_host_bytes,
-        bound.predictor_load_bytes,
-        bound.layout_host_bytes,
-        bound.position_rows_bytes,
-        bound.scorer_bytes,
-        bound.selector_bytes,
-        bound.gather_bytes,
-        bound.predictor_device_bytes,
-        bound.self_test_bytes,
-    ]
-    .iter()
-    .sum()
+/// Historical Veda-only host fixture. Production H3 checks the provider's complete source
+/// preparation, retained host weights, media and Veda host bound together.
+#[cfg(test)]
+fn veda_host_workspace_bytes(bound: &gen_core_h3::veda::workspace::WorkspaceBound) -> u64 {
+    bound.host_peak_bytes()
 }
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
-pub(crate) fn admit_veda_host_workspace(
+
+#[cfg(test)]
+fn admit_veda_host_workspace(
     bound: &gen_core_h3::veda::workspace::WorkspaceBound,
     available: Option<u64>,
 ) -> crate::WorkerResult<()> {
     let needed = veda_host_workspace_bytes(bound);
+    admit_h3_host_bytes(needed, available)
+}
+
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+pub(crate) fn admit_h3_host_bytes(needed: u64, available: Option<u64>) -> crate::WorkerResult<()> {
     let available=available.ok_or_else(||crate::WorkerError::InvalidPayload(
-        "Veda admission could not read available host RAM; refusing predictor/scorer allocation".into()))?;
+        "H3 host-memory admission could not read available RAM; refusing tensor/predictor preparation".into()))?;
     if needed > available {
         return Err(crate::WorkerError::InvalidPayload(format!(
-        "Veda predictor/scorer host workspace needs {needed} bytes, but host RAM has {available} bytes available")));
+        "H3 host preparation/retained workspace needs {needed} bytes, but host RAM has {available} bytes available. Free host RAM or use a machine with more RAM; a larger GPU does not resolve this pool limit.")));
     }
     Ok(())
 }

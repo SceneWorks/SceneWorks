@@ -57,19 +57,34 @@ export function observeMetalCase(name, receipt, save, observe = metalMemoryObser
   return observation;
 }
 
-// Physical GPU 0 is the owner's display/work GPU; the self-hosted CUDA runners own physical GPU 1.
-// Manual H3 proofs therefore pin the PCI-bus-ordered physical device 1 (CUDA ordinal 0 inside the
+// Existing manual H3 callers default to PCI-bus-ordered physical device 1 (CUDA ordinal 0 inside the
 // process, because CUDA_VISIBLE_DEVICES narrows visibility to that one card). SCENEWORKS_GPU_ID is
 // the worker's physical (nvidia-smi, PCI-ordered) index, so it must name the same card.
+// Visibility may use that physical ordinal or its full observed UUID; never a UUID prefix.
 export const MANUAL_CUDA_PHYSICAL_GPU = "1";
 
-export function cudaDeviceEvidence(env, csv) {
-  if (env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID" || env.CUDA_VISIBLE_DEVICES !== MANUAL_CUDA_PHYSICAL_GPU) {
-    throw new Error(`manual CUDA proof requires PCI_BUS_ID ordering and visible physical device ${MANUAL_CUDA_PHYSICAL_GPU}`);
+export function manualCudaSelection({physicalGpuIndex,physicalGpuUuid}={}) {
+  const index=physicalGpuIndex===undefined?Number(MANUAL_CUDA_PHYSICAL_GPU):physicalGpuIndex;
+  if(typeof index!=="number"||!Number.isInteger(index)||![0,1].includes(index))throw new Error("manual CUDA physicalGpuIndex must be the exact integer0 or1");
+  if((index===0||physicalGpuUuid!==undefined)&&!/^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(physicalGpuUuid??""))throw new Error("explicit physical GPU0 requires its complete CUDA UUID");
+  return {physicalGpuIndex:index,physicalGpuUuid};
+}
+
+function requireManualCudaVisibility(env,options={}) {
+  const selection=manualCudaSelection(options),physical=String(selection.physicalGpuIndex);
+  const visible = env.CUDA_VISIBLE_DEVICES;
+  if (env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID" || !(visible === physical
+      || /^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(visible ?? ""))) {
+    throw new Error(`manual CUDA proof requires PCI_BUS_ID ordering and visible physical device ${physical}`);
   }
-  if (env.SCENEWORKS_GPU_ID !== undefined && env.SCENEWORKS_GPU_ID !== "" && env.SCENEWORKS_GPU_ID !== MANUAL_CUDA_PHYSICAL_GPU) {
-    throw new Error(`manual CUDA proof requires SCENEWORKS_GPU_ID ${MANUAL_CUDA_PHYSICAL_GPU} to match the visible physical device`);
+  if ((options.physicalGpuIndex!==undefined&&env.SCENEWORKS_GPU_ID!==physical)||(env.SCENEWORKS_GPU_ID !== undefined && env.SCENEWORKS_GPU_ID !== "" && env.SCENEWORKS_GPU_ID !== physical)) {
+    throw new Error(`manual CUDA proof requires SCENEWORKS_GPU_ID ${physical} to match the visible physical device`);
   }
+  if(selection.physicalGpuUuid!==undefined&&visible!==selection.physicalGpuUuid)throw new Error("manual CUDA proof requires the explicitly selected UUID mask; no ordinal fallback");
+}
+
+export function cudaDeviceEvidence(env, csv,options={}) {
+  requireManualCudaVisibility(env,options);
   const devices = csv.trim().split(/\r?\n/).filter(Boolean).map(line => {
     const [index, uuid, pciBusId, name, driverVersion] = line.split(",").map(value => value.trim());
     const bus = /^([0-9a-f]+):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])$/i.exec(pciBusId ?? "");
@@ -83,9 +98,16 @@ export function cudaDeviceEvidence(env, csv) {
     for (let i = 0; i < a.busOrder.length; i++) if (a.busOrder[i] !== b.busOrder[i]) return a.busOrder[i] - b.busOrder[i];
     return 0;
   });
-  const physical = Number(MANUAL_CUDA_PHYSICAL_GPU);
+  for (const identity of [d => d.nvmlIndex, d => d.uuid.toLowerCase(), d => d.busOrder.join(":")]) {
+    if (new Set(devices.map(identity)).size !== devices.length) throw new Error("ambiguous physical CUDA device identities in nvidia-smi evidence");
+  }
+  const physical = manualCudaSelection(options).physicalGpuIndex;
   if (devices.length <= physical) throw new Error(`missing physical CUDA device ${physical} identity`);
   const { busOrder: _order, ...selectedPhysicalDevice } = devices[physical];
+  if(options.physicalGpuIndex!==undefined&&selectedPhysicalDevice.nvmlIndex!==physical)throw new Error("explicit CUDA physical index differs from PCI-ordered NVML identity");
+  if (env.CUDA_VISIBLE_DEVICES !== String(physical) && env.CUDA_VISIBLE_DEVICES !== selectedPhysicalDevice.uuid) {
+    throw new Error(`manual CUDA proof UUID must identify PCI-ordered physical device ${physical}`);
+  }
   return { cudaDeviceOrder: env.CUDA_DEVICE_ORDER, cudaVisibleDevices: env.CUDA_VISIBLE_DEVICES,
     selectedPhysicalDevice, enumeration: `PCI_BUS_ID ascending; physical device ${physical} (CUDA visible ordinal 0)` };
 }
@@ -151,7 +173,7 @@ export async function runProof(backend, evidence) {
   requireManualSelection(process.env.GITHUB_EVENT_NAME, process.env.H3_IMPORT_BACKEND, backend);
   if (process.platform !== (backend === "mlx" ? "darwin" : "win32")) throw new Error("native backend/host mismatch");
   if (backend === "mlx" && process.env.RUNNER_NAME !== "nax-macos-2") throw new Error("MLX proof is Mac2-only");
-  if (backend === "cuda" && (process.env.CUDA_VISIBLE_DEVICES !== MANUAL_CUDA_PHYSICAL_GPU || process.env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID")) throw new Error(`manual CUDA proof must retain PCI_BUS_ID ordering and physical device ${MANUAL_CUDA_PHYSICAL_GPU}`);
+  if (backend === "cuda") requireManualCudaVisibility(process.env);
   if (!path.isAbsolute(evidence)) throw new Error("evidence directory must be absolute and new");
   mkdirSync(evidence); // refuse accidental reuse of an earlier receipt/log set
   const start = Date.now();
@@ -160,7 +182,7 @@ export async function runProof(backend, evidence) {
   const receipt = {
     schema: 1, sourceSha: checked("git", ["rev-parse", "HEAD"]).trim(), inferenceSha,
     event: process.env.GITHUB_EVENT_NAME, selection: process.env.H3_IMPORT_BACKEND,
-    runner: process.env.RUNNER_NAME, backend, device: backend === "cuda" ? `CUDA_VISIBLE_DEVICES=${MANUAL_CUDA_PHYSICAL_GPU}` : "Mac2 Metal",
+    runner: process.env.RUNNER_NAME, backend, device: backend === "cuda" ? `CUDA_VISIBLE_DEVICES=${process.env.CUDA_VISIBLE_DEVICES}` : "Mac2 Metal",
     fixtureSource: fixture, fixtureSha256: createHash("sha256").update(readFileSync(fixture)).digest("hex"),
     configuration: { syntheticOnly: true, downloads: false, layers: 1, refinerLayers: 1, hiddenSize: 256,
       attentionHeads: 2, headDim: 128, ffnDim: 256, timeEmbedDim: 64, tableGrid: 1025, tableRank: 8,
