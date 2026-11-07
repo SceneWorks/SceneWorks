@@ -248,7 +248,7 @@ pub(crate) async fn validate_frozen_replay_binding(
     frozen
         .validate()
         .map_err(|error| incomplete(error.to_string()))?;
-    let candidate = match capture_portable_model_binding_inner(
+    let (candidate, needs_worker_availability) = match capture_portable_model_binding_inner(
         state,
         job_type,
         payload,
@@ -257,7 +257,7 @@ pub(crate) async fn validate_frozen_replay_binding(
     )
     .await
     {
-        Ok(Some(candidate)) => candidate,
+        Ok(Some(candidate)) => (candidate, false),
         Ok(None) => {
             return Err(incomplete(
                 "model-free replay cannot carry a frozen source binding",
@@ -275,7 +275,11 @@ pub(crate) async fn validate_frozen_replay_binding(
             // API-host locators may disappear after the original admission. Revalidate the
             // logical request and pinned sources, then require one worker with every exact local
             // digest before allowing a retry to enter the queue.
-            replay_without_api_local_paths(state, job_type, payload, requested_gpu, frozen).await?
+            (
+                replay_without_api_local_paths(state, job_type, payload, requested_gpu, frozen)
+                    .await?,
+                true,
+            )
         }
         Err(error) => return Err(error),
     };
@@ -286,7 +290,11 @@ pub(crate) async fn validate_frozen_replay_binding(
             )));
         }
     }
-    filter_replay_routes_by_registered_claims(state, payload, requested_gpu, candidate).await
+    if needs_worker_availability {
+        filter_replay_routes_by_registered_claims(state, payload, requested_gpu, candidate).await
+    } else {
+        Ok(candidate)
+    }
 }
 
 async fn replay_without_api_local_paths(
