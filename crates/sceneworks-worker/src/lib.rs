@@ -1932,6 +1932,7 @@ async fn register_worker(
             worker_id: settings.worker_id.clone(),
             gpu_id: gpu.id.clone(),
             platform: Some(std::env::consts::OS.to_owned()),
+            portable_source_claims: None,
             gpu_name: Some(gpu.name.clone()),
             capabilities: worker_capabilities(gpu),
             loaded_models: Vec::new(),
@@ -1985,6 +1986,7 @@ pub(crate) async fn heartbeat_with_reason(
                 loaded_models: Vec::new(),
                 utilization: gpu_utilization(&settings.gpu_id).await,
                 status_reason,
+                portable_source_claims: None,
                 extra: BTreeMap::new(),
             },
         )
