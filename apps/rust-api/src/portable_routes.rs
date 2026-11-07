@@ -725,4 +725,26 @@ mod tests {
             "linux"
         ));
     }
+
+    #[test]
+    fn catalog_analysis_binds_nonroutable_detector_sources_on_native_capability_routes() {
+        let person = json!({"id":"person_detector","type":"utility","downloads":[{"provider":"huggingface","repo":"example/person","revision":"0123456789012345678901234567890123456789","files":["person.onnx"]}]});
+        let pose = json!({"id":"dwpose_pose_detector","type":"utility","downloads":[{"provider":"huggingface","repo":"example/pose","revision":"0123456789012345678901234567890123456789","files":["pose.onnx"]}]});
+        let face = json!({"id":"instantid_face_stack","type":"utility","componentOnly":true,"downloads":[{"provider":"huggingface","repo":"example/face","revision":"0123456789012345678901234567890123456789","files":["face.safetensors"]}]});
+        let entries = [
+            ("modelManifestEntries/0".to_owned(), &person),
+            ("modelManifestEntries/1".to_owned(), &pose),
+            ("modelManifestEntries/2".to_owned(), &face),
+        ];
+        let payload = json!({"catalogId":"catalog"});
+        let routes = eligible_portable_routes(
+            &JobType::CatalogAnalysis,
+            payload.as_object().unwrap(),
+            &entries,
+            "auto",
+        )
+        .unwrap();
+        assert_eq!(routes.len(), 3);
+        assert_eq!(routes[0], ("mlx".to_owned(), "macos".to_owned()));
+    }
 }
