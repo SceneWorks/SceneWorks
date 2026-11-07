@@ -1605,7 +1605,7 @@ fn verify_portable_route(
                 ));
             }
         }
-        verify_portable_binding(model, entry, payload, settings, plans, &required)?;
+        verify_portable_binding(model, entry, payload, settings, plans, &required, job_type)?;
     }
     // The complete route must cover each selected HF requirement, including the resident base of
     // an imported checkpoint. A valid primary cannot hide an omitted protected component.
@@ -1653,22 +1653,7 @@ fn verify_portable_route(
             let (_, snapshot) = source_library
                 .discover_snapshot(&requirement.repository, Some(revision))
                 .map_err(|error| invalid_binding(error.to_string()))?;
-            let pattern_path = snapshot.join(selector);
-            let pattern = pattern_path
-                .to_str()
-                .ok_or_else(|| invalid_binding("artifact snapshot path is not UTF-8"))?;
-            let mut local_files = glob::glob(pattern)
-                .map_err(|error| invalid_binding(error.to_string()))?
-                .map(|path| {
-                    let path = path.map_err(|error| invalid_binding(error.to_string()))?;
-                    if !path.is_file() {
-                        return Err(invalid_binding("artifact selector matched a non-file"));
-                    }
-                    path.strip_prefix(&snapshot)
-                        .map(Path::to_path_buf)
-                        .map_err(|error| invalid_binding(error.to_string()))
-                })
-                .collect::<WorkerResult<Vec<_>>>()?;
+            let mut local_files = recursive_snapshot_matches(&snapshot, selector_text)?;
             let matcher = glob::Pattern::new(selector_text)
                 .map_err(|error| invalid_binding(error.to_string()))?;
             let mut frozen_files = route
@@ -1683,7 +1668,7 @@ fn verify_portable_route(
                         && requirement.is_primary == (member.role == ArtifactMemberRole::Primary)
                 })
                 .flat_map(|member| &member.files)
-                .filter(|file| matcher.matches_path(&file.relative_path))
+                .filter(|file| matcher.matches(&file.relative_path.to_string_lossy()))
                 .map(|file| file.relative_path.clone())
                 .collect::<Vec<_>>();
             local_files.sort();
@@ -1720,6 +1705,7 @@ fn verify_portable_binding(
     settings: &Settings,
     plans: &[EntryPlan],
     selected_aux_ids: &[String],
+    job_type: &JobType,
 ) -> WorkerResult<()> {
     binding
         .validate()
@@ -1742,6 +1728,22 @@ fn verify_portable_binding(
         .flat_map(|plan| plan.requirements.iter())
         .collect();
     let source_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+    // Raw ModelConvert admission can freeze the immutable source privately while the synthetic
+    // public manifest entry only carries repo/file hints. The binding is the source authority;
+    // require its primary repo to agree with the converter's actual sourceRepo before using it.
+    let raw_conversion_primary = *job_type == JobType::ModelConvert
+        && binding.slot == "modelManifestEntries/0"
+        && payload.get("sourceRepo").and_then(serde_json::Value::as_str)
+            .is_some_and(|repo| binding.model_id == format!("model_convert:{repo}"))
+        && binding.members.iter().find(|member| member.role == ArtifactMemberRole::Primary).is_some_and(|primary| {
+            matches!(&primary.source, PortableSourceIdentity::Revision { identity }
+                if payload.get("sourceRepo").and_then(serde_json::Value::as_str) == Some(identity.repository.as_str())
+                    && entry.get("downloads").and_then(serde_json::Value::as_array).is_some_and(|downloads| downloads.iter().any(|download|
+                        download.get("repo").and_then(serde_json::Value::as_str) == Some(identity.repository.as_str())
+                            && download.get("revision").is_none()
+                    ))
+            )
+        });
     let mut local = Vec::with_capacity(binding.members.len());
     for member in &binding.members {
         let files = match &member.source {
@@ -1761,13 +1763,22 @@ fn verify_portable_binding(
                     .component_id
                     .as_ref()
                     .is_some_and(|id| selected_aux_ids.contains(id));
+                let selected_manifest = selected_manifest_row_covers_member(
+                    member,
+                    entry,
+                    payload,
+                    raw_conversion_primary,
+                );
                 if !selected_auxiliary
+                    && !selected_manifest
                     && (matching.is_empty()
                         || member.files.iter().any(|file| {
                             !matching.iter().any(|requirement| {
                                 requirement.files.iter().any(|selector| {
                                     glob::Pattern::new(&selector.to_string_lossy()).is_ok_and(
-                                        |pattern| pattern.matches_path(&file.relative_path),
+                                        |pattern| {
+                                            pattern.matches(&file.relative_path.to_string_lossy())
+                                        },
                                     )
                                 })
                             })
@@ -1841,6 +1852,7 @@ fn verify_portable_binding(
         .iter()
         .find(|requirement| requirement.is_primary)
         .map(|requirement| requirement.variant.clone())
+        .or_else(|| raw_conversion_primary.then(|| binding.variant.clone()))
         .or_else(|| requested_runtime_variant(payload))
         .unwrap_or_else(|| "default".to_owned());
     if binding.variant != selected_variant || primary.tier != binding.tier {
@@ -1860,6 +1872,100 @@ fn verify_portable_binding(
         .verify_local(&local, &allowed_roots)
         .map_err(|error| invalid_binding(error.to_string()))?;
     verify_manifest_globs(binding, entry, payload, settings)
+}
+
+fn selected_manifest_row_covers_member(
+    member: &PortableArtifactMember,
+    entry: &serde_json::Value,
+    payload: &JsonObject,
+    raw_conversion_primary: bool,
+) -> bool {
+    let PortableSourceIdentity::Revision { identity } = &member.source else {
+        return false;
+    };
+    let selected = selected_model_artifact_closure(
+        entry,
+        std::env::consts::OS,
+        requested_runtime_variant(payload).as_deref(),
+    );
+    selected
+        .get("downloads")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|row| row.get("required").and_then(serde_json::Value::as_str) != Some("soft"))
+        .any(|row| {
+            let raw_primary = raw_conversion_primary
+                && member.role == ArtifactMemberRole::Primary
+                && row.get("revision").is_none()
+                && row.get("files").is_none();
+            if row.get("repo").and_then(serde_json::Value::as_str)
+                != Some(identity.repository.as_str())
+                || !raw_primary
+                    && row.get("revision").and_then(serde_json::Value::as_str)
+                        != Some(identity.revision.as_str())
+                || !raw_primary
+                    && row
+                        .get("variant")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("default")
+                        != identity.variant
+                || (member.role == ArtifactMemberRole::Primary) != !is_co_requisite_download(row)
+            {
+                return false;
+            }
+            if raw_primary {
+                return true;
+            }
+            let Some(selectors) = row.get("files").and_then(serde_json::Value::as_array) else {
+                return false;
+            };
+            !selectors.is_empty()
+                && member.files.iter().all(|file| {
+                    selectors
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .any(|selector| {
+                            glob::Pattern::new(selector).is_ok_and(|pattern| {
+                                pattern.matches(&file.relative_path.to_string_lossy())
+                            })
+                        })
+                })
+        })
+}
+
+/// Match the same relative file tree that admission's `glob::Pattern::matches` sees. A filesystem
+/// glob of `snapshot/q4/*` stops at a directory, while the admitted selector includes nested
+/// files such as `q4/transformer/model.safetensors`.
+fn recursive_snapshot_matches(snapshot: &Path, selector: &str) -> WorkerResult<Vec<PathBuf>> {
+    let pattern = glob::Pattern::new(selector)
+        .map_err(|_| invalid_binding("artifact selector is invalid"))?;
+    let mut selected = Vec::new();
+    let mut pending = vec![snapshot.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .map_err(|_| invalid_binding("artifact snapshot is unavailable"))?
+        {
+            let entry = entry.map_err(|_| invalid_binding("artifact snapshot is unavailable"))?;
+            let path = entry.path();
+            let kind = entry
+                .file_type()
+                .map_err(|_| invalid_binding("artifact snapshot is unavailable"))?;
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file() || kind.is_symlink() && path.is_file() {
+                let relative = path
+                    .strip_prefix(snapshot)
+                    .map_err(|_| invalid_binding("artifact snapshot is invalid"))?;
+                if pattern.matches(&relative.to_string_lossy()) {
+                    selected.push(relative.to_path_buf());
+                }
+            } else {
+                return Err(invalid_binding("artifact snapshot has a non-file entry"));
+            }
+        }
+    }
+    Ok(selected)
 }
 
 fn verify_manifest_globs(
@@ -1903,22 +2009,7 @@ fn verify_manifest_globs(
                 .discover_snapshot(repo, Some(revision))
                 .map_err(|error| invalid_binding(error.to_string()))?
                 .1;
-            let pattern_path = snapshot.join(selector);
-            let pattern = pattern_path
-                .to_str()
-                .ok_or_else(|| invalid_binding("artifact snapshot path is not UTF-8"))?;
-            let mut actual = glob::glob(pattern)
-                .map_err(|error| invalid_binding(error.to_string()))?
-                .map(|path| {
-                    let path = path.map_err(|error| invalid_binding(error.to_string()))?;
-                    if !path.is_file() {
-                        return Err(invalid_binding("artifact selector matched a non-file"));
-                    }
-                    path.strip_prefix(&snapshot)
-                        .map(Path::to_path_buf)
-                        .map_err(|error| invalid_binding(error.to_string()))
-                })
-                .collect::<WorkerResult<Vec<_>>>()?;
+            let mut actual = recursive_snapshot_matches(&snapshot, selector)?;
             let mut frozen = binding.members.iter()
                 .filter(|member| {
                     matches!(&member.source, PortableSourceIdentity::Revision { identity }
@@ -3787,6 +3878,239 @@ mod tests {
             Some(&omitted)
         )
         .is_err());
+    }
+
+    #[test]
+    fn portable_lora_resolves_worker_catalog_under_a_different_root() {
+        let temp = TempDir::new().unwrap();
+        let api_adapter = temp.path().join("api/loras/adapter.safetensors");
+        let data = temp.path().join("worker");
+        let worker_adapter = data.join("loras/adapter.safetensors");
+        let model = data.join("models/imports/demo/model.safetensors");
+        for file in [&api_adapter, &worker_adapter, &model] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&api_adapter, b"same adapter").unwrap();
+        std::fs::write(&worker_adapter, b"same adapter").unwrap();
+        std::fs::write(&model, b"model").unwrap();
+        let mut binding = local_binding("modelManifestEntry", "m", &model, None);
+        let adapter = PortableArtifactMember::capture(
+            &LocalArtifactMember {
+                role: ArtifactMemberRole::Lora,
+                component_id: Some("loras/0".to_owned()),
+                source: PortableSourceIdentity::Digest {
+                    sha256: format!("sha256:{:x}", Sha256::digest(b"same adapter")),
+                },
+                tier: None,
+                files: vec![LocalArtifactFile {
+                    relative_path: "adapter.safetensors".into(),
+                    path: api_adapter.clone(),
+                }],
+            },
+            &[temp.path().join("api")],
+        )
+        .unwrap();
+        binding.members.push(adapter);
+        let route = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![binding]).unwrap();
+        let mut settings = settings(data);
+        settings.config_dir = temp.path().join("worker-config");
+        let catalog = settings.config_dir.join("manifests/user.loras.jsonc");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        std::fs::write(
+            &catalog,
+            serde_json::to_vec(&json!({"loras":[{
+                "id":"adapter-id", "installedPath":worker_adapter
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let payload = json!({"model":"m", "modelManifestEntry":{
+            "id":"m", "downloads":[], "paths":{"model":model}},
+            "loras":[{"id":"adapter-id", "installedPath":api_adapter}]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let guard = RuntimeSourceGuard::begin_with_binding(
+            &JobType::ImageGenerate,
+            &payload,
+            &settings,
+            Some(&route),
+        )
+        .unwrap();
+        let dispatched = guard.dispatch_payload()["loras"][0]["installedPath"]
+            .as_str()
+            .unwrap();
+        assert_eq!(std::fs::read(dispatched).unwrap(), b"same adapter");
+        assert_ne!(dispatched, api_adapter.to_str().unwrap());
+        assert_ne!(dispatched, worker_adapter.to_str().unwrap());
+    }
+
+    #[test]
+    fn raw_model_convert_uses_private_frozen_revision_without_receipt() {
+        use sceneworks_core::model_artifacts::ArtifactIdentity;
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        let repo = "guardfx/raw-convert";
+        std::fs::create_dir_all(data.join("models")).unwrap();
+        seed_snapshot(&library, repo, REV_A, "native.safetensors");
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Revision {
+                identity: ArtifactIdentity::pinned(repo, REV_A, "default").unwrap(),
+            },
+            tier: None,
+            files: vec![PortableArtifactFile {
+                relative_path: "native.safetensors".into(),
+                size_bytes: 7,
+                sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+            }],
+        };
+        let route = PortableRouteBinding::new(
+            "cpu",
+            std::env::consts::OS,
+            vec![PortableModelBinding::new(
+                "modelManifestEntries/0",
+                "model_convert:guardfx/raw-convert",
+                "cpu",
+                "default",
+                None,
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                vec![member],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let payload = json!({
+            "modelId":"raw-convert", "sourceRepo":repo, "sourceFile":"native.safetensors",
+            "converter":"supra2_img",
+            "modelManifestEntries":[{"id":"model_convert:guardfx/raw-convert","downloads":[{"provider":"huggingface","repo":repo}]}]
+        }).as_object().unwrap().clone();
+        with_library(&library, || {
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ModelConvert,
+                &payload,
+                &settings(data.clone()),
+                Some(&route),
+            )
+            .unwrap();
+            let snapshot = sceneworks_core::hf_home::model_source_library(&data)
+                .discover_snapshot(repo, None)
+                .unwrap()
+                .1;
+            assert!(snapshot.join("native.safetensors").is_file());
+            assert!(
+                guard.dispatch_payload()["advanced"]["__portableFrozenSources"].as_bool()
+                    == Some(true)
+            );
+            drop(guard);
+            let source = library
+                .join("models--guardfx--raw-convert/snapshots")
+                .join(REV_A)
+                .join("native.safetensors");
+            std::fs::write(&source, b"changed").unwrap();
+            let second = temp.path().join("second-data");
+            std::fs::create_dir_all(second.join("models")).unwrap();
+            assert!(RuntimeSourceGuard::begin_with_binding(
+                &JobType::ModelConvert,
+                &payload,
+                &settings(second.clone()),
+                Some(&route)
+            )
+            .is_err());
+            std::fs::remove_file(&source).unwrap();
+            assert!(RuntimeSourceGuard::begin_with_binding(
+                &JobType::ModelConvert,
+                &payload,
+                &settings(second),
+                Some(&route)
+            )
+            .is_err());
+        });
+    }
+
+    #[test]
+    fn cold_wildcard_manifest_matches_nested_frozen_files_without_receipt() {
+        use sceneworks_core::model_artifacts::ArtifactIdentity;
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        let repo = "guardfx/nested-glob";
+        std::fs::create_dir_all(data.join("models")).unwrap();
+        for file in [
+            "q4/transformer/model.safetensors",
+            "q4/text_encoder/model.safetensors",
+        ] {
+            seed_snapshot(&library, repo, REV_A, file);
+        }
+        let files = [
+            "q4/transformer/model.safetensors",
+            "q4/text_encoder/model.safetensors",
+        ]
+        .into_iter()
+        .map(|relative_path| PortableArtifactFile {
+            relative_path: relative_path.into(),
+            size_bytes: 7,
+            sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+        })
+        .collect();
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Revision {
+                identity: ArtifactIdentity::pinned(repo, REV_A, "q4").unwrap(),
+            },
+            tier: Some("q4".to_owned()),
+            files,
+        };
+        let route = PortableRouteBinding::new(
+            "cpu",
+            std::env::consts::OS,
+            vec![PortableModelBinding::new(
+                "modelManifestEntry",
+                "nested-glob",
+                "cpu",
+                "q4",
+                Some("q4".to_owned()),
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                vec![member],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let payload = json!({"model":"nested-glob","variant":"q4","modelManifestEntry":{
+            "id":"nested-glob","downloads":[{"provider":"huggingface","repo":repo,
+                "revision":REV_A,"variant":"q4","files":["q4/*"]}]
+        }})
+        .as_object()
+        .unwrap()
+        .clone();
+        with_library(&library, || {
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings(data.clone()),
+                Some(&route),
+            )
+            .unwrap();
+            let mapped = guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                .as_str()
+                .unwrap();
+            assert!(Path::new(mapped)
+                .join("transformer/model.safetensors")
+                .is_file());
+            drop(guard);
+            seed_snapshot(&library, repo, REV_A, "q4/extra/unbound.safetensors");
+            assert!(RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings(data.clone()),
+                Some(&route)
+            )
+            .is_err());
+        });
     }
 
     #[test]
