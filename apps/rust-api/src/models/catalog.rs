@@ -74,7 +74,17 @@ impl ModelCatalogCache {
 pub(crate) async fn list_models(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    Ok(Json(model_catalog_sized(&state).await?))
+    let mut models = model_catalog_sized(&state).await?;
+    // Presentation-only hide for converted builtins. Keep the internal snapshot intact so
+    // explicit-id admission and unfiltered license/source checks still see the model.
+    models.retain(|model| {
+        let Some(id) = model.get("id").and_then(Value::as_str) else {
+            return true;
+        };
+        sceneworks_core::registry::builtin_model_spec(id).is_none()
+            || model.get("hidden").and_then(Value::as_bool) != Some(true)
+    });
+    Ok(Json(models))
 }
 
 /// Select from the current shared catalog before cloning. Linked-source availability is probed

@@ -155,6 +155,53 @@ async fn registered_builtin_projects_consistently_through_api_and_job_resolver()
     assert_eq!(license_rows[0]["downloads"], resolved["downloads"]);
 }
 
+#[tokio::test]
+async fn hiding_registered_builtin_only_removes_public_catalog_row() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let config = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config).expect("manifest dir");
+    write_empty_sibling_manifests(&config);
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[{"id":"flux_schnell"}]}"#,
+    )
+    .expect("builtin manifest");
+    std::fs::write(
+        config.join("user.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[{"id":"flux_schnell","hidden":true}]}"#,
+    )
+    .expect("user manifest");
+    let (app, state) = create_app_with_state(test_settings(&temp)).expect("app");
+
+    let (status, catalog) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(catalog
+        .as_array()
+        .expect("catalog rows")
+        .iter()
+        .all(|row| row["id"] != "flux_schnell"));
+    let explicit = crate::models::find_model_by_id(&state, "flux_schnell")
+        .await
+        .expect("explicit lookup")
+        .expect("hidden model remains addressable");
+    assert_eq!(explicit["adapter"], "flux_diffusers");
+    let resolved = crate::models::resolve_model_manifest_entry(&state, "flux_schnell")
+        .await
+        .expect("job resolver");
+    assert_eq!(resolved["catalogScope"], "builtin");
+    assert_eq!(
+        resolved["downloads"][0]["repo"],
+        "SceneWorks/flux1-schnell-mlx"
+    );
+    let (license_rows, _) = crate::models::merged_model_manifest_entries(&state)
+        .await
+        .expect("license source rows");
+    assert_eq!(license_rows.len(), 1);
+    assert_eq!(license_rows[0]["downloads"], resolved["downloads"]);
+}
+
 #[test]
 fn model_convert_request_parses_optional_mlx_quant_fields() {
     // The convert endpoint accepts optional camelCase quant knobs (sc-1982); the
