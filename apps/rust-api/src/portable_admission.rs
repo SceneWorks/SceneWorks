@@ -428,6 +428,7 @@ async fn capture_portable_model_binding_inner(
             matches!(
                 &source.source,
                 SelectedSourceLocation::OperatorCachedRepo(_)
+                    | SelectedSourceLocation::ConversionBorrow { .. }
                     | SelectedSourceLocation::PreferredWorkerClaim { .. }
                     | SelectedSourceLocation::OperatorOverrideOrManifest { .. }
             )
@@ -848,6 +849,21 @@ async fn capture_model_slot(
                     source.role.clone(),
                     source.component_id.clone(),
                     &claims,
+                )
+                .await?
+            }
+            SelectedSourceLocation::ConversionBorrow {
+                repo,
+                preferred_subdir,
+            } => {
+                capture_conversion_borrow_member(
+                    state,
+                    repo,
+                    preferred_subdir.as_deref(),
+                    source.role.clone(),
+                    source.component_id.clone(),
+                    source_claims,
+                    frozen_model,
                 )
                 .await?
             }
@@ -1438,11 +1454,9 @@ async fn capture_conversion_borrow_member(
         else {
             return None;
         };
-        (claim_repo == repo
-            && repository == repo
-            && revision == provenance_revision
-            && tiers.contains(&tier))
-        .then_some(tier)
+        (claim_repo == repo && repository == repo && revision == provenance_revision)
+            .then(|| tiers.iter().position(|candidate| *candidate == tier))
+            .flatten()
     };
     let chosen = if let Some(member) = frozen_source_member(frozen_model, &role, &component_id)? {
         claims
@@ -1454,17 +1468,11 @@ async fn capture_conversion_borrow_member(
     } else {
         let mut candidates = claims
             .iter()
-            .filter_map(|claim| allowed(claim).map(|tier| (claim, tier)))
+            .filter_map(|claim| allowed(claim).map(|priority| (claim, priority)))
             .collect::<Vec<_>>();
-        candidates.sort_by(|(left, left_tier), (right, right_tier)| {
-            let rank = |tier: &str| {
-                tiers
-                    .iter()
-                    .position(|candidate| *candidate == tier)
-                    .unwrap()
-            };
-            rank(left_tier)
-                .cmp(&rank(right_tier))
+        candidates.sort_by(|(left, left_priority), (right, right_priority)| {
+            left_priority
+                .cmp(right_priority)
                 .then_with(|| left.source_id.cmp(&right.source_id))
                 .then_with(|| left.closure_sha256.cmp(&right.closure_sha256))
         });
