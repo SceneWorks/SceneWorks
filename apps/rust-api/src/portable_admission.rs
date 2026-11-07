@@ -1594,6 +1594,19 @@ fn collect_source_files(
             .map_err(|_| incomplete("local model file escapes its selected source"))?
             .to_path_buf()
     };
+    if matches!(
+        relative_path.to_str(),
+        Some(
+            ".sceneworks-artifact-provenance.json"
+                | ".sceneworks-artifact-provenance.lock"
+                | ".sceneworks-produced-artifact.json"
+                | ".sceneworks-produced-artifact.lock"
+        )
+    ) {
+        // Producer receipts attest the loader-visible content and exclude their own mutable
+        // markers. Keep the portable byte ledger identical to that content scope.
+        return Ok(());
+    }
     let size_bytes = std::fs::metadata(&path)
         .map_err(|error| incomplete(format!("local model file is unavailable: {error}")))?
         .len();
@@ -1676,6 +1689,23 @@ fn capture_selected_request_overlays(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn local_produced_closure_excludes_mutable_receipt_files() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("weights.safetensors"), b"weight").unwrap();
+        for marker in [
+            ".sceneworks-artifact-provenance.json",
+            ".sceneworks-artifact-provenance.lock",
+            ".sceneworks-produced-artifact.json",
+            ".sceneworks-produced-artifact.lock",
+        ] {
+            std::fs::write(root.path().join(marker), b"mutable").unwrap();
+        }
+        let files = capture_local_source_files(root.path(), &[root.path().to_path_buf()]).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative_path, PathBuf::from("weights.safetensors"));
+    }
 
     #[test]
     fn authored_projection_keeps_choices_without_local_paths_or_credentials() {
