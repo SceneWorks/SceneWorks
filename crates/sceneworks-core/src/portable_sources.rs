@@ -15,6 +15,7 @@ pub fn registered_digest_claim_id(
     kind: &str,
     model_id: &str,
     component_id: Option<&str>,
+    file_ledger_sha256: &str,
 ) -> Result<String, String> {
     if !matches!(kind, "model" | "lora" | "control" | "component")
         || model_id.trim().is_empty()
@@ -24,13 +25,18 @@ pub fn registered_digest_claim_id(
         || component_id.is_some_and(|id| {
             id.trim().is_empty() || id != id.trim() || id.chars().any(char::is_control)
         })
+        || file_ledger_sha256
+            .strip_prefix("sha256:")
+            .is_none_or(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
     {
         return Err("invalid registered digest source identity".to_owned());
     }
     let identity =
         serde_json::to_vec(&(kind, model_id, component_id)).map_err(|error| error.to_string())?;
     Ok(format!(
-        "registered_digest:{kind}:{}",
+        "registered_digest:{kind}:{}:{file_ledger_sha256}",
         crate::hashing::sha256_bytes(&identity)
     ))
 }
@@ -565,16 +571,25 @@ mod tests {
 
     #[test]
     fn registered_digest_claim_key_is_path_free_and_slot_stable() {
-        let model = registered_digest_claim_id("model", "imported-model", None).unwrap();
+        let ledger_a = format!("sha256:{}", "a".repeat(64));
+        let ledger_b = format!("sha256:{}", "b".repeat(64));
+        let model = registered_digest_claim_id("model", "imported-model", None, &ledger_a).unwrap();
         let component =
-            registered_digest_claim_id("component", "imported-model", Some("vae")).unwrap();
+            registered_digest_claim_id("component", "imported-model", Some("vae"), &ledger_a)
+                .unwrap();
         assert_ne!(model, component);
         assert_eq!(
             model,
-            registered_digest_claim_id("model", "imported-model", None).unwrap()
+            registered_digest_claim_id("model", "imported-model", None, &ledger_a).unwrap()
         );
         assert!(!model.contains("imported-model"));
-        assert!(registered_digest_claim_id("component", "imported-model", None).is_err());
+        assert_ne!(
+            model,
+            registered_digest_claim_id("model", "imported-model", None, &ledger_b).unwrap()
+        );
+        assert!(
+            registered_digest_claim_id("component", "imported-model", None, &ledger_a).is_err()
+        );
     }
 
     #[test]

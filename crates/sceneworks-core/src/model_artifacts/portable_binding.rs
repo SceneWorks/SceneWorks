@@ -33,7 +33,7 @@ pub fn portable_closure_sha256(
     portable_file_ledger_sha256(files)
 }
 
-fn portable_file_ledger_sha256(
+pub fn portable_file_ledger_sha256(
     files: &[PortableArtifactFile],
 ) -> Result<String, ArtifactContractError> {
     if files.is_empty() {
