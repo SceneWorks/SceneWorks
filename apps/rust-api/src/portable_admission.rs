@@ -15,7 +15,8 @@ use sceneworks_core::model_artifacts::artifact_selection::{
 use sceneworks_core::model_artifacts::portable_binding::{
     canonical_authored_options_sha256, enumerate_portable_array_slots, portable_closure_sha256,
     resolve_pinned_hf_files, PortableArtifactFile, PortableArtifactMember, PortableJobBinding,
-    PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
+    PortableModelBinding, PortableRouteBinding, PortableSourceClaim, PortableSourceIdentity,
+    PortableSourceProvenance,
 };
 use sceneworks_core::model_artifacts::{
     confine_artifact_path, ArtifactIdentity, ArtifactMemberRole, ModelArtifactResolver,
@@ -141,6 +142,9 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
             | "useUncensoredEnhancer"
             | "enhancePrompt"
             | "tileControlNetRepo"
+            | "structuredAnalysisEnabled"
+            | "visionAnalysisEnabled"
+            | "semanticEmbeddingsEnabled"
             | "enabled"
             | "repo"
             | "revision"
@@ -240,6 +244,26 @@ pub(crate) async fn capture_portable_model_binding(
                 )));
             }
         }
+        let source_claims = if selected_sources.iter().any(|source| {
+            matches!(
+                &source.source,
+                SelectedSourceLocation::OperatorCachedRepo(_)
+            )
+        }) {
+            state
+                .jobs_store
+                .portable_source_claims_for_route(
+                    &backend,
+                    &platform,
+                    requested_gpu,
+                    state.settings.worker_timeout_seconds,
+                )
+                .map_err(|error| {
+                    incomplete(format!("worker source claims are unavailable: {error}"))
+                })?
+        } else {
+            Vec::new()
+        };
         let mut models = Vec::with_capacity(entries.len());
         for (index, (slot, entry)) in entries.iter().enumerate() {
             models.push(
@@ -254,6 +278,7 @@ pub(crate) async fn capture_portable_model_binding(
                     &authored_hash,
                     index == 0,
                     &selected_sources,
+                    &source_claims,
                 )
                 .await?,
             );
@@ -291,6 +316,14 @@ fn model_free_job(job_type: &JobType, payload: &JsonObject) -> bool {
         && payload.get("dryRun").and_then(Value::as_bool) == Some(true)
         || matches!(job_type, JobType::TrainingCaption)
             && payload.get("mode").and_then(Value::as_str) == Some("triggerOnly")
+        || matches!(job_type, JobType::CatalogAnalysis)
+            && [
+                "structuredAnalysisEnabled",
+                "visionAnalysisEnabled",
+                "semanticEmbeddingsEnabled",
+            ]
+            .into_iter()
+            .all(|key| payload.get(key).and_then(Value::as_bool) != Some(true))
 }
 
 struct TrainingBaseSelection {
@@ -408,6 +441,7 @@ async fn capture_model_slot(
     authored_hash: &str,
     owns_request_overlays: bool,
     selected_sources: &[SelectedRouteSource],
+    source_claims: &[PortableSourceClaim],
 ) -> Result<PortableModelBinding, ApiError> {
     let model_id = entry
         .get("id")
@@ -507,9 +541,30 @@ async fn capture_model_slot(
                 source.selected_tier.clone(),
             )?,
             SelectedSourceLocation::OperatorCachedRepo(source_id) => {
-                return Err(incomplete(format!(
-                    "operator source {source_id} has no registered exact worker claim"
-                )));
+                capture_worker_source_member(
+                    state,
+                    source_id,
+                    source.role.clone(),
+                    source.component_id.clone(),
+                    source_claims,
+                )
+                .await?
+            }
+            SelectedSourceLocation::DynamicHfRepo(repo) => {
+                let revision = resolve_dynamic_hf_revision(state, repo).await?;
+                let download = serde_json::json!({
+                    "provider":"huggingface",
+                    "repo":repo,
+                    "revision":revision,
+                    "files":["*"]
+                });
+                capture_download_member(
+                    state,
+                    &download,
+                    source.role.clone(),
+                    Some(source.component_id.clone()),
+                )
+                .await?
             }
         };
         if let Some(tier) = &source.selected_tier {
@@ -532,6 +587,65 @@ async fn capture_model_slot(
     .map_err(|error| incomplete(error.to_string()))
 }
 
+/// Resolve a mutable, user-selected repository to a publisher commit once, at admission.
+/// The worker sees only the immutable revision and exact file ledger in its frozen route.
+async fn resolve_dynamic_hf_revision(state: &AppState, repo: &str) -> Result<String, ApiError> {
+    let repo = sceneworks_core::hf_repo_id::namespaced(repo)
+        .map_err(|error| incomplete(format!("custom model repository is invalid: {error}")))?;
+    let base_url = std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
+        .unwrap_or_else(|_| "https://huggingface.co".to_owned());
+    let mut url = reqwest::Url::parse(&base_url)
+        .map_err(|error| incomplete(format!("Hugging Face endpoint is invalid: {error}")))?;
+    {
+        let mut parts = url
+            .path_segments_mut()
+            .map_err(|_| incomplete("Hugging Face endpoint cannot carry model paths"))?;
+        parts.pop_if_empty();
+        parts.push("api").push("models");
+        for segment in repo.split('/') {
+            parts.push(segment);
+        }
+        parts.push("revision").push("main");
+    }
+    let mut request = state.http_client.get(url);
+    if let Some(token) = huggingface_token(state)? {
+        request = request.bearer_auth(token);
+    }
+    let mut response = request
+        .send()
+        .await
+        .map_err(|error| incomplete(format!("custom model revision is unavailable: {error}")))?;
+    if !response.status().is_success() {
+        return Err(incomplete(format!(
+            "custom model revision lookup failed with status {}",
+            response.status()
+        )));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| incomplete(format!("custom model revision response failed: {error}")))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > 1_048_576 {
+            return Err(incomplete("custom model revision response exceeds one MiB"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        incomplete(format!(
+            "custom model revision response is invalid: {error}"
+        ))
+    })?;
+    let revision = value
+        .get("sha")
+        .and_then(Value::as_str)
+        .ok_or_else(|| incomplete("custom model revision response has no commit SHA"))?;
+    sceneworks_core::model_artifacts::validate_immutable_revision(revision)
+        .map_err(|error| incomplete(error.to_string()))?;
+    Ok(revision.to_owned())
+}
+
 fn capture_local_member(
     path: &Path,
     allowed_roots: &[PathBuf],
@@ -552,6 +666,148 @@ fn capture_local_member(
         .validate()
         .map_err(|error| incomplete(error.to_string()))?;
     Ok(member)
+}
+
+async fn capture_worker_source_member(
+    state: &AppState,
+    source_id: &str,
+    role: ArtifactMemberRole,
+    component_id: String,
+    claims: &[PortableSourceClaim],
+) -> Result<PortableArtifactMember, ApiError> {
+    let mut selected = claims.iter().filter(|claim| claim.source_id == source_id);
+    let claim = selected.next().ok_or_else(|| {
+        incomplete(format!(
+            "selected source {source_id} has no fresh worker claim"
+        ))
+    })?;
+    claim
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    if selected.any(|other| other != claim) {
+        return Err(incomplete(format!(
+            "selected source {source_id} has ambiguous worker identities"
+        )));
+    }
+    match &claim.provenance {
+        PortableSourceProvenance::PinnedRepo {
+            repository,
+            revision,
+        } => {
+            let shipped = sceneworks_core::control_weights::shipped_auxiliary_source(source_id)
+                .ok_or_else(|| {
+                    incomplete(format!(
+                        "selected source {source_id} has no server-owned pinned declaration"
+                    ))
+                })?;
+            if repository != shipped.repo || revision != shipped.revision {
+                return Err(incomplete(format!(
+                    "selected source {source_id} differs from the pinned declaration"
+                )));
+            }
+            verify_pinned_worker_claim(state, claim, shipped.files).await?;
+        }
+        PortableSourceProvenance::OperatorOverride => {
+            if source_id == "sdxl_detail_tile_control"
+                || (source_id != "ltx_amoral_gemma_3_12b"
+                    && source_id != "ltx_training_text_encoder"
+                    && sceneworks_core::control_weights::shipped_auxiliary_source(source_id)
+                        .is_none())
+            {
+                return Err(incomplete(format!(
+                    "selected source {source_id} has no authorized operator override"
+                )));
+            }
+        }
+    }
+    let member = PortableArtifactMember {
+        role,
+        component_id: Some(component_id),
+        source: PortableSourceIdentity::WorkerClaim {
+            source_id: claim.source_id.clone(),
+            provenance: claim.provenance.clone(),
+            closure_sha256: claim.closure_sha256.clone(),
+        },
+        tier: None,
+        files: claim.files.clone(),
+    };
+    member
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    Ok(member)
+}
+
+/// The worker claim uses paths relative to its selected file/directory. Rebase that exact ledger
+/// under the immutable publisher subtree and require every claimed file and declared loader file
+/// to match trusted metadata. Extra files cannot silently inherit the publisher identity.
+async fn verify_pinned_worker_claim(
+    state: &AppState,
+    claim: &PortableSourceClaim,
+    required_paths: &[&str],
+) -> Result<(), ApiError> {
+    let PortableSourceProvenance::PinnedRepo {
+        repository,
+        revision,
+    } = &claim.provenance
+    else {
+        return Err(incomplete(
+            "pinned worker claim has no publisher provenance",
+        ));
+    };
+    let parent = common_parent(required_paths)?;
+    let mut selectors = Vec::with_capacity(claim.files.len());
+    for file in &claim.files {
+        let candidate = parent.join(&file.relative_path);
+        let path = candidate
+            .to_str()
+            .ok_or_else(|| incomplete("worker source file path is not portable UTF-8"))?;
+        selectors.push(path.to_owned());
+    }
+    for required in required_paths {
+        if !selectors.iter().any(|path| {
+            sceneworks_core::model_artifacts::artifact_selection::pattern_matches(required, path)
+        }) {
+            return Err(incomplete(format!(
+                "pinned worker source is missing required file {required}"
+            )));
+        }
+    }
+    let remote = resolve_trusted_pinned_files(state, repository, revision, &selectors).await?;
+    let actual = selectors
+        .iter()
+        .zip(&claim.files)
+        .map(|(path, file)| PortableArtifactFile {
+            relative_path: PathBuf::from(path),
+            size_bytes: file.size_bytes,
+            sha256: file.sha256.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut actual = actual;
+    actual.sort();
+    if actual != remote {
+        return Err(incomplete(
+            "worker source bytes differ from the pinned publisher",
+        ));
+    }
+    Ok(())
+}
+
+fn common_parent(paths: &[&str]) -> Result<PathBuf, ApiError> {
+    let first = paths
+        .first()
+        .ok_or_else(|| incomplete("pinned source declares no required files"))?;
+    let mut parent = Path::new(first)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+    for path in &paths[1..] {
+        while !Path::new(path).starts_with(&parent) {
+            if !parent.pop() {
+                break;
+            }
+        }
+    }
+    Ok(parent)
 }
 
 /// Loader precedence for a request-owned source override. The chosen path is captured as a
