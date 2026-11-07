@@ -10,7 +10,7 @@ import { privateEnvironment } from './h3-finetune-terminal-runtime.mjs';
 import { validateBoundedQkResidentSources, validateRetainedWindowProvenance } from './h3-cuda-memory-terminal.mjs';
 import { sha256 } from './lib/file-sha256.mjs';
 import { parse as parseProvenanceCandidates, populationSha256 } from './scan-inference-provenance.mjs';
-import { campaignCudaSelection,campaignCudaEnvironment,anchorRuntime,validateAnchorDevice } from './h3-cuda-memory-terminal.mjs';
+import { campaignCudaSelection,campaignCudaEnvironment,anchorRuntime,anchorPoolPolicy,validatePoolInstallation,validateComparisonPool,validateAnchorDevice } from './h3-cuda-memory-terminal.mjs';
 import { collectDecodedMediaDiagnostics } from './h3-cuda-memory-terminal.mjs';
 import { validateCudaRuntimeDevice,hardware } from './h3-finetune-terminal-runtime.mjs';
 
@@ -38,8 +38,8 @@ test('explicit GPU0 preserves typed zero through all fresh anchor requests and o
     const runtime=anchorRuntime(p,capped,dense);assert.equal(runtime.gpuId,'0');assert.equal(runtime.deviceId,GPU0);
     assert.deepEqual(validateCudaRuntimeDevice(runtime),{physicalGpuIndex:0,physicalGpuUuid:GPU0});
     assert.equal(privateEnvironment('D:\\unit_fake', {...runtime,backend:'cuda'},'unit_fake_token').SCENEWORKS_GPU_ID,'0');
-    assert.deepEqual(runtime.memoryCap,capped?{kind:'cuda-vram-gb',value:24}:undefined);
-    assert.equal(runtime.cudaProofEnvironment.SCENEWORKS_CUDA_PROOF_POOL_BYTES,capped?String(21*GIB):undefined);
+    assert.deepEqual(runtime.memoryCap,{kind:'cuda-vram-gb',value:capped?24:95});
+    assert.equal(runtime.cudaProofEnvironment.SCENEWORKS_CUDA_PROOF_POOL_BYTES,String((capped?21:92)*GIB));
     assert.equal(runtime.cudaProofEnvironment.SCENEWORKS_H3_VEDA_FORCE_DENSE,dense?'1':undefined);
   }
   for(const physicalGpuIndex of [-1,2,true,false,0.5,'0',null])assert.throws(()=>validatePlan({...p,physicalGpuIndex}));
@@ -216,7 +216,12 @@ function parityRecords(){
     const events=[{event:'video_memory_strategy_selected',route:'minimax_h3',request_frames:345,strategy:windowed?'BoundedTransformerResidency':'Resident'},
       {event:'h3_attention_execution',transformer_window:windowed?'Some(1)':'None',transformer_component:windowed?'Some(Both)':'None'}];
     if(windowed)for(const component of ['text_encoder','dit'])events.push({event:'h3_transformer_window_materialized',component,first_block:0,block_count:1,base_bytes:100,device:'Cuda { gpu_id: 0 }'});
-    return {id,passed:true,sourcePair:structuredClone(sourcePair),settings:structuredClone(settings),job:{id:jobId,status:'completed',projectId,requestedGpu:'1',payload:{...structuredClone(settings),projectId}},
+    const allocationPolicy=anchorPoolPolicy(plan(),windowed);
+    const poolInstallation=validatePoolInstallation(`CUDA_PROOF_POOL installed logical_ordinal=0 cap_bytes=${allocationPolicy.poolBytes} scope=stream_ordered_pool outside_pool=unbounded_requires_separate_reserve_and_observation`,allocationPolicy.poolBytes);
+    const samples=[{host:GIB,device:10*GIB},{host:2*GIB,device:11*GIB}];
+    events.push({event:'h3_cuda_proof_pool_snapshot',jobId,logical_ordinal:0,cap_bytes:allocationPolicy.poolBytes,used_high_bytes:8*GIB,reserved_high_bytes:9*GIB,reserved_bytes:9*GIB,device_used_bytes:10*GIB});
+    const envelope=validatePoolEvidence(events,{jobId,...allocationPolicy,metrics:{samples}});
+    return {id,passed:true,allocationPolicy,poolInstallation,samples,envelope,sourcePair:structuredClone(sourcePair),settings:structuredClone(settings),job:{id:jobId,status:'completed',projectId,requestedGpu:'1',payload:{...structuredClone(settings),projectId}},
       generationMetrics:{vedaExecution:{requested:true,sparseCalls:8,kernel:'unit_fake actual sparse kernel',predictor:'unit_fake predictor',plan:'unit_fake same plan',executionGrid:[345,768,1344]}},
       media:[{jobId,sha256:hash,av:'unit_fake.mp4',decoded:{sha256:hash,streams:[video,audio]}}],events};
   });
@@ -320,6 +325,9 @@ test('fixed RMS policy stays bound to the existing same-backend CUDA H3 campaign
 
 function retainedRecord(){
   const record=parityRecords()[0];record.sourcePair=structuredClone(RETAINED_WORKSTATION.sourcePair);
+  // Historical receipt really had no pool; never synthesize matched metadata.
+  delete record.allocationPolicy;delete record.poolInstallation;delete record.envelope;
+  record.events=record.events.filter(e=>e.event!=='h3_cuda_proof_pool_snapshot');
   record.job.id=RETAINED_WORKSTATION.jobId;record.job.assignedGpu='1';
   record.media[0].jobId=record.job.id;record.media[0].sha256=RETAINED_WORKSTATION.mediaSha256;record.media[0].decoded.sha256=record.media[0].sha256;
   record.media[0].asset={recipe:{rawAdapterSettings:{effectiveSteps:8,minimaxH3Tier:'q4'}}};
@@ -427,7 +435,7 @@ test('only the complete immutable uncapped workstation control can be retained',
     r=>r.events[1].transformer_window='Some(1)',r=>r.events.push({event:'h3_transformer_window_materialized'}),r=>r.shutdownError='partial cleanup'];
   for(const mutate of mutations){const bad=retainedRecord();mutate(bad);assert.throws(()=>validateRetainedWorkstationRecord(bad,anchorRequest(original(),42)));}
   const p=plan();p.retainedWorkstation={campaignDirectory:'D:\\accepted',sourceAuditPath:'D:\\review.json',sourceAuditSha256:hash,runUrl:RETAINED_WORKSTATION.runUrl};
-  p.poolBytes=21*GIB;p.externalReserveBytes=3*GIB;validatePlan(p);
+  p.poolBytes=21*GIB;p.externalReserveBytes=3*GIB;assert.throws(()=>validatePlan(p),/uncapped reference is observation-only/);
   for(const field of ['sourceAuditPath','sourceAuditSha256','runUrl']){const bad=structuredClone(p);delete bad.retainedWorkstation[field];assert.throws(()=>validatePlan(bad));}
 });
 
@@ -552,17 +560,21 @@ test('manual retention mapping requires the exact nested original-receipt artifa
   }
 });
 
-test('retained parity needs the verified narrow source mapping and still compares all native AV',async t=>{
+test('historical uncapped parity refuses grading even with verified resident source mapping',async t=>{
   const fixture=sourceReviewFixture(),sourceEquivalence=await fixture.verify(),resident=retainedRecord(),streamed=parityRecords()[1];
   streamed.sourcePair=fixture.target;streamed.generationMetrics.vedaExecution=structuredClone(resident.generationMetrics.vedaExecution);
   assert.throws(()=>validateVedaParityPair([resident,streamed]),/source pair changed/);
   assert.throws(()=>validateVedaParityPair([resident,streamed],{sourceEquivalence:JSON.parse(JSON.stringify(sourceEquivalence))}),/actual Git objects/);
-  assert.equal(validateVedaParityPair([resident,streamed],{sourceEquivalence}).resident.sourcePair.inference,RETAINED_WORKSTATION.sourcePair.inference);
+  assert.throws(()=>validateVedaParityPair([resident,streamed],{sourceEquivalence}),/historical uncapped references are observation-only/);
+  // Decorating the immutable old job with a new policy cannot make it matched.
+  const decorated=structuredClone(resident),matched=parityRecords()[0];
+  for(const key of ['allocationPolicy','poolInstallation','samples','envelope'])decorated[key]=structuredClone(matched[key]);
+  assert.throws(()=>validateVedaParityPair([decorated,streamed],{sourceEquivalence}),/historical uncapped references are observation-only/);
   const dir=await directory(t);let calls=0;
   await mkdirForTest(path.join(dir,'workstation-veda'));await mkdirForTest(path.join(dir,'24gib-veda-sparse'));
   // The real comparator's hash guard stays active; a fabricated media payload cannot reach decoding.
   await writeFile(path.join(dir,'workstation-veda','unit_fake.mp4'),'unit_fake');await writeFile(path.join(dir,'24gib-veda-sparse','unit_fake.mp4'),'unit_fake');
-  await assert.rejects(compareVedaAnchors([resident,streamed],dir,{sourceEquivalence,compare:async()=>{calls++;}}),/bound parity media changed/);
+  await assert.rejects(compareVedaAnchors([resident,streamed],dir,{sourceEquivalence,compare:async()=>{calls++;}}),/historical uncapped references are observation-only/);
   assert.equal(calls,0);
 });
 
@@ -586,4 +598,23 @@ test('allocator primitive requires enforcement and an honest consistent observed
   for(const count of [-1,0.5,true,'1',null,Number.MAX_SAFE_INTEGER+1])assert.throws(()=>validatePrimitiveProofLog(log({...evidence,successfulRecoveryCount:count})));
   for(const [successfulRecoveryCount,fragmentationRecoveryExercised] of [[0,true],[1,false],[0,0],[1,1],[0,'false']])assert.throws(()=>validatePrimitiveProofLog(log({...evidence,successfulRecoveryCount,fragmentationRecoveryExercised})));
   for(const change of [{logicalOrdinal:1},{capBytes:512},{heldBytes:1},{heldBytes:536870913},{usedHighBytes:469762047},{reservedHighBytes:536870913},{capBytes:'536870912'},{heldBytes:true},{usedHighBytes:NaN},{reservedHighBytes:null}])assert.throws(()=>validatePrimitiveProofLog(log({...evidence,...change})));
+});
+
+test('future Resident95 and window24 both enforce the same source-owned32MiB workspace policy',()=>{
+  const p=plan(),resident=anchorRuntime(p,false,false),window=anchorRuntime(p,true,false);
+  assert.equal(resident.memoryCap.value,95);assert.equal(resident.cudaProofEnvironment.SCENEWORKS_CUDA_PROOF_POOL_BYTES,String(92*GIB));
+  assert.equal(window.cudaProofEnvironment.SCENEWORKS_CUDA_PROOF_POOL_BYTES,String(p.poolBytes));
+  assert.equal(resident.cudaProofEnvironment.SCENEWORKS_H3_VEDA_FORCE_DENSE,undefined);
+  assert.equal(resident.cudaProofEnvironment.SCENEWORKS_H3_ATTENTION_ROUTE,undefined);
+  assert.throws(()=>anchorRuntime(p,false,true));
+  const records=parityRecords();for(const [index,row] of records.entries())validateComparisonPool(row,index===1);
+  assert.equal(records[0].allocationPolicy.cublasWorkspaceBytesFromSource,records[1].allocationPolicy.cublasWorkspaceBytesFromSource);
+  for(const mutate of [r=>delete r.allocationPolicy,r=>delete r.poolInstallation,r=>r.poolInstallation.rawLine='',
+    r=>r.allocationPolicy.cublasWorkspaceBytesFromSource=12*1024**2,r=>r.allocationPolicy.poolBytes=21*GIB,
+    r=>r.poolInstallation.capBytes=21*GIB,r=>r.poolInstallation.rawLine=r.poolInstallation.rawLine.replace(String(92*GIB),String(21*GIB)),
+    r=>r.events=r.events.filter(e=>e.event!=='h3_cuda_proof_pool_snapshot'),r=>r.events.find(e=>e.cap_bytes).jobId='other-job',
+    r=>r.envelope.totalEnvelopeBytes=24*GIB,r=>r.samples[0].device=96*GIB]){
+    const copy=structuredClone(records);mutate(copy[0]);assert.throws(()=>validateVedaParityPair(copy));
+  }
+  for(const bad of ['', 'CUDA_PROOF_POOL installed logical_ordinal=1 cap_bytes=1', records[0].poolInstallation.rawLine+'\n'+records[0].poolInstallation.rawLine])assert.throws(()=>validatePoolInstallation(bad,92*GIB));
 });

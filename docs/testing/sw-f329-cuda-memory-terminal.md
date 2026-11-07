@@ -306,6 +306,23 @@ payloads, app databases, build caches, and access tokens.
 
 ## Conditional matched Resident control
 
+Future ordinary campaigns also use a matched workspace policy: the95GiB Resident
+reference installs a92GiB proof pool with3GiB outside reserve, while24GiB arms
+retain their selected pool+reserve limits. All arms therefore take the same
+source-owned32MiB cuBLAS workspace hook. They must record explicit policy metadata,
+an actual worker installation marker and job-scoped driver/device envelope facts.
+The95GiB reference must still select Resident/windowNone with zero block transfers;
+creative settings and normal Veda remain unchanged, with no force flags.
+
+The historical run42243645213 normal95 reference was uncapped, with no proof pool.
+Its receipts and the earlier GPU1 reference remain unchanged observations. They
+cannot be reused for future graded same-policy comparisons, even with a source
+mapping or newly added policy labels. The old retention helpers remain available
+for reading historical evidence; plan validation rejects that old reference for
+new grading before any new renders. The conditional control below still compares
+old media observationally. No numerical tolerance is changed here: the existing
+legacy0.001 media grading remains unresolved pending the actual matched control.
+
 The existing manual memory workflow also accepts the explicit
 `mode: "matched-resident-control"`. This is one conditional diagnostic after the
 component results are assessed. It is not a campaign rerun, a 24 GiB fit proof,

@@ -87,7 +87,35 @@ export function campaignCudaEnvironment(p,env){
 }
 export function anchorRuntime(p,capped,forceDense){
   const selected=campaignCudaSelection(p);
-  return {port:0,gpuId:String(selected.physicalGpuIndex),deviceId:selected.physicalGpuUuid,...selected,cudaProofFeatures:['sceneworks-rust-api/h3-memory-proof'],memoryCap:capped?{kind:'cuda-vram-gb',value:24}:undefined,cudaProofEnvironment:capped?{SCENEWORKS_CUDA_PROOF_POOL_BYTES:String(p.poolBytes),...(forceDense?{SCENEWORKS_H3_VEDA_FORCE_DENSE:'1'}:{})}:{}};
+  assert.ok(capped||!forceDense,'normal Resident reference cannot force dense attention');
+  const policy=anchorPoolPolicy(p,capped);
+  return {port:0,gpuId:String(selected.physicalGpuIndex),deviceId:selected.physicalGpuUuid,...selected,cudaProofFeatures:['sceneworks-rust-api/h3-memory-proof'],memoryCap:{kind:'cuda-vram-gb',value:capped?24:95},cudaProofEnvironment:{SCENEWORKS_CUDA_PROOF_POOL_BYTES:String(policy.poolBytes),...(forceDense?{SCENEWORKS_H3_VEDA_FORCE_DENSE:'1'}:{})}};
+}
+// Match the source-owned cuBLAS workspace policy in both numerical comparison
+// arms. Pool budgets differ, but both install the same32MiB per-handle hook.
+export function anchorPoolPolicy(p,capped){
+  return {kind:'proof-pool-and-source-bound-cublas/v1',poolBytes:capped?p.poolBytes:92*GIB,
+    externalReserveBytes:capped?p.externalReserveBytes:3*GIB,totalEnvelopeBytes:(capped?24:95)*GIB,
+    cublasWorkspaceBytesFromSource:32*1024**2};
+}
+export function validatePoolInstallation(log,poolBytes){
+  const lines=log.split(/\r?\n/).filter(line=>line.startsWith('CUDA_PROOF_POOL installed '));
+  assert.equal(lines.length,1,'one actual worker pool installation marker required');
+  const match=/^CUDA_PROOF_POOL installed logical_ordinal=(\d+) cap_bytes=(\d+) scope=stream_ordered_pool outside_pool=unbounded_requires_separate_reserve_and_observation$/.exec(lines[0]);
+  assert.ok(match,'actual source pool-installation schema required');
+  assert.equal(Number(match[1]),0);assert.equal(Number(match[2]),poolBytes);
+  return {logicalOrdinal:0,capBytes:poolBytes,rawLine:lines[0]};
+}
+export function validateComparisonPool(record,windowed){
+  const actual=record.allocationPolicy;assert.ok(actual,'same-policy comparison requires explicit pool/workspace metadata; historical uncapped references are observation-only');
+  const expected=anchorPoolPolicy({poolBytes:actual.poolBytes,externalReserveBytes:actual.externalReserveBytes},windowed);
+  assert.deepEqual(actual,expected,'comparison pool/workspace policy differs');
+  bytes(actual.poolBytes,'comparison pool');bytes(actual.externalReserveBytes,'comparison reserve');
+  assert.ok(actual.externalReserveBytes>=2*GIB);assert.equal(actual.poolBytes+actual.externalReserveBytes,actual.totalEnvelopeBytes);
+  assert.deepEqual(record.poolInstallation,validatePoolInstallation(record.poolInstallation?.rawLine??'',actual.poolBytes),'actual installation differs from declared policy');
+  const observed=validatePoolEvidence(record.events,{jobId:record.job.id,...actual,metrics:{samples:record.samples}});
+  assert.deepEqual(record.envelope,observed,'comparison envelope lacks actual matching driver/device evidence');
+  return actual;
 }
 export function validateAnchorDevice(job,physicalGpuIndex){
   manualCudaSelection({physicalGpuIndex,physicalGpuUuid:CAMPAIGN_GPU_UUIDS[physicalGpuIndex]});
@@ -118,6 +146,8 @@ export function validatePlan(p){
     assert.equal(p.poolBytes,92*GIB);assert.equal(p.externalReserveBytes,3*GIB);assert.equal(p.workstationDeviceBytes,95*GIB);
     for(const key of ['retainedWorkstation','additionalSparse24','additionalSparse24Reason','primitiveProof','materializingProof','binaryPath','prebuilt','runtimeSourcePair','runtimeSceneworksRoot','runtimeInferenceRoot','controllerSourcePair'])assert.equal(p[key],undefined,'single control has fixed original runtime/build and cannot claim campaign proofs');
   }else{
+    assert.equal(p.workstationDeviceBytes,95*GIB,'normal Resident reference uses95GiB admission with92GiB pool+3GiB reserve');
+    assert.equal(p.retainedWorkstation,undefined,'historical uncapped reference is observation-only; cannot reuse it in a future same-policy grade');
     assert.equal(p.additionalSparse24,true,'normal sparse24GiB anchor is required for resident/window Veda equivalence');
     assert.ok(typeof p.additionalSparse24Reason==='string'&&p.additionalSparse24Reason.trim(),'focused additional sparse render requires the concrete evidence gap');
   }
@@ -217,11 +247,13 @@ export function validateVedaParityPair(records,{sourceEquivalence}={}){
     assert.deepEqual(sourceEquivalence.targetSourcePair,streamed.sourcePair);
     assert.equal(resident.media?.[0]?.sha256,RETAINED_WORKSTATION.mediaSha256);
   }else assert.deepEqual(resident.sourcePair,streamed.sourcePair,'Veda parity source pair changed');
+  assert.notEqual(resident.job?.id,RETAINED_WORKSTATION.jobId,'historical uncapped references are observation-only, even with a resident source mapping');
   sha40(resident.sourcePair?.sceneworks);sha40(resident.sourcePair?.inference);
   assert.deepEqual(resident.settings,streamed.settings,'Veda parity changed creative settings');
   const witnesses=[];
   for(const [record,windowed] of [[resident,false],[streamed,true]]){
     assert.equal(record.passed,true);assert.equal(record.job?.status,'completed');
+    validateComparisonPool(record,windowed);
     assert.ok(typeof record.job.id==='string'&&record.job.id.length>0);
     assertQueuedMatchesSubmitted({...record.settings,projectId:record.job.payload?.projectId},record.job);
     assert.equal(record.settings.advanced?.veda?.enabled,true);
@@ -834,8 +866,10 @@ export async function run(p,swRoot,inferenceRoot,output){
       const raw=record.media[0].asset.recipe?.rawAdapterSettings;assert.ok(raw,'actual resolved generation settings required');assert.equal(raw.effectiveSteps,8);assert.equal(raw.minimaxH3Tier,'q4');assert.equal(metric.steps,8);
       record.observations=await observer.finish();record.samples=observer.samples;observer=undefined;
       record.sampledStagePeaks=Object.fromEntries([...new Set(record.samples.map(sample=>sample.stage))].map(stage=>{const group=record.samples.filter(sample=>sample.stage===stage);return [stage,{hostPeakBytes:Math.max(...group.map(sample=>sample.host)),devicePeakBytes:Math.max(...group.map(sample=>sample.device??NaN)),samples:group.length,scope:'sampled against actual product job stage; may miss transients, pool watermark remains full-process continuous'}];}));
-      const events=parseEvents(service.worker.log());record.events=events;
-      if(capped)record.envelope=validatePoolEvidence(events,{jobId:job.id,poolBytes:p.poolBytes,externalReserveBytes:p.externalReserveBytes,metrics:{samples:record.samples}});
+      const workerLog=service.worker.log(),events=parseEvents(workerLog);record.events=events;
+      record.allocationPolicy=anchorPoolPolicy(p,capped);
+      record.poolInstallation=validatePoolInstallation(workerLog,record.allocationPolicy.poolBytes);
+      record.envelope=validatePoolEvidence(events,{jobId:job.id,...record.allocationPolicy,metrics:{samples:record.samples}});
       record.passed=true;
     }catch(error){record.error=error.stack;throw error;}
     finally{if(observer)try{record.observations=await observer.finish();}catch(error){record.observationError=error.message;}if(service.worker)try{await service.stop();}catch(error){record.passed=false;record.shutdownError=error.message;}if(service.binary)try{assert.equal(await fileSha256(service.binary),service.binaryHash,'owned executable changed during the anchor');}catch(error){record.passed=false;record.binaryError=error.message;}record.endedAt=new Date().toISOString();await save(path.join(dir,'result.json'),record);}
