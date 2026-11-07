@@ -1841,7 +1841,10 @@ async fn register_worker_with_retry(
     let mut attempt = 0_u32;
     loop {
         match register_worker(api, settings, gpu).await {
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                portable_source_claims::start_background_inventory(settings.clone());
+                return Ok(());
+            }
             Err(error) => {
                 attempt = attempt.saturating_add(1);
                 let delay = retry_delay(settings.poll_seconds, attempt);
@@ -1962,7 +1965,7 @@ async fn register_worker(
             worker_id: settings.worker_id.clone(),
             gpu_id: gpu.id.clone(),
             platform: Some(std::env::consts::OS.to_owned()),
-            portable_source_claims: Some(portable_source_claims::static_source_claims(settings)),
+            portable_source_claims: Some(Vec::new()),
             gpu_name: Some(gpu.name.clone()),
             capabilities: worker_capabilities(gpu),
             loaded_models: Vec::new(),
@@ -2007,6 +2010,7 @@ pub(crate) async fn heartbeat_with_reason(
 ) -> WorkerResult<()> {
     // Capture the label before `status` is moved into the request, for the log line.
     let status_label = status.as_str().to_owned();
+    let portable_claims = portable_source_claims::pending_inventory_claims();
     let outcome: WorkerResult<WorkerSnapshot> = api
         .post_json(
             &format!("/api/v1/workers/{}/heartbeat", settings.worker_id),
@@ -2016,13 +2020,18 @@ pub(crate) async fn heartbeat_with_reason(
                 loaded_models: Vec::new(),
                 utilization: gpu_utilization(&settings.gpu_id).await,
                 status_reason,
-                portable_source_claims: None,
+                portable_source_claims: portable_claims.clone(),
                 extra: BTreeMap::new(),
             },
         )
         .await;
     match outcome {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            if portable_claims.is_some() {
+                portable_source_claims::mark_inventory_published();
+            }
+            Ok(())
+        }
         Err(WorkerError::Http(error)) => {
             emit_event_value(
                 Level::ERROR,

@@ -1,6 +1,42 @@
 //! Utility dispatch and terminal failure reconciliation.
 use super::*;
 
+pub(crate) fn missing_portable_revision_files(
+    binding: &PortableRouteBinding,
+    settings: &Settings,
+) -> std::collections::BTreeMap<(String, String), Vec<String>> {
+    let mut missing = std::collections::BTreeMap::new();
+    let library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+    for member in binding.models.iter().flat_map(|model| &model.members) {
+        let sceneworks_core::model_artifacts::portable_binding::PortableSourceIdentity::Revision {
+            identity,
+        } = &member.source
+        else {
+            continue;
+        };
+        let snapshot = library
+            .discover_snapshot(&identity.repository, Some(&identity.revision))
+            .ok()
+            .map(|(_, path)| path);
+        for file in &member.files {
+            if !snapshot
+                .as_ref()
+                .is_some_and(|root| root.join(&file.relative_path).is_file())
+            {
+                missing
+                    .entry((identity.repository.clone(), identity.revision.clone()))
+                    .or_insert_with(Vec::new)
+                    .push(file.relative_path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    for files in missing.values_mut() {
+        files.sort();
+        files.dedup();
+    }
+    missing
+}
+
 /// Dispatch one claimed job to its handler and reconcile the terminal state.
 ///
 /// `shutdown` (sc-8845, F-043) is the process-shutdown [`CancelFlag`] tripped by
@@ -58,6 +94,34 @@ async fn run_utility_job_inner(
     // timings are posted separately by the handlers and coalesce-merge server-side.
     let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
+        // Cold pinned files are fetched under the frozen route before the byte guard. Existing
+        // on-demand handlers may fetch too late: the guard must hash and lease the exact selected
+        // closure before any loader starts.
+        if let Some(binding) = portable_model_binding.as_ref() {
+            binding.validate().map_err(|_| {
+                (
+                    "Model source unavailable.",
+                    WorkerError::InvalidPayload("portable model binding is invalid".to_owned()),
+                )
+            })?;
+            if binding.backend != crate::portable_runtime_backend(settings)
+                || binding.platform != std::env::consts::OS
+            {
+                return Err((
+                    "Model source unavailable.",
+                    WorkerError::InvalidPayload(
+                        "portable model route does not match this worker".to_owned(),
+                    ),
+                ));
+            }
+            for ((repo, revision), files) in missing_portable_revision_files(binding, settings) {
+                crate::model_jobs::ensure_hf_files_cached(
+                    api, settings, &job, &repo, &revision, &files,
+                )
+                .await
+                .map_err(|error| ("Model source unavailable.", error))?;
+            }
+        }
         // sc-19708: the ONE pre-loader guard. Typed model-source admission happens here for every
         // job type, before any handler runs; handlers never carry availability or cache policy.
         //

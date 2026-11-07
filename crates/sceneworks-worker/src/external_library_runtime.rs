@@ -128,7 +128,92 @@ impl RuntimeSourceGuard {
             return Ok(Self::none(payload));
         }
 
-        let model_entries = payload_model_entries(payload);
+        let mut planning_payload = payload.clone();
+        if binding.is_some() {
+            // The claim's manifest was assembled on the API host. Its physical paths cannot
+            // establish this worker's installation, including during the legacy source pass.
+            let slots: Vec<_> = payload_model_slots(payload)
+                .into_iter()
+                .filter_map(|(slot, entry)| {
+                    entry
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|id| (slot, id.to_owned()))
+                })
+                .collect();
+            for (slot, id) in slots {
+                let model_binding =
+                    binding.and_then(|route| route.models.iter().find(|model| model.slot == slot));
+                let primary = model_binding.and_then(|model| {
+                    model
+                        .members
+                        .iter()
+                        .find(|member| member.role == ArtifactMemberRole::Primary)
+                });
+                if let Some(local) = primary
+                    .map(|member| {
+                        worker_catalog_member_path(
+                            settings,
+                            "user.models.jsonc",
+                            "models",
+                            &id,
+                            None,
+                            member,
+                        )
+                    })
+                    .transpose()?
+                    .flatten()
+                {
+                    let entry = model_slot_entry_mut(&mut planning_payload, &slot)
+                        .and_then(serde_json::Value::as_object_mut)
+                        .ok_or_else(|| invalid_binding("worker model slot disappeared"))?;
+                    entry.insert("modelPath".to_owned(), json!(local));
+                    entry.insert("installedPath".to_owned(), json!(local));
+                    entry
+                        .entry("paths".to_owned())
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                        .ok_or_else(|| invalid_binding("worker model paths are invalid"))?
+                        .insert("model".to_owned(), json!(local));
+                }
+                if let Some(model_binding) = model_binding {
+                    if let Some(components) = model_slot_entry_mut(&mut planning_payload, &slot)
+                        .and_then(|entry| entry.get_mut("components"))
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for component in components {
+                            let Some(component_id) =
+                                component.get("id").and_then(serde_json::Value::as_str)
+                            else {
+                                continue;
+                            };
+                            let member = model_binding.members.iter().find(|member| {
+                                member.component_id.as_deref() == Some(component_id)
+                            });
+                            let local = member
+                                .map(|member| {
+                                    worker_catalog_member_path(
+                                        settings,
+                                        "user.models.jsonc",
+                                        "models",
+                                        &id,
+                                        Some(component_id),
+                                        member,
+                                    )
+                                })
+                                .transpose()?
+                                .flatten();
+                            if let (Some(local), Some(component)) =
+                                (local, component.as_object_mut())
+                            {
+                                component.insert("path".to_owned(), json!(local));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let model_entries = payload_model_entries(&planning_payload);
         // Fail closed on an EMPTY model carrier set for every model-backed route. Routes that
         // genuinely load no model bytes are declared in the exhaustive table below — a job type
         // absent from that allowlist cannot pass without carriers.
@@ -343,6 +428,8 @@ impl RuntimeSourceGuard {
         {
             advanced.remove("__portableBoundTier");
             advanced.remove("__portableAuxPaths");
+            advanced.remove("__portableFrozenSources");
+            advanced.remove("__portableGemmaFiles");
         }
         if let Some(plan) = dispatch_payload
             .get_mut("plan")
@@ -361,7 +448,48 @@ impl RuntimeSourceGuard {
                 settings,
                 &mut dispatch_payload,
             )?;
+            if let Some(prepared) = prepared {
+                local_scope = None;
+                if !prepared.overlays.is_empty() {
+                    portable_scope =
+                        Some(prefer_portable_snapshots(prepared.overlays).map_err(|_| {
+                            invalid_binding("frozen snapshot overlay is unavailable")
+                        })?);
+                }
+                portable_snapshot = Some(prepared.snapshot);
+            }
+            rebind_revision_primary_paths(binding, payload, settings, &mut dispatch_payload)?;
             rewrite_training_plan_source(binding, settings, &mut dispatch_payload)?;
+            dispatch_payload
+                .entry("advanced".to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| invalid_binding("advanced options are not an object"))?
+                .insert("__portableFrozenSources".to_owned(), json!(true));
+            if *job_type == JobType::ModelConvert
+                && payload.get("converter").and_then(serde_json::Value::as_str) == Some("ltx_video")
+            {
+                let files = binding
+                    .models
+                    .iter()
+                    .flat_map(|model| &model.members)
+                    .filter(|member| {
+                        matches!(&member.source,
+                        PortableSourceIdentity::Revision { identity }
+                            if identity.repository == "SceneWorks/ltx-2.3-mlx")
+                    })
+                    .flat_map(|member| &member.files)
+                    .filter(|file| file.relative_path.starts_with("gemma"))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !files.is_empty() {
+                    dispatch_payload
+                        .get_mut("advanced")
+                        .and_then(serde_json::Value::as_object_mut)
+                        .expect("private advanced object was inserted")
+                        .insert("__portableGemmaFiles".to_owned(), json!(files));
+                }
+            }
             if let Some(tier) = binding
                 .models
                 .iter()
@@ -399,6 +527,8 @@ impl RuntimeSourceGuard {
         {
             advanced.remove("__portableBoundTier");
             advanced.remove("__portableAuxPaths");
+            advanced.remove("__portableFrozenSources");
+            advanced.remove("__portableGemmaFiles");
         }
         if let Some(plan) = dispatch_payload
             .get_mut("plan")
@@ -538,6 +668,93 @@ fn remove_private_snapshot(root: &Path) -> io::Result<()> {
     std::fs::remove_dir(root)
 }
 
+/// A resolved-cache preference can contain a complete hard closure while a selected soft
+/// companion lives only in the configured HF source tier. Choose per frozen member, never per
+/// repository, so a partial preferred snapshot cannot hide that companion.
+fn discover_frozen_member_snapshot(
+    settings: &Settings,
+    identity: &ArtifactIdentity,
+    files: &[PortableArtifactFile],
+) -> WorkerResult<PathBuf> {
+    let preferred = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+    let selected = preferred
+        .discover_snapshot(&identity.repository, Some(&identity.revision))
+        .map_err(|_| invalid_binding("frozen source snapshot is unavailable"))?
+        .1;
+    let selected_complete = files
+        .iter()
+        .all(|file| selected.join(&file.relative_path).is_file());
+    if selected_complete
+        && (selected.starts_with(preferred.root())
+            || snapshot_matches_frozen_files(&selected, files))
+    {
+        return Ok(selected);
+    }
+    let source = ArtifactSourceLibrary::new(preferred.root())
+        .map_err(|error| invalid_binding(error.to_string()))?;
+    let source_snapshot = source
+        .discover_snapshot(&identity.repository, Some(&identity.revision))
+        .map_err(|_| invalid_binding("frozen source snapshot is unavailable"))?
+        .1;
+    if files
+        .iter()
+        .any(|file| !source_snapshot.join(&file.relative_path).is_file())
+    {
+        return Err(invalid_binding(
+            "a frozen member is missing from every authorized source tier",
+        ));
+    }
+    Ok(source_snapshot)
+}
+
+fn snapshot_matches_frozen_files(snapshot: &Path, files: &[PortableArtifactFile]) -> bool {
+    files.iter().all(|file| {
+        let path = snapshot.join(&file.relative_path);
+        let Ok(input) = File::open(path) else {
+            return false;
+        };
+        let Ok((digest, size)) = sceneworks_core::hashing::sha256_reader_retry(input) else {
+            return false;
+        };
+        size == file.size_bytes && format!("sha256:{digest}") == file.sha256
+    })
+}
+
+fn selected_portable_aux_ids(
+    job_type: &JobType,
+    payload: &JsonObject,
+    entry: &serde_json::Value,
+    backend: &str,
+) -> WorkerResult<Vec<String>> {
+    let mut ids = required_portable_aux_source_ids(job_type, payload, entry, backend)
+        .map_err(invalid_binding)?;
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        let plan: sceneworks_core::training::TrainingPlan = serde_json::from_value(
+            payload
+                .get("plan")
+                .cloned()
+                .ok_or_else(|| invalid_binding("training plan is absent"))?,
+        )
+        .map_err(|error| invalid_binding(error.to_string()))?;
+        if entry.get("id").and_then(serde_json::Value::as_str)
+            == Some(plan.target.base_model.as_str())
+        {
+            let engine =
+                crate::portable_trainer_engine_id_for(&plan.target.kernel, &plan.target.base_model)
+                    .ok_or_else(|| invalid_binding("training engine is unavailable"))?;
+            ids.extend(
+                sceneworks_core::portable_sources::selected_training_aux_models(&plan, engine)
+                    .map_err(invalid_binding)?
+                    .into_iter()
+                    .map(|model| model.id.to_owned()),
+            );
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 fn prepare_portable_snapshot(
     route: &PortableRouteBinding,
     job_type: &JobType,
@@ -572,30 +789,8 @@ fn prepare_portable_snapshot(
     }) {
         return Ok(None);
     }
-    let declared_bytes = route
-        .models
-        .iter()
-        .zip(&selected_aux)
-        .flat_map(|(model, ids)| {
-            model.members.iter().filter(move |member| {
-                matches!(
-                    member.source,
-                    PortableSourceIdentity::Digest { .. }
-                        | PortableSourceIdentity::WorkerClaim { .. }
-                ) || member
-                    .component_id
-                    .as_ref()
-                    .is_some_and(|id| ids.contains(id))
-            })
-        })
-        .flat_map(|member| &member.files)
-        .try_fold(0u64, |total, file| total.checked_add(file.size_bytes))
-        .ok_or_else(|| invalid_binding("portable source closure size overflows"))?;
-    if declared_bytes > PORTABLE_CACHE_MAX_BYTES {
-        return Err(invalid_binding(
-            "portable source closure exceeds the worker cache limit",
-        ));
-    }
+    // A supported route may itself exceed the retention target. It remains leased while active;
+    // prune removes other entries, and a later route can evict this one after the lease ends.
     let route_digest = portable_cache_route_digest(route)?;
     let parent = settings
         .data_dir
@@ -813,8 +1008,8 @@ fn portable_cache_route_digest(route: &PortableRouteBinding) -> WorkerResult<Str
     Ok(format!("{:x}", digest.finalize()))
 }
 
-/// Keep at most eight route bundles and 256 GiB of cached copies. The current entry always
-/// remains; another entry is removed only after its nonblocking exclusive lease succeeds.
+/// Target at most eight route bundles and 256 GiB of reusable copies. The active entry always
+/// remains even when its frozen closure alone exceeds the target; a later route can evict it.
 fn prune_portable_snapshots(current: &Path, settings: &Settings) -> WorkerResult<()> {
     let root = settings.data_dir.join("models/portable-attempts");
     let _prune_lock =
@@ -1341,14 +1536,25 @@ fn verify_portable_route(
         )
         .map_err(invalid_binding)?;
         for source_id in &required {
-            if !model
+            let admitted = model
                 .members
                 .iter()
-                .any(|member| member.component_id.as_deref() == Some(source_id.as_str()))
-            {
+                .find(|member| member.component_id.as_deref() == Some(source_id.as_str()));
+            let Some(admitted) = admitted else {
                 return Err(invalid_binding(format!(
                     "the admitted route omits selected auxiliary source {source_id}"
                 )));
+            };
+            if source_id == "iris_depth_parent"
+                && !matches!(
+                    &admitted.source,
+                    PortableSourceIdentity::WorkerClaim { source_id, .. }
+                        if matches!(source_id.as_str(), "iris_depth_export" | "iris_generation_text_encoder")
+                )
+            {
+                return Err(invalid_binding(
+                    "Iris depth parent has no authorized source",
+                ));
             }
         }
         verify_portable_binding(model, entry, payload, settings, plans, &required)?;
@@ -1707,7 +1913,83 @@ fn selected_local_artifact_path(
             .map_err(|error| invalid_binding(error.to_string()))?;
         return Ok(selected);
     }
-    let raw = if member.role == ArtifactMemberRole::Primary {
+    let local_catalog = if member.role == ArtifactMemberRole::Primary {
+        entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| {
+                worker_catalog_member_path(
+                    settings,
+                    "user.models.jsonc",
+                    "models",
+                    id,
+                    None,
+                    member,
+                )
+                .transpose()
+            })
+            .transpose()?
+    } else if member.role == ArtifactMemberRole::Lora {
+        let claim = serde_json::Value::Object(payload.clone());
+        member
+            .component_id
+            .as_deref()
+            .and_then(|slot| {
+                enumerate_portable_array_slots(&claim, &["loras", "lokrs"])
+                    .into_iter()
+                    .find(|(candidate, _)| candidate == slot)
+                    .map(|(_, record)| record)
+            })
+            .and_then(|record| record.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| {
+                worker_lora_catalog_member_path(settings, payload, id, member).transpose()
+            })
+            .transpose()?
+    } else if member.role == ArtifactMemberRole::Control {
+        let claim = serde_json::Value::Object(payload.clone());
+        member
+            .component_id
+            .as_deref()
+            .and_then(|slot| {
+                enumerate_portable_array_slots(&claim, &["controls"])
+                    .into_iter()
+                    .find(|(candidate, _)| candidate == slot)
+                    .map(|(_, record)| record)
+            })
+            .and_then(|record| record.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| {
+                worker_catalog_member_path(
+                    settings,
+                    "user.models.jsonc",
+                    "models",
+                    id,
+                    None,
+                    member,
+                )
+                .transpose()
+            })
+            .transpose()?
+    } else {
+        let model_id = entry.get("id").and_then(serde_json::Value::as_str);
+        let component_id = member.component_id.as_deref();
+        if let (Some(model_id), Some(component_id)) = (model_id, component_id) {
+            worker_catalog_member_path(
+                settings,
+                "user.models.jsonc",
+                "models",
+                model_id,
+                Some(component_id),
+                member,
+            )?
+        } else {
+            None
+        }
+    };
+    let raw = if let Some(local) = local_catalog {
+        Some(local)
+    } else if member.role == ArtifactMemberRole::Primary {
         (model_slot == "modelManifestEntry")
             .then(|| {
                 payload
@@ -1767,6 +2049,126 @@ fn selected_local_artifact_path(
     }
     .ok_or_else(|| invalid_binding("the admitted local artifact has no worker locator"))?;
     crate::paths::normalize_app_managed_model_entry_path(settings, &raw, "portable model binding")
+}
+
+fn worker_catalog_member_path(
+    settings: &Settings,
+    manifest_name: &str,
+    collection: &str,
+    id: &str,
+    component_id: Option<&str>,
+    member: &PortableArtifactMember,
+) -> WorkerResult<Option<PathBuf>> {
+    if settings.config_dir.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    let manifest = settings.config_dir.join("manifests").join(manifest_name);
+    worker_catalog_member_path_at(settings, &manifest, collection, id, component_id, member)
+}
+
+fn worker_lora_catalog_member_path(
+    settings: &Settings,
+    payload: &JsonObject,
+    id: &str,
+    member: &PortableArtifactMember,
+) -> WorkerResult<Option<PathBuf>> {
+    if let Some(global) =
+        worker_catalog_member_path(settings, "user.loras.jsonc", "loras", id, None, member)?
+    {
+        return Ok(Some(global));
+    }
+    let Some(project) = crate::paths::project_path_for_payload(settings, payload)
+        .map_err(|_| invalid_binding("worker project source is unavailable"))?
+    else {
+        return Ok(None);
+    };
+    let manifest = project.join("loras/manifest.jsonc");
+    worker_catalog_member_path_at(settings, &manifest, "loras", id, None, member)
+}
+
+fn worker_catalog_member_path_at(
+    settings: &Settings,
+    manifest: &Path,
+    collection: &str,
+    id: &str,
+    component_id: Option<&str>,
+    member: &PortableArtifactMember,
+) -> WorkerResult<Option<PathBuf>> {
+    let raw = match std::fs::read_to_string(manifest) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(invalid_binding("worker catalog is unavailable")),
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&raw))
+            .map_err(|_| invalid_binding("worker catalog is invalid"))?;
+    let matches = parsed
+        .get(collection)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_binding("worker catalog collection is invalid"))?
+        .iter()
+        .filter(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        .collect::<Vec<_>>();
+    for entry in matches {
+        let selected = if collection == "loras" {
+            sceneworks_core::lora_family::adapter_record_path(entry)
+        } else if let Some(component_id) = component_id {
+            entry
+                .get("components")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|component| {
+                    component.get("id").and_then(serde_json::Value::as_str) == Some(component_id)
+                })
+                .and_then(|component| component.get("path"))
+                .or_else(|| entry.get("paths").and_then(|paths| paths.get(component_id)))
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        } else {
+            entry
+                .get("modelPath")
+                .or_else(|| entry.get("paths").and_then(|paths| paths.get("model")))
+                .or_else(|| entry.get("installedPath"))
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        };
+        let Some(selected) = selected else {
+            continue;
+        };
+        let normalized = if collection == "loras" {
+            crate::paths::normalize_app_managed_lora_path(settings, &selected)
+        } else {
+            crate::paths::normalize_app_managed_model_entry_path(
+                settings,
+                &selected,
+                "portable catalog source",
+            )
+        };
+        let Ok(normalized) = normalized else {
+            continue;
+        };
+        if crate::portable_source_claims::capture_registered_files(&normalized)
+            .is_ok_and(|files| files == member.files)
+        {
+            return Ok(Some(normalized));
+        }
+    }
+    if collection == "models"
+        && parsed
+            .get(collection)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(id))
+            })
+    {
+        return Err(invalid_binding(
+            "registered source bytes or location differ from the frozen binding",
+        ));
+    }
+    Ok(None)
 }
 
 fn invalid_binding(message: impl Into<String>) -> WorkerError {
@@ -2617,6 +3019,53 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_catalog_id_selects_the_frozen_file_ledger() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let mut settings = Settings::for_test(data.clone());
+        settings.config_dir = temp.path().join("config");
+        let wrong = data.join("models/wrong");
+        let right = data.join("models/right");
+        std::fs::create_dir_all(&wrong).unwrap();
+        std::fs::create_dir_all(&right).unwrap();
+        std::fs::write(wrong.join("model.safetensors"), b"wrong").unwrap();
+        std::fs::write(right.join("model.safetensors"), b"right").unwrap();
+        let manifest = settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({"models":[
+                {"id":"shared","modelPath":wrong},
+                {"id":"shared","modelPath":right}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(&right).unwrap();
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Digest {
+                sha256: files[0].sha256.clone(),
+            },
+            tier: None,
+            files,
+        };
+        assert_eq!(
+            worker_catalog_member_path(
+                &settings,
+                "user.models.jsonc",
+                "models",
+                "shared",
+                None,
+                &member
+            )
+            .unwrap(),
+            Some(std::fs::canonicalize(right).unwrap())
+        );
+    }
+
+    #[test]
     fn portable_binding_rebinds_same_bytes_under_another_root_and_refuses_substitution() {
         let temp = TempDir::new().unwrap();
         let first = temp
@@ -2826,6 +3275,25 @@ mod tests {
     }
 
     #[test]
+    fn portable_cache_keeps_one_over_target_active_route() {
+        let temp = TempDir::new().unwrap();
+        let settings = settings(temp.path().join("data"));
+        let root = settings.data_dir.join("models/portable-attempts");
+        let current = root.join(format!("{:064x}", 1));
+        let old = root.join(format!("{:064x}", 2));
+        for path in [&current, &old] {
+            std::fs::create_dir_all(path.join("bundle")).unwrap();
+            std::fs::write(path.join(".last-used"), b"").unwrap();
+        }
+        let sparse = std::fs::File::create(current.join("bundle/weights")).unwrap();
+        sparse.set_len(PORTABLE_CACHE_MAX_BYTES + 1).unwrap();
+        std::fs::write(old.join("bundle/old"), b"old").unwrap();
+        prune_portable_snapshots(&current, &settings).unwrap();
+        assert!(current.join("bundle/weights").exists());
+        assert!(!old.join("bundle/old").exists());
+    }
+
+    #[test]
     fn portable_worker_claim_auxiliary_uses_verified_private_path() {
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
@@ -2953,6 +3421,47 @@ mod tests {
                 .unwrap()
                 .1
                 .join(file);
+            let partial = data.join("models/resolved-test/partial-snapshot");
+            std::fs::create_dir_all(&partial).unwrap();
+            std::fs::write(partial.join("base.safetensors"), b"base only").unwrap();
+            let scope =
+                sceneworks_core::model_artifacts::local_preference::prefer_local_snapshots(vec![
+                    LocalArtifactOverlayEntry {
+                        repository: repo.to_owned(),
+                        revision: REV_A.to_owned(),
+                        snapshot_root: partial.clone(),
+                        files: vec!["base.safetensors".into()],
+                    },
+                ])
+                .unwrap();
+            let selected = discover_frozen_member_snapshot(
+                &settings(data.clone()),
+                &ArtifactIdentity::pinned(repo, REV_A, "default").unwrap(),
+                &[PortableArtifactFile {
+                    relative_path: file.into(),
+                    size_bytes: 7,
+                    sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+                }],
+            )
+            .unwrap();
+            assert_eq!(selected.join(file), source);
+            std::fs::write(partial.join(file), b"corrupt").unwrap();
+            let selected = discover_frozen_member_snapshot(
+                &settings(data.clone()),
+                &ArtifactIdentity::pinned(repo, REV_A, "default").unwrap(),
+                &[PortableArtifactFile {
+                    relative_path: file.into(),
+                    size_bytes: 7,
+                    sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+                }],
+            )
+            .unwrap();
+            assert_eq!(
+                selected.join(file),
+                source,
+                "bad preferred bytes must fall back"
+            );
+            drop(scope);
             let mut base = local_binding("modelManifestEntry", "flux_dev", &model, None);
             base.members.push(PortableArtifactMember {
                 role: ArtifactMemberRole::Control,
@@ -2969,6 +3478,21 @@ mod tests {
             });
             let binding =
                 PortableRouteBinding::new("cpu", std::env::consts::OS, vec![base]).unwrap();
+            assert!(crate::utility_dispatch::missing_portable_revision_files(
+                &binding,
+                &settings(data.clone()),
+            )
+            .is_empty());
+            std::fs::remove_file(&source).unwrap();
+            let cold = crate::utility_dispatch::missing_portable_revision_files(
+                &binding,
+                &settings(data.clone()),
+            );
+            assert_eq!(
+                cold[&(repo.to_owned(), REV_A.to_owned())],
+                vec![file.to_owned()]
+            );
+            std::fs::write(&source, b"weights").unwrap();
             let payload = json!({
                 "model":"flux_dev", "advanced":{"poses":[{"id":"pose"}]},
                 "modelManifestEntry":{"id":"flux_dev", "downloads":[], "paths":{"model":model}}
@@ -3076,6 +3600,66 @@ mod tests {
             Some(&binding)
         )
         .is_err());
+    }
+
+    #[test]
+    fn portable_component_uses_worker_catalog_path_across_hosts() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("worker");
+        let model = data.join("models/imports/demo/model.safetensors");
+        let component = data.join("models/components/encoder.safetensors");
+        let api_component = temp
+            .path()
+            .join("api/models/components/encoder.safetensors");
+        for file in [&model, &component, &api_component] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&model, b"model").unwrap();
+        std::fs::write(&component, b"same encoder").unwrap();
+        std::fs::write(&api_component, b"same encoder").unwrap();
+        let route = PortableRouteBinding::new(
+            "cpu",
+            std::env::consts::OS,
+            vec![local_binding(
+                "modelManifestEntry",
+                "m",
+                &model,
+                Some(("text_encoder", &component)),
+            )],
+        )
+        .unwrap();
+        let mut settings = settings(data);
+        settings.config_dir = temp.path().join("worker-config");
+        let catalog = settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        std::fs::write(
+            &catalog,
+            serde_json::to_vec(&json!({"models":[{
+                "id":"m", "paths":{"model":model},
+                "components":[{"id":"text_encoder","path":component}]
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let payload = json!({"model":"m", "modelManifestEntry":{
+            "id":"m", "downloads":[], "paths":{"model":model},
+            "components":[{"id":"text_encoder","path":api_component}]
+        }})
+        .as_object()
+        .unwrap()
+        .clone();
+        let guard = RuntimeSourceGuard::begin_with_binding(
+            &JobType::ImageGenerate,
+            &payload,
+            &settings,
+            Some(&route),
+        )
+        .unwrap();
+        let mapped = guard.dispatch_payload()["modelManifestEntry"]["components"][0]["path"]
+            .as_str()
+            .unwrap();
+        assert_eq!(std::fs::read(mapped).unwrap(), b"same encoder");
+        assert_ne!(mapped, api_component.to_str().unwrap());
     }
 
     #[test]
