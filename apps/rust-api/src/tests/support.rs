@@ -127,7 +127,6 @@ pub(crate) fn readiness_worker(
         gpu_id: "0".to_owned(),
         platform: None,
         gpu_name: None,
-        platform: None,
         status,
         current_job_id: None,
         capabilities,

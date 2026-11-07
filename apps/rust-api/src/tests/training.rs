@@ -1,6 +1,5 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
-use axum::Json;
 
 /// Shape errors precede even dataset lookup, for both checkpoints/methods and dry/real submits.
 /// No worker is dispatched and no model fixture is installed by this test.
