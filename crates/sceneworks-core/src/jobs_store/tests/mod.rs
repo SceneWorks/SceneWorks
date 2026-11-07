@@ -50,5 +50,6 @@ mod minimax_h3_import_routing_tests;
 mod mlx_routing_tests;
 mod pending_workflow_tests;
 mod termination_failure_error_tests;
+mod typed_registry_job_contract_tests;
 
 mod download_binding_tests;

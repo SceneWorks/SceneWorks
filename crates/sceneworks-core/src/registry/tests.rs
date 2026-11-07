@@ -323,6 +323,58 @@ fn all_public_generator_and_provider_families_have_native_projections() {
 }
 
 #[test]
+fn yue2_tiers_require_the_candle_audio_export() {
+    let spec = builtin_model_spec("yue2").expect("shipped audio model");
+    let tiers: std::collections::BTreeSet<_> = spec.product.fields["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["variant"].as_str())
+        .collect();
+    assert_eq!(tiers, ["bf16", "q4", "q8"].into_iter().collect());
+    let candle_audio: Value = serde_json::from_str(include_str!(
+        "../../../../config/engine-capabilities/audio/capabilities.candle.json"
+    ))
+    .unwrap();
+    assert_eq!(candle_audio["backend"], "candle");
+    assert!(candle_audio["engines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == "yue2" && row["modality"] == "audio"));
+    assert!(spec.provider_routes.contains_key("candle"));
+    // The generic runtime export also mentions YuE2 on MLX. The typed public projection
+    // correctly withholds that provider because only Candle registers the audio engine.
+    assert!(!spec.provider_routes.contains_key("mlx"));
+}
+
+#[test]
+fn starvector_install_exposes_only_image_to_svg_on_both_native_lanes() {
+    for id in ["starvector_1b", "starvector_8b"] {
+        let spec = builtin_model_spec(id).expect("shipped vector model");
+        assert_eq!(spec.product.model_type, "vector");
+        assert_eq!(spec.product.fields["capabilities"], json!(["image_to_svg"]));
+        for backend in ["mlx", "candle"] {
+            assert_eq!(spec.provider_routes[backend].len(), 1, "{id}/{backend}");
+            assert!(spec.provider_routes[backend][0].id.starts_with(backend));
+        }
+    }
+}
+
+#[test]
+fn pid_decoder_overlays_are_installable_without_standalone_provider_routes() {
+    for id in ["pid_qwenimage", "pid_flux", "pid_flux2", "pid_sdxl"] {
+        let spec = builtin_model_spec(id).expect("shipped decoder overlay");
+        assert_eq!(spec.product.model_type, "utility");
+        assert!(
+            spec.provider_routes.is_empty(),
+            "{id} is loaded by its owning image model"
+        );
+        assert!(spec.routes.is_empty(), "{id} is not an image generator");
+    }
+}
+
+#[test]
 fn router_policy_and_preview_feature_export_keep_the_frozen_population() {
     let policy = super::policy::parse(POLICY).unwrap();
     assert_eq!((policy.image.len(), policy.video.len()), (63, 14));
