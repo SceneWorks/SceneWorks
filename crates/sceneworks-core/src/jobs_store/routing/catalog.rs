@@ -399,10 +399,9 @@ pub struct ModelCandleFeatures {
 }
 
 /// Off-Mac (candle) UI gating support for a model id of the given catalog `model_type` — the
-/// sibling of [`model_mac_support`] (sc-19570). Only `"video"` carries a verdict; every other type
-/// is reported `supported` with an empty feature set, because the measured off-Mac reachability gap
-/// this block closes is per-video-mode. A caller must therefore read `features.video_modes` for the
-/// per-mode answer and treat an empty map as "this block says nothing about that model".
+/// sibling of [`model_mac_support`] (sc-19570). Converted builtins take availability from their
+/// static Candle route. Legacy video models expose per-mode verdicts in `features.video_modes`;
+/// other legacy rows keep their original supported/empty-features projection.
 pub fn model_candle_support(model_id: &str, model_type: &str) -> ModelCandleSupport {
     if let Some(spec) = crate::registry::builtin_model_spec(model_id) {
         let supported = spec.routes.contains_key("candle");

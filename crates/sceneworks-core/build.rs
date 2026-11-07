@@ -1,5 +1,7 @@
 #[path = "src/registry/assemble.rs"]
 mod assemble;
+#[path = "src/hf_repo_id.rs"]
+mod hf_repo_id;
 #[path = "src/registry/spec.rs"]
 mod spec;
 
@@ -12,6 +14,7 @@ fn build_registry() {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     };
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/hf_repo_id.rs");
     println!("cargo:rerun-if-changed=src/registry/assemble.rs");
     println!("cargo:rerun-if-changed=src/registry/spec.rs");
     let specs = assemble::assemble(

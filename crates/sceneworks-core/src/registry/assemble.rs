@@ -40,6 +40,21 @@ pub fn assemble(
     let mut specs = BTreeMap::new();
     for mut product in products {
         let id = product.id.clone();
+        if product.downloads.is_empty()
+            || product.downloads.iter().any(|download| {
+                download.provider != "huggingface"
+                    || crate::hf_repo_id::namespaced(&download.repo) != Ok(download.repo.as_str())
+                    || download.revision.len() != 40
+                    || !download
+                        .revision
+                        .bytes()
+                        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            })
+        {
+            return Err(format!(
+                "builtin {id} needs an immutable download repository and revision"
+            ));
+        }
         let evidence = evidence
             .remove(&id)
             .ok_or_else(|| format!("missing evidence for {id}"))?;

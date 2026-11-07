@@ -131,3 +131,15 @@ fn user_menus_only_narrow_native_product_choices_and_reconcile_defaults() {
     );
     assert!(row["defaults"].get("sampler").is_none());
 }
+
+#[test]
+fn mutable_distribution_revision_cannot_enter_the_static_catalog() {
+    let mut products: Value = serde_json::from_str(PRODUCTS).unwrap();
+    products[0]["downloads"][0]["revision"] = json!("main");
+    let result = assemble::assemble(
+        &products.to_string(),
+        EVIDENCE,
+        &[("mlx", MLX), ("candle", CANDLE)],
+    );
+    assert!(result.unwrap_err().contains("immutable download"));
+}

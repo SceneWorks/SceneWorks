@@ -20,8 +20,8 @@
 //! So the flag is dumped at build time on a lane that links engines
 //! (`sceneworks_worker::engine_capability_facts`, stage 1) and derived into
 //! `config/manifests/builtin.preview-support.jsonc` by `apps/web/scripts/generate-preview-support.mjs`
-//! (stage 2), whose vitest drift guard re-derives it on every PR. This module only embeds and reads
-//! that artifact.
+//! (stage 2), whose vitest drift guard re-derives it on every PR. Converted builtins read preview
+//! availability from their compiled ModelSpec. Other rows still use the stage-2 artifact.
 //!
 //! # Engine-keyed, never a boolean
 //!
