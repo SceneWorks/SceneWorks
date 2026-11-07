@@ -10,6 +10,9 @@ pub(crate) mod gaps;
 pub(crate) mod matrix;
 pub(crate) mod mlx;
 
+#[cfg(test)]
+mod typed_registry_contract_tests;
+
 use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
