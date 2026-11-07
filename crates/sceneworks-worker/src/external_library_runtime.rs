@@ -4955,10 +4955,36 @@ mod tests {
             assert!(RuntimeSourceGuard::begin_with_binding(
                 &JobType::ModelConvert,
                 &payload,
-                &settings(second),
+                &settings(second.clone()),
                 Some(&route)
             )
             .is_err());
+            let decision = crate::utility_dispatch::begin_source_guard_before_fetch(
+                &JobType::ModelConvert,
+                &payload,
+                &settings(second.clone()),
+                Some(&route),
+            )
+            .unwrap();
+            let crate::utility_dispatch::SourceGuardBeforeFetch::Missing(missing) = decision else {
+                panic!("cold frozen revision should request its exact missing file")
+            };
+            assert_eq!(
+                missing[&(repo.to_owned(), REV_A.to_owned())],
+                vec!["native.safetensors".to_owned()]
+            );
+            std::fs::remove_dir(source.parent().unwrap()).unwrap();
+            let decision = crate::utility_dispatch::begin_source_guard_before_fetch(
+                &JobType::ModelConvert,
+                &payload,
+                &settings(second),
+                Some(&route),
+            )
+            .unwrap();
+            assert!(matches!(
+                decision,
+                crate::utility_dispatch::SourceGuardBeforeFetch::Missing(_)
+            ));
         });
     }
 
@@ -5237,6 +5263,33 @@ mod tests {
         .unwrap()
         .clone();
         (settings(data), library, payload)
+    }
+
+    fn portable_installed_model_binding() -> PortableRouteBinding {
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Revision {
+                identity: ArtifactIdentity::pinned("guardfx/model", REV_A, "default").unwrap(),
+            },
+            tier: None,
+            files: vec![PortableArtifactFile {
+                relative_path: "model.safetensors".into(),
+                size_bytes: 7,
+                sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+            }],
+        };
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            "m",
+            "cpu",
+            "default",
+            None,
+            canonical_authored_options_sha256(&json!({})).unwrap(),
+            vec![member],
+        )
+        .unwrap();
+        PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap()
     }
 
     // The resident-base rows this THREAD resolves, replacing the production table for the body of
@@ -5659,6 +5712,73 @@ mod tests {
             // preference path never reaches the downloader.
             assert!(!library.exists());
             guard.finish_success().unwrap();
+        });
+    }
+
+    #[test]
+    fn portable_prefetch_uses_complete_bundle_before_considering_disconnected_source() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        with_local_cache(&settings, &library, |settings| {
+            publish_bundle(
+                &settings.data_dir,
+                &library,
+                "guardfx/model",
+                REV_A,
+                "default",
+                &["model.safetensors"],
+            );
+            std::fs::rename(&library, temp.path().join("detached")).unwrap();
+            let route = portable_installed_model_binding();
+            assert!(
+                !crate::utility_dispatch::missing_portable_revision_files(&route, &settings)
+                    .is_empty(),
+                "the old precheck would have attempted an offline fetch"
+            );
+            let decision = crate::utility_dispatch::begin_source_guard_before_fetch(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings,
+                Some(&route),
+            )
+            .unwrap();
+            let crate::utility_dispatch::SourceGuardBeforeFetch::Ready(guard) = decision else {
+                panic!("complete leased bundle must not request a download")
+            };
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::LocalReady
+            );
+            assert!(
+                !library.exists(),
+                "prefetch must not recreate the disconnected source"
+            );
+            guard.finish_success().unwrap();
+        });
+    }
+
+    #[test]
+    fn portable_prefetch_preserves_installed_external_unavailable_refusal() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        with_local_cache(&settings, &library, |settings| {
+            std::fs::rename(&library, temp.path().join("detached")).unwrap();
+            let route = portable_installed_model_binding();
+            let error = crate::utility_dispatch::begin_source_guard_before_fetch(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings,
+                Some(&route),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, WorkerError::ExternalLibraryUnavailable(_)),
+                "{error}"
+            );
+            assert!(
+                !library.exists(),
+                "refusal must not recreate the source library"
+            );
         });
     }
 

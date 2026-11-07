@@ -37,6 +37,45 @@ pub(crate) fn missing_portable_revision_files(
     missing
 }
 
+#[derive(Debug)]
+pub(crate) enum SourceGuardBeforeFetch {
+    Ready(external_library_runtime::RuntimeSourceGuard),
+    Missing(std::collections::BTreeMap<(String, String), Vec<String>>),
+}
+
+/// The source guard owns local-tier selection and the installed-external refusal. Let it select
+/// and lease a complete local bundle before considering any network fetch. Only a genuinely absent
+/// frozen revision member may reach the downloader; every other guard refusal stays terminal.
+pub(crate) fn begin_source_guard_before_fetch(
+    job_type: &JobType,
+    payload: &JsonObject,
+    settings: &Settings,
+    binding: Option<&PortableRouteBinding>,
+) -> WorkerResult<SourceGuardBeforeFetch> {
+    match external_library_runtime::RuntimeSourceGuard::begin_with_binding(
+        job_type, payload, settings, binding,
+    ) {
+        Ok(guard) => Ok(SourceGuardBeforeFetch::Ready(guard)),
+        Err(error) => {
+            let cold_revision = matches!(&error, WorkerError::InvalidPayload(detail)
+                if detail == "portable model binding: frozen source snapshot is unavailable"
+                    || detail == "portable model binding: a frozen member is missing from every authorized source tier"
+                    || detail.starts_with("portable model binding: artifact file is unavailable:")
+                    || (detail.starts_with("portable model binding: source snapshot ")
+                        && detail.ends_with(" is not installed")));
+            let Some(binding) = binding.filter(|_| cold_revision) else {
+                return Err(error);
+            };
+            let missing = missing_portable_revision_files(binding, settings);
+            if missing.is_empty() {
+                Err(error)
+            } else {
+                Ok(SourceGuardBeforeFetch::Missing(missing))
+            }
+        }
+    }
+}
+
 /// Dispatch one claimed job to its handler and reconcile the terminal state.
 ///
 /// `shutdown` (sc-8845, F-043) is the process-shutdown [`CancelFlag`] tripped by
@@ -94,9 +133,8 @@ async fn run_utility_job_inner(
     // timings are posted separately by the handlers and coalesce-merge server-side.
     let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
-        // Cold pinned files are fetched under the frozen route before the byte guard. Existing
-        // on-demand handlers may fetch too late: the guard must hash and lease the exact selected
-        // closure before any loader starts.
+        // Validate the claimed route before any source work. The guard below selects a local
+        // bundle first, then a genuinely cold revision may be fetched and re-guarded.
         if let Some(binding) = portable_model_binding.as_ref() {
             binding.validate().map_err(|_| {
                 (
@@ -114,13 +152,6 @@ async fn run_utility_job_inner(
                     ),
                 ));
             }
-            for ((repo, revision), files) in missing_portable_revision_files(binding, settings) {
-                crate::model_jobs::ensure_hf_files_cached(
-                    api, settings, &job, &repo, &revision, &files,
-                )
-                .await
-                .map_err(|error| ("Model source unavailable.", error))?;
-            }
         }
         // sc-19708: the ONE pre-loader guard. Typed model-source admission happens here for every
         // job type, before any handler runs; handlers never carry availability or cache policy.
@@ -134,7 +165,7 @@ async fn run_utility_job_inner(
         let guard_settings = settings.clone();
         let guard_binding = portable_model_binding.clone();
         let guard_task = crate::load_progress::spawn_blocking(move || {
-            external_library_runtime::RuntimeSourceGuard::begin_with_binding(
+            begin_source_guard_before_fetch(
                 &guard_job_type,
                 &guard_payload,
                 &guard_settings,
@@ -145,7 +176,7 @@ async fn run_utility_job_inner(
         // API's stale-worker timeout — the sc-13856 hazard at a new call site. Awaiting the handle
         // bare let the sweep mark a still-healthy worker offline mid-verification (the Krea bf16
         // 90s lost-heartbeat incident), so the wait must pump heartbeats on the progress interval.
-        let source_guard = progress::heartbeat_while_blocking(
+        let first_guard = progress::heartbeat_while_blocking(
             api,
             settings,
             &job.id,
@@ -154,6 +185,39 @@ async fn run_utility_job_inner(
         )
         .await
         .map_err(|error| ("Model source unavailable.", error))?;
+        let source_guard = match first_guard {
+            SourceGuardBeforeFetch::Ready(guard) => guard,
+            SourceGuardBeforeFetch::Missing(missing) => {
+                for ((repo, revision), files) in missing {
+                    crate::model_jobs::ensure_hf_files_cached(
+                        api, settings, &job, &repo, &revision, &files,
+                    )
+                    .await
+                    .map_err(|error| ("Model source unavailable.", error))?;
+                }
+                let guard_job_type = job.job_type.clone();
+                let guard_payload = job.payload.clone();
+                let guard_settings = settings.clone();
+                let guard_binding = portable_model_binding.clone();
+                let guard_task = crate::load_progress::spawn_blocking(move || {
+                    external_library_runtime::RuntimeSourceGuard::begin_with_binding(
+                        &guard_job_type,
+                        &guard_payload,
+                        &guard_settings,
+                        guard_binding.as_ref(),
+                    )
+                });
+                progress::heartbeat_while_blocking(
+                    api,
+                    settings,
+                    &job.id,
+                    "model source guard",
+                    guard_task,
+                )
+                .await
+                .map_err(|error| ("Model source unavailable.", error))?
+            }
+        };
         let mut dispatch_job = job.clone();
         dispatch_job.payload = source_guard.dispatch_payload().clone();
         let mut dispatch_settings = settings.clone();
