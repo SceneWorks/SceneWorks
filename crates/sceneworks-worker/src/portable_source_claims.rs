@@ -618,7 +618,7 @@ mod tests {
         .unwrap();
         let mut published = Vec::new();
         registered_digest_source_claims(&settings, |claim| published.push(claim));
-        assert_eq!(published.len(), 2); // valid model and control aliases
+        assert_eq!(published.len(), 3); // valid model, control, and locator aliases
         assert!(published
             .iter()
             .all(|claim| claim.source_id.starts_with("registered_digest:")));

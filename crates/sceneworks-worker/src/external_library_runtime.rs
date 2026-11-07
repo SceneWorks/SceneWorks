@@ -2226,11 +2226,15 @@ fn entry_locator_path(entry: &serde_json::Value, key: &str) -> Option<PathBuf> {
         }
         // Pre-portable jobs may carry a raw component id. Keep their exact existing locator.
         _ => entry
-            .get("components")?
-            .as_array()?
-            .iter()
-            .find(|component| component.get("id").and_then(serde_json::Value::as_str) == Some(key))?
-            .get("path"),
+            .get("components")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|components| {
+                components.iter().find(|component| {
+                    component.get("id").and_then(serde_json::Value::as_str) == Some(key)
+                })
+            })
+            .and_then(|component| component.get("path"))
+            .or_else(|| entry.get("paths").and_then(|paths| paths.get(key))),
     };
     selected
         .and_then(serde_json::Value::as_str)
@@ -2253,7 +2257,25 @@ fn set_existing_entry_locator(
             .and_then(|index| index.parse::<usize>().ok())
             .and_then(|index| entry.get_mut("components")?.as_array_mut()?.get_mut(index))
             .and_then(|component| component.get_mut("path")),
-        _ => None,
+        _ => {
+            let component = entry
+                .get_mut("components")
+                .and_then(serde_json::Value::as_array_mut)
+                .and_then(|components| {
+                    components.iter_mut().find(|component| {
+                        component.get("id").and_then(serde_json::Value::as_str) == Some(key)
+                    })
+                })
+                .and_then(|component| component.get_mut("path"));
+            if component.is_some() {
+                component
+            } else {
+                entry
+                    .get_mut("paths")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .and_then(|paths| paths.get_mut(key))
+            }
+        }
     };
     if let Some(value) = selected.filter(|value| value.is_string()) {
         *value = serde_json::Value::String(path.to_owned());
@@ -2330,7 +2352,19 @@ fn worker_catalog_member_path_at(
             crate::portable_source_claims::registered_model_locators(entry)
         };
         for (key, selected) in candidates {
-            if component_id.is_some_and(|required| key != required) {
+            if component_id.is_some_and(|required| {
+                key != required
+                    && !(collection == "models"
+                        && !required.contains('/')
+                        && (key.strip_prefix("paths/") == Some(required)
+                            || key
+                                .strip_prefix("components/")
+                                .and_then(|index| index.parse::<usize>().ok())
+                                .and_then(|index| entry.get("components")?.as_array()?.get(index))
+                                .and_then(|component| component.get("id"))
+                                .and_then(serde_json::Value::as_str)
+                                == Some(required)))
+            }) {
                 continue;
             }
             let normalized = if collection == "loras" {
