@@ -174,6 +174,12 @@ pub fn selected_training_aux_models(
 
 pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<PortableAuxSourceShape> {
     use PortableAuxSourceShape::{Directory, File};
+    // Training selectors return separately cataloged models, not component rows on the base
+    // model entry. Their native loaders receive the pinned snapshot directory and open the
+    // declared weight file inside it.
+    if is_training_aux_model_id(source_id) {
+        return Some(Directory);
+    }
     match source_id {
         "strict_control"
         | "sdxl_detail_tile_control"
@@ -255,6 +261,26 @@ pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<Porta
             .any(|option| option.get("componentId").and_then(Value::as_str) == Some(source_id))
             .then_some(File),
     }
+}
+
+fn is_training_aux_model_id(source_id: &str) -> bool {
+    use crate::training::{
+        body_losses, depth_anchoring, face_losses, latent_perceptual, training_adapter,
+    };
+    depth_anchoring::X0_DECODER_MODELS
+        .iter()
+        .chain(depth_anchoring::DEPTH_ANYTHING_V2_MODELS.iter())
+        .chain(latent_perceptual::ELATENTLPIPS_MODELS.iter())
+        .chain(training_adapter::TRAINING_ADAPTER_MODELS.iter())
+        .chain([
+            &body_losses::VITPOSE_PLUS_BASE_MODEL,
+            &body_losses::HYBRIK_RESNET34_MODEL,
+            &body_losses::SAPIENS_NORMAL_0_3B_MODEL,
+            &face_losses::FACE_STACK_SCRFD,
+            &face_losses::FACEMESH_V2_MODEL,
+            &latent_perceptual::FLUX2_VAE_MODEL,
+        ])
+        .any(|model| model.id == source_id)
 }
 
 pub fn pid_backbone_for(model: &str) -> Option<&'static str> {
@@ -836,6 +862,15 @@ mod tests {
         assert!(ids.contains("vitpose_plus_base"));
         assert!(ids.contains("instantid_face_stack"));
         assert_eq!(ids.len(), 4);
+        let base_entry = json!({"id":"z_image_turbo","downloads":[]});
+        for model in selected {
+            assert_eq!(
+                portable_aux_source_shape(model.id, &base_entry),
+                Some(PortableAuxSourceShape::Directory),
+                "{} must be resolved from its own pinned snapshot, not the training base",
+                model.id
+            );
+        }
         let mut task_plan = plan.clone();
         task_plan.target.base_model = "iris_3b_depth".to_owned();
         task_plan.target.kernel = "iris_train".to_owned();

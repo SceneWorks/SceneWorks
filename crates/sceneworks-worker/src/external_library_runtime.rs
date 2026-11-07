@@ -1168,7 +1168,23 @@ fn prepare_portable_snapshot(
         }
     }
     if needs_copy {
-        std::fs::rename(&staging, &published).map_err(WorkerError::Io)?;
+        // A source can change after the first guard check while it is being copied. Never
+        // publish those bytes as a reusable bundle until the complete staging tree matches the
+        // frozen ledger. A failed attempt remains private and the next attempt can rebuild it.
+        publish_verified_snapshot(&staging, &published, || {
+            private_tree_bytes(&staging)?;
+            for (_, member, selected_relative, _, relative_root, plan_layer) in &rewrites {
+                verify_private_snapshot_member(
+                    &staging,
+                    member,
+                    selected_relative,
+                    relative_root,
+                    plan_layer.is_some(),
+                    &allowed_roots,
+                )?;
+            }
+            Ok(())
+        })?;
     }
     private_tree_bytes(&published)?;
     // Copy-then-verify closes the race where the original changes after the first source check.
@@ -1189,32 +1205,17 @@ fn prepare_portable_snapshot(
         }
     }
     for (slot, member, selected_relative, is_selected_aux, relative_root, plan_layer) in &rewrites {
-        let target_root = published.join(relative_root);
-        let mapped = LocalArtifactMember {
-            role: member.role.clone(),
-            component_id: member.component_id.clone(),
-            source: member.source.clone(),
-            tier: member.tier.clone(),
-            files: member
-                .files
-                .iter()
-                .map(|file| LocalArtifactFile {
-                    relative_path: file.relative_path.clone(),
-                    path: if plan_layer.is_some() {
-                        target_root.join(selected_relative)
-                    } else {
-                        target_root.join(&file.relative_path)
-                    },
-                })
-                .collect(),
-        };
-        let captured = PortableArtifactMember::capture(&mapped, &allowed_roots)
-            .map_err(|_| invalid_binding("private snapshot verification failed"))?;
-        if captured != *member {
-            return Err(invalid_binding(
-                "private snapshot differs from admitted bytes",
-            ));
+        if !needs_copy {
+            verify_private_snapshot_member(
+                &published,
+                member,
+                selected_relative,
+                relative_root,
+                plan_layer.is_some(),
+                &allowed_roots,
+            )?;
         }
+        let target_root = published.join(relative_root);
         let selected = target_root.join(selected_relative);
         if let Some((checkpoint_id, layer_id)) = plan_layer {
             verified_plan_layers.insert(checkpoint_id, layer_id, selected)?;
@@ -1262,6 +1263,55 @@ fn prepare_portable_snapshot(
         overlays,
         plan_layers,
     }))
+}
+
+fn publish_verified_snapshot(
+    staging: &Path,
+    published: &Path,
+    verify: impl FnOnce() -> WorkerResult<()>,
+) -> WorkerResult<()> {
+    if let Err(error) = verify() {
+        remove_private_snapshot(staging).map_err(WorkerError::Io)?;
+        return Err(error);
+    }
+    std::fs::rename(staging, published).map_err(WorkerError::Io)
+}
+
+fn verify_private_snapshot_member(
+    snapshot_root: &Path,
+    member: &PortableArtifactMember,
+    selected_relative: &Path,
+    relative_root: &Path,
+    is_plan_layer: bool,
+    allowed_roots: &[PathBuf],
+) -> WorkerResult<()> {
+    let target_root = snapshot_root.join(relative_root);
+    let mapped = LocalArtifactMember {
+        role: member.role.clone(),
+        component_id: member.component_id.clone(),
+        source: member.source.clone(),
+        tier: member.tier.clone(),
+        files: member
+            .files
+            .iter()
+            .map(|file| LocalArtifactFile {
+                relative_path: file.relative_path.clone(),
+                path: if is_plan_layer {
+                    target_root.join(selected_relative)
+                } else {
+                    target_root.join(&file.relative_path)
+                },
+            })
+            .collect(),
+    };
+    let captured = PortableArtifactMember::capture(&mapped, allowed_roots)
+        .map_err(|_| invalid_binding("private snapshot verification failed"))?;
+    if captured != *member {
+        return Err(invalid_binding(
+            "private snapshot differs from admitted bytes",
+        ));
+    }
+    Ok(())
 }
 
 fn common_file_parent(
@@ -2082,7 +2132,17 @@ fn verify_portable_binding(
         .map(|requirement| requirement.variant.clone())
         .or(manifest_variant)
         .or_else(|| requested_runtime_variant(payload))
-        .unwrap_or_else(|| "default".to_owned());
+        .unwrap_or_else(|| {
+            if entry
+                .get("downloads")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(Vec::is_empty)
+            {
+                "local".to_owned()
+            } else {
+                "default".to_owned()
+            }
+        });
     if binding.variant != selected_variant || primary.tier != binding.tier {
         return Err(invalid_binding(
             "the selected model tier differs from its admitted identity",
@@ -3554,6 +3614,157 @@ mod tests {
             members,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn download_free_registered_model_uses_admitted_local_variant() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let model = data.join("models/imports/demo/model.safetensors");
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"registered local model").unwrap();
+        let payload = json!({
+            "model":"demo",
+            "modelManifestEntry":{"id":"demo","downloads":[],"paths":{"model":model}}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut model_binding = local_binding("modelManifestEntry", "demo", &model, None);
+        model_binding.variant = "local".to_owned();
+        let route =
+            PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model_binding]).unwrap();
+        RuntimeSourceGuard::begin_with_binding(
+            &JobType::ImageGenerate,
+            &payload,
+            &settings(data),
+            Some(&route),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn selected_taef1_training_auxiliary_uses_its_pinned_directory() {
+        use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+        use sceneworks_core::model_artifacts::ArtifactIdentity;
+        use sceneworks_core::training::depth_anchoring::TAEF1_MODEL;
+
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let model = data.join("models/imports/zimage/model.safetensors");
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"base").unwrap();
+        let library = temp.path().join("hf");
+        with_library(&library, || {
+            let source = sceneworks_core::hf_home::model_source_library(&data)
+                .repository_root(TAEF1_MODEL.repo)
+                .unwrap()
+                .join("snapshots")
+                .join(TAEF1_MODEL.revision)
+                .join(TAEF1_MODEL.file);
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(&source, b"taef1 bytes").unwrap();
+            let mut base = local_binding("modelManifestEntry", "z_image_turbo", &model, None);
+            base.variant = "local".to_owned();
+            base.members.push(PortableArtifactMember {
+                role: ArtifactMemberRole::CoRequisite,
+                component_id: Some(TAEF1_MODEL.id.to_owned()),
+                source: PortableSourceIdentity::Revision {
+                    identity: ArtifactIdentity::pinned(
+                        TAEF1_MODEL.repo,
+                        TAEF1_MODEL.revision,
+                        "default",
+                    )
+                    .unwrap(),
+                },
+                tier: None,
+                files: vec![PortableArtifactFile {
+                    relative_path: TAEF1_MODEL.file.into(),
+                    size_bytes: 11,
+                    sha256: format!("sha256:{:x}", Sha256::digest(b"taef1 bytes")),
+                }],
+            });
+            let route = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![base]).unwrap();
+            let payload = json!({
+                "modelManifestEntry":{"id":"z_image_turbo","downloads":[],"paths":{"model":model}},
+                "plan":{
+                    "schemaVersion":1,"planVersion":1,"jobId":"job",
+                    "target":{"targetId":"target","kernel":"z_image_lora","family":"zimage","modality":"image","outputKind":"lora","baseModel":"z_image_turbo","baseModelPath":model},
+                    "dataset":{"datasetId":"dataset","datasetVersion":1,"rootPath":"/dataset","items":[]},
+                    "config":{"rank":16,"alpha":32,"learningRate":0.0001,"steps":10,"batchSize":1,"gradientAccumulation":1,"resolution":512,"saveEvery":10,"seed":1,"optimizer":"adamw8bit","advanced":{"depthAnchoringWeight":0.1,"depthAnchoringModel":"small"}},
+                    "output":{"loraId":"lora","outputDir":"/output","fileName":"lora.safetensors","format":"safetensors","triggerWords":[]},
+                    "provenance":{"datasetId":"dataset","datasetVersion":1,"targetId":"target","baseModel":"z_image_turbo","configSnapshot":{},"outputLoraId":"lora","sourceJobId":"job","createdAt":"2026-11-07T00:00:00Z"}
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            let mut dispatch = payload.clone();
+            let prepared = prepare_portable_snapshot(
+                &route,
+                &JobType::LoraTrain,
+                &payload,
+                &settings(data),
+                &mut dispatch,
+            )
+            .unwrap();
+            assert!(prepared.is_some());
+            let selected = dispatch["plan"]["__portableAuxPaths"][TAEF1_MODEL.id]
+                .as_str()
+                .unwrap();
+            assert!(Path::new(selected).is_dir());
+            assert_eq!(
+                std::fs::read(Path::new(selected).join(TAEF1_MODEL.file)).unwrap(),
+                b"taef1 bytes"
+            );
+            assert_ne!(Path::new(selected), source.parent().unwrap());
+        });
+    }
+
+    #[test]
+    fn failed_staging_verification_does_not_poison_reusable_bundle() {
+        let temp = TempDir::new().unwrap();
+        let original = temp.path().join("data/models/imports/model.safetensors");
+        std::fs::create_dir_all(original.parent().unwrap()).unwrap();
+        std::fs::write(&original, b"frozen").unwrap();
+        let frozen = local_binding("modelManifestEntry", "demo", &original, None)
+            .members
+            .remove(0);
+        let staging = temp.path().join("staging");
+        let published = temp.path().join("bundle");
+        std::fs::create_dir(&staging).unwrap();
+        let copied = staging.join("model.safetensors");
+        std::fs::write(&copied, b"substituted").unwrap();
+        let verify = |root: &Path| {
+            verify_private_snapshot_member(
+                root,
+                &frozen,
+                Path::new(""),
+                Path::new(""),
+                false,
+                &[temp.path().to_path_buf()],
+            )
+        };
+        let error =
+            publish_verified_snapshot(&staging, &published, || verify(&staging)).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("private snapshot verification failed"));
+        assert!(
+            !published.exists(),
+            "invalid copied bytes must not be published"
+        );
+        assert!(
+            !staging.exists(),
+            "failed staging must be removable for retry"
+        );
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("model.safetensors"), b"frozen").unwrap();
+        publish_verified_snapshot(&staging, &published, || verify(&staging)).unwrap();
+        assert_eq!(
+            std::fs::read(published.join("model.safetensors")).unwrap(),
+            b"frozen"
+        );
     }
 
     #[test]
