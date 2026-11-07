@@ -63,6 +63,99 @@ fn merge_model_manifest_entry_handles_single_or_missing_sources() {
 }
 
 #[test]
+fn registered_builtin_merge_keeps_model_authority_for_catalog_and_license_reads() {
+    let user = json!({
+        "id": "flux_schnell",
+        "name": "My Schnell",
+        "adapter": "attacker_adapter",
+        "gated": true,
+        "requiresLicenseAcknowledgment": true,
+        "downloads": [{"provider": "huggingface", "repo": "attacker/weights"}]
+    });
+    let projected = crate::models::merge_model_entries_with_registry(
+        vec![json!({"id": "flux_schnell", "adapter": "stale_adapter"})],
+        vec![user.clone()],
+    );
+    let model = &projected[0];
+    assert_eq!(model["name"], "My Schnell");
+    assert_eq!(model["adapter"], "flux_diffusers");
+    assert_eq!(model["gated"], false);
+    assert_eq!(
+        model["downloads"][0]["repo"],
+        "SceneWorks/flux1-schnell-mlx"
+    );
+    assert_ne!(model["requiresLicenseAcknowledgment"], true);
+
+    // The reserved builtin id keeps its routing identity even when only a user row is on disk.
+    let user_only = crate::models::merge_model_entries_with_registry(Vec::new(), vec![user]);
+    assert_eq!(user_only[0]["adapter"], "flux_diffusers");
+    let unrelated = crate::models::merge_model_entries_with_registry(
+        vec![json!({"id":"other","adapter":"old"})],
+        vec![json!({"id":"other","adapter":"user"})],
+    );
+    assert_eq!(unrelated[0]["adapter"], "user");
+    let embedded = crate::models::embedded_builtin_catalog_entry(|row| row["id"] == "flux_schnell")
+        .expect("embedded catalog")
+        .expect("registered builtin fallback");
+    assert_eq!(embedded["adapter"], model["adapter"]);
+    assert_eq!(embedded["downloads"], model["downloads"]);
+}
+
+#[tokio::test]
+async fn registered_builtin_projects_consistently_through_api_and_job_resolver() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let config = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config).expect("manifest dir");
+    write_empty_sibling_manifests(&config);
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[{"id":"flux_schnell","adapter":"stale_adapter"}]}"#,
+    )
+    .expect("builtin manifest");
+    std::fs::write(
+        config.join("user.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[{"id":"flux_schnell","name":"My Schnell","adapter":"attacker_adapter","downloads":[{"repo":"attacker/weights"}]}]}"#,
+    )
+    .expect("user manifest");
+    let (app, state) = create_app_with_state(test_settings(&temp)).expect("app");
+
+    let (status, catalog) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = catalog
+        .as_array()
+        .expect("catalog rows")
+        .iter()
+        .find(|row| row["id"] == "flux_schnell")
+        .expect("registered row");
+    assert_eq!(row["name"], "My Schnell");
+    assert_eq!(row["adapter"], "flux_diffusers");
+    assert!(row["downloads"]
+        .as_array()
+        .expect("platform downloads")
+        .iter()
+        .all(|download| download["repo"] != "attacker/weights"));
+    assert_eq!(row["catalogScope"], "builtin");
+
+    let resolved = crate::models::resolve_model_manifest_entry(&state, "flux_schnell")
+        .await
+        .expect("job entry");
+    assert_eq!(resolved["name"], row["name"]);
+    assert_eq!(resolved["adapter"], row["adapter"]);
+    assert_eq!(
+        resolved["downloads"][0]["repo"],
+        "SceneWorks/flux1-schnell-mlx"
+    );
+    assert_eq!(resolved["catalogScope"], "builtin");
+    let (license_rows, _) = crate::models::merged_model_manifest_entries(&state)
+        .await
+        .expect("license rows");
+    assert_eq!(license_rows[0]["adapter"], row["adapter"]);
+    assert_eq!(license_rows[0]["downloads"], resolved["downloads"]);
+}
+
+#[test]
 fn model_convert_request_parses_optional_mlx_quant_fields() {
     // The convert endpoint accepts optional camelCase quant knobs (sc-1982); the
     // worker reads the same field names off the job payload, so the contract must
