@@ -8675,7 +8675,8 @@
         ]
       },
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "FLUX.2 [dev]",
       "type": "image",
@@ -9995,7 +9996,8 @@
       },
       "mlx": {
         "denseTextEncoderTier": true,
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "FLUX.2 [klein] 9B",
       "paths": {
@@ -11208,7 +11210,8 @@
       },
       "mlx": {
         "denseTextEncoderTier": true,
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "FLUX.2 [klein] 9B-KV",
       "paths": {
@@ -14974,7 +14977,8 @@
         ]
       },
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "FLUX.1 [dev]",
       "paths": {
@@ -16057,7 +16061,8 @@
         ]
       },
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "FLUX.1 [schnell]",
       "paths": {
@@ -30930,7 +30935,8 @@
       },
       "mlx": {
         "quantize": 4,
-        "repo": "SceneWorks/kolors-mlx"
+        "repo": "SceneWorks/kolors-mlx",
+        "standardTierLayout": true
       },
       "name": "Kolors",
       "paths": {
@@ -50485,7 +50491,8 @@
         ]
       },
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "PuLID-FLUX (FLUX.1 [dev])",
       "paths": {
@@ -51363,7 +51370,8 @@
             "ddim_uniform"
           ]
         },
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "Qwen Image",
       "paths": {
@@ -54661,7 +54669,8 @@
         ]
       },
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "Qwen Image Edit (2511)",
       "paths": {
@@ -55421,7 +55430,8 @@
         ]
       },
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "Qwen Image Edit (2511) Lightning",
       "paths": {
@@ -59241,7 +59251,8 @@
       "macOnly": false,
       "mlx": {
         "quantize": 4,
-        "repo": "SceneWorks/Sana_1600M_1024px_mlx"
+        "repo": "SceneWorks/Sana_1600M_1024px_mlx",
+        "standardTierLayout": true
       },
       "name": "SANA 1600M",
       "nonCommercial": false,
@@ -59962,7 +59973,8 @@
       "macOnly": false,
       "mlx": {
         "quantize": 4,
-        "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx"
+        "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+        "standardTierLayout": true
       },
       "name": "SANA-Sprint 1.6B",
       "nonCommercial": false,
@@ -60842,7 +60854,8 @@
       },
       "macOnly": false,
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "Stable Diffusion 3.5 Large",
       "type": "image",
@@ -61372,7 +61385,8 @@
       },
       "macOnly": false,
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "Stable Diffusion 3.5 Large Turbo",
       "type": "image",
@@ -61900,7 +61914,8 @@
       },
       "macOnly": false,
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "Stable Diffusion 3.5 Medium",
       "type": "image",
@@ -71666,7 +71681,8 @@
             "ddim_uniform"
           ]
         },
-        "quantize": 4
+        "quantize": 4,
+        "standardTierLayout": true
       },
       "name": "Z-Image",
       "paths": {

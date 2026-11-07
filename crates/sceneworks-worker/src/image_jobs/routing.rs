@@ -333,7 +333,7 @@ pub(super) enum ImageRoute {
     SensenovaEdit,
     Bernini,
     /// A strict-pose job on a WIRED MLX pose family (one with a `…_control_available` lane, i.e. a
-    /// [`WIRED_MLX_POSE_FAMILIES`] id) whose control base/overlay is NOT installed — its
+    /// MLX wired pose id) whose control base/overlay is NOT installed — its
     /// `…_control_available` gate failed, so it reached the fall-through. Reject loudly instead of
     /// falling through to `Mlx` (plain txt2img) and silently dropping the poses (sc-11796 generalized to
     /// every wired family, sc-11814) — the MLX twin of the candle `CandleImageRoute::PoseControlBaseMissing`.
@@ -345,33 +345,70 @@ pub(super) enum ImageRoute {
     Mlx,
 }
 
-/// Image model ids the MLX router HAS a bespoke strict-pose control lane for — each is claimed by an
-/// `… _control_available` arm in [`prepare_image_route`] BEFORE the generic `mlx_available` txt2img arm,
-/// but only when its control base/overlay resolves locally. This is the SINGLE source for the
-/// fall-through reject: a wired family that reached the fall-through means its control base is absent
-/// (its lane's local weight-gate failed) → [`ImageRoute::PoseControlBaseMissing`], never silent txt2img.
-/// The MLX twin of [`WIRED_CANDLE_POSE_FAMILIES`] (sc-11171/F-008), and the SAME id set — every candle
-/// wired family has a matching MLX control lane:
-///   - `z_image_turbo` → `zimage_control_available` (Turbo Fun-Controlnet-Union)
-///   - `z_image`       → `zimage_base_control_available` (base full-CFG Fun-Controlnet-Union, sc-8251)
-///   - `qwen_image`    → `qwen_control_available` (2512 Fun-Controlnet-Union)
-///   - `kolors`        → `kolors_control_available` (Kolors ControlNet; also needs a reference)
-///   - `krea_2_turbo`  → `krea_control_available` (trained control-branch overlay, sc-8465)
-///   - `flux_dev`      → `flux1_dev_control_available` (Shakker Union-Pro-2.0)
-///   - `flux2_dev`     → `flux2_dev_control_available` (Fun-Controlnet-Union)
-///
-/// Distinct from a non-wired MLX pose family, which reaches the sc-5968
-/// [`ImageRoute::PoseReject`] instead. (sc-11814.)
-#[cfg(target_os = "macos")]
-pub(super) const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
-    "z_image_turbo",
-    "z_image",
-    "qwen_image",
-    "kolors",
-    "krea_2_turbo",
-    "flux_dev",
-    "flux2_dev",
-];
+/// Distinguish a missing installed control base from a model with no pose lane. A shipped
+/// text-to-image route is wired when the native strict-control table registers its provider's
+/// control engine; `z_image_edit` shares the Turbo provider but is edit-only, so it is excluded.
+#[cfg(native_lane)]
+fn wired_pose_family(model: &str, backend: &str) -> bool {
+    sceneworks_core::registry::builtin_model_spec(model).is_some_and(|spec| {
+        spec.product
+            .fields
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|caps| caps.iter().any(|cap| cap == "text_to_image"))
+            && spec.routes.get(backend).is_some_and(|route| {
+                super::strict_control::strict_control_engine(&format!("{}_control", route.id))
+                    .is_some()
+            })
+    })
+}
+
+#[cfg(native_lane)]
+pub(super) fn wired_pose_families(backend: &str) -> Vec<String> {
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .expect("shipped builtin manifest")
+        .1;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+            .expect("shipped manifest parses");
+    manifest["models"]
+        .as_array()
+        .expect("shipped models")
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .filter(|id| wired_pose_family(id, backend))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn wired_pose_membership_follows_typed_routes_and_control_engines() {
+    let expected: std::collections::BTreeSet<String> = [
+        "z_image_turbo",
+        "z_image",
+        "qwen_image",
+        "kolors",
+        "krea_2_turbo",
+        "flux_dev",
+        "flux2_dev",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    for backend in ["mlx", "candle"] {
+        assert_eq!(
+            wired_pose_families(backend)
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+        assert!(!wired_pose_family("sdxl", backend));
+        assert!(!wired_pose_family("chroma1_base", backend));
+    }
+}
 
 /// FLUX.1-dev has independent IP-Adapter and strict-control providers, neither of which composes
 /// the other's conditioning. Keep this predicate at route selection so a combined request is
@@ -514,14 +551,13 @@ fn resolve_image_route_with_imported_availability(
         Some(ImageRoute::Bernini)
     } else if request.mode != "edit_image"
         && !pose_entries(request).is_empty()
-        && (WIRED_MLX_POSE_FAMILIES.contains(&request.model.as_str())
-            || mlx_available(request, settings))
+        && (wired_pose_family(&request.model, "mlx") || mlx_available(request, settings))
     {
         // A strict-pose job that fell past every `…_control_available` lane above (and the edit / identity /
         // bernini lanes) must be REJECTED, not silently rendered as plain txt2img with the poses dropped —
         // the MLX twin of the candle fall-through reject (base.rs, sc-11171/F-008 + sc-5968). Two sub-cases,
         // distinguished by whether the family has a wired MLX pose lane at all:
-        //  - WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`): its control lane exists but the base/overlay
+        //  - WIRED MLX pose family (derived wired MLX pose family): its control lane exists but the base/overlay
         //    snapshot is absent (the lane's `…_control_available` weight-gate failed) → `PoseControlBaseMissing`.
         //    Fires regardless of whether the plain base weights resolve, because the control gate can fail while
         //    `mlx_available` succeeds — for `krea_2_turbo` the control base (`resolve_krea_control_base`) diverges
@@ -530,7 +566,7 @@ fn resolve_image_route_with_imported_availability(
         //  - A non-wired MLX pose family that `mlx_available` would render as plain txt2img →
         //    the sc-5968 no-silent-T2I `PoseReject`.
         // Checked BEFORE the generic `mlx_available` arm.
-        if WIRED_MLX_POSE_FAMILIES.contains(&request.model.as_str()) {
+        if wired_pose_family(&request.model, "mlx") {
             Some(ImageRoute::PoseControlBaseMissing)
         } else {
             Some(ImageRoute::PoseReject)
@@ -928,29 +964,6 @@ pub(super) enum CandleImageRoute {
     CandleTxt2Img,
 }
 
-/// Candle-routed image model ids that HAVE a bespoke worker strict-pose control lane — each is claimed
-/// by an `else if …_control_available(…)` arm in [`prepare_candle_image_route`] BEFORE the generic
-/// txt2img arm, but only when its control base snapshot resolves locally. This is the SINGLE source for
-/// (a) the fall-through reject branch below (a wired family reaching the fall-through means its control
-/// base is absent → [`CandleImageRoute::PoseControlBaseMissing`], never silent txt2img) and (b) the
-/// reject error message that enumerates the wired families — previously hand-duplicated across the
-/// `resolve_candle_image_route` `matches!` guard, the handler comment, and the reject error string, which
-/// had already drifted (the handler comment omitted `krea_2_turbo`). (sc-11171, F-008.)
-///
-/// NOTE: deliberately DISTINCT from the router's `model_has_candle_pose_lane` (sceneworks-core),
-/// which omits `krea_2_turbo` so other GPU descriptors decline Krea pose jobs and candle reliably
-/// owns the request — do not conflate the two lists.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) const WIRED_CANDLE_POSE_FAMILIES: &[&str] = &[
-    "qwen_image",
-    "kolors",
-    "z_image_turbo",
-    "z_image",
-    "flux2_dev",
-    "flux_dev",
-    "krea_2_turbo",
-];
-
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 impl CandleImageRoute {
     /// True only for routes whose actual load path applies the request's LoRA/LoKr stack. This is
@@ -1319,13 +1332,13 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         // A strict-pose candle job that reached here was NOT claimed by any `…_control_available` lane
         // above, so it must be REJECTED, not silently rendered as plain txt2img (poses dropped). Two
         // sub-cases, distinguished by whether the family has a wired candle pose lane at all:
-        //  - WIRED pose family (`WIRED_CANDLE_POSE_FAMILIES`): the lane exists but its control base
+        //  - WIRED pose family (derived wired Candle pose family): the lane exists but its control base
         //    snapshot is absent (the lane's local weight-gate failed) → `PoseControlBaseMissing`
         //    ("control base snapshot not installed"). Previously this family was excluded from the reject
         //    entirely and fell through to `CandleTxt2Img`, silently dropping the poses (sc-11171, F-008).
         //  - No candle pose lane → the sc-5968 no-silent-T2I `PoseReject`.
         // Checked BEFORE the txt2img arm below.
-        if WIRED_CANDLE_POSE_FAMILIES.contains(&request.model.as_str()) {
+        if wired_pose_family(&request.model, "candle") {
             Some(CandleImageRoute::PoseControlBaseMissing)
         } else {
             Some(CandleImageRoute::PoseReject)

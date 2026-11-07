@@ -1866,6 +1866,7 @@
       // residency is higher even at the same resolution. Q4 brings this within tighter Mac
       // budgets via advanced.mlxQuantize.
       "mlx": {
+        "standardTierLayout": true,
 
         // q4/ default tier (sc-8670); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize.
         "quantize": 4,
@@ -2159,6 +2160,7 @@
       // pre-quantized q4/ subdir auto-downloads + loads packed (no install-time
       // quantize); q8/ + bf16/ are selectable.
       "mlx": {
+        "standardTierLayout": true,
 
         "quantize": 4,
         // Production native Qwen loads are deferred under both Resident and Sequential policies.
@@ -3121,6 +3123,7 @@
       // `candle` block below ("gates the DEFAULT (q4) tier"). Shared checkpoint with the Lightning
       // variant, which carries the same declaration.
       "mlx": {
+        "standardTierLayout": true,
         "quantize": 4
       },
       // candle/CUDA VRAM gate (epic 10765 sc-11019, the EDIT measure-sibling of the qwen txt2img sc-10969
@@ -3270,6 +3273,7 @@
       // Explicit so the image gate / `resolve_quant` never hit their `None => q8` fallthrough; matches the
       // `default: true` q4 download and the `candle` block below ("gates the DEFAULT (q4) tier").
       "mlx": {
+        "standardTierLayout": true,
         "quantize": 4
       },
       // candle/CUDA VRAM gate (epic 10765) — MEASURED through the shared additive-LoRA path (sc-11666;
@@ -5552,6 +5556,7 @@
       // tier. Default tier is now q4 (sc-8669): the pre-quantized q4/ subdir
       // auto-downloads + loads packed; q8/ + bf16/ are selectable.
       "mlx": {
+        "standardTierLayout": true,
 
         "quantize": 4
       },
@@ -5666,6 +5671,7 @@
       // proportionally longer than schnell. Default tier is now q4 (sc-8669): the
       // pre-quantized q4/ subdir auto-downloads + loads packed; q8/ + bf16/ selectable.
       "mlx": {
+        "standardTierLayout": true,
 
         "quantize": 4
       },
@@ -7063,6 +7069,7 @@
       // tracking is sc-8508/8509. `quantize: 4` records the DEFAULT tier; the actual load Quant is
       // forced to None by `denseTextEncoderTier` below so the dense bf16 TE is preserved.
       "mlx": {
+        "standardTierLayout": true,
 
         "quantize": 4,
         // sc-15799 (tier integrity): DECLARED here, not in a hardcoded worker id list. On the q4 and q8
@@ -7239,6 +7246,7 @@
       // to None by `denseTextEncoderTier` below so the dense TE is preserved. Per-tier memory:
       // sc-8508/8509.
       "mlx": {
+        "standardTierLayout": true,
 
         "quantize": 4,
         // sc-15799 (tier integrity): the above-tier text-encoder residency is DECLARED in the catalog —
@@ -7535,6 +7543,7 @@
       // over-budget combinations (≥3 references / higher resolution that exceed the machine's
       // unified memory) with an actionable message instead of a silent OOM.
       "mlx": {
+        "standardTierLayout": true,
 
         "quantize": 4
       },
@@ -8001,6 +8010,7 @@
         "types": ["style", "enhance", "character"]
       },
       "mlx": {
+        "standardTierLayout": true,
         // Standard q4/q8/bf16 turnkey tiers (sc-9946, epic 8506). q4 default; the ChatGLM3-6B TE is
         // packed (not dense) like flux1/sana, so the load-time quant is a harmless no-op on the
         // already-packed weights and bf16 resolves to Quant::None — no `mlx.denseTextEncoderTier` declaration.
@@ -8135,6 +8145,7 @@
         "types": ["style", "enhance", "character"]
       },
       "mlx": {
+        "standardTierLayout": true,
         // 8B MMDiT + triple text encoder (CLIP-L + CLIP-G + ~4.7B T5-XXL) + 16-ch VAE. Now ships as
         // a SceneWorks pre-built turnkey (sc-8513) — no install-time convert. q4/ is the default
         // tier (`quantize: 4`); q8/ + bf16/ are hosted and selectable (sc-8508/8509). Only the MMDiT
@@ -8267,6 +8278,7 @@
         "types": ["style", "enhance", "character"]
       },
       "mlx": {
+        "standardTierLayout": true,
         // Same footprint as Large (same backbone weights, few-step schedule). Now ships as a
         // SceneWorks pre-built turnkey (sc-8513) — no install-time convert. q4/ default
         // (`quantize: 4`); q8/ + bf16/ hosted + selectable (sc-8508/8509). Only the MMDiT is
@@ -8384,6 +8396,7 @@
         "types": ["style", "enhance", "character"]
       },
       "mlx": {
+        "standardTierLayout": true,
         // 2.5B MMDiT-X + the same triple TE + 16-ch VAE (the smaller backbone keeps the footprint
         // well under Large). Converted to a packed MLX dir at install (`sd3_5_medium_quant` converter,
         // REGISTERED IN S2/S3). minMemoryGb 56 — the S6 real-weight worker-lane validation measured the
@@ -8556,6 +8569,7 @@
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
       },
       "mlx": {
+        "standardTierLayout": true,
         // Quant-matrix turnkey (sc-8489/sc-8513): default q4 (`standard_tier_subdir` resolves the
         // `q4/` subdir; q8/bf16 selectable via advanced.mlxQuantize). The transformer + Gemma-2 TE are
         // pre-packed and packed-detected on load (no install-time quantize peak). minMemoryGb 24: the
@@ -8725,6 +8739,7 @@
         "schedulers": ["default"]
       },
       "mlx": {
+        "standardTierLayout": true,
         // Quant-matrix turnkey (sc-8490/sc-8513): default q4 (`standard_tier_subdir` resolves `q4/`;
         // q8/bf16 selectable via advanced.mlxQuantize). Transformer + Gemma-2 TE pre-packed +
         // packed-detected on load (no install-time quantize peak). minMemoryGb 24: the 1.6B Linear-DiT
@@ -10455,6 +10470,7 @@
       // stays conservative (the measured Q8 `flux_dev` gate + the ~1.6 GB f32 EVA tower + CA overhead);
       // a follow-up re-measures the now-lighter q4 default on-device.
       "mlx": {
+        "standardTierLayout": true,
 
         "quantize": 4
       },

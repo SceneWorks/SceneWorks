@@ -971,6 +971,12 @@ pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
     let descriptor = crate::inference_runtime::generators()
         .map(|reg| (reg.descriptor)())
         .find(|d| d.id == row.engine_id)?;
+    if let Some(spec) = sceneworks_core::registry::builtin_model_spec(sceneworks_id) {
+        let route = spec.routes.get(descriptor.backend)?;
+        if route.id != row.engine_id {
+            return None;
+        }
+    }
     Some(ResolvedModel { row, descriptor })
 }
 
@@ -999,10 +1005,19 @@ pub(crate) fn default_repo_for(sceneworks_id: &str) -> Option<&'static str> {
 /// Registry id paired with a SceneWorks catalog id. Unlike [`mlx_model`], this pure lookup is
 /// available to the API-side text-encoder catalog builder before a descriptor is joined.
 pub(crate) fn engine_id_for_model(sceneworks_id: &str) -> Option<&'static str> {
-    MODEL_TABLE
+    let row = MODEL_TABLE
         .iter()
-        .find(|row| row.sceneworks_id == sceneworks_id)
-        .map(|row| row.engine_id)
+        .find(|row| row.sceneworks_id == sceneworks_id)?;
+    if let Some(spec) = sceneworks_core::registry::builtin_model_spec(sceneworks_id) {
+        let route = spec
+            .routes
+            .get("mlx")
+            .or_else(|| spec.routes.get("candle"))?;
+        if route.id != row.engine_id {
+            return None;
+        }
+    }
+    Some(row.engine_id)
 }
 
 /// Capabilities backed by linked media or text descriptors whose backend is enabled in
@@ -1070,7 +1085,12 @@ fn registry_capabilities_from(
         if !backends.contains(&d.backend) {
             continue;
         }
-        let in_image = MODEL_TABLE.iter().any(|r| r.engine_id == d.id);
+        let in_image = MODEL_TABLE.iter().any(|row| {
+            row.engine_id == d.id
+                && sceneworks_core::registry::builtin_model_spec(row.sceneworks_id)
+                    .and_then(|spec| spec.routes.get(d.backend))
+                    .is_some_and(|route| route.id == d.id)
+        });
         let in_video = VIDEO_ENGINE_IDS.contains(&d.id);
         match d.modality {
             gen_core::Modality::Image if in_image => push(Cap::ImageGenerate, &mut caps),
@@ -1159,6 +1179,33 @@ fn registry_capabilities_from(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn public_worker_defaults_are_joined_to_typed_image_routes() {
+        let mut checked = 0;
+        for row in super::MODEL_TABLE {
+            let Some(spec) = sceneworks_core::registry::builtin_model_spec(row.sceneworks_id)
+            else {
+                assert!(matches!(
+                    row.sceneworks_id,
+                    "qwen_image_edit" | "qwen_image_edit_2509"
+                ));
+                continue;
+            };
+            assert_eq!(spec.product.model_type, "image");
+            assert!(
+                spec.routes.values().any(|route| route.id == row.engine_id),
+                "{}",
+                row.sceneworks_id
+            );
+            assert!(spec.product.fields["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|download| download["repo"] == row.default_repo));
+            checked += 1;
+        }
+        assert!(checked > 50);
+    }
     use super::*;
     use sceneworks_core::contracts::WorkerCapability as Cap;
 
@@ -2319,7 +2366,7 @@ mod tests {
     fn mochi_resolves_one_engine_id_to_the_gen_core_descriptor() {
         assert!(
             VIDEO_ENGINE_IDS.contains(&"mochi_1"),
-            "mochi_1 must be in VIDEO_ENGINE_IDS or the registry-derived video_generate \
+            "mochi_1 must be in VIDEO_ENGINE_IDS or video_generate \
              advertisement drops it"
         );
         // ONE engine id covers both backends — unlike LTX's `ltx_2_3` + `ltx_2_3_distilled` split,
