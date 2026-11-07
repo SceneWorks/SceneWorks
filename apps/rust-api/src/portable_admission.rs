@@ -298,10 +298,14 @@ fn replay_from_frozen_policy(
         requested_gpu,
     )? {
         let key = format!("{backend}:{platform}");
-        let route = frozen
-            .routes
-            .get(&key)
-            .ok_or_else(|| incomplete(format!("replay route {key} was not frozen")))?;
+        let Some(route) = frozen.routes.get(&key) else {
+            if requested_gpu == "auto" {
+                // Initial admission may have frozen only routes with a worker able to prove the
+                // complete local Digest closure. A newly eligible route cannot expand replay.
+                continue;
+            }
+            return Err(incomplete(format!("replay route {key} was not frozen")));
+        };
         if route.models.len() != entries.len() {
             return Err(incomplete("replay model carrier count changed"));
         }
@@ -341,110 +345,6 @@ fn replay_from_frozen_policy(
     PortableJobBinding::new(authored, routes).map_err(|error| incomplete(error.to_string()))
 }
 
-fn api_local_digests_match(
-    state: &AppState,
-    job_type: &JobType,
-    payload: &JsonObject,
-    route: &PortableRouteBinding,
-) -> bool {
-    let Ok(entries) = payload_model_entries(payload) else {
-        return false;
-    };
-    let value = Value::Object(payload.clone());
-    let records = enumerate_portable_array_slots(&value, &["loras", "lokrs", "controls"]);
-    for model in &route.models {
-        let Some((index, (_, entry))) = entries
-            .iter()
-            .enumerate()
-            .find(|(_, (slot, _))| *slot == model.slot)
-        else {
-            return false;
-        };
-        let local_entry_members = entry
-            .get("downloads")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
-            .then(|| capture_local_model_entry(state, entry, &model.slot).ok())
-            .flatten();
-        for member in &model.members {
-            if !matches!(member.source, PortableSourceIdentity::Digest { .. }) {
-                continue;
-            }
-            if let Some(local) = local_entry_members.as_ref().and_then(|members| {
-                members.iter().find(|local| {
-                    local.role == member.role && local.component_id == member.component_id
-                })
-            }) {
-                if local.files != member.files {
-                    return false;
-                }
-                continue;
-            }
-            let locator = match member.role {
-                ArtifactMemberRole::Primary => {
-                    training_base_selection(job_type, payload, &model.model_id)
-                        .ok()
-                        .flatten()
-                        .map(|training| training.path)
-                        .or_else(|| selected_primary_override(payload, entry, index == 0, false))
-                        .or_else(|| {
-                            entry
-                                .get("installedPath")
-                                .or_else(|| entry.pointer("/paths/model"))
-                                .and_then(Value::as_str)
-                                .map(PathBuf::from)
-                        })
-                }
-                ArtifactMemberRole::Lora | ArtifactMemberRole::Control => member
-                    .component_id
-                    .as_deref()
-                    .and_then(|slot| {
-                        records
-                            .iter()
-                            .find(|(record_slot, _)| record_slot == slot)
-                            .map(|(_, record)| *record)
-                    })
-                    .and_then(|record| {
-                        if member.role == ArtifactMemberRole::Lora {
-                            sceneworks_core::lora_family::adapter_record_path(record)
-                        } else {
-                            record
-                                .get("modelPath")
-                                .or_else(|| record.get("installedPath"))
-                                .or_else(|| record.get("path"))
-                                .and_then(Value::as_str)
-                                .map(PathBuf::from)
-                        }
-                    }),
-                _ => member.component_id.as_deref().and_then(|component| {
-                    component
-                        .strip_prefix(&format!("{}/paths/", model.slot))
-                        .and_then(|key| entry.pointer(&format!("/paths/{key}")))
-                        .or_else(|| {
-                            component
-                                .strip_prefix(&format!("{}/components/", model.slot))
-                                .and_then(|index| index.parse::<usize>().ok())
-                                .and_then(|index| {
-                                    entry.pointer(&format!("/components/{index}/path"))
-                                })
-                        })
-                        .and_then(Value::as_str)
-                        .map(PathBuf::from)
-                }),
-            };
-            let Some(locator) = locator else {
-                return false;
-            };
-            if !capture_local_source_files(&locator, &allowed_local_roots(state))
-                .is_ok_and(|files| files == member.files)
-            {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 async fn filter_replay_routes_by_registered_claims(
     state: &AppState,
     job_type: &JobType,
@@ -454,13 +354,12 @@ async fn filter_replay_routes_by_registered_claims(
 ) -> Result<PortableJobBinding, ApiError> {
     let mut available = BTreeMap::new();
     for (key, route) in &candidate.routes {
-        let worker_claim = route
+        let requires_worker_claim = route
             .models
             .iter()
             .flat_map(|model| &model.members)
-            .any(|member| matches!(member.source, PortableSourceIdentity::WorkerClaim { .. }));
-        let local_digest_available = api_local_digests_match(state, job_type, payload, route);
-        if !worker_claim && local_digest_available {
+            .any(|member| !matches!(member.source, PortableSourceIdentity::Revision { .. }));
+        if !requires_worker_claim {
             available.insert(key.clone(), route.clone());
             continue;
         }

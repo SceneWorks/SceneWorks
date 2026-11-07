@@ -2681,6 +2681,59 @@ async fn fresh_imported_model_admission_requires_matching_worker_bytes() {
     );
 }
 
+#[tokio::test]
+async fn imported_model_replay_refuses_when_worker_claim_disappears() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_imported_image_model_manifests(temp_dir.path());
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    register_imported_krea_worker(&state, true);
+    let (_, project) = create_project(app.clone(), "Unavailable import replay").await;
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId":project["id"], "mode":"text_to_image", "prompt":"a fox",
+            "model":"imported_krea", "count":1
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "initial admission: {created}");
+    let job_id = created["id"].as_str().expect("job id");
+    state
+        .jobs_store
+        .heartbeat_worker_with_portable_sources(
+            sceneworks_core::jobs_store::WorkerHeartbeat {
+                worker_id: "registered-krea-worker".into(),
+                status: sceneworks_core::contracts::WorkerStatus::Idle,
+                current_job_id: None,
+                loaded_models: vec![],
+                utilization: None,
+                status_reason: None,
+            },
+            Some(&[]),
+        )
+        .expect("worker removes source claim");
+    assert!(
+        temp_dir
+            .path()
+            .join("data/models/imports/imported_krea/model.safetensors")
+            .is_file(),
+        "API bytes remain present"
+    );
+    for operation in ["retry", "duplicate"] {
+        let (status, refused) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{operation}: {refused}");
+    }
+}
+
 fn register_imported_krea_worker(state: &crate::AppState, exact: bool) {
     use sceneworks_core::contracts::WorkerCapability;
     use sceneworks_core::jobs_store::RegisterWorker;
