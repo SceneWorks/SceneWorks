@@ -51,6 +51,15 @@ pub(crate) fn selected_route_source_rows(
     backend: &str,
     _platform: &str,
 ) -> Result<Vec<SelectedRouteSource>, String> {
+    if matches!(
+        job_type,
+        JobType::KpsExtract | JobType::DatasetFaceAnalysis | JobType::FaceLikenessCompare
+    ) {
+        return Err(format!(
+            "{} identity detector sources are not yet bound",
+            job_type.as_str()
+        ));
+    }
     let mut rows = Vec::new();
     let advanced = payload.get("advanced").and_then(Value::as_object);
     let has_reference = payload
@@ -136,6 +145,9 @@ pub(crate) fn selected_route_source_rows(
             .get("id")
             .and_then(Value::as_str)
             .ok_or("model entry lacks id")?;
+        if matches!(id, "instantid_realvisxl" | "pulid_flux_dev") {
+            return Err(format!("{id} identity provider sources are not yet bound"));
+        }
         let add_component = |rows: &mut Vec<SelectedRouteSource>,
                              component_id: &str,
                              role: ArtifactMemberRole|

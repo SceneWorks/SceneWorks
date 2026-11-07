@@ -3262,7 +3262,45 @@ impl TrainerLoadInputs {
             resolve_trainer_components(engine_id, &plan.target.base_model, settings)?;
         // Iris REPA (sc-25689): the frozen teacher is a separately installed TRAINING resource,
         // re-verified (size + sha256) before every run and never downloaded here.
-        if let Some(teacher) = crate::iris_curricula::repa_teacher_component(settings, plan)? {
+        let bound_teacher = plan
+            .extra
+            .get("__portableAuxPaths")
+            .and_then(|paths| paths.get("repa_teacher"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from);
+        if plan.extra.contains_key("__portableAuxPaths")
+            && sceneworks_core::training::iris::is_iris_training_kernel(&plan.target.kernel)
+            && sceneworks_core::training::iris::curricula::iris_repa_enabled(
+                &sceneworks_core::training::iris::iris_options(&plan.config)
+                    .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?,
+            )
+            && bound_teacher.is_none()
+        {
+            return Err(WorkerError::InvalidPayload(
+                "portable Iris REPA teacher is not bound".to_owned(),
+            ));
+        }
+        let teacher = if let Some(path) = bound_teacher {
+            let dir = if path.is_file() {
+                path.parent()
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "portable REPA teacher path has no parent".to_owned(),
+                        )
+                    })?
+                    .to_path_buf()
+            } else {
+                path
+            };
+            crate::iris_curricula::verify_repa_teacher_file(
+                &dir.join(sceneworks_core::training::iris::curricula::IRIS_REPA_TEACHER_FILE),
+            )
+            .map_err(WorkerError::InvalidPayload)?;
+            Some(WeightsSource::Dir(dir))
+        } else {
+            crate::iris_curricula::repa_teacher_component(settings, plan)?
+        };
+        if let Some(teacher) = teacher {
             components.insert(
                 gen_core_iris::train::repa::TEACHER_COMPONENT.to_owned(),
                 teacher,

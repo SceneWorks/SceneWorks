@@ -3,6 +3,40 @@
 use crate::contracts::{JobType, JsonObject};
 use serde_json::Value;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PortableAuxSourceShape {
+    File,
+    Directory,
+}
+
+pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<PortableAuxSourceShape> {
+    use PortableAuxSourceShape::{Directory, File};
+    match source_id {
+        "strict_control"
+        | "sdxl_detail_tile_control"
+        | "flux_ip_adapter"
+        | "sdxl_ip_adapter"
+        | "veda_predictor" => Some(File),
+        "depth_anything_v2_small"
+        | "flux_ip_encoder"
+        | "sdxl_ip_encoder"
+        | "prompt_upsampler"
+        | "sft_cover"
+        | "repa_teacher"
+        | "ltx_amoral_gemma_3_12b"
+        | "ltx_training_text_encoder" => Some(Directory),
+        _ => entry
+            .pointer("/decoders/byBackend")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|backends| backends.values())
+            .filter_map(Value::as_array)
+            .flatten()
+            .any(|option| option.get("componentId").and_then(Value::as_str) == Some(source_id))
+            .then_some(File),
+    }
+}
+
 pub fn required_portable_aux_source_ids(
     job_type: &JobType,
     payload: &JsonObject,
