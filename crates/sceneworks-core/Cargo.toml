@@ -102,6 +102,8 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
+# Metadata-only route reconciliation parses every native dispatcher arm, including inactive cfgs.
+syn = { version = "2.0", features = ["full", "visit"] }
 # Adversarial PNG fixtures choose compression explicitly, independent of the workspace's
 # unified miniz/zlib-rs backend. Already locked transitively; never a production dependency.
 flate2 = "1.1"

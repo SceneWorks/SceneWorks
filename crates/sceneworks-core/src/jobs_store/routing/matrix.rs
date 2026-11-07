@@ -19,6 +19,8 @@ use crate::contracts::{
 use crate::film_workspace::{QWEN36_FILM_PLANNER_MODEL_ID, QWEN36_FILM_PLANNER_REPO};
 use crate::jsonc::strip_jsonc_comments;
 
+pub mod route_coverage;
+
 use super::catalog::VIDEO_UI_MODES;
 
 const MANIFEST: &str = include_str!("../../../../../config/manifests/builtin.models.jsonc");
