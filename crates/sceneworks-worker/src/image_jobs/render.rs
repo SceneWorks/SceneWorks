@@ -132,6 +132,9 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// A native prompt batch (sc-25681): the request carries `prompt_batch` + `count` instead of
     /// one prompt, and the engine returns every image of the batch. `None` everywhere else.
     pub(crate) prompt_batch: Option<&'a lane_controls::NativePromptBatch>,
+    /// The exact owner-local plan compiled before the generator was loaded. Only base FLUX.1
+    /// reaches this seam during ENG-1a; other routes retain their existing generator call.
+    pub(crate) render_plan: Option<&'a gen_core::RenderPlan>,
 }
 
 /// [`generate_one`] with an explicit [`LaneRgbaSurface`].
@@ -227,6 +230,116 @@ pub(super) fn render_on_surface(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
+    let mut request = build_render_request(
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        negative_prompt,
+        reference,
+        multi_references,
+        edit_mask,
+        true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        use_pid,
+        text_style_gain,
+        memory,
+        enhance,
+        prompt_enhancement,
+        preview,
+        surface,
+        cancel,
+    )?;
+    // `generate_with_report` (sc-25681): the default implementation is exactly `generate`, so every
+    // provider that reports nothing is unaffected; one that reports (Iris's `caption_truncated`)
+    // has its warnings collected for the image's provenance.
+    let report = if let Some(references) = surface.flux3_references {
+        flux3_references::render_reference_request(
+            generator,
+            &mut request,
+            references,
+            memory_strategy_context,
+            on_progress,
+        )
+    } else {
+        match surface.render_plan {
+            Some(plan) => crate::memory_strategy::generate_with_scope_report_planned(
+                generator,
+                &mut request,
+                plan,
+                memory_strategy_context,
+                on_progress,
+            ),
+            None => crate::memory_strategy::generate_with_scope_report(
+                generator,
+                &mut request,
+                memory_strategy_context,
+                on_progress,
+            ),
+        }
+    }
+    .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
+    if let Some(sink) = surface.warnings {
+        sink.borrow_mut().extend(report.warnings);
+    }
+    if let Some(sink) = surface.prefix_kv_cache {
+        *sink.borrow_mut() = report.prefix_kv_cache;
+    }
+    let output = report
+        .output
+        .ok_or_else(|| WorkerError::Engine("generator produced no output".to_owned()))?;
+    match output {
+        GenerationOutput::Images(images) => Ok(images
+            .into_iter()
+            .map(|image| (image.width, image.height, image.pixels))
+            .collect()),
+        // Only ever produced for an `OutputChannels::Rgba` request (the shared request floor refuses
+        // one against a provider without `supports_alpha_output`). The flat interleaved RGBA buffer
+        // flows on unchanged: `GeneratedPixels::from_engine_buffer` types it by its channel count.
+        GenerationOutput::ImagesRgba(images) => Ok(images
+            .into_iter()
+            .map(|image| (image.width, image.height, image.pixels))
+            .collect()),
+        _ => Err(WorkerError::Engine(
+            "generator returned non-image output".to_owned(),
+        )),
+    }
+}
+
+/// Build the exact request sent by the generic image lane. The pre-load FLUX.1 compiler and the
+/// post-load render both call this function, so a plan cannot accidentally describe different
+/// prompt, geometry, count, schedule or conditioning inputs from execution.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_render_request(
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+    true_cfg: Option<f32>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    use_pid: bool,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+) -> WorkerResult<GenerationRequest> {
     let conditioning = if surface.flux3_references.is_some() {
         if reference.is_some() || !multi_references.is_empty() || edit_mask.is_some() {
             return Err(WorkerError::InvalidPayload(
@@ -282,51 +395,34 @@ pub(super) fn render_on_surface(
     if let Some(layout) = surface.flux3_layout {
         layout.apply(&mut request);
     }
-    // `generate_with_report` (sc-25681): the default implementation is exactly `generate`, so every
-    // provider that reports nothing is unaffected; one that reports (Iris's `caption_truncated`)
-    // has its warnings collected for the image's provenance.
-    let report = if let Some(references) = surface.flux3_references {
-        flux3_references::render_reference_request(
-            generator,
-            &mut request,
-            references,
-            memory_strategy_context,
-            on_progress,
-        )
-    } else {
-        crate::memory_strategy::generate_with_scope_report(
-            generator,
-            &mut request,
-            memory_strategy_context,
-            on_progress,
-        )
+    Ok(request)
+}
+
+/// Resolve a base provider's owner-local plan before `start_cached_gen_stream` can load weights.
+/// The registry returns `None` for routes that have not migrated yet; an invalid base request is a
+/// pre-load error rather than a fallback to the legacy call.
+pub(super) fn compile_render_plan(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    request: &GenerationRequest,
+) -> WorkerResult<Option<gen_core::RenderPlan>> {
+    let plan = registry
+        .compile_render_plan(engine_id, spec, request)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "{engine_id}: cannot compile render plan before load: {error}"
+            ))
+        })?;
+    if plan.is_none()
+        && matches!(engine_id, "flux1_schnell" | "flux1_dev")
+        && request.conditioning.is_empty()
+    {
+        return Err(WorkerError::Engine(format!(
+            "{engine_id}: base text-to-image route has no registered pre-load render planner"
+        )));
     }
-    .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
-    if let Some(sink) = surface.warnings {
-        sink.borrow_mut().extend(report.warnings);
-    }
-    if let Some(sink) = surface.prefix_kv_cache {
-        *sink.borrow_mut() = report.prefix_kv_cache;
-    }
-    let output = report
-        .output
-        .ok_or_else(|| WorkerError::Engine("generator produced no output".to_owned()))?;
-    match output {
-        GenerationOutput::Images(images) => Ok(images
-            .into_iter()
-            .map(|image| (image.width, image.height, image.pixels))
-            .collect()),
-        // Only ever produced for an `OutputChannels::Rgba` request (the shared request floor refuses
-        // one against a provider without `supports_alpha_output`). The flat interleaved RGBA buffer
-        // flows on unchanged: `GeneratedPixels::from_engine_buffer` types it by its channel count.
-        GenerationOutput::ImagesRgba(images) => Ok(images
-            .into_iter()
-            .map(|image| (image.width, image.height, image.pixels))
-            .collect()),
-        _ => Err(WorkerError::Engine(
-            "generator returned non-image output".to_owned(),
-        )),
-    }
+    Ok(plan)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -668,6 +764,7 @@ pub(super) fn generate_one_with_hires_on_surface(
         prefix_kv_cache: surface.prefix_kv_cache,
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
+        render_plan: surface.render_plan,
     };
     let (base_width, base_height, base_pixels) = generate_one_on_surface(
         generator,
@@ -736,6 +833,7 @@ pub(super) fn generate_one_with_hires_on_surface(
         prefix_kv_cache: surface.prefix_kv_cache,
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
+        render_plan: None,
     };
     generate_one_on_surface(
         generator,
