@@ -1531,6 +1531,46 @@ fn imported_h3_portable_plan_uses_frozen_layers_without_a_worker_plan_record() {
     );
     assert!(dit.transformer_dir.starts_with(&private));
     dit.load_authority.validate().unwrap();
+
+    // A partial private handoff must fail before the H3 provider sees a checkpoint, even though
+    // the original API host had a complete plan and the worker still has some matching layers.
+    let incomplete_lease = std::sync::Arc::new(
+        sceneworks_core::file_lock::FileLock::open_exclusive(
+            &worker.path().join("incomplete-attempt.lock"),
+        )
+        .unwrap(),
+    );
+    let mut incomplete =
+        crate::external_library_runtime::VerifiedPlanLayers::new_for_test(incomplete_lease);
+    incomplete
+        .add_plan(
+            &imported.checkpoint_id,
+            PortableCheckpointPlan::from_import_plan(&source.plan, None).unwrap(),
+        )
+        .unwrap();
+    for layer in source.layers.iter().skip(1) {
+        incomplete
+            .insert(
+                &imported.checkpoint_id,
+                &layer.layer.layer_id,
+                private.join(&layer.layer.target_path),
+            )
+            .unwrap();
+    }
+    let incomplete_settings = Settings {
+        verified_plan_layers: Some(std::sync::Arc::new(incomplete)),
+        ..settings
+    };
+    let error = crate::video_jobs::minimax_h3::resolve_imported_minimax_h3_dit(
+        &request,
+        &incomplete_settings,
+    )
+    .err()
+    .expect("a missing frozen layer must refuse before H3 load");
+    assert!(
+        error.to_string().contains("private plan layer set differs"),
+        "{error}"
+    );
 }
 
 #[test]
