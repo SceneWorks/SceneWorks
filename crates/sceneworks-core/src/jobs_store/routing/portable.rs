@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-use crate::contracts::{ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage};
-
-use super::gaps::{job_is_any_candle_eligible, job_is_any_mlx_eligible};
+use crate::contracts::{
+    ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage, WorkerCapability,
+    WorkerSnapshot, WorkerStatus,
+};
 
 /// Whether a native worker would claim this exact request shape. The API uses this before
 /// freezing portable sources for a route; catalog support blocks describe any possible shape
@@ -49,9 +50,66 @@ pub fn native_route_claims_request(
         title: None,
         extra: BTreeMap::new(),
     };
-    match backend {
-        "mlx" => Ok(job_is_any_mlx_eligible(&probe)),
-        "candle" => Ok(job_is_any_candle_eligible(&probe)),
-        other => Err(format!("unknown native backend {other:?}")),
+    let gpu_id = match backend {
+        "mlx" => "mlx",
+        "candle" => "0",
+        other => return Err(format!("unknown native backend {other:?}")),
+    };
+    let required = super::super::required_capability(&probe);
+    let required_capability: WorkerCapability =
+        serde_json::from_value(Value::String(required.to_owned()))
+            .map_err(|error| error.to_string())?;
+    let mut capabilities = vec![
+        WorkerCapability::Gpu,
+        required_capability,
+        WorkerCapability::LoraTrainExecute,
+    ];
+    if backend == "candle" {
+        capabilities.push(WorkerCapability::Unknown("candle".to_owned()));
+    }
+    let worker = WorkerSnapshot {
+        id: "portable-route-worker-probe".to_owned(),
+        gpu_id: gpu_id.to_owned(),
+        gpu_name: None,
+        status: WorkerStatus::Idle,
+        current_job_id: None,
+        capabilities,
+        loaded_models: Vec::new(),
+        utilization: None,
+        status_reason: None,
+        registered_at: String::new(),
+        last_seen_at: String::new(),
+        extra: BTreeMap::new(),
+    };
+    Ok(super::super::worker_supports_job(&worker, &probe))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn capability_only_catalog_analysis_uses_real_worker_claim_policy() {
+        let payload = json!({"catalogId":"catalog"});
+        for backend in ["mlx", "candle"] {
+            assert!(native_route_claims_request(
+                backend,
+                &JobType::CatalogAnalysis,
+                payload.as_object().unwrap()
+            )
+            .unwrap());
+        }
+    }
+
+    #[test]
+    fn unsupported_conditioned_image_remains_unclaimable() {
+        let payload = json!({"model":"chroma","advanced":{"poses":[{}]}});
+        assert!(!native_route_claims_request(
+            "mlx",
+            &JobType::ImageGenerate,
+            payload.as_object().unwrap()
+        )
+        .unwrap());
     }
 }
