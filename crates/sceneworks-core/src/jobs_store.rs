@@ -3434,16 +3434,29 @@ impl JobsStore {
             *self.last_claim_hydration.lock() = hydration;
             return Ok((None, None, None));
         }
-        if should_defer_image_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
-            || should_defer_video_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
-            || should_defer_training_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
-            || should_defer_caption_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
-            || should_defer_understanding_to_mlx_worker(
-                &transaction,
-                &queued,
-                &worker,
-                mlx_required,
-            )?
+        let mlx_deferral_allowed = portable_binding.is_none()
+            || portable_mlx_worker_can_claim(&transaction, &queued, &worker, false)?;
+        if mlx_deferral_allowed
+            && (should_defer_image_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
+                || should_defer_video_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
+                || should_defer_training_to_mlx_worker(
+                    &transaction,
+                    &queued,
+                    &worker,
+                    mlx_required,
+                )?
+                || should_defer_caption_to_mlx_worker(
+                    &transaction,
+                    &queued,
+                    &worker,
+                    mlx_required,
+                )?
+                || should_defer_understanding_to_mlx_worker(
+                    &transaction,
+                    &queued,
+                    &worker,
+                    mlx_required,
+                )?)
         {
             // A non-mlx worker is yielding this MLX-eligible job to an idle mlx worker.
             let decision = RouteDecision::new(
@@ -5048,6 +5061,9 @@ fn should_defer_auto_gpu_claim(
         if !worker_supports_job(&candidate, job) {
             continue;
         }
+        if !portable_worker_can_claim_job(connection, job, &candidate)? {
+            continue;
+        }
         let gpu_busy = match active_by_gpu.get(&candidate.gpu_id) {
             Some(&busy) => busy,
             None => {
@@ -5200,23 +5216,87 @@ fn idle_mlx_worker_can_claim(
     job: &JobSnapshot,
     worker: &WorkerSnapshot,
 ) -> JobsStoreResult<bool> {
-    let mut statement = connection.prepare(
+    portable_mlx_worker_can_claim(connection, job, worker, true)
+}
+
+fn portable_mlx_worker_can_claim(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+    idle_only: bool,
+) -> JobsStoreResult<bool> {
+    let status_filter = if idle_only {
+        "and status = 'idle'"
+    } else {
+        "and status in ('idle', 'busy')"
+    };
+    let mut statement = connection.prepare(&format!(
         "
         select * from workers
          where id != ?1
            and gpu_id = 'mlx'
-           and status = 'idle'
+           {status_filter}
          order by id
-        ",
-    )?;
+        "
+    ))?;
     let candidates = collect_workers(statement.query_map(params![worker.id], row_to_worker)?)?;
     // Every candidate here has `gpu_id = 'mlx'`, so the active-GPU-job fact is
     // identical for all of them — resolve a supporting candidate first, then run
     // `active_gpu_job_exists` once instead of once per candidate (sc-4273).
-    let Some(candidate) = candidates.iter().find(|c| worker_supports_job(c, job)) else {
+    for candidate in candidates {
+        if worker_supports_job(&candidate, job)
+            && portable_worker_can_claim_job(connection, job, &candidate)?
+        {
+            return Ok(!idle_only || !active_gpu_job_exists(connection, &candidate.gpu_id)?);
+        }
+    }
+    Ok(false)
+}
+
+fn portable_worker_can_claim_job(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+) -> JobsStoreResult<bool> {
+    let Some(binding) = JobsStore::read_portable_binding(connection, &job.id)? else {
+        return Ok(true);
+    };
+    let Some(platform) = worker.platform.as_deref() else {
         return Ok(false);
     };
-    Ok(!active_gpu_job_exists(connection, &candidate.gpu_id)?)
+    let backend = if worker.gpu_id.eq_ignore_ascii_case("mlx") {
+        "mlx"
+    } else if worker_is_candle(worker) {
+        "candle"
+    } else if worker.gpu_id.eq_ignore_ascii_case("cpu") {
+        "cpu"
+    } else {
+        return Ok(false);
+    };
+    let binding: crate::model_artifacts::portable_binding::PortableJobBinding =
+        serde_json::from_value(binding)?;
+    if !binding
+        .routes
+        .contains_key(&format!("{backend}:{platform}"))
+    {
+        return Ok(false);
+    }
+    let claims_raw: Option<String> = connection.query_row(
+        "select portable_source_claims_json from workers where id = ?1",
+        params![worker.id],
+        |row| row.get(0),
+    )?;
+    let claims: Vec<PortableSourceClaim> = claims_raw
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    candidate_matches_portable_worker_sources(
+        connection,
+        &job.id,
+        Some((backend, platform)),
+        &claims,
+    )
 }
 
 fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResult<bool> {

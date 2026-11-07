@@ -511,7 +511,7 @@ fn worker_claim_member_requires_exact_current_worker_proof_before_claim() {
         .claim_next_job_routed_with_portable_binding(
             "worker",
             false,
-            1,
+            PORTABLE_MODEL_BINDING_VERSION,
             Some("cpu"),
             Some(std::env::consts::OS)
         )
@@ -532,7 +532,7 @@ fn worker_claim_member_requires_exact_current_worker_proof_before_claim() {
         .claim_next_job_routed_with_portable_binding(
             "worker",
             false,
-            1,
+            PORTABLE_MODEL_BINDING_VERSION,
             Some("cpu"),
             Some(std::env::consts::OS)
         )
@@ -550,7 +550,7 @@ fn worker_claim_member_requires_exact_current_worker_proof_before_claim() {
         .claim_next_job_routed_with_portable_binding(
             "worker",
             false,
-            1,
+            PORTABLE_MODEL_BINDING_VERSION,
             Some("cpu"),
             Some(std::env::consts::OS),
         )
@@ -558,4 +558,139 @@ fn worker_claim_member_requires_exact_current_worker_proof_before_claim() {
         .0
         .unwrap();
     assert_eq!(claimed.id, job.id);
+}
+
+#[test]
+fn candle_claim_does_not_defer_portable_image_to_ineligible_mlx_worker() {
+    for (mlx_route_without_claim, mlx_required) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JobsStore::new(temp.path().join("jobs.db"));
+        store.initialize().unwrap();
+        let platform = std::env::consts::OS;
+        let authored = json!({"model":"flux_dev"});
+        let digest = canonical_authored_options_sha256(&authored).unwrap();
+        let member = serde_json::from_value::<PortableJobBinding>(binding())
+            .unwrap()
+            .routes
+            .values()
+            .next()
+            .unwrap()
+            .models[0]
+            .members[0]
+            .clone();
+        let candle_model = PortableModelBinding::new(
+            "modelManifestEntry",
+            "flux_dev",
+            "candle",
+            "default",
+            None,
+            digest.clone(),
+            vec![member.clone()],
+        )
+        .unwrap();
+        let candle_route =
+            PortableRouteBinding::new("candle", platform, vec![candle_model]).unwrap();
+        let mut routes = BTreeMap::from([(candle_route.key(), candle_route)]);
+        if mlx_route_without_claim {
+            let claim = PortableSourceClaim::new(
+                "aux/encoder",
+                PortableSourceProvenance::OperatorOverride,
+                member.files.clone(),
+            )
+            .unwrap();
+            let mut mlx_member = member;
+            mlx_member.source = PortableSourceIdentity::WorkerClaim {
+                source_id: claim.source_id,
+                provenance: claim.provenance,
+                closure_sha256: claim.closure_sha256,
+            };
+            let mlx_model = PortableModelBinding::new(
+                "modelManifestEntry",
+                "flux_dev",
+                "mlx",
+                "default",
+                None,
+                digest,
+                vec![mlx_member],
+            )
+            .unwrap();
+            let route = PortableRouteBinding::new("mlx", platform, vec![mlx_model]).unwrap();
+            routes.insert(route.key(), route);
+        }
+        let portable =
+            serde_json::to_value(PortableJobBinding::new(authored, routes).unwrap()).unwrap();
+        let mut create = request();
+        create.job_type = JobType::ImageGenerate;
+        create.payload = json!({"model":"flux_dev", "mode":"text_to_image", "prompt":"test"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let job = store
+            .create_job_with_portable_binding(create, None, None, Some(&portable))
+            .unwrap();
+        store
+            .register_worker_with_platform(
+                RegisterWorker {
+                    worker_id: "candle".into(),
+                    gpu_id: "cuda:0".into(),
+                    gpu_name: None,
+                    capabilities: vec![
+                        crate::contracts::WorkerCapability::Gpu,
+                        crate::contracts::WorkerCapability::ImageGenerate,
+                        crate::contracts::WorkerCapability::Unknown("candle".into()),
+                    ],
+                    loaded_models: vec![],
+                    utilization: (!mlx_required).then_some(
+                        crate::contracts::WorkerUtilizationSnapshot {
+                            memory_total_mb: Some(1000),
+                            memory_used_mb: Some(900),
+                            memory_free_mb: Some(100),
+                            gpu_load_percent: Some(90.0),
+                        },
+                    ),
+                },
+                Some(platform),
+            )
+            .unwrap();
+        store
+            .register_worker_with_platform(
+                RegisterWorker {
+                    worker_id: "mlx".into(),
+                    gpu_id: "mlx".into(),
+                    gpu_name: None,
+                    capabilities: vec![
+                        crate::contracts::WorkerCapability::Gpu,
+                        crate::contracts::WorkerCapability::ImageGenerate,
+                    ],
+                    loaded_models: vec![],
+                    utilization: (!mlx_required).then_some(
+                        crate::contracts::WorkerUtilizationSnapshot {
+                            memory_total_mb: Some(1000),
+                            memory_used_mb: Some(100),
+                            memory_free_mb: Some(900),
+                            gpu_load_percent: Some(10.0),
+                        },
+                    ),
+                },
+                Some(platform),
+            )
+            .unwrap();
+        let claimed = store
+            .claim_next_job_routed_with_portable_binding(
+                "candle",
+                mlx_required,
+                PORTABLE_MODEL_BINDING_VERSION,
+                Some("candle"),
+                Some(platform),
+            )
+            .unwrap()
+            .0
+            .unwrap();
+        assert_eq!(
+            claimed.id, job.id,
+            "mlx route exists: {mlx_route_without_claim}, mlx required: {mlx_required}"
+        );
+    }
 }
