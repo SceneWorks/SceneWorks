@@ -132,6 +132,7 @@ fn parse_builtin_manifest(name: &str, contents: &str) -> Result<serde_json::Valu
             {
                 *model = spec.project(None);
             }
+            crate::registry::project_builtin_memory_evidence(model)?;
         }
     }
     Ok(value)

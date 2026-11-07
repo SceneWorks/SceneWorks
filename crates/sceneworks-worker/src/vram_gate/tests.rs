@@ -213,9 +213,10 @@ fn builtin_krea_turbo_manifest_at_live_closure() -> JsonObject {
 }
 
 fn builtin_krea_turbo_manifest() -> JsonObject {
-    let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let parsed: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
-        .expect("builtin model manifest parses");
+    let parsed: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     parsed["models"]
         .as_array()
         .expect("models array")
@@ -841,9 +842,10 @@ fn the_binding_phase_resolves_ties_to_the_later_phase() {
 /// static-contract version that the schema independently pins.
 #[test]
 fn no_builtin_route_ships_a_stale_calibration_abi_stamp() {
-    let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let parsed: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
-        .expect("builtin model manifest parses");
+    let parsed: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
 
     // Two shapes carry a live calibration ABI: `turboFit.calibrationAbi` (Krea's bespoke opt-in)
     // and `<backend>.calibrations[].abi` (the packaged-evidence bindings, read into

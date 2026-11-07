@@ -7,6 +7,9 @@ use serde_json::{Map, Value};
 
 mod spec;
 pub use spec::ModelSpec;
+#[allow(dead_code)] // Shared with build.rs, where every shipped evidence row is validated.
+mod evidence;
+pub use evidence::{builtin_memory_evidence, project_builtin_memory_evidence};
 
 static BUILTINS: LazyLock<BTreeMap<String, ModelSpec>> = LazyLock::new(|| {
     serde_json::from_str(include_str!(concat!(
@@ -35,6 +38,8 @@ impl ModelSpec {
         if let Some(user) = user.and_then(Value::as_object) {
             self.apply_author_choices(&mut model, user);
         }
+        project_builtin_memory_evidence(&mut model)
+            .expect("build-validated static model evidence projection");
         model
     }
 

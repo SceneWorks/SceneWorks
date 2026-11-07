@@ -23,7 +23,7 @@ pub fn assemble(
     dumps: &[(&str, &str)],
 ) -> Result<BTreeMap<String, ModelSpec>, String> {
     let products: Vec<ProductModel> = serde_json::from_str(products).map_err(|e| e.to_string())?;
-    let mut evidence: BTreeMap<String, BTreeMap<String, BackendEvidence>> =
+    let mut evidence: BTreeMap<String, serde_json::Value> =
         serde_json::from_str(evidence).map_err(|e| e.to_string())?;
     let mut exports = BTreeMap::new();
     for &(backend, contents) in dumps {
@@ -55,9 +55,22 @@ pub fn assemble(
                 "builtin {id} needs an immutable download repository and revision"
             ));
         }
-        let evidence = evidence
+        let raw_evidence = evidence
             .remove(&id)
             .ok_or_else(|| format!("missing evidence for {id}"))?;
+        let evidence: BTreeMap<String, BackendEvidence> = ["mlx", "candle"]
+            .into_iter()
+            .filter_map(|backend| {
+                raw_evidence
+                    .get(backend)
+                    .map(|fields| (backend.to_owned(), fields.clone()))
+            })
+            .map(|(backend, fields)| {
+                serde_json::from_value(fields)
+                    .map(|parsed| (backend, parsed))
+                    .map_err(|error| format!("invalid {id} backend evidence: {error}"))
+            })
+            .collect::<Result<_, _>>()?;
         let mut routes = BTreeMap::new();
         for (&backend, dump) in &exports {
             let Some(provider) = dump.model_mappings.get(&id) else {
@@ -123,8 +136,7 @@ pub fn assemble(
             return Err(format!("duplicate product {id}"));
         }
     }
-    if !evidence.is_empty() {
-        return Err(format!("evidence without a product: {:?}", evidence.keys()));
-    }
+    // Other evidence rows belong to legacy builtins while their product routes migrate to
+    // ModelSpec. build.rs validates every row against the entire shipped manifest above.
     Ok(specs)
 }

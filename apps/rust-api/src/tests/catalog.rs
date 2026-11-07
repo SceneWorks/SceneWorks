@@ -101,6 +101,30 @@ fn registered_builtin_merge_keeps_model_authority_for_catalog_and_license_reads(
     assert_eq!(embedded["downloads"], model["downloads"]);
 }
 
+#[test]
+fn legacy_builtin_merge_restores_memory_evidence_after_user_product_overlay() {
+    let builtin = sceneworks_core::builtin_manifests::builtin_model_entry("flux_dev")
+        .expect("legacy builtin")
+        .clone();
+    let original_floor = builtin["mlx"]["minMemoryGb"].clone();
+    let original_contract = builtin["mlx"]["memoryStrategyContract"].clone();
+    let user = json!({
+        "id": "flux_dev",
+        "name": "My FLUX",
+        "mlx": {"minMemoryGb": 1, "memoryStrategyContract": {"provider": "attacker"}}
+    });
+    let merged = crate::models::merge_model_entries_with_registry(
+        vec![serde_json::Value::Object(builtin)],
+        vec![user],
+    );
+    assert_eq!(merged[0]["name"], "My FLUX");
+    assert_eq!(merged[0]["mlx"]["minMemoryGb"], original_floor);
+    assert_eq!(
+        merged[0]["mlx"]["memoryStrategyContract"],
+        original_contract
+    );
+}
+
 #[tokio::test]
 async fn registered_builtin_projects_consistently_through_api_and_job_resolver() {
     let _env = isolate_hf_cache();

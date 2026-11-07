@@ -2439,5 +2439,248 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "const": 2
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "models": {
+            "items": {
+              "allOf": [
+                {
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "minMemoryGb"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "properties": {
+                    "mlx": {
+                      "not": {
+                        "anyOf": [
+                          {
+                            "required": [
+                              "minMemoryGb"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "minMemoryGbByTier"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyContract"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyCapabilities"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyStructuralExemptions"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "calibrations"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "vramGbByTier"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "vramMeasuredPixels"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "supportsSequentialOffload"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "sequentialPeakGb"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "measured"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "imageActivationGbPerMegapixel"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "turboFit"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "control"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryDeclarationWithhold"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "measuredSiblingActiveDiskFraction"
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "candle": {
+                      "not": {
+                        "anyOf": [
+                          {
+                            "required": [
+                              "minMemoryGb"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "minMemoryGbByTier"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyContract"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyCapabilities"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyStructuralExemptions"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "calibrations"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "vramGbByTier"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "vramMeasuredPixels"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "supportsSequentialOffload"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "sequentialPeakGb"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "measured"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "imageActivationGbPerMegapixel"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "turboFit"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "control"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryDeclarationWithhold"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "measuredSiblingActiveDiskFraction"
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "downloads": {
+                      "items": {
+                        "properties": {
+                          "footprint": {
+                            "not": {
+                              "anyOf": [
+                                {
+                                  "required": [
+                                    "residentMemoryBytes"
+                                  ]
+                                },
+                                {
+                                  "required": [
+                                    "peakMemoryBytes"
+                                  ]
+                                },
+                                {
+                                  "required": [
+                                    "measuredPixels"
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
   "additionalProperties": false
 }

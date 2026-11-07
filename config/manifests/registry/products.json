@@ -25,9 +25,7 @@
         ],
         "estimatedSizeBytes": 9611551284,
         "footprint": {
-          "diskSizeBytes": 9611551284,
-          "residentMemoryBytes": null,
-          "peakMemoryBytes": null
+          "diskSizeBytes": 9611551284
         }
       },
       {
@@ -40,9 +38,7 @@
         ],
         "estimatedSizeBytes": 17999175703,
         "footprint": {
-          "diskSizeBytes": 17999175703,
-          "residentMemoryBytes": null,
-          "peakMemoryBytes": null
+          "diskSizeBytes": 17999175703
         }
       },
       {
@@ -55,9 +51,7 @@
         ],
         "estimatedSizeBytes": 33725923002,
         "footprint": {
-          "diskSizeBytes": 33725923002,
-          "residentMemoryBytes": null,
-          "peakMemoryBytes": null
+          "diskSizeBytes": 33725923002
         }
       }
     ],

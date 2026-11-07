@@ -538,9 +538,10 @@ fn mage_mlx_production_load_shape_is_deferred_and_sequential_for_the_resident_se
 }
 
 fn shipped_model(id: &str) -> JsonObject<String, Value> {
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin model manifest parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     manifest["models"]
         .as_array()
         .expect("models array")
@@ -919,9 +920,10 @@ fn krea_raw_declaration_is_exact_true_cfg_generation_authority() {
             );
         }
     }
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin model manifest parses");
+    let shipped: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let models = shipped["models"].as_array().expect("models array");
     assert!(
         declared_mlx_deferred_routes(models).contains("krea_2_raw"),
@@ -3733,9 +3735,10 @@ fn shipped_sensenova_candle_routes_load_resident_and_eager() {
 
 #[test]
 fn shipped_candle_population_is_manifest_derived_and_mode_exact() {
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin model manifest parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let routes =
         declared_candle_deferred_routes(manifest["models"].as_array().expect("models array"));
     for expected in [
@@ -5407,9 +5410,10 @@ fn candle_request_strategy_declaration_is_exact_and_does_not_change_load_shape()
 
 #[test]
 fn shipped_candle_request_strategy_population_is_manifest_derived_and_complete() {
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin manifest parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let witnesses = declared_candle_request_strategy_route_witnesses(
         manifest["models"].as_array().expect("models array"),
     )

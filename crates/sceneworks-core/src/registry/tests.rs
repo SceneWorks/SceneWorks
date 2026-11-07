@@ -8,6 +8,88 @@ const CANDLE: &str =
     include_str!("../../../../config/engine-capabilities/runtime/capabilities.candle.json");
 
 #[test]
+fn every_builtin_memory_fact_is_projected_from_validated_evidence() {
+    let raw: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(include_str!(
+        "../../../../config/manifests/builtin.models.jsonc"
+    )))
+    .unwrap();
+    assert_eq!(raw["schemaVersion"], 2);
+    super::evidence::validate_evidence_document(EVIDENCE, &raw).unwrap();
+    let effective = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+    assert_eq!(raw["models"].as_array().unwrap().len(), 143);
+    assert_eq!(effective["models"].as_array().unwrap().len(), 143);
+    let evidence: Value = serde_json::from_str(EVIDENCE).unwrap();
+    let mut mlx_count = 0;
+    let mut candle_count = 0;
+    for (original, projected) in raw["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(effective["models"].as_array().unwrap())
+    {
+        assert_eq!(original["id"], projected["id"]);
+        let id = original["id"].as_str().unwrap();
+        let mut once = original.clone();
+        project_builtin_memory_evidence(&mut once).unwrap();
+        let mut twice = once.clone();
+        project_builtin_memory_evidence(&mut twice).unwrap();
+        assert_eq!(once, twice, "{id}: evidence projection must be idempotent");
+        if once != *projected {
+            let differing: Vec<_> = once
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|key| once[*key] != projected[*key])
+                .cloned()
+                .collect();
+            panic!("{id}: effective model differs from evidence projection in {differing:?}");
+        }
+        for backend in ["mlx", "candle"] {
+            if original.get(backend).is_some() {
+                if backend == "mlx" {
+                    mlx_count += 1;
+                } else {
+                    candle_count += 1;
+                }
+            }
+            if let Some(facts) = evidence[id].get(backend).and_then(Value::as_object) {
+                for (key, value) in facts {
+                    assert!(
+                        original[backend].get(key).is_none(),
+                        "{id}/{backend}.{key} leaked into product"
+                    );
+                    assert_eq!(&projected[backend][key], value);
+                }
+            }
+        }
+        for row in original["downloads"].as_array().unwrap_or(&Vec::new()) {
+            if let Some(footprint) = row.get("footprint") {
+                for key in ["residentMemoryBytes", "peakMemoryBytes", "measuredPixels"] {
+                    assert!(
+                        footprint.get(key).is_none(),
+                        "{id} product download has {key}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!((mlx_count, candle_count), (75, 86));
+    let mut malformed = evidence.clone();
+    malformed["flux_schnell"]["mlx"]["unknownMemoryKey"] = json!(1);
+    assert!(super::evidence::validate_evidence_document(&malformed.to_string(), &raw).is_err());
+    let mut ambiguous = evidence.clone();
+    let rows = ambiguous["flux3_klein"]["downloads"]
+        .as_array_mut()
+        .unwrap();
+    let row = rows
+        .iter_mut()
+        .find(|row| row.get("platforms").is_some())
+        .unwrap();
+    row.as_object_mut().unwrap().remove("platforms");
+    assert!(super::evidence::validate_evidence_document(&ambiguous.to_string(), &raw).is_err());
+}
+
+#[test]
 fn both_shipping_routes_and_the_v1_compatibility_projection_are_preserved() {
     let spec = builtin_model_spec("flux_schnell").unwrap();
     assert_eq!(spec.routes["mlx"].id, "flux1_schnell");
@@ -15,11 +97,8 @@ fn both_shipping_routes_and_the_v1_compatibility_projection_are_preserved() {
     assert_eq!(spec.routes["mlx"].supported_quants, ["q4", "q8"]);
     assert!(spec.routes["candle"].supported_quants.is_empty());
     assert!(spec.routes["candle"].conditioning.is_empty());
-    let old: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(include_str!(
-        "../../../../config/manifests/builtin.models.jsonc"
-    )))
-    .unwrap();
-    let legacy = old["models"]
+    let effective = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+    let legacy = effective["models"]
         .as_array()
         .unwrap()
         .iter()
@@ -28,7 +107,7 @@ fn both_shipping_routes_and_the_v1_compatibility_projection_are_preserved() {
     assert_eq!(
         &spec.project(None),
         legacy,
-        "v1 raw readers must see the same public facts and exact calibration identities"
+        "effective readers must see the same public facts and exact calibration identities"
     );
     assert_eq!(
         crate::builtin_manifests::builtin_model_entry("flux_schnell"),
