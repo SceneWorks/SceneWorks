@@ -722,7 +722,13 @@ impl VerifiedPlanLayers {
             checkpoint_id: checkpoint_id.to_owned(),
             reason: reason.to_owned(),
         };
-        check().map_err(|_| refuse("checkpoint plan load was interrupted"))?;
+        let checked = || {
+            check().map_err(|error| CheckpointPlanError::Io {
+                path: PathBuf::new(),
+                message: error.to_string(),
+            })
+        };
+        checked()?;
         let portable = self
             .plans
             .get(checkpoint_id)
@@ -773,7 +779,7 @@ impl VerifiedPlanLayers {
             .map_err(|_| refuse("checkpoint catalog projection is invalid"))?;
         let mut resolved_layers = Vec::with_capacity(plan.layers.len());
         for layer in &plan.layers {
-            check().map_err(|_| refuse("checkpoint plan load was interrupted"))?;
+            checked()?;
             let path = paths
                 .get(&layer.layer_id)
                 .ok_or_else(|| refuse("private checkpoint layer is missing"))?;
