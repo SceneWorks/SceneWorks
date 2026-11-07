@@ -3542,11 +3542,22 @@ mod plan_backed_video_enqueue_tests {
 
     /// An app whose catalog holds ONE imported `wan-video` model. `import_plan` is spliced in
     /// verbatim so the control case can drop it and change nothing else.
-    fn app_with_imported_wan(temp_dir: &tempfile::TempDir, import_plan: &str) -> axum::Router {
+    fn app_with_imported_wan(
+        temp_dir: &tempfile::TempDir,
+        import_plan: &str,
+    ) -> (axum::Router, crate::AppState) {
         if !import_plan.is_empty() {
             use sceneworks_core::checkpoint_import::{
                 CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
             };
+            let library = temp_dir.path().join("wan-library");
+            std::fs::create_dir_all(&library).unwrap();
+            std::fs::write(library.join("model.safetensors"), b"wan-fixture").unwrap();
+            let root = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+                &test_settings(temp_dir).data_dir,
+            )
+            .approve_root(&library)
+            .unwrap();
             let plan = ImportPlanV1::new(
                 format!("checkpoint-plan-{}", "3".repeat(64)),
                 "wan-video",
@@ -3556,9 +3567,9 @@ mod plan_backed_video_enqueue_tests {
                     target_path: "model.safetensors".into(),
                     container: CheckpointContainerV1::Safetensors,
                     source: SourceLocatorV1::linked(
-                        "root-wan-fixture",
+                        &root.root_id,
                         "model.safetensors",
-                        "a".repeat(64),
+                        sceneworks_core::hashing::sha256_bytes(b"wan-fixture"),
                     )
                     .unwrap(),
                 }],
@@ -3580,7 +3591,66 @@ mod plan_backed_video_enqueue_tests {
                 }}"#
             ),
         );
-        create_app(test_settings(temp_dir)).expect("app creates")
+        let (app, state) = create_app_with_state(test_settings(temp_dir)).expect("app creates");
+        if !import_plan.is_empty() {
+            use sceneworks_core::jobs_store::RegisterWorker;
+            use sceneworks_core::model_artifacts::portable_binding::{
+                portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+                PortableSourceProvenance,
+            };
+            let files = vec![PortableArtifactFile {
+                relative_path: "artifact".into(),
+                size_bytes: b"wan-fixture".len() as u64,
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_bytes(b"wan-fixture")
+                ),
+            }];
+            let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+                "model-bytes",
+                "imported_wan_2_2_abc123",
+                None,
+                &portable_file_ledger_sha256(&files).unwrap(),
+            )
+            .unwrap();
+            let claim = PortableSourceClaim::new(
+                source_id,
+                PortableSourceProvenance::OperatorOverride,
+                files,
+            )
+            .unwrap();
+            for (worker_id, gpu_id, platform) in [
+                ("wan-plan-mlx", "mlx", "macos"),
+                ("wan-plan-candle-linux", "cuda:0", "linux"),
+                ("wan-plan-candle-windows", "cuda:1", "windows"),
+            ] {
+                let mut capabilities = vec![
+                    sceneworks_core::contracts::WorkerCapability::Gpu,
+                    sceneworks_core::contracts::WorkerCapability::VideoGenerate,
+                ];
+                if gpu_id != "mlx" {
+                    capabilities.push(sceneworks_core::contracts::WorkerCapability::Unknown(
+                        "candle".into(),
+                    ));
+                }
+                state
+                    .jobs_store
+                    .register_worker_with_portable_sources(
+                        RegisterWorker {
+                            worker_id: worker_id.into(),
+                            gpu_id: gpu_id.into(),
+                            gpu_name: None,
+                            capabilities,
+                            loaded_models: vec![],
+                            utilization: None,
+                        },
+                        Some(platform),
+                        Some(&[claim.clone()]),
+                    )
+                    .unwrap();
+            }
+        }
+        (app, state)
     }
 
     const IMPORT_PLAN: &str = r#","importPlan": { "checkpointId": "ckpt_wan_abc123" }"#;
@@ -3594,7 +3664,7 @@ mod plan_backed_video_enqueue_tests {
     #[tokio::test]
     async fn a_plan_backed_wan_checkpoint_enqueues_a_text_to_video_job() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
+        let (app, state) = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
         create_project(&app).await;
 
         let (status, job) = request(
@@ -3614,6 +3684,20 @@ mod plan_backed_video_enqueue_tests {
         // Not merely accepted — still QUEUED after `fail_job_if_platform_unreachable` has run, so
         // the row is genuinely waiting for a worker rather than terminal-failed on the way out.
         assert_eq!(job["status"], "queued", "{job}");
+        let frozen = state
+            .jobs_store
+            .portable_model_binding(job["id"].as_str().unwrap())
+            .unwrap()
+            .expect("checkpoint job has a private portable binding");
+        let frozen: sceneworks_core::model_artifacts::portable_binding::PortableJobBinding =
+            serde_json::from_value(frozen).unwrap();
+        let plan = frozen.routes.values().next().unwrap().models[0]
+            .checkpoint_plan
+            .as_ref()
+            .expect("trusted checkpoint plan is frozen");
+        assert_eq!(plan.family, "wan-video");
+        assert_eq!(plan.layers[0].target_path, "model.safetensors");
+        assert!(!serde_json::to_string(plan).unwrap().contains("wan-library"));
         // The plan identity the worker's Wan lane resolves through is on the enqueued payload.
         assert_eq!(
             job["payload"]["modelManifestEntry"]["importPlan"]["checkpointId"],
@@ -3631,7 +3715,7 @@ mod plan_backed_video_enqueue_tests {
     #[tokio::test]
     async fn the_same_imported_wan_entry_without_a_plan_is_still_refused_by_the_no_lane_gate() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = app_with_imported_wan(&temp_dir, "");
+        let (app, _) = app_with_imported_wan(&temp_dir, "");
         create_project(&app).await;
 
         let (status, error) = request(
@@ -3663,7 +3747,7 @@ mod plan_backed_video_enqueue_tests {
     #[tokio::test]
     async fn a_plan_backed_wan_checkpoint_is_refused_on_a_mode_its_lane_does_not_serve() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
+        let (app, _) = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
         create_project(&app).await;
 
         let (status, error) = request(

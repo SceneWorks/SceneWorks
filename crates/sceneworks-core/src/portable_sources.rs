@@ -17,8 +17,10 @@ pub fn registered_digest_claim_id(
     component_id: Option<&str>,
     file_ledger_sha256: &str,
 ) -> Result<String, String> {
-    if !matches!(kind, "model" | "lora" | "control" | "component")
-        || model_id.trim().is_empty()
+    if !matches!(
+        kind,
+        "model" | "model-bytes" | "lora" | "control" | "component"
+    ) || model_id.trim().is_empty()
         || model_id != model_id.trim()
         || model_id.chars().any(char::is_control)
         || (kind == "component") != component_id.is_some()
@@ -587,6 +589,16 @@ mod tests {
             model,
             registered_digest_claim_id("model", "imported-model", None, &ledger_b).unwrap()
         );
+        let bytes =
+            registered_digest_claim_id("model-bytes", "imported-model", None, &ledger_a).unwrap();
+        assert_ne!(bytes, model);
+        assert!(registered_digest_claim_id(
+            "model-bytes",
+            "imported-model",
+            Some("layer"),
+            &ledger_a
+        )
+        .is_err());
         assert!(
             registered_digest_claim_id("component", "imported-model", None, &ledger_a).is_err()
         );
