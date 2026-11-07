@@ -111,6 +111,13 @@ fn catalog_hash(settings: &Settings) -> [u8; 32] {
         manifests.join("user.loras.jsonc"),
         manifests.join("user.control_overlays.jsonc"),
     ];
+    paths.extend(converted_builtin_model_ids().into_iter().map(|id| {
+        settings
+            .data_dir
+            .join("models/mlx")
+            .join(id)
+            .join(".sceneworks-produced-artifact.json")
+    }));
     let projects =
         sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
     if let Ok(projects) = projects.list_projects() {
@@ -320,6 +327,17 @@ fn registered_digest_source_claims(
             }
         }
     }
+    for id in converted_builtin_model_ids() {
+        let Some(root) = registered_converted_builtin_model_root(settings, &id) else {
+            continue;
+        };
+        if let Some(files) = capture_converted_builtin_files(settings, &root) {
+            append_registered_claim_files(&mut claims, "model", &id, None, files);
+            for claim in claims.drain(..) {
+                publish(claim);
+            }
+        }
+    }
     let mut lora_manifests = vec![manifests.join("user.loras.jsonc")];
     let projects =
         sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
@@ -360,6 +378,89 @@ fn registered_digest_source_claims(
             }
         }
     }
+}
+
+fn converted_builtin_model_ids() -> Vec<String> {
+    let Ok(manifest) = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+    else {
+        return Vec::new();
+    };
+    manifest
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .pointer("/mlx/requiresConversion")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+pub(crate) fn is_converted_builtin_model_id(id: &str) -> bool {
+    converted_builtin_model_ids()
+        .iter()
+        .any(|builtin| builtin == id)
+}
+
+/// A builtin conversion has no user-model record. Its receipt and fixed app-owned output root
+/// supply the worker-side registration; API admission separately verifies the completed job.
+fn registered_converted_builtin_model_root(settings: &Settings, id: &str) -> Option<PathBuf> {
+    if !is_converted_builtin_model_id(id) {
+        return None;
+    }
+    let root = settings.data_dir.join("models/mlx").join(id);
+    let root = crate::paths::normalize_app_managed_model_entry_path(
+        settings,
+        &root,
+        "converted builtin model",
+    )
+    .ok()?;
+    if !root.is_dir() {
+        return None;
+    }
+    let marker = root.join(".sceneworks-produced-artifact.json");
+    let receipt: crate::ProducedArtifactReceipt =
+        serde_json::from_slice(&std::fs::read(marker).ok()?).ok()?;
+    crate::verify_produced_artifact_receipt(
+        &root,
+        &receipt.producer_job_id,
+        &receipt.source_artifact_id,
+        id,
+    )
+    .ok()?;
+    Some(root)
+}
+
+fn capture_converted_builtin_files(
+    settings: &Settings,
+    root: &Path,
+) -> Option<Vec<PortableArtifactFile>> {
+    let files = capture_registered_files(root).ok()?;
+    for file in &files {
+        crate::paths::normalize_app_managed_model_entry_path(
+            settings,
+            &root.join(&file.relative_path),
+            "converted builtin member",
+        )
+        .ok()?;
+    }
+    Some(files)
+}
+
+pub(crate) fn registered_converted_builtin_model_path(
+    settings: &Settings,
+    id: &str,
+    frozen_files: &[PortableArtifactFile],
+) -> Option<PathBuf> {
+    let root = registered_converted_builtin_model_root(settings, id)?;
+    capture_converted_builtin_files(settings, &root)
+        .filter(|files| files == frozen_files)
+        .map(|_| root)
 }
 
 fn control_overlay_manifests(settings: &Settings) -> Vec<PathBuf> {
@@ -954,6 +1055,67 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn receipt_backed_builtin_conversion_advertises_and_rebinds_exact_model_bytes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut settings = Settings::for_test(temp.path().join("data"));
+        settings.config_dir = temp.path().join("config");
+        let id = "flux2_klein_9b_true_v2";
+        let root = settings.data_dir.join("models/mlx").join(id);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("model_index.json"), b"{}").unwrap();
+        std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
+        let before = catalog_hash(&settings);
+        let mut claims = Vec::new();
+        registered_digest_source_claims(&settings, |claim| claims.push(claim));
+        assert!(claims.is_empty(), "unreceipted bytes cannot be advertised");
+        assert!(registered_converted_builtin_model_path(&settings, id, &[]).is_none());
+
+        crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id).unwrap();
+        assert_ne!(
+            catalog_hash(&settings),
+            before,
+            "new receipt schedules a rescan"
+        );
+        let files = capture_registered_files(&root).unwrap();
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
+                .unwrap();
+        let expected = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "model", id, None, &ledger,
+        )
+        .unwrap();
+        registered_digest_source_claims(&settings, |claim| claims.push(claim));
+        assert!(claims
+            .iter()
+            .any(|claim| claim.source_id == expected && claim.files == files));
+        assert_eq!(
+            registered_converted_builtin_model_path(&settings, id, &files).as_deref(),
+            Some(std::fs::canonicalize(&root).unwrap().as_path())
+        );
+
+        std::fs::write(root.join("model.safetensors"), b"substituted weights").unwrap();
+        assert!(registered_converted_builtin_model_path(&settings, id, &files).is_none());
+        let mut rescanned = Vec::new();
+        registered_digest_source_claims(&settings, |claim| rescanned.push(claim));
+        assert!(!rescanned.iter().any(|claim| claim.source_id == expected));
+        #[cfg(unix)]
+        {
+            std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
+            let outside = temp.path().join("outside.safetensors");
+            std::fs::write(&outside, b"outside").unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("escaped.safetensors")).unwrap();
+            crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id)
+                .unwrap();
+            assert!(registered_converted_builtin_model_path(
+                &settings,
+                id,
+                &capture_registered_files(&root).unwrap()
+            )
+            .is_none());
+        }
+    }
 
     #[test]
     fn registered_control_overlay_claims_rebind_only_matching_confined_bytes() {

@@ -2724,6 +2724,21 @@ fn worker_catalog_member_path(
     component_id: Option<&str>,
     member: &PortableArtifactMember,
 ) -> WorkerResult<Option<PathBuf>> {
+    if manifest_name == "user.models.jsonc"
+        && collection == "models"
+        && component_id.is_none()
+        && member.role == ArtifactMemberRole::Primary
+        && matches!(&member.source, PortableSourceIdentity::Digest { .. })
+        && crate::portable_source_claims::is_converted_builtin_model_id(id)
+    {
+        return crate::portable_source_claims::registered_converted_builtin_model_path(
+            settings,
+            id,
+            &member.files,
+        )
+        .map(Some)
+        .ok_or_else(|| invalid_binding("converted builtin receipt or bytes are unavailable"));
+    }
     if settings.config_dir.as_os_str().is_empty() {
         return Ok(None);
     }
@@ -3632,6 +3647,49 @@ mod tests {
 
     fn settings(data_dir: PathBuf) -> Settings {
         Settings::for_test(data_dir)
+    }
+
+    #[test]
+    fn converted_builtin_primary_rebinds_without_user_model_record() {
+        let temp = TempDir::new().unwrap();
+        let mut settings = settings(temp.path().join("data"));
+        settings.config_dir = temp.path().join("config");
+        let id = "flux2_klein_9b_true_v2";
+        let root = settings.data_dir.join("models/mlx").join(id);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("model_index.json"), b"{}").unwrap();
+        std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
+        crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(&root).unwrap();
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Digest {
+                sha256:
+                    sceneworks_core::model_artifacts::portable_binding::portable_closure_sha256(
+                        &files,
+                    )
+                    .unwrap(),
+            },
+            tier: None,
+            files,
+        };
+        assert_eq!(
+            worker_catalog_member_path(&settings, "user.models.jsonc", "models", id, None, &member)
+                .unwrap()
+                .as_deref(),
+            Some(std::fs::canonicalize(&root).unwrap().as_path())
+        );
+        std::fs::remove_file(root.join(".sceneworks-produced-artifact.json")).unwrap();
+        assert!(worker_catalog_member_path(
+            &settings,
+            "user.models.jsonc",
+            "models",
+            id,
+            None,
+            &member
+        )
+        .is_err());
     }
 
     fn local_binding(
