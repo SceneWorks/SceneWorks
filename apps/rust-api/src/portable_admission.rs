@@ -132,6 +132,7 @@ fn is_source_choice_container(key: &str) -> bool {
             | "lokrs"
             | "controls"
             | "controlWeights"
+            | "pidCheckpoint"
             | "veda"
             | "source"
             | "upscale"
@@ -164,6 +165,8 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
             | "useUncensoredEnhancer"
             | "enhancePrompt"
             | "tileControlNetRepo"
+            | "pidGemma"
+            | "usePid"
             | "structuredAnalysisEnabled"
             | "visionAnalysisEnabled"
             | "semanticEmbeddingsEnabled"
@@ -644,6 +647,26 @@ async fn capture_model_slot(
                 .await?
             }
             SelectedSourceLocation::DynamicHfRef {
+                repo,
+                reference,
+                files,
+            } => {
+                let revision = resolve_dynamic_hf_revision(state, repo, reference).await?;
+                let download = serde_json::json!({
+                    "provider":"huggingface",
+                    "repo":repo,
+                    "revision":revision,
+                    "files":files
+                });
+                capture_download_member(
+                    state,
+                    &download,
+                    source.role.clone(),
+                    Some(source.component_id.clone()),
+                )
+                .await?
+            }
+            SelectedSourceLocation::DynamicHfFiles {
                 repo,
                 reference,
                 files,
@@ -1781,6 +1804,25 @@ mod tests {
             portable_authored_options(original.as_object().unwrap()),
             portable_authored_options(changed_adapter.as_object().unwrap())
         );
+    }
+
+    #[test]
+    fn pid_source_override_is_authored_without_physical_locator() {
+        let original = json!({"advanced":{
+            "usePid":true,
+            "pidCheckpoint":{"repo":"owner/first","filename":"first.safetensors","path":"/private/a"},
+            "pidGemma":"owner/gemma"
+        }});
+        let changed = json!({"advanced":{
+            "usePid":true,
+            "pidCheckpoint":{"repo":"owner/second","filename":"first.safetensors","path":"/private/b"},
+            "pidGemma":"owner/gemma"
+        }});
+        let first = portable_authored_options(original.as_object().unwrap());
+        let second = portable_authored_options(changed.as_object().unwrap());
+        assert_eq!(first["advanced"]["pidCheckpoint"]["repo"], "owner/first");
+        assert!(!first.to_string().contains("/private"));
+        assert_ne!(first, second);
     }
 
     #[test]
