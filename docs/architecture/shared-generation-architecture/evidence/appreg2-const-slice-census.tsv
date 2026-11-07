@@ -85,7 +85,7 @@ crates/sceneworks-core/src/jobs_store/routing/candle.rs	127	CANDLE_IMAGE_ROUTES	
 crates/sceneworks-core/src/jobs_store/routing/candle.rs	480	CANDLE_IMAGE_CHECKS	model fact candidate	keep as product data	Request-shape refusal logic retained; membership audited against feature export.
 crates/sceneworks-core/src/jobs_store/routing/candle.rs	1482	SDXL_CONTROL_MODELS	model fact candidate	derive	Backend model/conditioning membership must derive from typed route/feature export.
 crates/sceneworks-core/src/jobs_store/routing/candle.rs	2141	CANDLE_POSE_MODELS	model fact candidate	derive	Backend model/conditioning membership must derive from typed route/feature export.
-crates/sceneworks-core/src/jobs_store/routing/catalog.rs	28	KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES	model fact candidate	delete	Test mirror or obsolete exception list; typed route/claim tests replace this copy.
+crates/sceneworks-core/src/jobs_store/routing/catalog.rs	28	KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES	model fact candidate	deleted	Empty exception list removed; advertised-video class guard now asserts every advertised pair has a live claiming lane.
 crates/sceneworks-core/src/jobs_store/routing/catalog.rs	215	VIDEO_UI_MODES	model fact candidate	keep as product data	Product mode vocabulary; one exported owner required for web and routing.
 crates/sceneworks-core/src/jobs_store/routing/catalog.rs	917	MLX_ROUTED_FAMILIES	model fact candidate	delete	Test mirror or obsolete exception list; typed route/claim tests replace this copy.
 crates/sceneworks-core/src/jobs_store/routing/catalog.rs	936	CANDLE_ROUTED_FAMILIES	model fact candidate	delete	Test mirror or obsolete exception list; typed route/claim tests replace this copy.

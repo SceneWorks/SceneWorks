@@ -12,21 +12,6 @@ use serde_json::{json, Map, Value};
 use crate::checkpoint_weight_facts::NVFP4_CODEC_ID;
 use crate::contracts::JobType;
 
-/// Video capabilities a shipped manifest entry advertises that NO lane can currently claim.
-///
-/// The class guard below verifies that every advertised mode is claimable.
-///
-/// EXACT, not a suppression list — the class guard fails if a row here is no longer needed, so a
-/// capability that becomes claimable forces its row to be deleted.
-///
-/// EMPTY is the goal state and the current state. The last row —
-/// `("minimax_h3_ref", "reference_to_video")`, filed while the MLX Ref2VA declaration was
-/// withheld pending a `MultiReference` conditioning declaration — was deleted by sc-18650, which
-/// instead aligned `video_mode_conditioning_requirements` to the ordered omni-reference surface
-/// the pinned engines actually declare and restored the `minimax_h3_ref` arm in `routing/mlx.rs`.
-#[cfg(test)]
-const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[];
-
 use crate::jobs_store::routing::candle::video_mode_is_candle_eligible;
 use crate::jobs_store::routing::gaps::{
     classify_candle_video_gap, classify_image_gap, classify_video_gap, UnsupportedReason,
@@ -3178,8 +3163,6 @@ mod tests {
     /// to latent frame 0 — and the checkpoint's `in_dim 36` patch embedding was trained on
     /// "frame 0 image, rest zeros", so a second pinned frame is out-of-distribution rather than an
     /// unwired flag. The 5B's FLF rides a mask-blend architecture the A14B does not have.
-    use super::KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES;
-
     /// **THE CLASS GUARD (sc-17159, GH #2074).** A video mode in a shipped model's `capabilities`
     /// is a promise to the user — the Video Studio builds its mode tabs from that array. This
     /// asserts the promise is keepable: every advertised capability is a mode the Mac gate can
@@ -3258,18 +3241,10 @@ mod tests {
              wrong and this guard is vacuous"
         );
 
-        let known: BTreeSet<(String, String)> = KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES
-            .iter()
-            .map(|(id, mode, _)| ((*id).to_owned(), (*mode).to_owned()))
-            .collect();
         let found: BTreeSet<(String, String)> = unclaimable.into_iter().collect();
-        assert_eq!(
-            found, known,
-            "the set of advertised-but-unclaimable video capabilities changed. A pair present in \
-             `found` and absent from `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` is a mode the Video \
-             Studio offers and NO lane will claim — the job queues forever next to an idle worker, \
-             with no error (GH #2074). A pair in the constant and not in `found` has been fixed: \
-             delete its row."
+        assert!(
+            found.is_empty(),
+            "advertised video modes have no claiming lane: {found:?} (GH #2074)"
         );
     }
 
@@ -3281,8 +3256,7 @@ mod tests {
     /// `videoModelServesMode` collapsed to `capabilities.includes(mode)`), and submitting one
     /// produced a job that sat `queued` / "Waiting for an available worker." with no terminal state.
     ///
-    /// The inventory is EXACT, like `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES`: it is not a suppression
-    /// list, it is the measured set, and every member must be BOTH hidden (a `false` in the model's
+    /// The inventory is exact: it is not a suppression list, it is the measured set, and every member must be BOTH hidden (a `false` in the model's
     /// `candleSupport.features.videoModes`, which `candleVideoModeBlock` reads) AND judged
     /// unreachable on both off-Mac platforms (`video_request_is_claimable_on_platform`). Hiding
     /// alone would not do: `VIDEO_JOB_MODES` is global and the MCP tool, a raw REST caller or a
