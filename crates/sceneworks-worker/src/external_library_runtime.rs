@@ -2767,7 +2767,9 @@ fn worker_catalog_member_path_at(
                 continue;
             }
             let normalized = if collection == "loras" {
-                crate::paths::normalize_app_managed_lora_path(settings, &selected)
+                crate::portable_source_claims::normalize_catalog_lora_path(
+                    settings, manifest, &selected,
+                )
             } else {
                 crate::paths::normalize_app_managed_model_entry_path(
                     settings,
@@ -4084,6 +4086,53 @@ mod tests {
             .unwrap(),
             Some(std::fs::canonicalize(right).unwrap())
         );
+    }
+
+    #[test]
+    fn relative_lora_catalog_member_uses_global_and_project_scope() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let mut settings = Settings::for_test(data.clone());
+        settings.config_dir = temp.path().join("config");
+        for (manifest, relative, selected) in [
+            (
+                settings.config_dir.join("manifests/user.loras.jsonc"),
+                "loras/global",
+                data.join("loras/global"),
+            ),
+            (
+                data.join("projects/demo/loras/manifest.jsonc"),
+                "loras/project",
+                data.join("projects/demo/loras/project"),
+            ),
+        ] {
+            std::fs::create_dir_all(&selected).unwrap();
+            std::fs::write(selected.join("adapter.safetensors"), b"adapter").unwrap();
+            std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+            std::fs::write(
+                &manifest,
+                serde_json::to_vec(&json!({"loras":[{"id":"trained","source":{"path":relative}}]}))
+                    .unwrap(),
+            )
+            .unwrap();
+            let files = crate::portable_source_claims::capture_registered_files(&selected).unwrap();
+            let member = PortableArtifactMember {
+                role: ArtifactMemberRole::Lora,
+                component_id: None,
+                source: PortableSourceIdentity::Digest {
+                    sha256: files[0].sha256.clone(),
+                },
+                tier: None,
+                files,
+            };
+            assert_eq!(
+                worker_catalog_member_path_at(
+                    &settings, &manifest, "loras", "trained", None, &member,
+                )
+                .unwrap(),
+                Some(selected.canonicalize().unwrap())
+            );
+        }
     }
 
     #[test]

@@ -2010,6 +2010,7 @@ pub(crate) async fn heartbeat_with_reason(
 ) -> WorkerResult<()> {
     // Capture the label before `status` is moved into the request, for the log line.
     let status_label = status.as_str().to_owned();
+    portable_source_claims::refresh_background_inventory(settings.clone());
     let portable_claims = portable_source_claims::pending_inventory_claims();
     let outcome: WorkerResult<WorkerSnapshot> = api
         .post_json(

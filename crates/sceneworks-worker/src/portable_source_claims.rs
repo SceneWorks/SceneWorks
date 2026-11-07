@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
 };
+use std::time::{Duration, Instant};
 
 use sceneworks_core::contracts::JsonObject;
 use sceneworks_core::model_artifacts::portable_binding::{
@@ -38,6 +39,16 @@ const STATIC_SOURCE_IDS: &[&str] = &[
 
 static INVENTORY_STARTED: AtomicBool = AtomicBool::new(false);
 static PENDING_INVENTORY: OnceLock<Mutex<InventoryProgress>> = OnceLock::new();
+static INVENTORY_SCHEDULE: OnceLock<Mutex<InventorySchedule>> = OnceLock::new();
+// Catalog writes are detected on the next ordinary heartbeat; this slower sweep covers a file
+// appearing at an already-registered path or an operator-installed source without a catalog edit.
+const INVENTORY_RESCAN_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Default)]
+struct InventorySchedule {
+    next_due: Option<Instant>,
+    catalog_hash: Option<[u8; 32]>,
+}
 
 #[derive(Default)]
 struct InventoryProgress {
@@ -48,17 +59,28 @@ struct InventoryProgress {
 
 impl InventoryProgress {
     fn publish(&mut self, claim: PortableSourceClaim) {
-        if self
+        if let Some(existing) = self
             .claims
-            .iter()
-            .any(|existing| existing.source_id == claim.source_id)
+            .iter_mut()
+            .find(|existing| existing.source_id == claim.source_id)
         {
-            return;
+            if *existing != claim {
+                *existing = claim;
+                self.generation += 1;
+            }
+        } else {
+            self.claims.push(claim);
+            self.claims
+                .sort_by(|left, right| left.source_id.cmp(&right.source_id));
+            self.generation += 1;
         }
-        self.claims.push(claim);
-        self.claims
-            .sort_by(|left, right| left.source_id.cmp(&right.source_id));
-        self.generation += 1;
+    }
+
+    fn replace_scanned(&mut self, claims: Vec<PortableSourceClaim>) {
+        if self.claims != claims {
+            self.claims = claims;
+            self.generation += 1;
+        }
     }
 
     fn pending(&self) -> Option<(u64, Vec<PortableSourceClaim>)> {
@@ -74,6 +96,60 @@ fn pending_inventory() -> &'static Mutex<InventoryProgress> {
     PENDING_INVENTORY.get_or_init(|| Mutex::new(InventoryProgress::default()))
 }
 
+fn inventory_schedule() -> &'static Mutex<InventorySchedule> {
+    INVENTORY_SCHEDULE.get_or_init(|| Mutex::new(InventorySchedule::default()))
+}
+
+fn scan_due(schedule: &InventorySchedule, now: Instant, catalog_hash: [u8; 32]) -> bool {
+    schedule.next_due.is_none_or(|next| now >= next) || schedule.catalog_hash != Some(catalog_hash)
+}
+
+fn catalog_hash(settings: &Settings) -> [u8; 32] {
+    let manifests = settings.config_dir.join("manifests");
+    let mut paths = vec![
+        manifests.join("user.models.jsonc"),
+        manifests.join("user.loras.jsonc"),
+    ];
+    let projects =
+        sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
+    if let Ok(projects) = projects.list_projects() {
+        paths.extend(
+            projects
+                .into_iter()
+                .map(|project| PathBuf::from(project.path).join("loras/manifest.jsonc")),
+        );
+    }
+    paths.sort();
+    let mut digest = Sha256::new();
+    for path in paths {
+        digest.update(path.to_string_lossy().as_bytes());
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                digest.update([1]);
+                digest.update((bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            }
+            Err(_) => digest.update([0]),
+        }
+    }
+    digest.finalize().into()
+}
+
+/// Heartbeats schedule a bounded background rescan so imports, conversions, and trained LoRAs
+/// appear without a worker restart. Hashing never runs on the heartbeat path.
+pub(crate) fn refresh_background_inventory(settings: Settings) {
+    let now = Instant::now();
+    let hash = catalog_hash(&settings);
+    let schedule = inventory_schedule()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !scan_due(&schedule, now, hash) || INVENTORY_STARTED.load(Ordering::Acquire) {
+        return;
+    }
+    drop(schedule);
+    start_background_inventory(settings);
+}
+
 /// Registration stays fast even when installed source closure spans terabytes. Exactly one
 /// blocking inventory hashes it in the background. Each completed source is published on the
 /// next ordinary heartbeat; unverified sources remain ineligible until their own hash completes.
@@ -87,17 +163,34 @@ pub(crate) fn start_background_inventory(settings: Settings) {
             .acknowledged = 0;
         return;
     }
-    *pending_inventory()
+    // Registration replaces the server vector even when the preceding scan finished. Republish
+    // the last verified snapshot while its replacement is being built.
+    pending_inventory()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = InventoryProgress::default();
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .acknowledged = 0;
+    *inventory_schedule()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = InventorySchedule {
+        next_due: Some(Instant::now() + INVENTORY_RESCAN_INTERVAL),
+        catalog_hash: Some(catalog_hash(&settings)),
+    };
     tokio::spawn(async move {
         let result = crate::load_progress::spawn_blocking(move || {
+            let mut scanned = Vec::new();
             collect_source_claims(&settings, |claim| {
+                scanned.push(claim.clone());
                 pending_inventory()
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .publish(claim);
             });
+            scanned.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+            scanned.dedup_by(|left, right| left.source_id == right.source_id);
+            pending_inventory()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .replace_scanned(scanned);
         })
         .await;
         match result {
@@ -106,6 +199,10 @@ pub(crate) fn start_background_inventory(settings: Settings) {
             }
             Err(error) => {
                 tracing::warn!(%error, "private source inventory failed");
+                inventory_schedule()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .next_due = None;
                 INVENTORY_STARTED.store(false, Ordering::Release);
             }
         }
@@ -235,7 +332,7 @@ fn registered_digest_source_claims(
             let Some(path) = sceneworks_core::lora_family::adapter_record_path(&lora) else {
                 continue;
             };
-            if let Ok(path) = crate::paths::normalize_app_managed_lora_path(settings, &path) {
+            if let Ok(path) = normalize_catalog_lora_path(settings, &manifest, &path) {
                 append_registered_claim(&mut claims, "lora", id, None, &path);
             }
             for claim in claims.drain(..) {
@@ -243,6 +340,40 @@ fn registered_digest_source_claims(
             }
         }
     }
+}
+
+/// Catalog source paths are relative to their declared scope, not the worker's process cwd.
+/// The global manifest uses the data directory; a project manifest lives under
+/// `<project>/loras/manifest.jsonc`. The final normalization still confines the resolved path.
+pub(crate) fn normalize_catalog_lora_path(
+    settings: &Settings,
+    manifest: &Path,
+    source: &Path,
+) -> WorkerResult<PathBuf> {
+    let scoped = if source.is_absolute() {
+        source.to_path_buf()
+    } else if manifest == settings.config_dir.join("manifests/user.loras.jsonc") {
+        settings.data_dir.join(source)
+    } else if manifest
+        .file_name()
+        .is_some_and(|name| name == "manifest.jsonc")
+        && manifest
+            .parent()
+            .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "loras"))
+    {
+        manifest
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("project LoRA scope is unavailable".to_owned())
+            })?
+            .join(source)
+    } else {
+        return Err(WorkerError::InvalidPayload(
+            "LoRA catalog scope is unavailable".to_owned(),
+        ));
+    };
+    crate::paths::normalize_app_managed_lora_path(settings, &scoped)
 }
 
 /// The local catalog's loader locators, named with the same relative keys as API admission.
@@ -759,6 +890,152 @@ mod tests {
         assert!(progress.pending().is_none());
         progress.publish(make("second"));
         assert!(progress.pending().is_none());
+    }
+
+    #[test]
+    fn rescans_publish_new_sources_and_withdraw_removed_or_changed_claims() {
+        let make = |source_id: &str, byte: char| {
+            PortableSourceClaim::new(
+                source_id,
+                PortableSourceProvenance::OperatorOverride,
+                vec![PortableArtifactFile {
+                    relative_path: PathBuf::from("model.safetensors"),
+                    size_bytes: 1,
+                    sha256: format!("sha256:{}", byte.to_string().repeat(64)),
+                }],
+            )
+            .unwrap()
+        };
+        let mut progress = InventoryProgress::default();
+        progress.publish(make("removed", 'a'));
+        progress.acknowledge(progress.pending().unwrap().0);
+        progress.publish(make("new", 'b'));
+        assert_eq!(progress.pending().unwrap().1.len(), 2);
+        progress.publish(make("removed", 'c'));
+        assert_eq!(
+            progress.pending().unwrap().1[1].files[0].sha256,
+            format!("sha256:{}", "c".repeat(64))
+        );
+        progress.replace_scanned(vec![make("new", 'b')]);
+        let (generation, claims) = progress.pending().unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].source_id, "new");
+        progress.acknowledge(generation);
+        assert!(progress.pending().is_none());
+
+        let now = Instant::now();
+        let hash = [1; 32];
+        assert!(scan_due(&InventorySchedule::default(), now, hash));
+        let schedule = InventorySchedule {
+            next_due: Some(now + INVENTORY_RESCAN_INTERVAL),
+            catalog_hash: Some(hash),
+        };
+        assert!(!scan_due(&schedule, now, hash));
+        assert!(scan_due(&schedule, now, [2; 32]));
+        assert!(scan_due(&schedule, now + INVENTORY_RESCAN_INTERVAL, hash));
+    }
+
+    #[test]
+    fn changed_catalog_is_claimable_after_rescan_without_worker_restart() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let mut settings = Settings::for_test(data.clone());
+        settings.config_dir = temp.path().join("config");
+        let manifest = settings.config_dir.join("manifests/user.loras.jsonc");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, br#"{"loras":[]}"#).unwrap();
+        let mut progress = InventoryProgress::default();
+        let original_hash = catalog_hash(&settings);
+        let adapter = data.join("loras/trained/adapter.safetensors");
+        std::fs::create_dir_all(adapter.parent().unwrap()).unwrap();
+        std::fs::write(&adapter, b"trained bytes").unwrap();
+        std::fs::write(
+            &manifest,
+            br#"{"loras":[{"id":"trained","source":{"path":"loras/trained"}}]}"#,
+        )
+        .unwrap();
+        let updated_hash = catalog_hash(&settings);
+        assert_ne!(original_hash, updated_hash);
+        let schedule = InventorySchedule {
+            next_due: Some(Instant::now() + INVENTORY_RESCAN_INTERVAL),
+            catalog_hash: Some(original_hash),
+        };
+        assert!(scan_due(&schedule, Instant::now(), updated_hash));
+        let mut scanned = Vec::new();
+        registered_digest_source_claims(&settings, |claim| scanned.push(claim));
+        progress.replace_scanned(scanned);
+        let (generation, claims) = progress
+            .pending()
+            .expect("new trained source is advertised");
+        assert_eq!(claims.len(), 1);
+        assert_eq!(
+            claims[0].files,
+            capture_registered_files(adapter.parent().unwrap()).unwrap()
+        );
+        progress.acknowledge(generation);
+
+        std::fs::write(&manifest, br#"{"loras":[]}"#).unwrap();
+        let mut rescanned = Vec::new();
+        registered_digest_source_claims(&settings, |claim| rescanned.push(claim));
+        progress.replace_scanned(rescanned);
+        assert!(
+            progress.pending().unwrap().1.is_empty(),
+            "removed source is withdrawn"
+        );
+    }
+
+    #[test]
+    fn catalog_lora_relative_paths_use_global_or_project_scope() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let global = data.join("loras/global/model.safetensors");
+        let project = data.join("projects/demo/loras/project/model.safetensors");
+        for file in [&global, &project] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"adapter").unwrap();
+        }
+        let mut settings = Settings::for_test(data.clone());
+        settings.config_dir = temp.path().join("config");
+        let global_manifest = settings.config_dir.join("manifests/user.loras.jsonc");
+        let project_manifest = data.join("projects/demo/loras/manifest.jsonc");
+        assert_eq!(
+            normalize_catalog_lora_path(
+                &settings,
+                &global_manifest,
+                Path::new("loras/global/model.safetensors")
+            )
+            .unwrap(),
+            global.canonicalize().unwrap()
+        );
+        assert_eq!(
+            normalize_catalog_lora_path(
+                &settings,
+                &project_manifest,
+                Path::new("loras/project/model.safetensors")
+            )
+            .unwrap(),
+            project.canonicalize().unwrap()
+        );
+        assert!(
+            normalize_catalog_lora_path(&settings, &global_manifest, Path::new("../escape"))
+                .is_err()
+        );
+
+        std::fs::create_dir_all(global_manifest.parent().unwrap()).unwrap();
+        std::fs::write(&global_manifest, serde_json::to_vec(&json!({"loras":[{"id":"global","source":{"path":"loras/global/model.safetensors"}}]})).unwrap()).unwrap();
+        let mut claims = Vec::new();
+        registered_digest_source_claims(&settings, |claim| claims.push(claim));
+        let files = capture_registered_files(&global).unwrap();
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
+                .unwrap();
+        let expected = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "lora", "global", None, &ledger,
+        )
+        .unwrap();
+        assert!(claims
+            .iter()
+            .any(|claim| claim.source_id == expected && claim.files == files));
     }
 
     #[test]
