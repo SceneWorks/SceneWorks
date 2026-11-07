@@ -3,6 +3,37 @@ use super::support::*;
 use crate::{validate_prompt_enhancement_fields, validate_prompt_enhancement_payload};
 
 #[test]
+fn generation_dtos_preserve_unset_carrier_encoding() {
+    let image: crate::dto::ImageJobRequest = serde_json::from_value(json!({
+        "projectId": "project-1", "mode": "text_to_image", "prompt": "probe"
+    }))
+    .unwrap();
+    let image = serde_json::to_value(image).unwrap();
+    for key in ["sourceAssetId", "referenceAssetId", "maskAssetId"] {
+        assert!(image.get(key).is_some_and(Value::is_null), "image {key}");
+    }
+    assert_eq!(image["referenceAssetIds"], json!([]));
+
+    let video: crate::dto::VideoJobRequest = serde_json::from_value(json!({
+        "projectId": "project-1", "mode": "text_to_video", "prompt": "probe"
+    }))
+    .unwrap();
+    let video = serde_json::to_value(video).unwrap();
+    for key in [
+        "sourceAssetId",
+        "lastFrameAssetId",
+        "sourceClipAssetId",
+        "bridgeRightClipAssetId",
+        "referenceClipAssetId",
+    ] {
+        assert!(video.get(key).is_some_and(Value::is_null), "video {key}");
+    }
+    for key in ["referenceAssetIds", "sourceClipAssetIds"] {
+        assert_eq!(video[key], json!([]), "video {key}");
+    }
+}
+
+#[test]
 fn vector_detail_default_allows_five_minutes_per_svg() {
     assert_eq!(
         crate::dto::VectorDetailBudget::default().max_wall_time_ms,
@@ -370,17 +401,20 @@ fn write_vector_workflow_test_manifest(
     let spec = sceneworks_core::registry::builtin_model_spec("flux_schnell")
         .expect("registered raster model");
     let raster = spec.project(None);
-    let download = spec
-        .product
-        .downloads
-        .iter()
-        .find(|d| d.default == Some(true))
-        .expect("default raster variant");
-    let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(&data, &download.repo)
+    let download = raster["downloads"]
+        .as_array()
         .unwrap()
-        .join("snapshots")
-        .join(&download.revision)
-        .join(&download.variant);
+        .iter()
+        .find(|d| d["default"] == true)
+        .expect("default raster variant");
+    let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(
+        &data,
+        download["repo"].as_str().unwrap(),
+    )
+    .unwrap()
+    .join("snapshots")
+    .join(download["revision"].as_str().unwrap())
+    .join(download["variant"].as_str().unwrap());
     // The workflow requires an installed raster model. Materialize its declared tier in the
     // fixture's private hub; the metadata-only tests never open or execute these weights.
     std::fs::create_dir_all(&snapshot).unwrap();
@@ -570,12 +604,12 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
         workflow["rasterStage"]["revision"],
         sceneworks_core::registry::builtin_model_spec("flux_schnell")
             .unwrap()
-            .product
-            .downloads
-            .iter()
-            .find(|d| d.default == Some(true))
+            .project(None)["downloads"]
+            .as_array()
             .unwrap()
-            .revision
+            .iter()
+            .find(|d| d["default"] == true)
+            .unwrap()["revision"]
     );
     assert_eq!(
         workflow["vectorStage"]["revision"],

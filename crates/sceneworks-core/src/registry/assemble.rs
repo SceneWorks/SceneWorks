@@ -329,3 +329,69 @@ pub fn assemble(
     }
     Ok(specs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removing_a_routed_video_mapping_removes_its_typed_route() {
+        let products = crate::jsonc::strip_jsonc_comments(include_str!(
+            "../../../../config/manifests/builtin.models.jsonc"
+        ));
+        let evidence = include_str!("../../../../config/manifests/registry/evidence.json");
+        let policy = include_str!("../../../../config/manifests/registry/route-policy.json");
+        let preview = crate::jsonc::strip_jsonc_comments(include_str!(
+            "../../../../config/manifests/builtin.preview-support.jsonc"
+        ));
+        let mlx =
+            include_str!("../../../../config/engine-capabilities/runtime/capabilities.mlx.json");
+        let candle =
+            include_str!("../../../../config/engine-capabilities/runtime/capabilities.candle.json");
+        let original = assemble(
+            &products,
+            evidence,
+            policy,
+            &preview,
+            &[("mlx", mlx), ("candle", candle)],
+        )
+        .unwrap();
+        for (backend, dump) in [("mlx", mlx), ("candle", candle)] {
+            let parsed: Value = serde_json::from_str(dump).unwrap();
+            let mappings = parsed["videoModelMappings"].as_array().unwrap();
+            let mut checked = 0;
+            for (index, mapping) in mappings.iter().enumerate() {
+                let model = mapping["modelId"].as_str().unwrap();
+                let mode = mapping["mode"].as_str().unwrap();
+                if !original.get(model).is_some_and(|spec| {
+                    spec.video_routes
+                        .get(backend)
+                        .is_some_and(|routes| routes.iter().any(|route| route.mode == mode))
+                }) {
+                    continue;
+                }
+                let mut changed = parsed.clone();
+                changed["videoModelMappings"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(index);
+                let changed = serde_json::to_string(&changed).unwrap();
+                let dumps = if backend == "mlx" {
+                    [("mlx", changed.as_str()), ("candle", candle)]
+                } else {
+                    [("mlx", mlx), ("candle", changed.as_str())]
+                };
+                let projected = assemble(&products, evidence, policy, &preview, &dumps).unwrap();
+                assert!(
+                    !projected[model]
+                        .video_routes
+                        .get(backend)
+                        .is_some_and(|routes| routes.iter().any(|route| route.mode == mode)),
+                    "{backend}/{model}/{mode} must disappear with its engine mapping"
+                );
+                checked += 1;
+            }
+            assert!(checked > 0, "{backend} must exercise routed video mappings");
+        }
+    }
+}
