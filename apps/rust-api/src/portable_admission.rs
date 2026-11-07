@@ -473,11 +473,6 @@ async fn capture_model_slot(
     if downloads.is_empty() {
         let local = capture_local_model_entry(state, entry, slot)?;
         if let Some(training) = &training {
-            if entry.pointer("/importPlan/checkpointId").is_none() {
-                return Err(incomplete(
-                    "local training base has no verified checkpoint plan provenance",
-                ));
-            }
             let selected = capture_local_source_files(&training.path, &allowed_local_roots(state))?;
             if local
                 .iter()
