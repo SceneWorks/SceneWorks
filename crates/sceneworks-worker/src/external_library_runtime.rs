@@ -489,7 +489,7 @@ impl RuntimeSourceGuard {
                 portable_snapshot = Some(prepared.snapshot);
                 plan_layers = prepared.plan_layers;
             }
-            rebind_revision_primary_paths(binding, payload, settings, &mut dispatch_payload)?;
+            rebind_revision_primary_paths(binding, settings, &mut dispatch_payload)?;
             rewrite_training_plan_source(binding, settings, &mut dispatch_payload)?;
             dispatch_payload
                 .entry("advanced".to_owned())
@@ -1622,7 +1622,12 @@ fn rewrite_loader_locator(
             .ok_or_else(|| invalid_binding("private payload root changed shape"))?;
         return Ok(());
     }
-    if member.role == ArtifactMemberRole::Primary && model_slot == "modelManifestEntry" {
+    let owns_advanced_model_path = model_slot == "modelManifestEntry"
+        || (model_slot == "modelManifestEntries/0"
+            && ["modelManifestEntry", "baseModelManifestEntry"]
+                .into_iter()
+                .all(|slot| payload.get(slot).is_none_or(serde_json::Value::is_null)));
+    if member.role == ArtifactMemberRole::Primary && owns_advanced_model_path {
         if let Some(advanced) = payload
             .get_mut("advanced")
             .and_then(serde_json::Value::as_object_mut)
@@ -1692,7 +1697,6 @@ fn rewrite_matching_plan_path(
 
 fn rebind_revision_primary_paths(
     route: &PortableRouteBinding,
-    original: &JsonObject,
     settings: &Settings,
     dispatch: &mut JsonObject,
 ) -> WorkerResult<()> {
@@ -1705,17 +1709,6 @@ fn rebind_revision_primary_paths(
         let PortableSourceIdentity::Revision { identity } = &primary.source else {
             continue;
         };
-        if model.slot == "modelManifestEntry"
-            && original
-                .get("advanced")
-                .and_then(|advanced| advanced.get("modelPath"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|path| !path.trim().is_empty())
-        {
-            return Err(invalid_binding(
-                "an advanced model path requires a digest-bound primary",
-            ));
-        }
         let (_, snapshot) = sceneworks_core::hf_home::model_source_library(&settings.data_dir)
             .discover_snapshot(&identity.repository, Some(&identity.revision))
             .map_err(|error| invalid_binding(error.to_string()))?;
@@ -4327,12 +4320,9 @@ mod tests {
         std::fs::create_dir_all(substituted.parent().unwrap()).unwrap();
         std::fs::write(&selected, b"admitted checkpoint").unwrap();
         std::fs::write(&substituted, b"admittex checkpoint").unwrap();
-        let binding = PortableRouteBinding::new(
-            "cpu",
-            std::env::consts::OS,
-            vec![local_binding("modelManifestEntry", "m", &selected, None)],
-        )
-        .unwrap();
+        let mut model = local_binding("modelManifestEntry", "m", &selected, None);
+        model.variant = "local".to_owned();
+        let binding = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap();
         let payload = json!({"model":"m", "advanced":{"modelPath":substituted},
             "modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":selected}}})
         .as_object()
@@ -4346,6 +4336,73 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("bytes differ"), "{error}");
+    }
+
+    #[test]
+    fn publisher_byte_advanced_override_rebinds_to_verified_revision_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, mut payload) = installed_model(&temp);
+        let api_host_path = temp.path().join("api-host/models/publisher-copy");
+        payload.insert("advanced".to_owned(), json!({"modelPath": api_host_path}));
+        let binding = portable_installed_model_binding();
+        with_library(&library, || {
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings,
+                Some(&binding),
+            )
+            .expect("admitted publisher bytes must rebind despite the API-host path being absent");
+            let dispatched = guard.dispatch_payload();
+            let selected = dispatched["advanced"]["modelPath"].as_str().unwrap();
+            assert_ne!(Path::new(selected), api_host_path);
+            assert_eq!(dispatched["modelManifestEntry"]["paths"]["model"], selected);
+            assert_eq!(
+                std::fs::read(Path::new(selected).join("model.safetensors")).unwrap(),
+                b"weights"
+            );
+            let source = library
+                .join("models--guardfx--model/snapshots")
+                .join(REV_A)
+                .join("model.safetensors");
+            std::fs::write(source, b"changed").unwrap();
+            assert_eq!(
+                std::fs::read(Path::new(selected).join("model.safetensors")).unwrap(),
+                b"weights",
+                "dispatch must keep the verified private copy after the source changes"
+            );
+        });
+    }
+
+    #[test]
+    fn array_primary_revision_rewrites_advanced_loader_override() {
+        let binding = portable_installed_model_binding();
+        let primary = binding.models[0]
+            .members
+            .iter()
+            .find(|member| member.role == ArtifactMemberRole::Primary)
+            .unwrap();
+        let mut payload = json!({
+            "advanced": {"modelPath": "/api-host/publisher-copy"},
+            "modelManifestEntries": [{"id": "m", "paths": {"model": "/api-host/publisher-copy"}}]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let private = Path::new("/worker/private/verified");
+        rewrite_loader_locator(
+            &mut payload,
+            "modelManifestEntries/0",
+            primary,
+            private,
+            false,
+        )
+        .unwrap();
+        assert_eq!(payload["advanced"]["modelPath"], private.to_str().unwrap());
+        assert_eq!(
+            payload["modelManifestEntries"][0]["paths"]["model"],
+            private.to_str().unwrap()
+        );
     }
 
     #[test]
