@@ -226,6 +226,7 @@ pub(super) fn zimage_base_control_load(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn zimage_control_generate_one(
     generator: &dyn Generator,
+    sampling_controls: &GenerationRequest,
     prompt: &str,
     width: u32,
     height: u32,
@@ -246,7 +247,7 @@ pub(super) fn zimage_control_generate_one(
         conditioning,
         preview,
         cancel: cancel.clone(),
-        ..Default::default()
+        ..sampling_controls.clone()
     };
     let output = generator
         .generate(&request, on_progress)
@@ -298,6 +299,7 @@ pub(super) async fn generate_zimage_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     // Identity img2img-init (sc-2328 / sc-3146) — OPT-IN escape hatch, off by default. The
     // Fun-Controlnet-Union pose head denoises the pose FROM NOISE, so seeding from a reference
     // init fights the pose lock on few-step Turbo (validated marginal on 8-step Turbo; no single
@@ -417,6 +419,7 @@ pub(super) async fn generate_zimage_control_stream(
                 );
                 let (out_w, out_h, pixels) = zimage_control_generate_one(
                     generator,
+                    &sampling_controls,
                     &prompt,
                     width,
                     height,
@@ -472,6 +475,7 @@ pub(super) async fn generate_zimage_control_stream(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn zimage_base_control_generate_one(
     generator: &dyn Generator,
+    sampling_controls: &GenerationRequest,
     prompt: &str,
     negative_prompt: Option<String>,
     width: u32,
@@ -496,7 +500,7 @@ pub(super) fn zimage_base_control_generate_one(
         conditioning,
         preview,
         cancel: cancel.clone(),
-        ..Default::default()
+        ..sampling_controls.clone()
     };
     let output = generator.generate(&request, on_progress).map_err(|error| {
         WorkerError::Engine(format!("base Z-Image control generation failed: {error}"))
@@ -560,6 +564,7 @@ pub(super) async fn generate_zimage_base_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     // Identity img2img-init (opt-in escape hatch, off by default) — same gate as the Turbo path
     // (`advanced.referenceStrength > 0` AND a `referenceAssetId`). Shared across the whole pose set.
     let identity_init = resolve_identity_init(request, settings, project_path)?;
@@ -681,6 +686,7 @@ pub(super) async fn generate_zimage_base_control_stream(
                 );
                 let (out_w, out_h, pixels) = zimage_base_control_generate_one(
                     generator,
+                    &sampling_controls,
                     &prompt,
                     negative_prompt.clone(),
                     width,

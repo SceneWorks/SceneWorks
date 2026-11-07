@@ -1,3 +1,5 @@
+import { useAppearance } from "../hooks/useAppearance.js";
+import { composeNegativePrompt } from "../data/appearanceCatalog.js";
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { useStudioAdvancedSettings } from "../hooks/useStudioAdvancedSettings.js";
 import { useStudioPromptGuide } from "../hooks/useStudioPromptGuide.js";
@@ -155,7 +157,7 @@ import { IRIS_RESTORE_DEFAULTS, irisRestoreControls, restorePlanBodyForRenders }
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { styleHintForId, styleTextForId } from "../data/styleCatalog.js";
-import { guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint, schedulerShiftDefaultFromModel } from "../samplerOptions.js";
+import { guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
@@ -439,6 +441,7 @@ export function ImageStudio() {
     setScheduler,
     schedulerShift,
     setSchedulerShift,
+    schedulerShiftExplicit,
     stepsOverride,
     setStepsOverride,
     guidanceOverride,
@@ -1223,6 +1226,8 @@ export function ImageStudio() {
   const tagConventionModel = selectedModel?.captionStyle === "tags";
   const styleAxisAvailable = !tagConventionModel;
   const effectiveStyleId = styleAxisAvailable ? styleId : null;
+  const appearance = useAppearance({ model: selectedModel, initial: saved.appearance, enabled: styleAxisAvailable && !structuredPromptModel && !(mossEdit && (mossImageAdvanced?.positive || mossImageAdvanced?.negative || mossImageAdvanced?.negativePrompts?.length)), prompt });
+  const { setSelection: setAppearance } = appearance;
   // sc-13366: when a style is selected, replace the generic scene/character suggestion pills with a
   // single hint pill carrying that style's tailored subject prompt (styleThumbnailPrompts.json) — a
   // strong, style-fitting starting point. Falls back to the normal suggestions with no style.
@@ -1463,7 +1468,7 @@ export function ImageStudio() {
   // override on the Windows/Linux candle build (e.g. Lens exposes the curated menu
   // only on candle; SDXL only on MLX). The advanced panel hides the dropdowns when
   // the menu has fewer than 2 options (epic 1753 §7.4).
-  const { samplerOptions, schedulerOptions, samplerDefault, schedulerDefault, showSchedulerPicker } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler, emptyValue: "default" });
+  const { samplerOptions, schedulerOptions, samplerDefault, schedulerDefault } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler, emptyValue: "default" });
 
   const guidanceMethodOptions = useMemo(
     () => guidanceMethodOptionsFromModel(selectedModel, activeBackend),
@@ -1503,8 +1508,12 @@ export function ImageStudio() {
   // `null` = no explicit value yet (a fresh workspace, or a recipe that recorded none): the model's
   // own default, which for a shift-axis model (Iris-3B) is its checkpoint's flow shift — not the
   // historical blanket 3.0, which would be SENT for it and silently change the schedule.
-  const effectiveSchedulerShift = schedulerShift ?? schedulerShiftDefaultFromModel(selectedModel);
-  const showSchedulerShift = supportsSchedulerShift || (showSchedulerPicker && scheduler !== "default");
+  // Old drafts stored a blanket shift even when the default scheduler ignored it. Only an
+  // explicit edit, a legacy curated scheduler, or the old standalone axis makes that value apply.
+  const shiftOverrideApplies = schedulerShiftExplicit || (supportsSchedulerShift && ["iris", "moss_image"].includes(selectedModel?.family)) || Boolean(scheduler && scheduler !== "default");
+  const schedulerShiftToSend = selectedModel?.image?.supportsSchedulerShift !== false && shiftOverrideApplies ? schedulerShift ?? selectedModel?.defaults?.schedulerShift : null;
+  const effectiveSchedulerShift = schedulerShiftToSend ?? "";
+  const showSchedulerShift = true;
   const supportsCfgInterval = supportsGuidance && selectedModel?.image?.supportsCfgInterval;
   const cfgIntervalDisabled = guidanceIsOff(selectedModel, guidanceOverride);
   const { interval: resolvedCfgInterval, error: cfgIntervalError } = resolveCfgInterval({
@@ -1577,7 +1586,7 @@ export function ImageStudio() {
     setMossDmdSteps(8);
     setSampler(samplerDefault);
     setScheduler(schedulerDefault);
-    setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
+    setSchedulerShift(mossEdit ? 5 : null);
     setCfgInterval("");
     setCaptionOverflow("default");
     setGuidanceMethod(
@@ -1729,7 +1738,7 @@ export function ImageStudio() {
   );
   if (mossEdit && !mossEditError) mossEditError = mossPositivePromptIssue(mossImageAdvanced, {
     prompt, prompts: mossPromptBatch,
-    effectivePrompt: composeImageJobPrompt({ promptToSend: composedStack.prompt, sendStructured: false, styleText: styleTextForId(effectiveStyleId) }).prompt,
+    effectivePrompt: composeImageJobPrompt({ promptToSend: composedStack.prompt, sendStructured: false, styleText: styleTextForId(effectiveStyleId), appearance: appearance.selection, model: selectedModel }).prompt,
   });
   const stackAddsNegative = generalStack.some((preset) => Boolean(preset?.defaults?.negativePrompt));
   const stackAddsCount = generalStack.some((preset) => Number.isFinite(Number(preset?.defaults?.count)));
@@ -1866,6 +1875,7 @@ export function ImageStudio() {
   skipAdvancedDefaultsReset,
   setModel,
   setStyleId,
+  setAppearance,
   setPrompt,
   setCaption,
   setPromptMode,
@@ -2158,7 +2168,7 @@ export function ImageStudio() {
       steps: mossDmd ? Number(mossDmdSteps) : finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
-      schedulerShift: mossDmd ? undefined : effectiveSchedulerShift,
+      schedulerShift: mossDmd ? undefined : finiteNumberOrUndefined(schedulerShiftToSend),
       ...(resolvedCfgInterval ? { cfgInterval: resolvedCfgInterval } : {}),
       ...(outgoingCaptionOverflow !== "default" ? { captionOverflow: outgoingCaptionOverflow } : {}),
       guidanceMethod,
@@ -2193,6 +2203,7 @@ export function ImageStudio() {
     mossPromptBatch,
     mossDmdSteps,
     styleId,
+    appearance: appearance.selection,
     structuredCaption: caption,
     promptMode,
     magicPromptBackend,
@@ -2245,6 +2256,7 @@ export function ImageStudio() {
     sampler,
     scheduler,
     schedulerShift,
+    schedulerShiftExplicit,
     cfgInterval,
     captionOverflow,
     guidanceMethod,
@@ -2411,10 +2423,12 @@ export function ImageStudio() {
         promptToSend,
         sendStructured: isStructured,
         styleText: activeStyleText,
+        appearance: appearance.selection,
+        model: selectedModel,
       });
       return { composedPrompt, foldPrompt, isStructured, promptToSend };
     },
-    [activeStyleText, generalStack, resolutionOptions, selectedPreset, mossEdit, mossPromptBatch.length],
+    [activeStyleText, generalStack, resolutionOptions, selectedPreset, mossEdit, mossPromptBatch.length, appearance.selection, selectedModel],
   );
 
   const buildJobRequest = (overrides = {}) => {
@@ -2431,6 +2445,7 @@ export function ImageStudio() {
       flux3ReferenceIds: layoutReferences.map(({ id }) => id),
       // Overrides — the one legitimate single-vs-batch difference.
       promptToSend,
+      appearancePromptBatch: overrides.appearancePromptBatch?.map((text) => composeJobPrompt({ ...overrides, promptToSend: text }).promptToSend),
       submitIntent: overrides.submitIntent,
       sendStructured: isStructured,
       submitCaption: overrides.submitCaption,
@@ -2471,6 +2486,9 @@ export function ImageStudio() {
       styleText: activeStyleText,
       // sc-13132: the opaque style id travels with the recipe so replay can re-select the picker.
       styleId: effectiveStyleId,
+      appearance: appearance.selection,
+      appearanceModel: selectedModel,
+      appearanceNegativeEnabled: supportsNegativePrompt && !negativePromptCfgOff && !mossDmd,
       characterId,
       characterLookId,
       multiReference,
@@ -2498,7 +2516,7 @@ export function ImageStudio() {
       hiresFixCfgScale: supportsGuidance ? hiresFixCfgScale : "",
       sampler,
       scheduler,
-      schedulerShift: effectiveSchedulerShift,
+      schedulerShift: schedulerShiftToSend,
       supportsSchedulerShift,
       cfgInterval: resolvedCfgInterval,
       captionOverflow: outgoingCaptionOverflow,
@@ -2571,6 +2589,7 @@ export function ImageStudio() {
   const buildBatchJobRequest = (resolvedPrompt, opts = {}) =>
     buildJobRequest({
       promptToSend: opts.promptToSend ?? resolvedPrompt,
+      appearancePromptBatch: opts.appearancePromptBatch,
       submitIntent: resolvedPrompt,
       sendStructured: opts.sendStructured ?? false,
       submitCaption: opts.submitCaption ?? caption,
@@ -2614,7 +2633,9 @@ export function ImageStudio() {
   const batchStructuredExpandBlocked =
     structuredPromptModel && (magicModelMissing || typeof magicPrompt !== "function");
   const styleSelected = typeof activeStyleText === "string" && activeStyleText.trim() !== "";
-  const stylePreviewActive = !structuredPromptModel && styleSelected;
+  const stylePreviewActive = !structuredPromptModel && (styleSelected || appearance.active);
+  const appearanceNegativePreview = supportsNegativePrompt && !negativePromptCfgOff && !mossDmd
+    ? composeNegativePrompt(generalStack.length ? composedStack.negativePrompt : negativePrompt, appearance.resolved.negative) : "";
   // sc-13224: structured JSON-caption models apply the Style axis by merging into the caption's
   // `style_description.aesthetics` (see imageJobRequest.js), so the outgoing prompt is the injected,
   // re-serialized caption. Compute it here so the budget guard measures the ACTUAL string sent (the
@@ -3246,6 +3267,7 @@ export function ImageStudio() {
             activeProject={activeProject}
             createLoraImportJob={createLoraImportJob}
             models={models}
+            appearance={appearance}
             styleAxisAvailable={styleAxisAvailable}
             styleId={styleId}
             setStyleId={setStyleId}
@@ -3272,7 +3294,7 @@ export function ImageStudio() {
               and the own-`Style:` MERGE) the run will send once a style is active — reuses
               buildJobRequest so it can never drift from the payload. Sits under the Style axis row.
               Hidden when no style applies. */}
-          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} />
+          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} appearanceActive={appearance.active} negativePrompt={appearance.active ? appearanceNegativePreview : undefined} />
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 

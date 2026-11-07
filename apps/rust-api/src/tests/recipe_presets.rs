@@ -769,7 +769,8 @@ async fn recipe_preset_accepts_full_studio_snapshot_and_rejects_bad_defaults() {
                 "resolution": "1024x1024",
                 "count": 4,
                 "mode": "character_image",
-                "guidanceScale": 5.0,
+                "guidanceScale": 101.5,
+                "schedulerShift": 33.375,
                 "steps": 28,
                 "sampler": "default",
                 "ipAdapterScale": 0.8
@@ -782,7 +783,8 @@ async fn recipe_preset_accepts_full_studio_snapshot_and_rejects_bad_defaults() {
     assert_eq!(created["id"], "atrium_look");
     // The flatten-extra defaults round-trip intact through persistence.
     assert_eq!(created["defaults"]["prompt"], "a portrait in the atrium");
-    assert_eq!(created["defaults"]["guidanceScale"], 5.0);
+    assert_eq!(created["defaults"]["guidanceScale"], 101.5);
+    assert_eq!(created["defaults"]["schedulerShift"], 33.375);
     assert_eq!(created["defaults"]["steps"], 28);
     assert_eq!(created["defaults"]["sampler"], "default");
     assert_eq!(created["defaults"]["mode"], "character_image");
@@ -801,7 +803,7 @@ async fn recipe_preset_accepts_full_studio_snapshot_and_rejects_bad_defaults() {
     assert_eq!(saved["defaults"]["prompt"], "a portrait in the atrium");
     assert_eq!(saved["defaults"]["steps"], 28);
 
-    // An out-of-range guidance scale is rejected.
+    // A mathematically invalid Shift is rejected.
     let (status, error) = request(
         app.clone(),
         "POST",
@@ -810,7 +812,7 @@ async fn recipe_preset_accepts_full_studio_snapshot_and_rejects_bad_defaults() {
             "name": "Too Hot",
             "model": "z_image_turbo",
             "workflow": "text_to_image",
-            "defaults": { "guidanceScale": 999.0 }
+            "defaults": { "schedulerShift": 0.0 }
         }),
     )
     .await;
@@ -819,7 +821,7 @@ async fn recipe_preset_accepts_full_studio_snapshot_and_rejects_bad_defaults() {
         error["detail"]
             .as_str()
             .unwrap_or_default()
-            .contains("guidanceScale"),
+            .contains("schedulerShift"),
         "unexpected error: {error}"
     );
 
@@ -1530,4 +1532,24 @@ async fn recipe_preset_general_presets_are_model_agnostic() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "unknown kind rejected");
+}
+
+#[test]
+fn experimental_sampling_preset_defaults_validate_native_float_semantics() {
+    use crate::recipe_presets::validate_recipe_preset_defaults;
+    for value in [
+        json!({"guidanceScale":-2.5,"trueCfgScale":101.5,"schedulerShift":33.375}),
+        json!({"guidanceScale":"1.01","schedulerShift":"18.375"}),
+    ] {
+        assert!(validate_recipe_preset_defaults(Some(&value)).is_ok());
+    }
+    for value in [
+        json!({"guidanceScale":"NaN"}),
+        json!({"schedulerShift":0}),
+        json!({"schedulerShift":-1}),
+        json!({"schedulerShift":"inf"}),
+        json!({"schedulerShift":1e-100}),
+    ] {
+        assert!(validate_recipe_preset_defaults(Some(&value)).is_err());
+    }
 }

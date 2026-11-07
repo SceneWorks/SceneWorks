@@ -9807,7 +9807,7 @@ fn scail2_lightning_recipe_overrides_sampling_and_records() {
         (Some(8), Some(1.0), Some(1.0)),
         "lightning applies the 8-step CFG-off recipe"
     );
-    // An explicit user step count is honored; CFG/shift stay forced.
+    // An explicit step count overrides the accelerator default.
     let req_steps = request(json!({
         "projectId": "p", "model": "scail2_14b", "mode": "animate_character",
         "duration": 5, "fps": 16, "advanced": { "steps": 4 }
@@ -9816,6 +9816,16 @@ fn scail2_lightning_recipe_overrides_sampling_and_records() {
         scail2_sampling(&req_steps, true),
         (Some(4), Some(1.0), Some(1.0))
     );
+    let experimental = request(json!({
+        "projectId": "p", "model": "scail2_14b", "mode": "animate_character",
+        "advanced": { "steps": 6, "guidanceScale": 1.5, "schedulerShift": 18.375 }
+    }));
+    for lightning in [false, true] {
+        assert_eq!(
+            scail2_sampling(&experimental, lightning),
+            (Some(6), Some(1.5), Some(18.375))
+        );
+    }
     // The effective recipe is recorded for observability when lightning is active.
     let raw = scail2_raw_settings(&req, true);
     let raw = raw.as_object().unwrap();
@@ -10368,7 +10378,7 @@ fn wan_sampling_toggle_off_runs_native_multistep_cfg() {
     }));
     assert_eq!(
         wan_sampling("wan2_2_t2v_14b", &on_over),
-        (Some(4), Some(1.0))
+        (Some(4), Some(4.0))
     );
     // 5B ignores the lightning flag entirely (no toggle) — interim default steps still apply.
     let five_b = request(json!({ "projectId": "p", "advanced": { "lightning": false } }));
@@ -21114,16 +21124,10 @@ fn every_turbo_variant_with_veda_drives_its_own_recipe_to_the_engine() {
     }
 }
 
-/// An explicit `advanced.steps` beats the variant's own count; the trained SHIFT does not yield.
-///
-/// Upstream lists the 8-step adapter as "8 / 4", so a caller who knows the checkpoint may run it
-/// shorter — honouring the knob rather than seizing it, exactly as `scail2_sampling` does. The shift
-/// is the opposite call and is asserted here so the asymmetry is a decision rather than an accident:
-/// a distilled checkpoint sampled at a shift it was not distilled for is the off-distribution render
-/// the recipe exists to prevent, so `advanced.schedulerShift` loses to the variant.
+/// Explicit Advanced controls override the selected accelerator’s recommended defaults.
 #[cfg(target_os = "macos")]
 #[test]
-fn an_explicit_step_override_wins_over_the_variants_count_but_the_shift_does_not() {
+fn explicit_steps_and_shift_override_the_variant_defaults() {
     let tiers = minimax_h3_tier_root("mm_override_", &["q4"], &["transformer", "transformer_ref"]);
     let base = minimax_h3_base_root("mm_override_base_");
     let probe = ArmProbe::default();
@@ -21150,8 +21154,8 @@ fn an_explicit_step_override_wins_over_the_variants_count_but_the_shift_does_not
     );
     assert_eq!(
         engine.scheduler_shift,
-        Some(12.0),
-        "the variant's TRAINED shift must win over an explicit one — 9.0 must not reach the engine"
+        Some(9.0),
+        "Advanced shift overrides the recommended Turbo default"
     );
 }
 

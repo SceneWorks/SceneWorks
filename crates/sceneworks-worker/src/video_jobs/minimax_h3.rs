@@ -646,10 +646,8 @@ pub(super) fn requested_h3_veda(
 ///
 /// An explicit `advanced.steps` wins over the variant's own count, exactly as `scail2_sampling`
 /// lets it — upstream's spec table lists the 8-step file as "8 / 4", so a caller who knows the
-/// checkpoint can run it shorter. The shift is NOT overridable the same way: `advanced.schedulerShift`
-/// still reaches the base regime (it is the pre-existing knob this arm already read), but under a
-/// turbo variant the trained shift wins, because a distilled checkpoint sampled at a shift it was
-/// not distilled for is the off-distribution render the recipe exists to prevent.
+/// checkpoint can run it shorter. An explicit `advanced.schedulerShift` likewise wins over the
+/// variant's trained video shift; when omitted, the recipe supplies its trained default.
 #[cfg(native_lane)]
 pub(super) fn minimax_h3_sampling(
     request: &VideoRequest,
@@ -673,7 +671,7 @@ pub(super) fn minimax_h3_sampling(
     };
     Ok((
         advanced_opt_u32(request, "steps").or(Some(recipe.steps)),
-        Some(recipe.video_shift),
+        advanced_opt_f32(request, "schedulerShift").or(Some(recipe.video_shift)),
         Some(recipe),
     ))
 }

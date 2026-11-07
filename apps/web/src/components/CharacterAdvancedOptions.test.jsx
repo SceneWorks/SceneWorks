@@ -117,6 +117,33 @@ describe("CharacterAdvancedOptions PiD toggle (sc-8372)", () => {
     expect(container.textContent).toContain("Negative prompt");
   });
 
+  it("keeps singleton menus and independently submits experimental CFG and Shift", async () => {
+    const model = {
+      id: "turbo-fine-tune", samplers: ["euler"], schedulers: ["default"],
+      defaults: { guidanceScale: 1, sampler: "euler", scheduler: "default" },
+      image: { supportsGuidance: true, supportsNegativePrompt: true, supportsSchedulerShift: true, negativePromptRequiresGuidance: true },
+    };
+    await act(async () => root.render(<Harness model={model} catalog={[]} defaultNegativePrompt="blurry" />));
+    const field = (text) => [...container.querySelectorAll("label")].find((label) => label.textContent.trim().startsWith(text));
+    const guidance = field("Guidance").querySelector("input");
+    const shift = field("Schedule shift").querySelector("input");
+    expect(field("Sampler").querySelector("select")).not.toBeNull();
+    expect(field("Scheduler").querySelector("select")).not.toBeNull();
+    expect(field("Negative prompt").querySelector("textarea").disabled).toBe(true);
+    expect(advanced()).not.toHaveProperty("schedulerShift");
+    const change = async (input, value) => act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await change(guidance, "1.5");
+    await change(shift, "18.375");
+    expect(advanced()).toMatchObject({ guidanceScale: 1.5, schedulerShift: 18.375, sampler: "euler" });
+    expect(field("Negative prompt").querySelector("textarea").disabled).toBe(false);
+    expect(container.querySelector('[data-testid="negative"]').textContent).toBe("blurry");
+    await change(shift, "");
+    expect(advanced()).not.toHaveProperty("schedulerShift");
+  });
+
   it("hides and suppresses retained Guidance and Negative prompt after a CFG-free model switch", async () => {
     const guided = { id: "guided" };
     const cfgFree = {

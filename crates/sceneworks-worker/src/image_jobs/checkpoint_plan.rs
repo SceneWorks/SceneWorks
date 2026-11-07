@@ -1852,6 +1852,17 @@ pub(super) fn checkpoint_plan_negative_prompt(
         .then(|| negative.to_owned())
 }
 
+/// Request prototype shared by both plan-backed native lanes; omitted controls keep provider defaults.
+pub(super) fn checkpoint_plan_generation_request(request: &ImageRequest) -> GenerationRequest {
+    GenerationRequest {
+        width: request.width,
+        height: request.height,
+        steps: checkpoint_plan_u32_override(request, "steps").map(|steps| steps.clamp(1, 100)),
+        guidance: checkpoint_plan_f32_override(request, "guidanceScale"),
+        ..super::sampling::explicit_sampling_request(request)
+    }
+}
+
 /// Plan-driven text-to-image: `count` renders, each its own seed, through the provider the
 /// registry bound for the plan's family and source shape.
 #[allow(clippy::too_many_arguments)]
@@ -1869,8 +1880,9 @@ pub(super) async fn generate_checkpoint_plan_stream(
     let (quant, quant_bits) =
         imported_model_quant(request, &sources.descriptor, "Checkpoint plan")?;
     let (width, height) = (request.width, request.height);
-    let steps = checkpoint_plan_u32_override(request, "steps").map(|steps| steps.clamp(1, 100));
-    let guidance = checkpoint_plan_f32_override(request, "guidanceScale");
+    let prototype = checkpoint_plan_generation_request(request);
+    let steps = prototype.steps;
+    let guidance = prototype.guidance;
     let raw_settings = checkpoint_plan_raw_settings(request, &sources, steps, guidance, quant_bits);
     let negative_prompt = checkpoint_plan_negative_prompt(request, &sources.descriptor);
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -1950,7 +1962,7 @@ pub(super) async fn generate_checkpoint_plan_stream(
             preview,
             cancel: cancel.clone(),
             memory,
-            ..Default::default()
+            ..prototype.clone()
         };
         // The same seam every request-scoped MLX lane generates through: the selected memory
         // strategy plus its run context. On candle both are `None` and this is the plain call.

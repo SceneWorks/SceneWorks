@@ -223,6 +223,7 @@ fn krea_edit_candle_generate_one(
     seed: i64,
     steps: u32,
     guidance: f32,
+    sampling: &gen_core::GenerationRequest,
     conditioning: Vec<gen_core::Conditioning>,
     use_pid: bool,
     text_style_gain: Option<f32>,
@@ -241,6 +242,9 @@ fn krea_edit_candle_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance: Some(guidance),
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         conditioning,
         use_pid,
         text_style_gain,
@@ -335,7 +339,11 @@ pub(super) async fn generate_candle_krea_edit_stream(
     // `turbo_schedule`; Raw honors the resolved guidance on the full-CFG loop (sc-11640).
     let distilled = krea_edit_candle_distilled(request);
     let guidance = if distilled {
-        0.0
+        sceneworks_core::image_sampling_controls::effective_guidance(
+            &request.advanced,
+            &JsonObject::new(),
+        )
+        .unwrap_or(0.0) as f32
     } else {
         krea_edit_candle_guidance(request)
     };
@@ -481,6 +489,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
         .collect();
     let total = work.len();
 
+    let sampling = super::sampling::explicit_sampling_request(request);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         descriptor_id,
@@ -505,6 +514,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
                         seed,
                         steps,
                         guidance,
+                        &sampling,
                         conditioning,
                         use_pid,
                         text_style_gain,

@@ -6305,6 +6305,21 @@ async fn create_audio_job_maps_the_full_yue_control_set() {
     assert_eq!(job["payload"]["iclReferenceAssetId"], "asset_mix");
     assert_eq!(job["payload"]["guidanceEnabled"], false);
 
+    for guidance in [0.0, 0.5, 1.0, 1.01] {
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/audio/jobs",
+            json!({
+                "projectId": project_id, "model":"yue_en_cot", "prompt":"rock", "lyrics":lyrics,
+                "guidanceEnabled":true, "guidance":guidance
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert!((job["payload"]["guidance"].as_f64().unwrap() - guidance).abs() < 1e-6);
+    }
+
     // A CoT render with no reference is the plain lyrics2song path.
     let (status, job) = request(
         app.clone(),
@@ -6430,9 +6445,9 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
             "guidanceEnabled is false",
         ),
         (
-            "guidance ON scale at or below 1",
-            json!({ "model": "yue_en_cot", "guidance": 1.0 }),
-            "greater than 1",
+            "negative YuE guidance scale",
+            json!({ "model": "yue_en_cot", "guidance": -0.5 }),
+            "must be nonnegative",
         ),
         (
             "unknown tier",
@@ -14592,7 +14607,7 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
         {
           "schemaVersion": 1,
           "source": "documents/style.txt",
-          "promptTemplate": "Subject: {subject}\nStyle: {style}",
+          "promptTemplate": "Description: {subject}\nStyle: {style}",
           "groups": [
             {
               "id": "test-anime",
@@ -14675,7 +14690,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     assert_eq!(status, StatusCode::CREATED, "{group_styled:?}");
     assert_eq!(
         group_styled["payload"]["prompt"],
-        "Subject: a fox\nStyle: broad test anime look"
+        "Description: a fox\nStyle: broad test anime look"
     );
 
     // An unknown styleId is a clean 400, not a silent no-op.
@@ -14796,6 +14811,32 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
         verbatim["payload"]["prompt"], already_composed,
         "a client-composed styled prompt must be taken verbatim, never double-folded"
     );
+}
+
+#[tokio::test]
+async fn appearance_catalog_and_job_route_share_model_aware_composition() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+    let (status, catalog) = request(app.clone(), "GET", "/api/v1/appearance", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{catalog:?}");
+    assert_eq!(catalog["entries"].as_array().unwrap().len(), 81);
+    let selection =
+        json!({"film":"film-kodak-portra-400","looks":["look-cool-muted","look-matte-faded-film"]});
+    let body = json!({"projectId":project_id,"model":"z_image_turbo","mode":"text_to_image","prompt":"Subject: a fox","appearance":selection,"count":1,"width":1024,"height":1024});
+    let (status, job) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert!(job["payload"]["prompt"].as_str().unwrap().contains("Film:"));
+    assert!(job["payload"]["prompt"].as_str().unwrap().contains("Look:"));
+    assert_eq!(job["payload"]["advanced"]["appearance"], selection);
+    assert_eq!(
+        job["payload"]["advanced"]["appearancePrompt"],
+        "Subject: a fox"
+    );
+    let mut incompatible = body;
+    incompatible["appearance"] = json!({"looks":["look-light-leaks"]});
+    incompatible["presetPromptResolvedClientSide"] = json!(true);
+    let (status, _) = request(app, "POST", "/api/v1/image/jobs", incompatible).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

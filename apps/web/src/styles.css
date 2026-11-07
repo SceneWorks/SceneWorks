@@ -19119,3 +19119,29 @@ pre.yue2-abc,
 .training-caption-window-canvas {
   position: relative;
 }
+
+/* Photography controls share the Style bar and wrap before the preset row. */
+.appearance-bar { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.appearance-bar .style-axis-presets, .appearance-bar .preset-guidance-strip { grid-column: 1 / -1; }
+.appearance-axis { min-width: 0; }
+.appearance-axis .compact-selector { position: relative; width: 100%; }
+.appearance-selector-pill { width: 100%; min-width: 0; }
+.appearance-selector-pill .compact-selector-meta { min-width: 0; }
+.appearance-selector-pill strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.appearance-selector-menu { min-width: 0; left: auto; right: 0; width: min(360px, calc(100vw - 40px)); max-height: 440px; overflow: auto; padding: 10px; }
+.appearance-options { display: grid; gap: 4px; }
+.appearance-option { display: flex; gap: 10px; align-items: flex-start; padding: 9px; border-radius: 6px; cursor: pointer; }
+.appearance-option:hover, .appearance-option:focus-within, .appearance-option:has(input[type="radio"]:checked) { background: var(--surface-2); }
+.appearance-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.appearance-option span { display: grid; gap: 3px; }
+.appearance-option input { flex: 0 0 auto; margin-top: 3px; }
+.appearance-option input[type="radio"] { position: absolute; width: 1px; height: 1px; padding: 0; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.appearance-clear { width: 100%; text-align: left; padding: 8px; margin: 4px 0; }
+.appearance-notes:empty { display: none; }
+.appearance-notes { color: var(--text-muted); font-size: 12px; margin-block: 6px; }
+.appearance-notes p { margin-block: 4px; }
+@media (max-width: 1000px) { .appearance-bar { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .appearance-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); } .appearance-selector-menu { position: fixed; inset: auto 20px 20px; width: auto; max-height: 60vh; } }
+
+.appearance-bar .style-axis-control, .appearance-bar .compact-selector { width: 100%; min-width: 0; }
+.appearance-bar .compact-selector-pill { width: 100%; min-width: 0; }

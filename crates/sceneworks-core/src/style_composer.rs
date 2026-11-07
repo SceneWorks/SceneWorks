@@ -1,13 +1,13 @@
 //! Rust port of the web Style composer (`apps/web/src/styleComposer.js`, sc-13129),
 //! so a headless/MCP job that carries a `styleId` + a raw prompt is folded into the
-//! SAME `Subject:`/`Style:` composition the web app sends (sc-13134).
+//! SAME Description/Style fallback and directive composition the web app sends (sc-13134).
 //!
 //! This is a byte-for-byte port of `composeStyledPrompt`: the directive-collision splice
 //! (line-anchored directive detection over a fixed recognized key set; the caller's own
 //! `Style:` line MERGES — catalog text first, the user's words appended after `", "`; their own
 //! `Subject:` line folds into the prose in line order; every other recognized directive is kept
-//! as a top-level sibling; free text folds into a single leading `Subject:` block followed by the
-//! `Style:` block; CRLF/lone-CR safe; identity when no style is selected).
+//! as a top-level sibling; unstructured text becomes `Description:`, while prose mixed with
+//! directives retains the existing `Subject:` splice; CRLF/lone-CR safe; no-style identity).
 //!
 //! Cross-language parity is pinned by the shared golden fixtures in
 //! `documents/style-composer.fixtures.json`, exercised by both this module's test and
@@ -15,7 +15,7 @@
 
 /// The recognized directive keys that seed the parser. A line only counts as a directive
 /// when its line-anchored key is one of these — identical to the JS `STYLE_DIRECTIVE_KEYS`.
-pub const STYLE_DIRECTIVE_KEYS: [&str; 11] = [
+pub const STYLE_DIRECTIVE_KEYS: [&str; 14] = [
     "Style",
     "Subject",
     "Description",
@@ -27,10 +27,14 @@ pub const STYLE_DIRECTIVE_KEYS: [&str; 11] = [
     "Mood",
     "Composition",
     "Negative",
+    "Action",
+    "Film",
+    "Look",
 ];
 
 const STYLE_KEY: &str = "Style";
 const SUBJECT_KEY: &str = "Subject";
+const DESCRIPTION_KEY: &str = "Description";
 
 /// Longest recognized key we treat as a directive (mirrors the JS guard). Redundant with the
 /// set membership below, but keeps the structural rule explicit.
@@ -158,26 +162,58 @@ fn parse_directive_lines(text: &str) -> Vec<Line> {
 /// (already preset-folded) prompt — the Rust port of `composeStyledPrompt`.
 ///
 /// Returns the untouched `user_prompt` when `style_text` is empty/whitespace (identity, "no
-/// style selected"), else the spliced `Subject:`/`Style:`/siblings composition.
+/// style selected"), else the Description/Style fallback or structured directive composition.
 pub fn compose_styled_prompt(style_text: &str, user_prompt: &str) -> String {
-    let style = style_text.trim();
-    if style.is_empty() {
+    compose_prompt_with_directives(style_text, user_prompt, &std::collections::BTreeMap::new())
+}
+
+/// Compose selected appearance directives, merging matching user-authored sections once.
+pub fn compose_prompt_with_directives(
+    style_text: &str,
+    user_prompt: &str,
+    directives: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let mut selected: Vec<(&str, &str)> = Vec::new();
+    if !style_text.trim().is_empty() {
+        selected.push((STYLE_KEY, style_text.trim()));
+    }
+    for key in ["Camera", "Film", "Look", "Lighting"] {
+        if let Some(text) = directives
+            .get(key)
+            .map(|text| text.trim())
+            .filter(|text| !text.is_empty())
+        {
+            selected.push((key, text));
+        }
+    }
+    if selected.is_empty() {
         return user_prompt.to_owned();
     }
 
     let parsed = parse_directive_lines(user_prompt);
+    let prose_key = if parsed
+        .iter()
+        .any(|line| matches!(line, Line::Directive { .. }))
+    {
+        SUBJECT_KEY
+    } else {
+        DESCRIPTION_KEY
+    };
 
     // The user's own `Style:` content merges into our block; their own `Subject:` content folds
     // into the prose (in line order); every other directive is a sibling.
-    let mut user_style_parts: Vec<String> = Vec::new();
+    let mut user_parts: std::collections::BTreeMap<String, Vec<String>> = selected
+        .iter()
+        .map(|(key, _)| ((*key).to_owned(), Vec::new()))
+        .collect();
     let mut sibling_directives: Vec<String> = Vec::new();
     let mut prose_lines: Vec<String> = Vec::new();
     for line in parsed {
         match line {
             Line::Directive { key, content, raw } => {
-                if key == STYLE_KEY {
+                if let Some(parts) = user_parts.get_mut(&key) {
                     if !content.trim().is_empty() {
-                        user_style_parts.push(content.trim().to_owned());
+                        parts.push(content.trim().to_owned());
                     }
                 } else if key == SUBJECT_KEY {
                     if !content.trim().is_empty() {
@@ -197,15 +233,19 @@ pub fn compose_styled_prompt(style_text: &str, user_prompt: &str) -> String {
     let subject = prose_lines.join("\n");
     let subject = subject.trim();
     if !subject.is_empty() {
-        blocks.push(format!("{SUBJECT_KEY}: {subject}"));
+        blocks.push(format!("{prose_key}: {subject}"));
     }
 
-    let mut style_content = String::from(style);
-    for part in &user_style_parts {
-        style_content.push_str(", ");
-        style_content.push_str(part);
+    for (key, text) in selected {
+        let mut content = text.to_owned();
+        if let Some(parts) = user_parts.get(key) {
+            for part in parts {
+                content.push_str(", ");
+                content.push_str(part);
+            }
+        }
+        blocks.push(format!("{key}: {content}"));
     }
-    blocks.push(format!("{STYLE_KEY}: {style_content}"));
 
     blocks.extend(sibling_directives);
 
@@ -251,8 +291,12 @@ mod tests {
                 .get("expected")
                 .and_then(Value::as_str)
                 .expect("fixture expected is a string");
+            let directives = case
+                .get("directives")
+                .map(|value| serde_json::from_value(value.clone()).expect("directive fixture"))
+                .unwrap_or_default();
             assert_eq!(
-                compose_styled_prompt(style_text, user_prompt),
+                compose_prompt_with_directives(style_text, user_prompt, &directives),
                 expected,
                 "golden fixture mismatch: {name}"
             );
@@ -277,20 +321,20 @@ mod tests {
     #[test]
     fn no_space_after_colon_is_prose_not_a_directive() {
         // `Setting:x` fails the JS `[ \t]+` separator requirement, so it stays prose and folds
-        // into Subject — discriminates the separator rule the port must preserve.
+        // into Description — discriminates the separator rule the port must preserve.
         assert_eq!(
             compose_styled_prompt("noir", "Setting:x"),
-            "Subject: Setting:x\nStyle: noir"
+            "Description: Setting:x\nStyle: noir"
         );
     }
 
     #[test]
-    fn subject_leads_the_style_block() {
+    fn plain_description_leads_the_style_block() {
         // The template order itself: the user's prose is the LEADING block, the catalog style
         // trails it. Fails if the two blocks are emitted in the pre-sc-13129-rework order.
         assert_eq!(
             compose_styled_prompt("cinematic watercolor", "a fox in the snow"),
-            "Subject: a fox in the snow\nStyle: cinematic watercolor"
+            "Description: a fox in the snow\nStyle: cinematic watercolor"
         );
     }
 

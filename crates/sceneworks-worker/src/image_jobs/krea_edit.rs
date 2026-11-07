@@ -140,6 +140,7 @@ fn krea_edit_raw_settings(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn krea_edit_generate_one(
     generator: &dyn Generator,
+    sampling_controls: &GenerationRequest,
     prompt: &str,
     negative_prompt: Option<String>,
     width: u32,
@@ -170,7 +171,7 @@ pub(super) fn krea_edit_generate_one(
         memory: Some(memory_evaluation.memory),
         preview,
         cancel: cancel.clone(),
-        ..Default::default()
+        ..sampling_controls.clone()
     };
     let output = crate::memory_strategy::generate_with_scope(
         generator,
@@ -207,6 +208,7 @@ pub(super) async fn generate_krea_edit_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
@@ -389,6 +391,7 @@ pub(super) async fn generate_krea_edit_stream(
                     let conditioning = build_edit_conditioning(&sources);
                     let (out_w, out_h, pixels) = krea_edit_generate_one(
                         generator,
+                        &sampling_controls,
                         &prompt,
                         negative_prompt.clone(),
                         width,

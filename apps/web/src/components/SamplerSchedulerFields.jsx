@@ -20,7 +20,7 @@ export function SamplerSchedulerFields({
     ["Sampler", sampler, samplerOptions, onSamplerChange, SAMPLER_LABELS],
     ["Scheduler", scheduler, schedulerOptions, onSchedulerChange, SCHEDULER_LABELS],
   ];
-  return fields.map(([label, value, options, onChange, labels]) => options.length > 1 ? (
+  return fields.map(([label, value, options, onChange, labels]) => options.length > 0 ? (
     <SamplingField key={label} label={label} variant={variant}>
       <select className={variant === "rail" ? "ve-select" : undefined} disabled={disabled}
         onChange={(event) => onChange(event.target.value)} value={value}>

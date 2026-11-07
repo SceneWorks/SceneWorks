@@ -295,3 +295,10 @@ describe("Supra2-IMG interface hints (sc-24215)", () => {
     expect(promptTokenLimitHint({ name: "P", image: { maxPromptTokens: 0 } })).toBeNull();
   });
 });
+
+it("uses the provider's CFG-off value for offset guidance", () => {
+  const model = { image: { negativePromptRequiresGuidance: true, guidanceOffValue: 0 }, defaults: { guidanceScale: 0 } };
+  expect(negativePromptInertAtGuidance(model, "")).toBe(true);
+  expect(negativePromptInertAtGuidance(model, "0")).toBe(true);
+  expect(negativePromptInertAtGuidance(model, "1.5")).toBe(false);
+});

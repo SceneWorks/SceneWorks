@@ -275,6 +275,8 @@ GET	/api/v1/control-overlays	token
 HEAD	/api/v1/control-overlays	token
 GET	/api/v1/styles	token
 HEAD	/api/v1/styles	token
+GET	/api/v1/appearance	token
+HEAD	/api/v1/appearance	token
 GET	/api/v1/loras	token
 HEAD	/api/v1/loras	token
 DELETE	/api/v1/loras/:lora_id	token

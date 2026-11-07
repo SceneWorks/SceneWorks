@@ -194,21 +194,24 @@ describe("buildImageJobAdvanced", () => {
     expect(buildImageJobAdvanced(offState({ guidanceMethod: "cfg_pp" })).guidanceMethod).toBe("cfg_pp");
   });
 
-  it("only rides schedulerShift when a curated (non-default) scheduler is active and the value is finite", () => {
-    // Default scheduler → shift omitted even if provided.
+  it("sends explicit finite shift independently of the selected scheduler", () => {
+    // An explicit shift also applies to the native scheduler.
     expect(
-      buildImageJobAdvanced(offState({ scheduler: "default", schedulerShift: "3" })),
-    ).not.toHaveProperty("schedulerShift");
+      buildImageJobAdvanced(offState({ scheduler: "default", schedulerShift: "3" })).schedulerShift,
+    ).toBe(3);
     // Curated scheduler + finite shift → coerced to Number and sent.
     expect(
       buildImageJobAdvanced(offState({ scheduler: "karras", schedulerShift: "3" })).schedulerShift,
     ).toBe(3);
-    // Curated scheduler but a non-finite shift (Number("abc") -> NaN) → omitted. Note the
-    // empty-string case coerces to 0 (Number("") === 0), which IS finite, matching the
-    // original submit() behavior, so it would be sent — we don't assert it away here.
+    // Invalid and cleared overrides are omitted, so the engine retains its own default.
     expect(
       buildImageJobAdvanced(offState({ scheduler: "karras", schedulerShift: "abc" })),
     ).not.toHaveProperty("schedulerShift");
+    for (const schedulerShift of ["", null, undefined]) {
+      expect(buildImageJobAdvanced(offState({ scheduler: "default", schedulerShift }))).not.toHaveProperty("schedulerShift");
+    }
+    expect(buildImageJobAdvanced(offState({ schedulerShift: "18.375" })).schedulerShift).toBe(18.375);
+
   });
 
   it("coerces step/guidance overrides and omits empty strings", () => {
@@ -451,9 +454,9 @@ describe("buildImageJobAdvanced", () => {
 // resolved CFG interval and a non-default caption-overflow policy ride verbatim; and every one of
 // them is absent when not set, so other models' payloads stay byte-identical.
 describe("buildImageJobAdvanced — sc-25681 sampling controls", () => {
-  it("sends the shift on its own for a shift-axis model, never otherwise", () => {
+  it("sends explicit shift without requiring an axis flag or scheduler menu", () => {
     expect(buildImageJobAdvanced(offState({ schedulerShift: 4, supportsSchedulerShift: true })).schedulerShift).toBe(4);
-    expect(buildImageJobAdvanced(offState({ schedulerShift: 4 })).schedulerShift).toBeUndefined();
+    expect(buildImageJobAdvanced(offState({ schedulerShift: 4 })).schedulerShift).toBe(4);
     expect(
       buildImageJobAdvanced(offState({ schedulerShift: 2, scheduler: "karras" })).schedulerShift,
     ).toBe(2);

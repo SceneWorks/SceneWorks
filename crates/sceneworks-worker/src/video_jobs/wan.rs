@@ -1185,10 +1185,11 @@ pub(super) fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u
     if engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b" {
         if wan_lightning_on(engine_id, request) {
             // Lightning distill (default): 4 steps / CFG-off. The distill is applied as an
-            // adapter (resolve_wan_adapters), so a user `steps`/`guidanceScale` can't break it.
+            // adapter (resolve_wan_adapters), so a user `steps`/`guidanceScale` can override the CFG-off recommendation.
             return (
                 Some(lightning_policy::LIGHTNING_STEPS),
-                Some(lightning_policy::LIGHTNING_GUIDANCE),
+                advanced_opt_f32(request, "guidanceScale")
+                    .or(Some(lightning_policy::LIGHTNING_GUIDANCE)),
             );
         }
         // Toggle off: native multi-step CFG. Honor an explicit user override, else `None` so the
@@ -1212,26 +1213,18 @@ const SCAIL2_LIGHTNING_GUIDANCE: f32 = 1.0;
 #[cfg(native_lane)]
 const SCAIL2_LIGHTNING_SHIFT: f32 = 1.0;
 
-/// SCAIL-2 sampling recipe `(steps, guidance, scheduler_shift)`. When a lightx2v diff-patch
-/// "lightning" LoRA is selected (`lightning`), apply the step-distill recipe so the toggle yields the
-/// ~10× fewer-DiT-passes speedup: CFG off (guidance 1.0 → the engine short-circuits to a single DiT
-/// forward per step) and scheduler shift 1.0 are the lightning invariants (forced), and the step count
-/// defaults to 8 but honors an explicit user `advanced.steps` override. Without a lightning LoRA, return
-/// all-`None` so the engine's quality defaults (40 steps, guide 5.0, shift 5.0) stand exactly as before
-/// — this path is unchanged. The chosen knobs are recorded as `effective*` in [`scail2_raw_settings`]
-/// so what actually ran is inspectable on the asset (mirrors [`wan_raw_settings`]).
+/// Resolve SCAIL-2 sampling with the selected Lightning recipe as defaults. Explicit
+/// Advanced controls win; absent values preserve native or accelerator defaults.
 #[cfg(native_lane)]
 pub(super) fn scail2_sampling(
     request: &VideoRequest,
     lightning: bool,
 ) -> (Option<u32>, Option<f32>, Option<f32>) {
-    if !lightning {
-        return (None, None, None);
-    }
     (
-        advanced_opt_u32(request, "steps").or(Some(SCAIL2_LIGHTNING_STEPS)),
-        Some(SCAIL2_LIGHTNING_GUIDANCE),
-        Some(SCAIL2_LIGHTNING_SHIFT),
+        advanced_opt_u32(request, "steps").or(lightning.then_some(SCAIL2_LIGHTNING_STEPS)),
+        advanced_opt_f32(request, "guidanceScale")
+            .or(lightning.then_some(SCAIL2_LIGHTNING_GUIDANCE)),
+        advanced_opt_f32(request, "schedulerShift").or(lightning.then_some(SCAIL2_LIGHTNING_SHIFT)),
     )
 }
 

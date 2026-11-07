@@ -529,6 +529,7 @@ pub(super) struct KreaStrictControl {
     /// so the control fit gate owns this decision instead of consulting `supports_sequential_offload`.
     stage_residency: bool,
     prompt: String,
+    sampling: gen_core::GenerationRequest,
     width: u32,
     height: u32,
     steps: u32,
@@ -555,6 +556,7 @@ pub(super) fn krea_strict_control_test_fixture(path: PathBuf) -> KreaStrictContr
         chunk_attention: false,
         stage_residency: false,
         prompt: "p".to_owned(),
+        sampling: gen_core::GenerationRequest::default(),
         width: 1024,
         height: 1024,
         steps: 8,
@@ -600,6 +602,11 @@ impl KreaStrictControl {
     ) -> runtime_cuda::providers::krea::Krea2ControlRequest {
         runtime_cuda::providers::krea::Krea2ControlRequest {
             prompt: self.prompt.clone(),
+            guidance: self.sampling.guidance,
+            negative_prompt: self.sampling.negative_prompt.clone(),
+            sampler: self.sampling.sampler.clone(),
+            scheduler: self.sampling.scheduler.clone(),
+            scheduler_shift: self.sampling.scheduler_shift,
             width: self.width,
             height: self.height,
             steps: self.steps as usize,
@@ -1046,6 +1053,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         chunk_attention,
         stage_residency: matches!(offload_policy, gen_core::OffloadPolicy::Sequential),
         prompt: request.prompt.clone(),
+        sampling: super::sampling::explicit_sampling_request(request),
         width: request.width,
         height: request.height,
         steps,
@@ -1124,6 +1132,7 @@ mod krea_control_tier_reconcile_tests {
             chunk_attention: true,
             stage_residency: false,
             prompt: "portrait".to_owned(),
+            sampling: gen_core::GenerationRequest::default(),
             width: 1024,
             height: 1024,
             steps: 8,

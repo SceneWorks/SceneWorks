@@ -761,6 +761,8 @@ impl Default for TrainingCaptionOptions {
 pub(crate) struct ImageJobRequest {
     pub(crate) project_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) appearance: Option<sceneworks_core::appearance::AppearanceSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) moss_image_advanced: Option<sceneworks_core::moss_image_advanced::EditAdvanced>,
     #[serde(default)]
     pub(crate) project_name: Option<String>,
@@ -1076,6 +1078,8 @@ pub(crate) fn default_interleave_max_images() -> u32 {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoJobRequest {
     pub(crate) project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) appearance: Option<sceneworks_core::appearance::AppearanceSelection>,
     #[serde(default)]
     pub(crate) project_name: Option<String>,
     #[serde(default = "default_video_mode")]
@@ -1261,6 +1265,9 @@ pub(crate) struct AudioJobRequest {
     /// range is the real gate the generator's `validate` applies (sc-13409).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) guidance: Option<f32>,
+    /// Optional native flow schedule shift; omitted preserves the model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) scheduler_shift: Option<f32>,
     /// Solver step count for diffusion-audio models (Sound FX / MOSS-SoundEffect + Music / ACE-Step).
     /// Rides the top-level [`gen_core::GenerationRequest::steps`]. `None` ⇒ the model's default (MOSS:
     /// 100; ACE-Step turbo: 8). Bounded to a blanket sane ceiling here; the model's advertised step

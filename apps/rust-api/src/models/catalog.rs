@@ -977,7 +977,100 @@ pub(super) fn apply_imported_provider_surface_for_lanes(
     })
     .filter(|route| route.source == source)
     .collect::<Vec<_>>();
+    for (backend, available) in [
+        ("mlx", mlx_lane_available),
+        ("candle", candle_lane_available),
+    ] {
+        if available {
+            let backend_routes =
+                sceneworks_core::jobs_store::imported_provider_routes(backend, &family)
+                    .filter(|route| route.source == source)
+                    .collect::<Vec<_>>();
+            apply_imported_sampling_surface(object, backend, &backend_routes);
+        }
+    }
     project_imported_operation_surface(object, &routes);
+}
+
+/// Imported checkpoints inherit the sampling surface of their exact generation provider, so a new
+/// checkpoint id does not erase the sampler/scheduler menus. Preserve explicit authored overrides.
+fn apply_imported_sampling_surface(
+    object: &mut JsonObject,
+    backend: &str,
+    routes: &[&sceneworks_core::jobs_store::ImportedProviderSurface],
+) {
+    let Some(route) = routes.iter().find(|route| route.operation == "generate") else {
+        return;
+    };
+    let Some(template) =
+        sceneworks_core::builtin_manifests::builtin_model_entry(&route.provider_id)
+    else {
+        return;
+    };
+    let authored_limits = object.get("limits").cloned();
+    let limits = template
+        .get(backend)
+        .and_then(|lane| lane.get("limits"))
+        .or_else(|| template.get("limits"));
+    for target in ["limits", "defaults", "image"] {
+        let source = if target == "limits" {
+            limits
+        } else {
+            template.get(target)
+        };
+        let Some(source) = source.and_then(Value::as_object) else {
+            continue;
+        };
+        let keys: &[&str] = match target {
+            "limits" => &["samplers", "schedulers", "guidanceMethods"],
+            "defaults" => &[
+                "sampler",
+                "scheduler",
+                "schedulerShift",
+                "guidanceScale",
+                "steps",
+                "guidanceMethod",
+            ],
+            _ => &[
+                "supportsGuidance",
+                "supportsNegativePrompt",
+                "negativePromptRequiresGuidance",
+                "guidanceOffValue",
+                "supportsSchedulerShift",
+            ],
+        };
+        let target = object.entry(target.to_owned()).or_insert_with(|| json!({}));
+        if let Some(target) = target.as_object_mut() {
+            for &key in keys {
+                if let Some(value) = source.get(key) {
+                    target
+                        .entry(key.to_owned())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+        }
+    }
+    if let Some(source) = limits.and_then(Value::as_object) {
+        let lane = object
+            .entry(backend.to_owned())
+            .or_insert_with(|| json!({}));
+        if let Some(lane) = lane.as_object_mut() {
+            let limits = lane.entry("limits".to_owned()).or_insert_with(|| json!({}));
+            if let Some(limits) = limits.as_object_mut() {
+                for key in ["samplers", "schedulers", "guidanceMethods"] {
+                    if let Some(value) = authored_limits
+                        .as_ref()
+                        .and_then(|limits| limits.get(key))
+                        .or_else(|| source.get(key))
+                    {
+                        limits
+                            .entry(key.to_owned())
+                            .or_insert_with(|| value.clone());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Replace family-wide defaults with the operations exposed by this exact source/backend route set.

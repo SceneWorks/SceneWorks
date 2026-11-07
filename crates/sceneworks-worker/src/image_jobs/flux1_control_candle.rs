@@ -283,6 +283,7 @@ pub(super) struct Flux1StrictControl {
     width: u32,
     height: u32,
     steps: u32,
+    sampling: gen_core::GenerationRequest,
     guidance: f32,
     control_scale: f32,
     /// The resolved control kind for this set (`pose` | `canny` | `depth`) — input-agnostic; the engine
@@ -302,6 +303,7 @@ pub(super) fn flux1_strict_control_test_fixture(path: PathBuf) -> Flux1StrictCon
         width: 512,
         height: 512,
         steps: 25,
+        sampling: gen_core::GenerationRequest::default(),
         guidance: 3.5,
         control_scale: 0.7,
         adapters: Vec::new(),
@@ -376,6 +378,9 @@ impl CandleStrictControl for Flux1StrictControl {
             width: self.width,
             height: self.height,
             steps: self.steps as usize,
+            sampler: self.sampling.sampler.clone(),
+            scheduler: self.sampling.scheduler.clone(),
+            scheduler_shift: self.sampling.scheduler_shift,
             guidance: self.guidance,
             // The worker resolves `controlScale` itself (user value or `FLUX1_CONTROL_CANDLE_DEFAULT_SCALE`)
             // before building the provider, so always pass the resolved value explicitly. `None` (engine
@@ -534,6 +539,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         width: request.width,
         height: request.height,
         steps,
+        sampling: super::sampling::explicit_sampling_request(request),
         guidance,
         control_scale,
         control_kind,

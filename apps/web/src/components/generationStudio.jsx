@@ -1,3 +1,4 @@
+import { AppearanceSelectors, AppearanceNotes } from "./AppearanceSelectors.jsx";
 import { useDismissOnOutsideOrEscape } from "../hooks/useDismissOnOutsideOrEscape.js";
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
@@ -199,6 +200,7 @@ export function TierPickerField({
 }
 
 export function StyleAxisRow({
+  appearance,
   available,
   groups,
   styleId,
@@ -221,7 +223,7 @@ export function StyleAxisRow({
   return (
     <>
       <div
-        className={`settings-bar-styles settings-bar-style-axis${available ? "" : " settings-bar-style-axis-single"}`}
+        className={`settings-bar-styles settings-bar-style-axis${appearance?.available ? " appearance-bar" : ""}${available ? "" : " settings-bar-style-axis-single"}`}
       >
         {available ? (
           <div className="style-axis-field style-axis-catalog">
@@ -231,6 +233,7 @@ export function StyleAxisRow({
             </div>
           </div>
         ) : null}
+        <AppearanceSelectors control={appearance} />
         <div className="style-axis-field style-axis-presets">
           <span className="settings-bar-label">Style preset</span>
           <div className="style-axis-control preset-chips">
@@ -249,6 +252,7 @@ export function StyleAxisRow({
           selectedPreset={selectedPreset}
         />
       </div>
+      <AppearanceNotes control={appearance} />
       {generalPresets.length ? (
         <div className="settings-bar-styles">
           <span className="settings-bar-label">General</span>

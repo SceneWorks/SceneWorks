@@ -882,16 +882,20 @@ pub(super) fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiErr
     // rejects a garbage token up front). Region seconds must be finite and well-ordered; strength is a
     // 0..=1 weight.
     validate_audio_edit_fields(payload)?;
-    // Diffusion-audio sampling knobs (Sound FX / MOSS-SoundEffect, sc-13409). Bounded to a blanket
-    // sane range here — the same "API blanket vs. model's real cap" split the duration uses: the
-    // generator's `validate` owns the per-model guidance range (MOSS: 1.0..=20.0) and step ceiling
-    // (MOSS: 1000), so this only rejects nonsense (NaN / non-positive / absurdly large) up front.
+    // Recommendations remain model defaults. Reject non-finite guidance and a non-positive
+    // flow shift; the provider owns any additional mathematical restrictions.
     if let Some(guidance) = payload.guidance {
-        if !guidance.is_finite() || !(0.0..=100.0).contains(&guidance) {
-            return Err(ApiError::bad_request(
-                "guidance (CFG scale) must be between 0 and 100",
-            ));
+        if !guidance.is_finite() {
+            return Err(ApiError::bad_request("guidance (CFG scale) must be finite"));
         }
+    }
+    if payload
+        .scheduler_shift
+        .is_some_and(|shift| !shift.is_finite() || shift <= 0.0)
+    {
+        return Err(ApiError::bad_request(
+            "schedulerShift must be finite and greater than 0",
+        ));
     }
     if let Some(steps) = payload.steps {
         if !(1..=10_000).contains(&steps) {
@@ -1065,6 +1069,11 @@ pub(crate) fn validate_audio_job_for_model(
             .and_then(Value::as_bool)
             .unwrap_or(false)
     };
+    if payload.scheduler_shift.is_some() && !flag("supportsSchedulerShift") {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take a schedulerShift"
+        )));
+    }
     let segmented = flag("supportsSegmentedLyrics");
     let repetition = flag("supportsRepetitionPenalty");
     let region = flag("supportsReferenceRegion");
@@ -1133,12 +1142,10 @@ pub(crate) fn validate_audio_job_for_model(
                  song length follows the lyrics and segments)"
             )));
         }
-        // A segmented-song model reads a scale in 0..=1 as "guidance off", so an explicit ON scale
-        // must be above 1 — turn guidance off with guidanceEnabled: false instead.
-        if payload.guidance_enabled != Some(false) && payload.guidance.is_some_and(|g| g <= 1.0) {
+        // YuE accepts nonnegative scales; 0..=1 uses its native CFG-off path.
+        if payload.guidance.is_some_and(|guidance| guidance < 0.0) {
             return Err(ApiError::bad_request(format!(
-                "{model}: a guidance scale must be greater than 1 (set guidanceEnabled: false to \
-                 turn guidance off)"
+                "{model}: guidance must be nonnegative"
             )));
         }
     } else if payload.guidance_enabled.is_some() {
@@ -1453,4 +1460,36 @@ pub(super) fn required_finite_f64_field(payload: &Value, field: &str) -> Result<
         )));
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod advanced_audio_sampling_tests {
+    use super::*;
+
+    #[test]
+    fn audio_sampling_overrides_round_trip_and_preserve_omitted_defaults() {
+        let mut request: AudioJobRequest = serde_json::from_value(serde_json::json!({
+            "projectId":"project", "model":"moss_sfx_v2", "prompt":"rain",
+            "guidance": 101.5, "schedulerShift": 18.375, "negativePrompt":"voices"
+        }))
+        .unwrap();
+        let entry = serde_json::json!({"audio":{"supportsSchedulerShift":true,
+            "supportsGuidance":true,"supportsNegativePrompt":true,"supportsSteps":true}});
+        assert!(validate_audio_job(&request).is_ok());
+        assert!(validate_audio_job_for_model(&request, &entry).is_ok());
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["schedulerShift"],
+            18.375
+        );
+        assert!(validate_audio_job_for_model(&request, &serde_json::json!({"audio":{}})).is_err());
+        request.scheduler_shift = Some(0.0);
+        assert!(validate_audio_job(&request).is_err());
+        request.scheduler_shift = Some(f32::INFINITY);
+        assert!(validate_audio_job(&request).is_err());
+        request.scheduler_shift = None;
+        assert!(serde_json::to_value(&request)
+            .unwrap()
+            .get("schedulerShift")
+            .is_none());
+    }
 }

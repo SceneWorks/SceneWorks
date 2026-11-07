@@ -1024,6 +1024,11 @@ fn every_image_advanced_key_is_honored_or_refused_by_supra2() {
         "structuredPrompt",
         "styleId",
         "stylePrompt",
+        // Authored recipe metadata; model gating and text composition happen at the API boundary.
+        "appearance",
+        "appearancePrompt",
+        "appearancePromptBatch",
+        "appearanceNegativePrompt",
     ];
     let text = BUILTIN_MANIFESTS
         .iter()

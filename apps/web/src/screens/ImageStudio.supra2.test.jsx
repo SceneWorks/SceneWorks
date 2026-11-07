@@ -30,7 +30,7 @@ const SUPRA2 = {
   type: "image",
   family: "supra2",
   capabilities: ["text_to_image"],
-  image: { supportsNegativePrompt: false, maxPromptTokens: 128, nativeCountBatch: true },
+  image: { supportsSchedulerShift: false, supportsNegativePrompt: false, maxPromptTokens: 128, nativeCountBatch: true },
   defaults: { resolution: "256x256", steps: 50, guidanceScale: 3.0, count: 1 },
   limits: {
     resolutions: ["256x256"],
@@ -133,14 +133,14 @@ describe("ImageStudio — Supra2-IMG (sc-24215)", () => {
     expect(field(container, "Variations")).toBeTruthy();
     for (const absent of [
       "Negative prompt",
-      "Sampler",
-      "Scheduler",
-      "Schedule shift",
       "Guidance method",
       "Guidance interval",
     ]) {
       expect(field(container, absent), absent).toBeUndefined();
     }
+    expect(field(container, "Sampler")).toBeTruthy();
+    expect(field(container, "Scheduler")).toBeTruthy();
+    expect(field(container, "Schedule shift").disabled).toBe(true);
     expect(container.querySelector('select[aria-label="Caption overflow"]')).toBeNull();
   });
 
