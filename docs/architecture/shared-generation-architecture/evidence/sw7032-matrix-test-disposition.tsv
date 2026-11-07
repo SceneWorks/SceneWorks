@@ -1,0 +1,51 @@
+old_line	test	disposition	evidence_or_remaining_obligation
+3927	checked_in_matrix_matches_all_authoritative_sources	obsolete	matrix artifact and SHA digest gate deliberately removed by SW-7032
+3939	qwen_image_2_1_adapters_are_served_on_both_registered_lanes	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+3965	a_tiered_audio_model_serves_its_tiers_only_on_the_lane_whose_audio_dump_registers_it	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+3991	terminal_vector_install_is_projected_from_native_worker_capabilities	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4039	source_capture_digest_values_are_provenance_not_semantics	obsolete	source capture digest removed with matrix
+4085	runtime_pair_accepts_platform_local_trainer_ids_for_the_same_target	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4111	mlx_and_candle_trainer_identities_share_each_targets_x0_decoder	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4126	runtime_pair_rejects_training_target_population_drift	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4139	runtime_pair_rejects_unregistered_or_wrong_backend_local_trainers	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4211	qwen_image_2_1_training_target_is_supported_on_both_backends_at_the_pin	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4250	runtime_pair_rejects_ambiguous_or_incomplete_trainer_facts	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4313	probes_carry_the_production_optional_carrier_encoding	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4377	source_capture_contract_rejects_key_and_digest_shape_mutations	obsolete	source capture digest removed with matrix
+4412	every_capability_semantic_field_remains_exact	obsolete	byte-for-byte matrix document comparison removed; typed projection has frozen catalog baseline
+4444	sc19059_resolved_candle_conditioning_is_not_left_in_the_residual_register	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4591	bespoke_conditioning_authority_is_exact_and_route_backed	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4666	sc18476_conditioning_cells_match_production_routes	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4711	sc18477_bespoke_qwen_edit_adapter_cells_match_production_routes	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4732	sc18481_existing_candle_image_lanes_are_not_descriptor_false_negatives	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4764	sc18481_z_image_edit_and_removed_no_op_style_claims_use_real_product_shapes	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+4830	sc18481_supported_import_defaults_are_provenanced_and_use_live_family_routes	partial	typed_registry_contract_tests::imported_provider_operations_keep_exact_source_and_conditioning_claims covers source/operation claim; defaults provenance pending
+4986	preview_source_layout_cannot_change_the_sink_claim_or_its_order	partial	projection agent covers 83 preview entries; sink mutation/layout still pending
+5031	preview_sink_mutations_keep_their_code_anchor_across_layouts_and_utf8_prefixes	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5047	imported_preview_rows_fail_closed_when_the_production_sink_is_removed	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5115	sc18481_cross_platform_catalog_rows_retain_both_native_text_routes	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5141	sc18481_bespoke_identity_routes_are_derived_from_the_live_lane_tables	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5175	sc20739_strict_pose_control_uses_only_real_product_lanes	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5277	sc18481_utility_probes_use_their_production_job_shapes	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5316	sc18481_cfg_pp_has_an_exact_guidance_axis_and_live_specialist_owner	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5348	sc18481_bernini_preserves_candle_only_adapters_without_global_ui_exposure	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5366	generated_summary_is_derived_from_every_matrix_section	obsolete	generated matrix summary removed with matrix
+5405	every_gpu_job_type_is_in_the_matrix	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5429	advanced_video_gpu_rows_use_models_that_advertise_each_operation	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5451	mutation_guards_reject_untracked_gap_and_incomplete_exception	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5490	future_training_gaps_are_attributed_to_the_closure_story	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5501	residual_obligations_use_live_specialist_authority	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5551	every_manifest_operation_has_an_exact_matrix_cell	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5570	audit_regressions_are_derived_from_production_truth	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5867	exception_register_rejects_bad_dates_authority_duplicates_and_non_mlx_cells	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+5940	exception_register_rejects_unknown_decision_types_and_empty_evidence	replaced	registry::exceptions::malformed_or_duplicate_decisions_are_rejected plus serde enum validation
+5997	exception_register_accepts_authorized_guidance_cell	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+6038	approved_exception_register_covers_every_residual_mlx_only_cell_exactly_once	partial	registry::exceptions::every_approved_cell_matches_typed_route_and_native_capability checks 42 approved cells; unapproved residual census still pending
+6251	rich_runtime_mutations_change_descriptor_and_dispatch_answers	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+6492	edit_targets_need_a_trainer_that_accepts_their_reference_cap	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+6546	trainer_mappings_allow_native_engine_ids_and_fail_closed	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+6574	every_routed_shipped_video_mode_has_an_exact_descriptor_join	replaced	typed_registry_contract_tests::every_shipped_video_mode_with_a_native_mapping_is_claimable
+6630	deleting_any_routed_video_mapping_fails_closed	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+6677	drift_digest_covers_video_audio_and_utility_owners	obsolete	source digest gate removed with matrix
+6723	every_descriptor_axis_for_a_shipped_generator_has_a_matrix_cell	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
+6806	canonical_probe_validation_rejects_missing_operation_inputs	pending	Locate owner-side behavior assertion or add focused typed/production-route test before matrix deletion.
