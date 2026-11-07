@@ -1632,13 +1632,17 @@ test("receipt-backed bespoke Candle staged coverage is visible and census-fenced
     "plain kolors Candle staged stays Missing — no borrowed bespoke evidence",
   );
 
-  // A new typed composed route contributes its exact coordinates without a second hand map.
-  const added = parseCandleBespokeStagedLanes(JSON.stringify({
-    schemaVersion: 1,
-    declaredRoutes: [{ backend: "candle", provider: "candle_new_provider", modelId: "kolors", tiers: ["q4"], modes: ["text_to_image"], loadProfiles: ["single_control"] }],
-  }));
-  assert.deepEqual([...added], ["kolors:control:text_to_image:q4"]);
-  assert.throws(() => parseCandleBespokeStagedLanes("// nothing here"), /Unexpected token/);
+  // The generator must not get ahead of the worker's composed-provider shape arms or attribute
+  // their staged coverage to a sibling catalog model.
+  const registrySource = await readFile("crates/sceneworks-worker/src/memory_route_registry.rs", "utf8");
+  const policy = JSON.parse(await readFile("config/manifests/registry/memory-route-policy.json", "utf8"));
+  const kolors = policy.declaredRoutes.find((row) => row.provider === "candle_kolors_control");
+  kolors.modelId = "sdxl";
+  assert.throws(() => parseCandleBespokeStagedLanes(JSON.stringify(policy), registrySource), /invalid modelId/);
+  kolors.modelId = "kolors";
+  kolors.provider = "candle_new_provider";
+  assert.throws(() => parseCandleBespokeStagedLanes(JSON.stringify(policy), registrySource), /invalid modelId|differ from worker shape arms/);
+  assert.throws(() => parseCandleBespokeStagedLanes("// nothing here", registrySource), /Unexpected token/);
 });
 
 test("the staged column tells structural truth apart from undelivered work (sc-20799)", async () => {

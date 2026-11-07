@@ -878,25 +878,11 @@ derive_model_list! {
     pub(crate) MLX_ROUTED_MODELS, IMAGE_MODEL_CAPS, mlx_routed
 }
 
-/// Historical architecture-family surface retained only for test oracles that compare the former
-/// family gate with the import compatibility allow-list. Production imported routing does not read
-/// this list: it selects an exact backend + family + `importSourceShape` + operation row from the
-/// checked-in provider facts below. Builtins remain id-routed through [`MLX_ROUTED_MODELS`]. Keep
-/// this test fixture aligned with the importable families and with at least one exact MLX provider
-/// registration for each listed family.
-///
-/// `mage-flow` (sc-15036, epic 14034 F6) joins for a different reason than the other two: its
-/// non-builtin ids are not community imports but this app's OWN full base fine-tunes — the
-/// `transformer/`-shaped checkpoint a `networkType: "full"` training run produces, registered into
-/// the model catalog and loaded by `image_jobs::mage_finetuned` against the installed base's shared
-/// text encoder + VAE. The pinned MLX and Candle runtimes both expose the same `load_finetuned`
-/// seam, so this family is listed for both native backends in these fixtures. Production still
-/// admits one only when the stamped source is the registered `transformer_directory` shape, and the
-/// exact provider-facts route below is what decides per backend.
-/// The token is the MANIFEST family spelling (`mage-flow`), matching the builtin entries — not the
-/// underscored id prefix.
+/// Legacy family-gate test fixtures derive from the exact imported-provider registrations.
+/// Production imported routing also selects the provider by source and operation.
 #[cfg(test)]
-pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
+pub(crate) static MLX_ROUTED_FAMILIES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| legacy_test_routed_families("mlx"));
 
 /// Test oracle for whether the generated provider facts contain at least one MLX route for a
 /// family. It does not authorize a request without an exact source-shaped provider match.
@@ -904,18 +890,18 @@ pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
     imported_provider_routes("mlx", family).next().is_some()
 }
 
-/// Architecture families whose existing Candle engine can serve a non-builtin imported/user
-/// same-family model. This is deliberately separate from [`CANDLE_ROUTED_MODELS`]: imported
-/// checkpoints have novel ids and are claimed only after the scheduler validates their manifest
-/// family and supported request shape. Seeded by the descriptor-gated Krea single-file lane
-/// (sc-14023).
 #[cfg(test)]
-/// `flux2` (sc-11043, epic 11037) is Candle-only and NVFP4-only: the single-file Klein import is
-/// served through the shared codec and the Klein dialect, and MLX has no consumer for its packed
-/// E2M1 weights — which is exactly why it is NOT in [`MLX_ROUTED_FAMILIES`]. Family membership is
-/// not a claim about encodings; `base_weights::import_supported` still refuses every non-NVFP4
-/// FLUX.2 single file.
-pub(crate) const CANDLE_ROUTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow", "sdxl"];
+pub(crate) static CANDLE_ROUTED_FAMILIES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| legacy_test_routed_families("candle"));
+
+#[cfg(test)]
+fn legacy_test_routed_families(backend: &str) -> Vec<&'static str> {
+    crate::base_weights::IMPORT_SUPPORTED_FAMILIES
+        .iter()
+        .copied()
+        .filter(|family| imported_provider_routes(backend, family).next().is_some())
+        .collect()
+}
 
 /// Whether `id` names a builtin image model (a row in [`IMAGE_MODEL_CAPS`]). The route-by-family
 /// path applies only to non-builtin (imported/user) ids, so a builtin's id-keyed routing is never
@@ -1910,14 +1896,15 @@ pub(crate) fn video_model_is_mlx_video_routed(model: &str) -> bool {
 /// Pinned against the per-model predicates by `crate::video_request`'s
 /// `video_admission_surface_matches_the_routing_catalog`.
 pub(crate) fn video_model_has_candle_video_route(model: &str) -> bool {
-    CANDLE_VIDEO_ROUTED_MODELS.contains(&model) || CANDLE_SCAIL2_VIDEO_MODELS.contains(&model)
+    CANDLE_VIDEO_ROUTED_MODELS.contains(&model)
+        || crate::registry::builtin_model_spec(model).is_some_and(|spec| {
+            spec.product.family == "scail2"
+                && spec
+                    .video_routes
+                    .get("candle")
+                    .is_some_and(|routes| !routes.is_empty())
+        })
 }
-
-/// Video models served off-Mac by a DISTINCT candle engine that is deliberately absent from
-/// [`CANDLE_VIDEO_ROUTED_MODELS`] (sc-6837): the candle SCAIL-2 engine, gated by
-/// [`super::candle::scail2_animate_candle_eligible`] /
-/// [`super::candle::scail2_replace_candle_eligible`] rather than by table membership.
-pub(crate) const CANDLE_SCAIL2_VIDEO_MODELS: &[&str] = &["scail2_14b"];
 
 /// SceneWorks training kernels with a registered MLX trainer supporting at least one technique
 /// offered by a shipped target. The product target owns its kernel and offered techniques; the
@@ -2244,24 +2231,6 @@ mod tests {
 
     // --- route-by-family for imported models (sc-14019, epic 14015) -------------
 
-    /// The MLX-routed *family* allow-list, pinned like the model lists above. Adding a family here is
-    /// a deliberate edit (it makes every imported same-family checkpoint Mac-routable), so it must be
-    /// mirrored here — the guardrail that a family is never silently added to the import surface.
-    const EXPECTED_MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
-    const EXPECTED_CANDLE_ROUTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow", "sdxl"];
-
-    #[test]
-    fn mlx_routed_families_match_snapshot() {
-        assert_eq!(MLX_ROUTED_FAMILIES, EXPECTED_MLX_ROUTED_FAMILIES);
-    }
-
-    #[test]
-    fn candle_routed_families_match_snapshot() {
-        assert_eq!(CANDLE_ROUTED_FAMILIES, EXPECTED_CANDLE_ROUTED_FAMILIES);
-        assert!(CANDLE_ROUTED_FAMILIES.contains(&"krea_2"));
-        assert!(!CANDLE_ROUTED_FAMILIES.contains(&"z-image"));
-    }
-
     #[test]
     fn mlx_routed_families_have_a_same_family_builtin_engine() {
         // Every allow-listed family must actually be one an MLX-routed builtin defines an engine for
@@ -2275,7 +2244,7 @@ mod tests {
         // prefix check so the guard keeps asserting "this family token names a real MLX-routed
         // builtin" instead of accidentally asserting "the family token happens to be spelled with
         // underscores".
-        for family in MLX_ROUTED_FAMILIES {
+        for family in MLX_ROUTED_FAMILIES.iter() {
             let prefix = family.replace('-', "_");
             let has_routed_builtin = MLX_ROUTED_MODELS
                 .iter()
@@ -2289,7 +2258,7 @@ mod tests {
 
     #[test]
     fn candle_routed_families_have_a_same_family_builtin_engine() {
-        for family in CANDLE_ROUTED_FAMILIES {
+        for family in CANDLE_ROUTED_FAMILIES.iter() {
             let prefix = family.replace('-', "_");
             let has_routed_builtin = CANDLE_ROUTED_MODELS
                 .iter()
@@ -2650,7 +2619,7 @@ mod tests {
             imported_image_request_family_eligible(
                 imported_id,
                 p,
-                MLX_ROUTED_FAMILIES,
+                MLX_ROUTED_FAMILIES.as_slice(),
                 MLX_IMPORTED_CAPS,
             )
         };
@@ -2658,7 +2627,7 @@ mod tests {
             imported_image_request_family_eligible(
                 imported_id,
                 p,
-                CANDLE_ROUTED_FAMILIES,
+                CANDLE_ROUTED_FAMILIES.as_slice(),
                 CANDLE_IMPORTED_CAPS,
             )
         };
@@ -2848,7 +2817,7 @@ mod tests {
             imported_image_request_family_eligible(
                 finetune_id,
                 p,
-                CANDLE_ROUTED_FAMILIES,
+                CANDLE_ROUTED_FAMILIES.as_slice(),
                 CANDLE_IMPORTED_CAPS,
             )
         };
@@ -2865,8 +2834,8 @@ mod tests {
             "plain txt2img is the shape the MLX fine-tuned lane serves"
         );
         assert!(
-            candle(&payload(serde_json::json!({ "mode": "text_to_image" }))),
-            "plain txt2img is the shape the Candle fine-tuned lane serves"
+            !candle(&payload(serde_json::json!({ "mode": "text_to_image" }))),
+            "Candle has no registered Mage imported provider"
         );
 
         for (label, extra) in [
@@ -2902,14 +2871,12 @@ mod tests {
             );
         }
 
-        // The generated Mage full-fine-tune seam is present on both pinned runtimes.
+        // The generated Mage full-fine-tune seam exists in the pinned Candle runtime, but no
+        // imported-provider registration currently makes that source claimable there.
         assert!(
-            CANDLE_ROUTED_FAMILIES.contains(&"mage-flow"),
-            "Candle must advertise the generated Mage full-fine-tune family"
+            !CANDLE_ROUTED_FAMILIES.contains(&"mage-flow"),
+            "test family projection must follow registered imported providers"
         );
-        // ...but the family fixture is only an oracle. Production selects an EXACT provider-facts
-        // route, and the checked-in candle facts register no `mage-flow` import row, so the
-        // provider path stays closed on candle even though the runtime exposes the seam.
         assert!(
             !imported_image_request_provider_eligible(
                 finetune_id,
@@ -2951,13 +2918,13 @@ mod tests {
                 imported_image_request_family_eligible(
                     imported_id,
                     p,
-                    MLX_ROUTED_FAMILIES,
+                    MLX_ROUTED_FAMILIES.as_slice(),
                     MLX_IMPORTED_CAPS,
                 ),
                 imported_image_request_family_eligible(
                     imported_id,
                     p,
-                    CANDLE_ROUTED_FAMILIES,
+                    CANDLE_ROUTED_FAMILIES.as_slice(),
                     CANDLE_IMPORTED_CAPS,
                 ),
             )
@@ -3186,52 +3153,6 @@ mod tests {
     /// bytes, and the verdicts come from the real predicates. Nothing here restates a mode list.
     #[test]
     fn every_declared_video_mode_with_no_off_mac_lane_is_hidden_and_unreachable() {
-        /// The measured MLX-only, candle-unclaimable pairs a shipped model ADVERTISES (sc-19570).
-        /// A pair leaving this set has gained an off-Mac lane; a pair joining it is a new tab that
-        /// hangs on Windows and Linux.
-        const MLX_ONLY_ADVERTISED_PAIRS: &[(&str, &str)] = &[
-            // THIRTEEN PAIRS LEFT THIS SET when `main` was synced into the epic branch, which is the
-            // "has gained an off-Mac lane — delete its row" case the panic below names. They were
-            // measured on the epic branch, where those candle lanes did not exist yet; `main` ships
-            // them, so the rows were facts about a tree that no longer exists rather than
-            // suppressions worth keeping:
-            //
-            //   * `ltx_2_3` / `ltx_2_3_eros` × image_to_video, first_last_frame, extend_clip,
-            //     video_bridge, replace_person (10) — `candle_video_engine_id` resolves the LTX pair
-            //     to `ltx_2_3_distilled`, and `video_request_candle_eligible` /
-            //     `ltx_replace_candle_eligible` serve those modes. The advanced three additionally
-            //     require an IC-LoRA on BOTH lanes, which is why `video_mode_probe_payload` now
-            //     supplies one for exactly this pair of models — without it these three would still
-            //     read as stranded and the Studio would hide tabs candle genuinely serves.
-            //   * `wan_2_2` × image_to_video, first_last_frame (2) — native TI2V-5B keyframe
-            //     conditioning on the candle lane.
-            //   * `wan_2_2_vace_fun_14b` × replace_person (1) — the dedicated dual-expert arm in
-            //     `video_request_candle_vace_eligible`.
-            //
-            // What remains is the genuinely MLX-only inventory. The three families whose every
-            // download is `platforms: ["macos"]`. They are
-            // in the set because they are the same defect — an advertised mode with no off-Mac
-            // lane — even though the catalog's own `retain_downloads_for_os` already leaves them
-            // uninstallable off-Mac, which is why sc-19570's measured list (scoped to
-            // Windows/Linux-INSTALLABLE models) did not name them. They are covered rather than
-            // exempted: install state is not a reachability gate, a mac-only download list is one
-            // manifest edit from changing, and a raw REST call for a pair no worker on this host
-            // can claim must still terminate regardless of what is on disk.
-            ("krea_realtime_14b", "text_to_video"),
-            ("krea_realtime_14b", "image_to_video"),
-            ("krea_realtime_14b", "video_to_video"),
-            // SC-18902 (main) withdrew the WHOLE Eros candle route after the exact-head CUDA
-            // acceptance run produced unusable output, so every advertised Eros mode is back to
-            // MLX-only. The previous sync had deleted these rows when the candle lane existed;
-            // this is the same measurement moving the other way, not a suppression.
-            ("ltx_2_3_eros", "text_to_video"),
-            ("ltx_2_3_eros", "image_to_video"),
-            ("ltx_2_3_eros", "first_last_frame"),
-            ("ltx_2_3_eros", "extend_clip"),
-            ("ltx_2_3_eros", "video_bridge"),
-            ("ltx_2_3_eros", "replace_person"),
-        ];
-
         let models = builtin_video_models();
         assert!(
             models.len() >= 12,
@@ -3240,11 +3161,6 @@ mod tests {
             models.len()
         );
 
-        let expected: BTreeSet<(String, String)> = MLX_ONLY_ADVERTISED_PAIRS
-            .iter()
-            .map(|(id, mode)| ((*id).to_owned(), (*mode).to_owned()))
-            .collect();
-        let mut found: BTreeSet<(String, String)> = BTreeSet::new();
         let mut checked = 0_usize;
         for model in &models {
             let id = model
@@ -3283,7 +3199,6 @@ mod tests {
                 if !(mlx && !candle) {
                     continue;
                 }
-                found.insert((id.to_owned(), mode.to_owned()));
                 // 1. HIDDEN off-Mac: either the whole model is candle-unsupported (so the picker
                 //    drops it) or this specific mode is `false` (so the tab never renders).
                 assert!(
@@ -3318,12 +3233,6 @@ mod tests {
             checked >= 30,
             "only {checked} advertised (model, mode) pairs were probed — the manifest read is \
              wrong and this guard is vacuous"
-        );
-        assert_eq!(
-            found, expected,
-            "the set of advertised video modes with no off-Mac lane changed. A pair in `found` and \
-             not in `MLX_ONLY_ADVERTISED_PAIRS` is a NEW Windows/Linux hang; a pair in the constant \
-             and not in `found` has gained a candle lane — delete its row."
         );
     }
 

@@ -42,6 +42,26 @@ pub fn parse(raw: &str) -> Result<MemoryRoutePolicyDocument, String> {
                 rule.provider
             ));
         }
+        match (
+            rule.backend.as_str(),
+            rule.provider.as_str(),
+            rule.model_id.as_deref(),
+        ) {
+            ("candle", "candle_kolors_ipadapter" | "candle_kolors_control", Some("kolors")) => {}
+            (_, "candle_kolors_ipadapter" | "candle_kolors_control", _) => {
+                return Err(format!(
+                    "{} must bind exactly to Candle model kolors",
+                    rule.provider
+                ));
+            }
+            (_, _, Some(_)) => {
+                return Err(format!(
+                    "{} has no supported composed-provider shape arm",
+                    rule.provider
+                ));
+            }
+            _ => {}
+        }
         for (name, values, allowed) in [
             ("tiers", &rule.tiers, TIERS),
             ("modes", &rule.modes, MODES),
@@ -106,3 +126,34 @@ const LOAD_PROFILES: &[&str] = &[
     "pid",
     "identity",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn composed_provider_links_are_exact_and_closed() {
+        let mut policy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../config/manifests/registry/memory-route-policy.json"
+        ))
+        .unwrap();
+        let index = policy["declaredRoutes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|row| row["provider"] == "candle_kolors_control")
+            .unwrap();
+        policy["declaredRoutes"][index]["modelId"] = serde_json::Value::from("sdxl");
+        assert!(
+            parse(&policy.to_string()).is_err(),
+            "wrong model attribution must fail"
+        );
+        policy["declaredRoutes"][index]["modelId"] = serde_json::Value::from("kolors");
+        policy["declaredRoutes"][index]["provider"] =
+            serde_json::Value::from("candle_new_provider");
+        assert!(
+            parse(&policy.to_string()).is_err(),
+            "unknown shape arm must fail"
+        );
+    }
+}

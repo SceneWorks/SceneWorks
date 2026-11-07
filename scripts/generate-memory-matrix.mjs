@@ -1640,11 +1640,25 @@ function geometryFor(model, backend) {
  */
 
 /** `model.id:overlay:mode:tier` coordinates with receipt-backed bespoke Candle staged coverage. */
-export function parseCandleBespokeStagedLanes(policySource) {
+export function parseCandleBespokeStagedLanes(policySource, registrySource) {
   const policy = JSON.parse(policySource);
   const bespoke = policy.declaredRoutes?.filter((row) => row.backend === "candle" && row.modelId);
   if (!Array.isArray(bespoke) || bespoke.length === 0) {
     throw new Error("memory-matrix: typed memory route policy has no Candle bespoke providers");
+  }
+  for (const row of bespoke) {
+    const family = row.provider.match(/^candle_([a-z0-9]+)_(?:ipadapter|control)$/)?.[1];
+    if (!family || row.modelId !== family) {
+      throw new Error(`memory-matrix: bespoke provider ${row.provider} has invalid modelId ${row.modelId}`);
+    }
+  }
+  const shapeArms = registrySource?.match(/match runtime_provider \{([\s\S]*?)\n\s*\};/);
+  if (!shapeArms) throw new Error("memory-matrix: missing Candle bespoke request shape arms");
+  const implemented = [...shapeArms[1].matchAll(/"([a-z0-9_]+)"\s*=>/g)]
+    .map((match) => match[1]).sort();
+  const declared = bespoke.map((row) => row.provider).sort();
+  if (JSON.stringify(implemented) !== JSON.stringify(declared)) {
+    throw new Error(`memory-matrix: typed Candle bespoke providers differ from worker shape arms (${declared.join(",")} vs ${implemented.join(",")})`);
   }
   const lanes = new Set();
   const overlayForProfile = (profile) =>
@@ -2838,7 +2852,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     routingMlx: bodies.routingMlx,
   });
   const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
-  const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRoutePolicy);
+  const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRoutePolicy, bodies.memoryRouteRegistry);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
   revisionBodies.instantId = backendTierOverridesRevisionBody(backendTierOverrides);
   const routeLaneTiers = parseRouteRegistryLaneTiers(bodies.memoryRouteRegistry, bodies.memoryRoutePolicy);
