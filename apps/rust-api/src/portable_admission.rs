@@ -472,6 +472,23 @@ async fn capture_model_slot(
     let tier;
     if downloads.is_empty() {
         let local = capture_local_model_entry(state, entry, slot)?;
+        if let Some(training) = &training {
+            if entry.pointer("/importPlan/checkpointId").is_none() {
+                return Err(incomplete(
+                    "local training base has no verified checkpoint plan provenance",
+                ));
+            }
+            let selected = capture_local_source_files(&training.path, &allowed_local_roots(state))?;
+            if local
+                .iter()
+                .find(|member| member.role == ArtifactMemberRole::Primary)
+                .is_none_or(|primary| primary.files != selected)
+            {
+                return Err(incomplete(
+                    "training plan base path differs from its verified imported source",
+                ));
+            }
+        }
         members.extend(local);
         variant = requested_variant.unwrap_or_else(|| "local".to_owned());
         tier = None;
