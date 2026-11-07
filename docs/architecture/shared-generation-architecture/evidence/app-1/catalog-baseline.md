@@ -98,7 +98,7 @@ source-digest gate. Existing capability/memory verification teardown remains unc
 ## Validation
 
 The frozen population contains 1,197 public studio/platform/model/mode rows. The capture records
-12,552 scalar/select/chip changes and 246 explicit behavior witnesses; these are observations,
+12,555 scalar/select/chip changes and 246 explicit behavior witnesses; these are observations,
 not model renders. Source input count is 143 models and 26 training targets.
 
 Validation commands and results are recorded with the local acceptance commit in the handoff.
@@ -162,3 +162,58 @@ cargo test --locked -p sceneworks-core --test workflow_share
 
 The prior native-dump test was not workflow-share parity evidence; these receipts supply that
 missing scope. The capture data and the ordinary adapter repair remain valid.
+
+## Review capture corrections on head 613a36ff
+
+All three [automatic review threads](https://github.com/SceneWorks/SceneWorks/pull/3339#discussion_r4502619704)
+were read in full and checked against the owning product code. They exposed missing evidence in
+the capture tooling rather than production registry changes:
+
+- [Submission actions](https://github.com/SceneWorks/SceneWorks/pull/3339#discussion_r4502619704):
+  full Video submits through `Render clip`/`Replace person`, and Training uses a `Start training`
+  button with `type="button"`. The shared action selector now follows these actual controls;
+  the invalid-override witnesses use the same selector. Focused tests assert real recorded Video
+  and Training requests and distinguish the Replace-person submit action from its mode tab.
+- [Converted installations](https://github.com/SceneWorks/SceneWorks/pull/3339#discussion_r4502619711):
+  the controlled macOS host now supplies Anima's three converted tiers (`bf16`, `q8`, `q4`) and
+  complete `mlxTierStates`, as emitted by the Anima converter and API install-state projection.
+  The real Image Studio picker exposes all three and its submitted default is Q8. The other
+  shipped convert-at-install models use flat output bundles, so they are marked converted where
+  the API does so without inventing tier directories. Off-Mac Anima keeps the raw-checkpoint
+  shape. Tier disk-size observations are unknown (`null`); no weight files or measurements are
+  fabricated.
+- [Independent recipe replay](https://github.com/SceneWorks/SceneWorks/pull/3339#discussion_r4502619715):
+  each replay starts with a different Camera, Film, Looks and Lighting selection and an unrelated
+  prompt/batch/count. The public recipe carrier alone must restore all four axes and reproduce
+  the original effective prompts. The complete original persisted draft is no longer reused.
+
+The corrected tooling was overlaid as untracked test files in an isolated detached checkout at
+`5a28d413dd9f579cc9607d44f252a045d025bd8e`. Both capture guards verified the exact old HEAD and
+unchanged production source paths. The native old-input capture remained byte-identical.
+The old-tree capture passed **1,454 tests**, and only `old-observations.json` and
+`old-behavior.json` were copied back. Their 1,197-row population and source identity are unchanged.
+Semantic observation changes cover 78 Training rows, 117 Video rows (18 gated rows are unchanged),
+and three macOS Anima rows in each of full and Simple Image Studio. Default requests are now
+recorded for **66 Training** and **81 Video** rows. There are **12,555** scalar/select/chip changes.
+The behavior artifact updates 18 appearance witnesses and 38 provider-override witnesses.
+All 18 appearance witnesses retain identical original/replay payload batches while recording
+and asserting independent destination state.
+
+Mutation checks are load-bearing: reinstating the old submission omission fails all three action
+checks; withholding converted tiers fails the Anima picker/request check; deleting appearance
+restoration from production `recipeToStudioPatch` fails both the independent replay check and
+the corrected menu/batch witness. The original same-state replay test stayed green under that
+last mutation, demonstrating its prior false-green. Every temporary mutation was restored;
+production source files are unchanged in the repair.
+
+These receipts supersede the previous full Video/Training submission claims, macOS Anima tier
+coverage and independent appearance-import claim. Other source data is retained. Full ordinary
+Node 22.23.4 web discovery now passes **7,325 tests in 391 files**. Full web lint/build, the native
+frozen-input test, all 92 workflow-share tests, clippy, full Cargo formatting and capture guards
+are also checked. The candidate-removal control and ordinary/native input parity remain required.
+
+At coordinator handoff, the previously published `613a36ff` head had no failed checks; only
+hosted macOS workspace tests were still running. The coordinator owns that pending receipt and
+publication. A `gh api` REST job-status read hit HTTP 403 rate limiting; GraphQL rollup reads and
+the GitHub connector still worked. The last connector step snapshot showed worker build, both
+clippy steps and memory-adapter tests passing before the in-progress workspace tests.

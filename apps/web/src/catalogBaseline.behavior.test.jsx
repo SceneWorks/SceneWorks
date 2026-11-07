@@ -6,7 +6,7 @@ import { act } from "react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 vi.mock("./api.js", async (original) => ({ ...await original(), apiFetch: vi.fn(async () => ({})) }));
 import old from "./testUtils/catalogBaseline/old-catalog.json";
-import { mount, click, change, controls } from "./testUtils/catalogBaseline/harness.jsx";
+import { mount, click, change, controls, submissionButton } from "./testUtils/catalogBaseline/harness.jsx";
 import { appearanceOptions } from "./data/appearanceCatalog.js";
 const path = "src/testUtils/catalogBaseline/old-behavior.json";
 const capture = process.env.CAPTURE_OLD_CATALOG === old.source.revision;
@@ -33,7 +33,7 @@ describe("old public request behavior (SW-7028)", () => {
         const row = { platform, studio: "image", model: id, mode: "text_to_image" };
         const catalog = capture ? old.catalog : candidate;
         const mounted = await mount(catalog, row, { batchMode: true, batchPromptsText: "a fox\na cat", count: 1 });
-        let original, saved;
+        let original, expectedAppearance;
         const menus = [];
         try {
           for (const [axis, names] of [["Camera", ["Disposable", "Digital compact"]], ["Film", ["Kodak Portra 400"]], ["Looks", ["Warm golden", "Matte faded film"]], ["Lighting", ["Golden hour"]]]) {
@@ -64,10 +64,10 @@ describe("old public request behavior (SW-7028)", () => {
           }
           const selection = JSON.parse(localStorage.getItem(mounted.persistenceKey)).appearance;
           expect(selection.looks).toHaveLength(2);
+          expectedAppearance = selection;
           await click([...mounted.container.querySelectorAll("button")].find((node) => text(node).includes("Run batch")));
           expect(mounted.calls.length).toBeGreaterThan(0);
           original = JSON.parse(JSON.stringify(mounted.calls));
-          saved = JSON.parse(localStorage.getItem(mounted.persistenceKey));
         } finally { await mounted.close(); }
         // Restore the public recipe carrier used by workflow/PNG imports and regenerate through
         // the real studio. Native packed and one-job-per-prompt batches retain their own shapes.
@@ -77,14 +77,23 @@ describe("old public request behavior (SW-7028)", () => {
           normalizedSettings: { count: 1 },
           rawAdapterSettings: { ...first.advanced, ...(first.prompts ? { promptBatch: first.prompts } : {}) },
         };
-        const replay = await mount(catalog, row, saved, { studioLaunch: { id: "baseline-workflow-import", view: "Image", recipe } });
+        const oldModel = old.catalog.models.find((model) => model.id === id);
+        const alternative = (axis, selected) => appearanceOptions(oldModel, axis).find((entry) => !selected.includes(entry.id)).id;
+        const replayInitial = { appearance: {
+          camera: alternative("camera", [expectedAppearance.camera]), film: alternative("film", [expectedAppearance.film]),
+          looks: [alternative("look", expectedAppearance.looks)], lighting: alternative("lighting", [expectedAppearance.lighting]),
+        }, prompt: "An unrelated destination draft", batchMode: false, batchPromptsText: "unrelated row", count: 4 };
+        for (const axis of ["camera", "film", "looks", "lighting"]) expect(replayInitial.appearance[axis]).not.toEqual(expectedAppearance[axis]);
+        const replay = await mount(catalog, row, replayInitial, { studioLaunch: { id: "baseline-workflow-import", view: "Image", recipe } });
         try {
+          expect(JSON.parse(localStorage.getItem(replay.persistenceKey)).appearance).toEqual(expectedAppearance);
           await click([...replay.container.querySelectorAll("button")].find((node) => text(node).includes("Run batch")) ?? button(replay.container, "Generate"));
           const effective = (calls) => calls.flatMap(({ payload }) => payload.prompts ?? [payload.prompt]);
           // An unpacked recipe represents one job, so importing it restores its single authored
           // row; packed carriers restore the complete authored batch.
           expect(effective(replay.calls)).toEqual(first.prompts ?? [first.prompt]);
-          snapshots(`${platform}/${id}/appearance`, { menus, original, carrier: recipe, restored: JSON.parse(localStorage.getItem(replay.persistenceKey)), replay: replay.calls });
+          for (const call of replay.calls) expect(call.payload.appearance).toEqual(expectedAppearance);
+          snapshots(`${platform}/${id}/appearance`, { menus, original, carrier: recipe, replayInitial, restored: JSON.parse(localStorage.getItem(replay.persistenceKey)), replay: replay.calls });
         } finally { await replay.close(); }
       });
     }
@@ -100,7 +109,7 @@ describe("old public request behavior (SW-7028)", () => {
         try {
           for (const toggle of [...mounted.container.querySelectorAll(".advanced-section-toggle")]) if (toggle.getAttribute("aria-expanded") !== "true") await click(toggle);
           const rendered = controls(mounted.container, mounted.persistenceKey).filter((control) => /sampler|scheduler|schedule shift|guidance|steps/i.test(control.label));
-          const submit = [...mounted.container.querySelectorAll('button[type="submit"]')].find((node) => text(node).startsWith("Generate"));
+          const submit = submissionButton(mounted.container, model.type);
           if (submit && !submit.disabled) await click(submit);
           snapshots(`${platform}/${model.id}/sampling-override`, { rendered, calls: mounted.calls, submitDisabled: submit?.disabled ?? null,
             hints: [...mounted.container.querySelectorAll('.field-hint,[role="alert"],.form-error')].map(text) });

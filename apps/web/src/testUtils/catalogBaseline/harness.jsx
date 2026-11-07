@@ -73,13 +73,22 @@ export const reference = { id: "baseline-image", projectId: "baseline-project", 
   file: { path: "assets/reference.png", mimeType: "image/png" } };
 const clip = { ...reference, id: "baseline-video", type: "video", file: { path: "assets/reference.mp4", mimeType: "video/mp4", duration: 6, fps: 25, width: 1024, height: 1024 } };
 const audio = { ...reference, id: "baseline-audio", type: "audio", file: { path: "assets/reference.wav", mimeType: "audio/wav", duration: 12 } };
-function installed(model) {
+function installed(model, platform) {
   const variants = [...new Set((model.downloads ?? []).map((d) => d.variant).filter(Boolean))];
+  // API catalog.rs:1340 and install_state.rs:1805/1825. Anima conversion emits all three
+  // tier directories; the other shipped converters produce flat bundles. Off-Mac Anima uses
+  // its raw checkpoint, so it does not receive the macOS convert-output projection.
+  const converted = model.mlx?.requiresConversion && (platform === "macos" ||
+    ["flux2_klein_diffusers", "supra2_img"].includes(model.mlx.converter));
+  const tieredConversion = converted && model.mlx.converter === "anima_quant";
   return { ...model, installState: "installed", cacheState: "complete", usable: true,
     conditionalPurposes: Object.fromEntries((model.conditionalComponents ?? []).flatMap((component) => (component.requiredFor ?? []).map((purpose) => [purpose, { installState: "installed", blocked: false }]))),
     minQualityTier: model.mlx?.minQualityTier,
     hasVariantMatrix: variants.length > 1,
     variants: variants.map((variant) => ({ variant, installState: "installed" })),
+    ...(converted ? { mlxInstallState: "installed", mlxConversionState: "converted" } : {}),
+    ...(tieredConversion ? { mlxTiers: ["bf16", "q8", "q4"], mlxTierStates: ["q4", "q8", "bf16"].map((tier) =>
+      ({ tier, installState: "installed", cacheState: "complete", diskSizeBytes: null })) } : {}),
   };
 }
 // Pinned API training.rs:206-243 projection. Test fixture only: the old API intentionally
@@ -99,7 +108,7 @@ function targetForPlatform(target, platform) {
   return next;
 }
 export function contextFor(catalog, row, overrides = {}) {
-  const models = catalog.models.map(installed);
+  const models = catalog.models.map((model) => installed(model, row.platform));
   const selected = models.find((model) => model.id === row.model);
   const calls = [];
   const submit = (kind) => vi.fn(async (payload) => { calls.push({ kind, payload: JSON.parse(JSON.stringify(payload)) }); return { id: `baseline-job-${calls.length}`, status: "queued" }; });
@@ -158,6 +167,15 @@ export async function change(node, value) {
     node.dispatchEvent(new Event(node.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
   });
 }
+export function submissionButton(container, studio) {
+  return [...container.querySelectorAll("button")].filter((node) => !node.closest("[hidden]"))
+    .find((node) => {
+      const label = clean(node.textContent);
+      if (studio === "training") return node.classList.contains("primary-action") && label === "Start training";
+      return (node.type === "submit" || node.classList.contains("su-generate")) &&
+        /^(Generate(?:\s|$)|Render clip$|Replace person$|Convert to SVG$|Compose document$|Create SVG$|Test Character$|Run test$)/.test(label);
+    });
+}
 export async function mount(catalog, row, saved = {}, overrides = {}) {
   // Seed identity generation, rather than dropping attachment ids from observations. Sequence
   // and identity relationships remain real and comparable within each mounted public workflow.
@@ -209,7 +227,7 @@ export async function observe(catalog, row) {
       const dataset = [...container.querySelectorAll("label")].find((node) => node.textContent.startsWith("Dataset"))?.querySelector("select");
       if (dataset) await change(dataset, "baseline-dataset");
     }
-    const submit = [...container.querySelectorAll("button")].filter((node) => !node.closest("[hidden]") && (node.type === "submit" || node.classList.contains("su-generate"))).find((node) => /^(Generate(?:\s|$)|Convert to SVG|Start training|Compose document|Create SVG|Test Character|Run test)/.test(clean(node.textContent)));
+    const submit = submissionButton(container, row.studio);
     const initial = controls(container, persistenceKey);
     if (submit && !submit.disabled) await click(submit);
     const defaults = JSON.parse(JSON.stringify(calls));
