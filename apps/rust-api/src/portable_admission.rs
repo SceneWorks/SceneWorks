@@ -94,7 +94,29 @@ fn portable_authored_options(payload: &JsonObject) -> Value {
             _ => value.clone(),
         }
     }
-    project(&Value::Object(payload.clone()), None)
+    let mut options = project(&Value::Object(payload.clone()), None);
+    if let Some(target) = payload.get("plan").and_then(|plan| plan.get("target")) {
+        let selected = options
+            .as_object_mut()
+            .expect("projection returns an object");
+        for (source_key, authored_key) in [
+            ("targetId", "trainingTargetId"),
+            ("kernel", "trainingKernel"),
+            ("baseModel", "trainingBaseModel"),
+        ] {
+            if let Some(value) = target.get(source_key).and_then(Value::as_str) {
+                selected.insert(authored_key.to_owned(), Value::String(value.to_owned()));
+            }
+        }
+        if let Some(weight) = payload
+            .get("plan")
+            .and_then(|plan| plan.pointer("/config/advanced/iris/repa/weight"))
+            .and_then(Value::as_f64)
+        {
+            selected.insert("irisRepaSelected".to_owned(), Value::Bool(weight > 0.0));
+        }
+    }
+    options
 }
 
 fn is_source_choice_container(key: &str) -> bool {
@@ -1683,6 +1705,22 @@ mod tests {
                     .unwrap();
             assert_eq!(selected.tier, expected, "{base}");
         }
+    }
+
+    #[test]
+    fn training_authored_choice_binds_target_and_repa_without_host_path() {
+        let payload = json!({"plan":{
+            "target":{
+                "targetId":"iris_repa", "kernel":"iris_mlx_lora",
+                "baseModel":"iris_3b", "baseModelPath":"/host/private/base"
+            },
+            "config":{"advanced":{"iris":{"repa":{"weight":0.5}}}}
+        }});
+        let options = portable_authored_options(payload.as_object().unwrap());
+        assert_eq!(options["trainingBaseModel"], "iris_3b");
+        assert_eq!(options["trainingKernel"], "iris_mlx_lora");
+        assert_eq!(options["irisRepaSelected"], true);
+        assert!(!options.to_string().contains("/host/private"));
     }
 
     #[test]
