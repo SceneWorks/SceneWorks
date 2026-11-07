@@ -69,6 +69,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { projectBuiltinMemoryEvidence, readBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import {
   HEADER_MEASUREMENT_TERMS,
   VAE_RESIDENCY_SCOPES,
@@ -942,10 +943,11 @@ function renderMarkdown({ rows, unverifiedTiers }) {
 }
 
 async function readInputs() {
-  const [ledgerBody, manifestBody, mlxFitGate, routingCatalog, routingCandle, routingMlx, schemaBody] =
+  const [ledgerBody, manifestBody, memoryEvidence, mlxFitGate, routingCatalog, routingCandle, routingMlx, schemaBody] =
     await Promise.all([
       readFile(path.join(ROOT, LEDGER), "utf8"),
       readFile(path.join(ROOT, MANIFEST), "utf8"),
+      readBuiltinMemoryEvidence(ROOT),
       rustFacadeSource(path.join(ROOT, MLX_FIT_GATE)),
       readFile(path.join(ROOT, ROUTING_CATALOG), "utf8"),
       readFile(path.join(ROOT, ROUTING_CANDLE), "utf8"),
@@ -955,7 +957,7 @@ async function readInputs() {
   return {
     ledger: parseJsonc(ledgerBody),
     ledgerSource: ledgerBody,
-    manifest: parseJsonc(manifestBody),
+    manifest: projectBuiltinMemoryEvidence(parseJsonc(manifestBody), memoryEvidence),
     mlxFitGate,
     routingCatalog,
     routingCandle,

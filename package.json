@@ -13,7 +13,6 @@
     "measure:memory-catalog": "node scripts/measure-memory-catalog.mjs",
     "generate:memory-anchors": "node scripts/extract-memory-anchors.mjs",
     "check:memory-anchors": "node scripts/extract-memory-anchors.mjs --check",
-    "generate:manifest-memory-declarations": "node scripts/generate-manifest-memory-declarations.mjs",
     "check:memory-matrix": "node scripts/generate-memory-matrix.mjs --check",
     "check:memory-calibration": "node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/ltx-mlx-video-sc-18808.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/ltx-mlx-geometry-sweep-sc-18810.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/qwen-candle-five-rung-sc-15817.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/krea-candle-five-rung-sc-11045.json",
     "report:stale-lanes": "node scripts/stale-lane-report.mjs",

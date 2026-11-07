@@ -8,6 +8,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { projectBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import { canonicalSourceText, semanticSourceBody } from "./lib/source-revision.mjs";
 import { routedLanes } from "./check-tier-integrity.mjs";
 import { CONVERTER_TIER_OVERRIDES, contractIsLoraOnly } from "./lib/manifest-memory-declarations.mjs";
@@ -2640,6 +2641,7 @@ export function assertOutOfMatrixEntriesAreStillUnroutable(manifestModels, resol
 export const SOURCE_PATHS = Object.freeze({
   // ── The POPULATION: which coordinates exist, and which rungs their code implements ───────────
   manifest: "config/manifests/builtin.models.jsonc",
+  memoryEvidence: "config/manifests/registry/evidence.json",
   routingCatalog: "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
   routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
   routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
@@ -2809,7 +2811,10 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const manifestBody = bodies.manifest;
   const enginesBody = bodies.engines;
   const mlxFitBody = bodies.mlxFitGate;
-  const manifest = JSON.parse(stripJsoncComments(manifestBody));
+  const manifest = projectBuiltinMemoryEvidence(
+    JSON.parse(stripJsoncComments(manifestBody)),
+    JSON.parse(bodies.memoryEvidence),
+  );
   // Comments and formatting are not part of any of these sources' contracts. Hash each source's
   // SEMANTIC body — parsed value for JSON/JSONC, inert whole-line comments removed for Rust and JS —
   // so provenance is stable across semantically inert edits (sc-16129 did the manifest; sc-16268 the

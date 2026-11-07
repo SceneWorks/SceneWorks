@@ -2317,6 +2317,7 @@ test("the fingerprint covers exactly the anchor and catalog sources, and the art
   // them can move a cell any more.
   assert.deepEqual(SOURCE_PATHS, {
     manifest: "config/manifests/builtin.models.jsonc",
+    memoryEvidence: "config/manifests/registry/evidence.json",
     routingCatalog: "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
     routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
     routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",

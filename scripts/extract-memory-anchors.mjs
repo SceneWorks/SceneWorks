@@ -30,7 +30,7 @@ import { sha256 } from "./lib/file-sha256.mjs";
  *   2. `docs/generated/video-memory-curves.json` — the fitted curves' `evidence.sources` name the
  *      record corpora the video lane's identities were measured from, which is how the LTX-2.3
  *      sweep is reached (its paths are asserted to be part of the discovered corpus set);
- *   3. `config/manifests/builtin.models.jsonc` — `measured: true` `vramGbByTier` /
+ *   3. `config/manifests/registry/evidence.json` — `measured: true` `vramGbByTier` /
  *      `sequentialPeakGb` tier tables, a per-tier declared envelope but not a phase decomposition.
  *
  * A fourth source — the pinned inference revision's per-provider
@@ -86,6 +86,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { MEMORY_EVIDENCE_PATH, projectBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import { buildMatrix } from "./generate-memory-matrix.mjs";
 import { validateOwnedProcessAccountingRecord } from "./lib/flux3-owned-accounting-contract.mjs";
 
@@ -1759,8 +1760,12 @@ export async function buildAnchorStore({
   const cells = await catalogCells(resolvedMatrix);
   const corpora = await loadCorpora(root);
   const manifestBody = await readFile(path.join(root, MANIFEST_PATH), "utf8");
-  const manifest = JSON.parse(stripJsoncComments(manifestBody));
-  const manifestSha256 = sha256(manifestBody);
+  const evidenceBody = await readFile(path.join(root, MEMORY_EVIDENCE_PATH), "utf8");
+  const manifest = projectBuiltinMemoryEvidence(
+    JSON.parse(stripJsoncComments(manifestBody)),
+    JSON.parse(evidenceBody),
+  );
+  const manifestSha256 = sha256(evidenceBody);
   // sc-22734: the lanes whose engine has no staged composition at all, derived from the manifest's
   // own structural exemptions. Threaded into every derivability decision below so the ONE anchor
   // such a cell can be captured in — the resident render — is admitted rather than discarded.
@@ -1929,7 +1934,7 @@ export async function buildAnchorStore({
         : null;
     const contract = contractEstimateEvidence(
       manifest,
-      MANIFEST_PATH,
+      MEMORY_EVIDENCE_PATH,
       manifestSha256,
       cell,
     );
@@ -1938,7 +1943,7 @@ export async function buildAnchorStore({
       cell,
       manifestTierEvidence(
         manifest,
-        MANIFEST_PATH,
+        MEMORY_EVIDENCE_PATH,
         manifestSha256,
         cell,
       ),
