@@ -339,6 +339,13 @@ impl RuntimeSourceGuard {
             .and_then(serde_json::Value::as_object_mut)
         {
             advanced.remove("__portableBoundTier");
+            advanced.remove("__portableAuxPaths");
+        }
+        if let Some(plan) = dispatch_payload
+            .get_mut("plan")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            plan.remove("__portableAuxPaths");
         }
         let mut portable_snapshot = None;
         if let Some(binding) = binding {
@@ -382,6 +389,13 @@ impl RuntimeSourceGuard {
             .and_then(serde_json::Value::as_object_mut)
         {
             advanced.remove("__portableBoundTier");
+            advanced.remove("__portableAuxPaths");
+        }
+        if let Some(plan) = dispatch_payload
+            .get_mut("plan")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            plan.remove("__portableAuxPaths");
         }
         Self {
             dispatch_payload,
@@ -514,7 +528,12 @@ fn prepare_portable_snapshot(
         .models
         .iter()
         .flat_map(|model| &model.members)
-        .any(|member| matches!(member.source, PortableSourceIdentity::Digest { .. }))
+        .any(|member| {
+            matches!(
+                member.source,
+                PortableSourceIdentity::Digest { .. } | PortableSourceIdentity::WorkerClaim { .. }
+            )
+        })
     {
         return Ok(None);
     }
@@ -545,7 +564,7 @@ fn prepare_portable_snapshot(
         create_private_directory(&staging)?;
     }
     let model_slots = payload_model_slots(payload);
-    let allowed_roots = crate::paths::allowed_model_roots(settings)?;
+    let mut allowed_roots = crate::paths::allowed_model_roots(settings)?;
     let mut rewrites = Vec::new();
     for (model_index, model) in route.models.iter().enumerate() {
         let entry = model_slots
@@ -554,11 +573,17 @@ fn prepare_portable_snapshot(
             .map(|(_, entry)| *entry)
             .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
         for (member_index, member) in model.members.iter().enumerate() {
-            if !matches!(member.source, PortableSourceIdentity::Digest { .. }) {
+            if !matches!(
+                member.source,
+                PortableSourceIdentity::Digest { .. } | PortableSourceIdentity::WorkerClaim { .. }
+            ) {
                 continue;
             }
             let selected =
                 selected_local_artifact_path(member, &model.slot, entry, payload, settings)?;
+            if matches!(member.source, PortableSourceIdentity::WorkerClaim { .. }) {
+                allowed_roots.push(selected.parent().unwrap_or(&selected).to_path_buf());
+            }
             let selected_is_file = selected.is_file();
             if !selected_is_file && !selected.is_dir() {
                 return Err(invalid_binding("snapshot source is unavailable"));
@@ -789,6 +814,32 @@ fn rewrite_loader_locator(
         .to_str()
         .ok_or_else(|| invalid_binding("private snapshot path is not UTF-8"))?
         .to_owned();
+    if let PortableSourceIdentity::WorkerClaim { source_id, .. } = &member.source {
+        let advanced = payload
+            .entry("advanced".to_owned())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| invalid_binding("advanced options are not an object"))?;
+        advanced
+            .entry("__portableAuxPaths".to_owned())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| invalid_binding("private auxiliary path map is not an object"))?
+            .insert(source_id.clone(), json!(path));
+        if let Some(plan) = payload
+            .get_mut("plan")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            plan.entry("__portableAuxPaths".to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| {
+                    invalid_binding("private training auxiliary path map is not an object")
+                })?
+                .insert(source_id.clone(), json!(path));
+        }
+        return Ok(());
+    }
     if matches!(
         member.role,
         ArtifactMemberRole::Lora | ArtifactMemberRole::Control
@@ -959,6 +1010,11 @@ fn rewrite_training_plan_source(
                 .ok_or_else(|| {
                     invalid_binding("training source was not rebound to a private bundle")
                 })?
+        }
+        PortableSourceIdentity::WorkerClaim { .. } => {
+            return Err(invalid_binding(
+                "training primary cannot use an auxiliary worker claim",
+            ));
         }
     };
     let selected = selected
@@ -1221,7 +1277,7 @@ fn verify_portable_binding(
                     })
                     .collect()
             }
-            PortableSourceIdentity::Digest { .. } => {
+            PortableSourceIdentity::Digest { .. } | PortableSourceIdentity::WorkerClaim { .. } => {
                 let selected =
                     selected_local_artifact_path(member, &binding.slot, entry, payload, settings)?;
                 let is_file = selected.is_file();
@@ -1280,7 +1336,14 @@ fn verify_portable_binding(
             "the selected model tier differs from its admitted identity",
         ));
     }
-    let allowed_roots = crate::paths::allowed_model_roots(settings)?;
+    let mut allowed_roots = crate::paths::allowed_model_roots(settings)?;
+    for member in &binding.members {
+        if matches!(member.source, PortableSourceIdentity::WorkerClaim { .. }) {
+            let selected =
+                selected_local_artifact_path(member, &binding.slot, entry, payload, settings)?;
+            allowed_roots.push(selected.parent().unwrap_or(&selected).to_path_buf());
+        }
+    }
     binding
         .verify_local(&local, &allowed_roots)
         .map_err(|error| invalid_binding(error.to_string()))?;
@@ -1376,6 +1439,16 @@ fn selected_local_artifact_path(
     payload: &JsonObject,
     settings: &Settings,
 ) -> WorkerResult<PathBuf> {
+    if let PortableSourceIdentity::WorkerClaim { source_id, .. } = &member.source {
+        let (claim, selected) = crate::portable_source_claims::capture_selected_source(
+            source_id, settings, payload,
+        )?
+        .ok_or_else(|| invalid_binding("worker-advertised auxiliary source is unavailable"))?;
+        claim
+            .matches_worker_claim_member(member)
+            .map_err(|error| invalid_binding(error.to_string()))?;
+        return Ok(selected);
+    }
     let raw = if member.role == ArtifactMemberRole::Primary {
         (model_slot == "modelManifestEntry")
             .then(|| {
@@ -2479,6 +2552,66 @@ mod tests {
             8
         );
         drop(active);
+    }
+
+    #[test]
+    fn portable_worker_claim_auxiliary_uses_verified_private_path() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let model = data.join("models/imports/demo/model.safetensors");
+        let auxiliary = data.join("cache/ipadapter-flux/ip_adapter.safetensors");
+        for path in [&model, &auxiliary] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&model, b"model").unwrap();
+        std::fs::write(&auxiliary, b"selected adapter").unwrap();
+        let settings = settings(data);
+        let payload =
+            json!({"modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":model}},
+            "advanced":{"__portableAuxPaths":{"flux_ip_adapter":"/untrusted/path"}}})
+            .as_object()
+            .unwrap()
+            .clone();
+        let (claim, _) = crate::portable_source_claims::capture_selected_source(
+            "flux_ip_adapter",
+            &settings,
+            &payload,
+        )
+        .unwrap()
+        .unwrap();
+        let mut model_binding = local_binding("modelManifestEntry", "m", &model, None);
+        model_binding.members.push(PortableArtifactMember {
+            role: ArtifactMemberRole::CoRequisite,
+            component_id: Some("flux_ip_adapter".to_owned()),
+            source: PortableSourceIdentity::WorkerClaim {
+                source_id: claim.source_id.clone(),
+                provenance: claim.provenance.clone(),
+                closure_sha256: claim.closure_sha256.clone(),
+            },
+            tier: None,
+            files: claim.files.clone(),
+        });
+        let binding =
+            PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model_binding]).unwrap();
+        let guard = RuntimeSourceGuard::begin_with_binding(
+            &JobType::ImageGenerate,
+            &payload,
+            &settings,
+            Some(&binding),
+        )
+        .unwrap();
+        let selected = guard.dispatch_payload()["advanced"]["__portableAuxPaths"]
+            ["flux_ip_adapter"]
+            .as_str()
+            .unwrap();
+        assert_ne!(selected, "/untrusted/path");
+        assert_ne!(selected, auxiliary.to_str().unwrap());
+        std::fs::write(&auxiliary, b"changed adapter!").unwrap();
+        assert_eq!(std::fs::read(selected).unwrap(), b"selected adapter");
+        assert_eq!(
+            payload["advanced"]["__portableAuxPaths"]["flux_ip_adapter"],
+            "/untrusted/path"
+        );
     }
 
     #[test]

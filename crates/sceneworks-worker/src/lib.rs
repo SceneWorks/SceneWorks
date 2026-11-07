@@ -411,6 +411,7 @@ pub use worker_loop::run_worker_loop;
 mod converted_install;
 mod model_jobs;
 mod portable_aux_sources;
+mod portable_source_claims;
 pub use model_jobs::recover_stranded_model_conversions;
 pub use model_jobs::{
     verify_produced_artifact_receipt, write_produced_artifact_receipt, ProducedArtifactReceipt,
@@ -1960,7 +1961,7 @@ async fn register_worker(
             worker_id: settings.worker_id.clone(),
             gpu_id: gpu.id.clone(),
             platform: Some(std::env::consts::OS.to_owned()),
-            portable_source_claims: None,
+            portable_source_claims: Some(portable_source_claims::static_source_claims(settings)),
             gpu_name: Some(gpu.name.clone()),
             capabilities: worker_capabilities(gpu),
             loaded_models: Vec::new(),
