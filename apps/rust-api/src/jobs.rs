@@ -1351,19 +1351,53 @@ async fn validate_and_canonicalize_merged_generation_payload(
             }
         }
     }
+    if frozen_portable_binding.is_some() {
+        // The persisted carrier was minted by the server at the original admission. Preserve its
+        // revision and logical slots across a mutable catalog/HF HEAD change. The frozen replay
+        // validator below checks authored choices and re-verifies the exact bound sources against
+        // current local paths or worker claims; it never treats these old locators as authority.
+        for key in [
+            "modelManifestEntry",
+            "baseModelManifestEntry",
+            "modelManifestEntries",
+        ] {
+            if let Some(original) = persisted.get(key) {
+                merged.insert(key.to_owned(), original.clone());
+            } else {
+                merged.remove(key);
+            }
+        }
+    }
     let selected_entry = if canonical_selection {
         merged.get("modelManifestEntry")
     } else {
         None
     };
     let provenance = canonical_model_provenance(state, selected_entry, &merged).await?;
-    let candidate = crate::portable_admission::capture_portable_model_binding(
-        state,
-        &job_type,
-        &merged,
-        &requested_gpu,
-    )
-    .await?;
+    let candidate = if let Some(frozen) = &frozen_portable_binding {
+        let frozen: sceneworks_core::model_artifacts::portable_binding::PortableJobBinding =
+            serde_json::from_value(frozen.clone()).map_err(|error| {
+                ApiError::bad_request(format!("Invalid saved source binding: {error}"))
+            })?;
+        Some(
+            crate::portable_admission::validate_frozen_replay_binding(
+                state,
+                &job_type,
+                &merged,
+                &requested_gpu,
+                &frozen,
+            )
+            .await?,
+        )
+    } else {
+        crate::portable_admission::capture_portable_model_binding(
+            state,
+            &job_type,
+            &merged,
+            &requested_gpu,
+        )
+        .await?
+    };
     let candidate = candidate
         .map(|binding| {
             serde_json::to_value(binding).map_err(|error| {

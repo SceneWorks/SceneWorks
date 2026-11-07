@@ -443,6 +443,55 @@ fn write_vector_workflow_test_manifest(
     guard
 }
 
+async fn vector_workflow_metadata_server() -> (String, tokio::task::JoinHandle<()>) {
+    use sha2::{Digest, Sha256};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("pinned vector metadata listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener address")
+    );
+    let model_index = serde_json::to_vec(&json!({
+        "_class_name":"FluxPipeline", "transformer":["diffusers","FluxTransformer2DModel"],
+        "vae":["diffusers","AutoencoderKL"], "text_encoder":["transformers","CLIPTextModel"],
+        "text_encoder_2":["transformers","T5EncoderModel"]
+    }))
+    .expect("model index serializes");
+    let mut files = vec![
+        ("config.json".to_owned(), b"{}".to_vec()),
+        ("model.safetensors".to_owned(), b"fixture".to_vec()),
+        ("q4/model_index.json".to_owned(), model_index),
+    ];
+    for component in ["transformer", "vae", "text_encoder", "text_encoder_2"] {
+        files.push((format!("q4/{component}/config.json"), b"{}".to_vec()));
+        files.push((
+            format!("q4/{component}/model.safetensors"),
+            b"fixture".to_vec(),
+        ));
+    }
+    for tier in ["q8", "bf16"] {
+        files.push((format!("{tier}/model.safetensors"), b"fixture".to_vec()));
+    }
+    let tree = Value::Array(
+        files
+            .into_iter()
+            .map(|(path, bytes)| {
+                json!({"type":"file","path":path,"size":bytes.len(),
+                    "lfs":{"oid":format!("{:x}", Sha256::digest(&bytes))}})
+            })
+            .collect(),
+    );
+    let app = axum::Router::new().fallback(move || {
+        let tree = tree.clone();
+        async move { axum::Json(tree) }
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("metadata server");
+    });
+    (base_url, server)
+}
+
 #[test]
 fn prompt_vector_revision_identity_rejects_mutable_missing_and_conflicting_primaries() {
     let revision = "1111111111111111111111111111111111111111";
@@ -525,6 +574,8 @@ fn prompt_vector_intermediate_ownership_is_server_authored_and_worker_facts_are_
 
 #[tokio::test]
 async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascades() {
+    let (base_url, metadata_server) = vector_workflow_metadata_server().await;
+    let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let _cache_root = write_vector_workflow_test_manifest(
         &temp_dir.path().join("config/manifests"),
@@ -660,10 +711,13 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
         .await;
         assert_eq!(canceled["status"], "canceled");
     }
+    metadata_server.abort();
 }
 
 #[tokio::test]
 async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typed() {
+    let (base_url, metadata_server) = vector_workflow_metadata_server().await;
+    let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let _cache_root = write_vector_workflow_test_manifest(
         &temp_dir.path().join("config/manifests"),
@@ -746,6 +800,100 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
     assert_eq!(drift["context"]["stage"], "raster");
     let (_, after) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(after.as_array().expect("jobs").len(), 4);
+    metadata_server.abort();
+}
+
+#[tokio::test]
+async fn vector_parent_without_linked_child_replays_its_frozen_raster_after_catalog_drift() {
+    let (base_url, metadata_server) = vector_workflow_metadata_server().await;
+    let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    let _cache_root = write_vector_workflow_test_manifest(
+        &config_dir,
+        "2222222222222222222222222222222222222222",
+    );
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Frozen vector").await;
+    let (status, original) = request(
+        app,
+        "POST",
+        "/api/v1/image/vectorize/prompt/jobs",
+        json!({
+            "projectId": project["id"], "prompt":"an angular fox",
+            "rasterModel":"flux_schnell", "vectorModel":"starvector_test"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let original_id = original["id"].as_str().expect("parent id");
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let (raw_payload, raw_binding): (String, String) = connection
+        .query_row(
+            "SELECT payload_json, portable_model_binding_json FROM jobs WHERE id = ?1",
+            [original_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("frozen parent exists");
+    let binding: Value = serde_json::from_str(&raw_binding).expect("binding JSON");
+    for route in binding["routes"].as_object().expect("routes").values() {
+        let slots = route["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .filter_map(|model| model["slot"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            slots.contains("modelManifestEntries/0"),
+            "raster source must be frozen before child creation"
+        );
+    }
+    let mut parent_payload: Value = serde_json::from_str(&raw_payload).expect("payload JSON");
+    parent_payload["workflow"]["childJobId"] = Value::Null;
+    connection
+        .execute(
+            "UPDATE jobs SET payload_json = ?1 WHERE id = ?2",
+            rusqlite::params![parent_payload.to_string(), original_id],
+        )
+        .expect("simulate parent persisted before child link");
+    drop(connection);
+    let manifest_path = config_dir.join("builtin.models.jsonc");
+    let manifest = std::fs::read_to_string(&manifest_path).expect("manifest reads");
+    std::fs::write(
+        &manifest_path,
+        manifest.replace(
+            "2222222222222222222222222222222222222222",
+            "3333333333333333333333333333333333333333",
+        ),
+    )
+    .expect("catalog HEAD drifts");
+    let replay_app = create_app(settings).expect("fresh catalog app creates");
+    let (status, replay) = request(
+        replay_app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{original_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replay}");
+    assert_eq!(
+        replay["payload"]["workflow"]["vectorStage"]["revision"],
+        "2222222222222222222222222222222222222222"
+    );
+    let child_id = replay["payload"]["workflow"]["childJobId"]
+        .as_str()
+        .expect("replayed child id");
+    let (_, child) = request(
+        replay_app,
+        "GET",
+        &format!("/api/v1/jobs/{child_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(child["type"], "image_generate");
+    assert_eq!(child["payload"]["modelManifestEntry"]["id"], "flux_schnell");
+    metadata_server.abort();
 }
 
 #[tokio::test]

@@ -1615,6 +1615,56 @@ async fn catalog_analysis_uses_typed_revisioned_route_and_never_accepts_catalog_
 }
 
 #[tokio::test]
+async fn metadata_only_catalog_analysis_queues_without_model_binding() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({"name":"Metadata only","path":temporary.path().join("catalog")}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+    let mut analyzer = created["analyzerConfig"]["settings"].clone();
+    for key in [
+        "structuredAnalysisEnabled",
+        "visionAnalysisEnabled",
+        "semanticEmbeddingsEnabled",
+    ] {
+        analyzer[key] = json!(false);
+    }
+    let (status, updated) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/catalogs/{id}/analyzer-config"),
+        json!({"expectedRevision":0,"settings":analyzer}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let (status, job) = request(
+        app,
+        "POST",
+        &format!("/api/v1/catalogs/{id}/analyze"),
+        json!({"expectedAnalyzerConfigRevision":1,"requestedGpu":"auto"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "catalog_analysis");
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let binding: Option<String> = connection
+        .query_row(
+            "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+            [job["id"].as_str().expect("job id")],
+            |row| row.get(0),
+        )
+        .expect("analysis job exists");
+    assert!(binding.is_none());
+}
+
+#[tokio::test]
 async fn stale_running_status_is_reconciled_and_lifecycle_recovers() {
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);

@@ -56,19 +56,36 @@ pub(super) async fn create_generation_job_with_binding(
     if let Some(binding) = download_binding.as_mut().and_then(Value::as_object_mut) {
         binding.insert("payload".to_owned(), json!(payload));
     }
-    let portable_binding = crate::portable_admission::capture_portable_model_binding(
-        &state,
-        &job_type,
-        &payload,
-        &requested_gpu,
-    )
-    .await?
-    .map(|binding| {
-        serde_json::to_value(binding).map_err(|error| {
-            ApiError::internal(format!("Serialize portable model binding: {error}"))
+    let portable_binding =
+        if let Some((_, parent_binding)) = vector_replay_raster_source(&state, &payload).await? {
+            let frozen = serde_json::from_value(parent_binding).map_err(|error| {
+                ApiError::bad_request(format!("Invalid recorded vector source binding: {error}"))
+            })?;
+            Some(
+                crate::portable_admission::derive_vector_raster_child_binding(
+                    &state,
+                    &job_type,
+                    &payload,
+                    &requested_gpu,
+                    &frozen,
+                )
+                .await?,
+            )
+        } else {
+            crate::portable_admission::capture_portable_model_binding(
+                &state,
+                &job_type,
+                &payload,
+                &requested_gpu,
+            )
+            .await?
+        }
+        .map(|binding| {
+            serde_json::to_value(binding).map_err(|error| {
+                ApiError::internal(format!("Serialize portable model binding: {error}"))
+            })
         })
-    })
-    .transpose()?;
+        .transpose()?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job_with_portable_binding(
             CreateJob {
@@ -88,7 +105,7 @@ pub(super) async fn create_generation_job_with_binding(
         )
     })
     .await?;
-    publish(&state, "job.updated", &job);
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
     Ok(job)
 }
@@ -278,12 +295,23 @@ pub(crate) async fn create_image_job(
         .to_owned();
     // The shared canonicalizer reads the final payload and also owns retry/duplicate, so no
     // alternate image boundary can retain caller-supplied manifest metadata.
-    let mut model_manifest_entry =
+    let mut model_manifest_entry = if let Some((frozen_raster, _)) =
+        vector_replay_raster_source(&state, &job_payload).await?
+    {
+        if frozen_raster.get("id").and_then(Value::as_str) != Some(model_id.as_str()) {
+            return Err(ApiError::bad_request(
+                "Recorded vector raster source differs from the replayed model",
+            ));
+        }
+        job_payload.insert("modelManifestEntry".into(), frozen_raster.clone());
+        frozen_raster
+    } else {
         crate::jobs::canonicalize_image_model_payload(&state, &job_type, &mut job_payload)
             .await?
             .ok_or_else(|| {
                 ApiError::internal("image model canonicalization returned no catalog entry")
-            })?;
+            })?
+    };
     // Overlay the authored text-encoder selection onto the canonical entry and re-stamp it, so the
     // worker sees the resolved encoder rather than the catalog default. The decoder gate then runs
     // against the same server-owned entry.
@@ -1054,6 +1082,170 @@ enum VectorWorkflowReplayRelation<'a> {
     },
 }
 
+struct VectorReplayChild {
+    job: JobSnapshot,
+    binding: Value,
+    provenance: Option<Value>,
+    download_binding: Option<Value>,
+}
+
+struct VectorReplaySource {
+    parent: JobSnapshot,
+    binding: Value,
+    child: Option<VectorReplayChild>,
+}
+
+/// The newly created vector parent carries its original raster slot on replay. Read this
+/// server-owned carrier and frozen envelope before the typed image route consults current catalog
+/// defaults; a mutable publisher ref may have moved since the first workflow was admitted.
+async fn vector_replay_raster_source(
+    state: &AppState,
+    payload: &JsonObject,
+) -> Result<Option<(Value, Value)>, ApiError> {
+    let Some(parent_id) = payload.get("workflowParentId").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let parent_id = parent_id.to_owned();
+    store_call(state.clone(), move |store, _timeout| {
+        let parent = store.get_job(&parent_id)?;
+        if parent.source_job_id.is_none() && parent.duplicate_of_job_id.is_none() {
+            return Ok(None);
+        }
+        let raster = parent
+            .payload
+            .get("modelManifestEntries")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .cloned()
+            .ok_or_else(|| {
+                JobsStoreError::InvalidStatus(
+                    "recorded vector workflow has no frozen raster carrier".into(),
+                )
+            })?;
+        let binding = store.portable_model_binding(&parent_id)?.ok_or_else(|| {
+            JobsStoreError::InvalidStatus(
+                "recorded vector workflow has no frozen source binding".into(),
+            )
+        })?;
+        Ok(Some((raster, binding)))
+    })
+    .await
+    .map_err(Into::into)
+}
+
+async fn vector_replay_source(
+    state: &AppState,
+    relation: VectorWorkflowReplayRelation<'_>,
+) -> Result<Option<VectorReplaySource>, ApiError> {
+    let original_id = match relation {
+        VectorWorkflowReplayRelation::Fresh => return Ok(None),
+        VectorWorkflowReplayRelation::Retry { source_job_id, .. } => source_job_id,
+        VectorWorkflowReplayRelation::Duplicate {
+            duplicate_of_job_id,
+        } => duplicate_of_job_id,
+    }
+    .to_owned();
+    store_call(state.clone(), move |store, _timeout| {
+        let parent = store.get_job(&original_id)?;
+        let binding = store.portable_model_binding(&original_id)?.ok_or_else(|| {
+            JobsStoreError::InvalidStatus("vector workflow has no frozen source binding".into())
+        })?;
+        let child = parent
+            .payload
+            .get("workflow")
+            .and_then(|workflow| workflow.get("childJobId"))
+            .and_then(Value::as_str)
+            .map(|child_id| {
+                let job = store.get_job(child_id)?;
+                let binding = store.portable_model_binding(child_id)?.ok_or_else(|| {
+                    JobsStoreError::InvalidStatus(
+                        "vector raster child has no frozen source binding".into(),
+                    )
+                })?;
+                Ok::<VectorReplayChild, JobsStoreError>(VectorReplayChild {
+                    job,
+                    binding,
+                    provenance: store.model_provenance(child_id)?,
+                    download_binding: store.download_binding(child_id)?,
+                })
+            })
+            .transpose()?;
+        Ok(Some(VectorReplaySource {
+            parent,
+            binding,
+            child,
+        }))
+    })
+    .await
+    .map_err(Into::into)
+}
+
+async fn enqueue_replayed_vector_raster_child(
+    state: &AppState,
+    source: &VectorReplayChild,
+    parent_id: &str,
+    workflow_id: &str,
+    requested_gpu: &str,
+) -> Result<JobSnapshot, ApiError> {
+    if !matches!(
+        source.job.job_type,
+        JobType::ImageGenerate | JobType::ImageEdit
+    ) {
+        return Err(ApiError::bad_request(
+            "Recorded vector raster child has an invalid job type",
+        ));
+    }
+    let mut payload = source.job.payload.clone();
+    payload.insert(
+        "workflowParentId".into(),
+        Value::String(parent_id.to_owned()),
+    );
+    payload.insert("workflowId".into(), Value::String(workflow_id.to_owned()));
+    let frozen: sceneworks_core::model_artifacts::portable_binding::PortableJobBinding =
+        serde_json::from_value(source.binding.clone()).map_err(|error| {
+            ApiError::bad_request(format!("Invalid recorded raster source binding: {error}"))
+        })?;
+    crate::portable_admission::validate_frozen_replay_binding(
+        state,
+        &source.job.job_type,
+        &payload,
+        requested_gpu,
+        &frozen,
+    )
+    .await?;
+    let job = store_call(state.clone(), {
+        let job_type = source.job.job_type.clone();
+        let project_id = source.job.project_id.clone();
+        let project_name = source.job.project_name.clone();
+        let requested_gpu = requested_gpu.to_owned();
+        let provenance = source.provenance.clone();
+        let download_binding = source.download_binding.clone();
+        let binding = source.binding.clone();
+        move |store, _timeout| {
+            store.create_job_with_portable_binding(
+                CreateJob {
+                    job_type,
+                    project_id,
+                    project_name,
+                    payload,
+                    requested_gpu,
+                    source_job_id: None,
+                    duplicate_of_job_id: None,
+                    attempts: 1,
+                    initial_status: None,
+                },
+                provenance.as_ref(),
+                download_binding.as_ref(),
+                Some(&binding),
+            )
+        }
+    })
+    .await?;
+    publish(state, "job.updated", &public_job_snapshot(job.clone()));
+    publish_queue(state).await?;
+    Ok(job)
+}
+
 fn typed_vector_workflow_error(code: &'static str, detail: impl Into<String>) -> ApiError {
     ApiError::typed(
         StatusCode::CONFLICT,
@@ -1176,6 +1368,7 @@ async fn create_vector_prompt_workflow_internal(
     payload: VectorPromptWorkflowRequest,
     relation: VectorWorkflowReplayRelation<'_>,
 ) -> Result<JobSnapshot, ApiError> {
+    let replay_source = vector_replay_source(&state, relation).await?;
     let raster_request: ImageJobRequest = serde_json::from_value(json!({
         "projectId": payload.project_id,
         "projectName": payload.project_name,
@@ -1192,14 +1385,43 @@ async fn create_vector_prompt_workflow_internal(
     .map_err(|error| ApiError::bad_request(format!("Invalid raster stage: {error}")))?;
     validate_image_job(&raster_request)?;
 
-    let raster_model = crate::models::find_model_by_id(&state, &payload.raster_model)
-        .await?
-        .unwrap_or_else(|| json!({}));
-    let vector_model = crate::models::find_model_by_id(&state, &payload.vector_model)
-        .await?
-        .unwrap_or_else(|| json!({}));
-    let raster_revision =
-        validate_raster_workflow_model(&state, &payload.raster_model, &raster_model)?;
+    let raster_model = if let Some(source) = &replay_source {
+        source
+            .parent
+            .payload
+            .get("modelManifestEntries")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .or_else(|| {
+                source
+                    .child
+                    .as_ref()
+                    .and_then(|child| child.job.payload.get("modelManifestEntry"))
+            })
+            .cloned()
+            .ok_or_else(|| ApiError::bad_request("Recorded raster stage has no model carrier"))?
+    } else {
+        crate::models::find_model_by_id(&state, &payload.raster_model)
+            .await?
+            .unwrap_or_else(|| json!({}))
+    };
+    let vector_model = if let Some(source) = &replay_source {
+        source
+            .parent
+            .payload
+            .get("modelManifestEntry")
+            .cloned()
+            .ok_or_else(|| ApiError::bad_request("Recorded vector parent has no model carrier"))?
+    } else {
+        crate::models::find_model_by_id(&state, &payload.vector_model)
+            .await?
+            .unwrap_or_else(|| json!({}))
+    };
+    let raster_revision = if replay_source.is_some() {
+        authoritative_workflow_revision(&raster_model)?
+    } else {
+        validate_raster_workflow_model(&state, &payload.raster_model, &raster_model)?
+    };
     let vector_revision = authoritative_workflow_revision(&vector_model)?;
     validate_workflow_revision(
         "raster",
@@ -1229,11 +1451,13 @@ async fn create_vector_prompt_workflow_internal(
     };
     validate_vector_request(&pending_vector_request)?;
     validate_vector_provider_request(&pending_vector_request, &vector_model)?;
-    validate_vector_model_availability(
-        &payload.vector_model,
-        enqueue_backend(&state),
-        &vector_model,
-    )?;
+    if replay_source.is_none() {
+        validate_vector_model_availability(
+            &payload.vector_model,
+            enqueue_backend(&state),
+            &vector_model,
+        )?;
+    }
 
     let parent_id = format!("job_{}", uuid::Uuid::new_v4().simple());
     let workflow_id = format!("vwf_{}", uuid::Uuid::new_v4().simple());
@@ -1241,6 +1465,12 @@ async fn create_vector_prompt_workflow_internal(
     parent_payload.remove("requestedGpu");
     parent_payload.remove("sourceAssetId");
     parent_payload.insert("modelManifestEntry".to_owned(), vector_model.clone());
+    // The parent is durable before its raster child is enqueued. Freeze both stage sources here,
+    // so a child-creation failure can still retry the original raster revision after HEAD drifts.
+    parent_payload.insert(
+        "modelManifestEntries".to_owned(),
+        Value::Array(vec![raster_model.clone()]),
+    );
     parent_payload.insert(
         "workflow".to_owned(),
         json!({
@@ -1280,35 +1510,39 @@ async fn create_vector_prompt_workflow_internal(
             duplicate_of_job_id,
         } => (None, Some(duplicate_of_job_id.to_owned()), 1),
     };
-    let portable_binding = crate::portable_admission::capture_portable_model_binding(
-        &state,
-        &JobType::VectorGenerate,
-        &parent_payload,
-        &payload.requested_gpu,
-    )
-    .await?
-    .map(|binding| {
-        serde_json::to_value(binding).map_err(|error| {
-            ApiError::internal(format!("Serialize portable model binding: {error}"))
+    let portable_binding = if let Some(source) = &replay_source {
+        let frozen: sceneworks_core::model_artifacts::portable_binding::PortableJobBinding =
+            serde_json::from_value(source.binding.clone()).map_err(|error| {
+                ApiError::bad_request(format!("Invalid recorded vector source binding: {error}"))
+            })?;
+        crate::portable_admission::validate_frozen_replay_binding(
+            &state,
+            &JobType::VectorGenerate,
+            &parent_payload,
+            &payload.requested_gpu,
+            &frozen,
+        )
+        .await?;
+        Some(source.binding.clone())
+    } else {
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &JobType::VectorGenerate,
+            &parent_payload,
+            &payload.requested_gpu,
+        )
+        .await?
+        .map(|binding| {
+            serde_json::to_value(binding).map_err(|error| {
+                ApiError::internal(format!("Serialize portable model binding: {error}"))
+            })
         })
-    })
-    .transpose()?;
+        .transpose()?
+    };
     if portable_binding.is_none() {
         return Err(ApiError::bad_request(
             "The vector workflow has no complete portable model source binding.",
         ));
-    }
-    if let Some(original_id) = source_job_id.as_deref().or(duplicate_of_job_id.as_deref()) {
-        let original_id = original_id.to_owned();
-        let previous = store_call(state.clone(), move |store, _timeout| {
-            store.portable_model_binding(&original_id)
-        })
-        .await?;
-        if previous != portable_binding {
-            return Err(ApiError::bad_request(
-                "The vector workflow's frozen model bytes are unavailable on this host; bind the original sources before replaying.",
-            ));
-        }
     }
     let parent = store_call(state.clone(), {
         let parent_id = parent_id.clone();
@@ -1336,14 +1570,31 @@ async fn create_vector_prompt_workflow_internal(
         }
     })
     .await?;
-    publish(&state, "job.updated", &parent);
+    publish(&state, "job.updated", &public_job_snapshot(parent.clone()));
     publish_queue(&state).await?;
 
     let mut child_request = raster_request;
     child_request.workflow_parent_id = Some(parent_id.clone());
     child_request.workflow_id = Some(workflow_id.clone());
-    let child = match create_image_job(State(state.clone()), ApiJson(child_request)).await {
-        Ok((_status, Json(child))) => child,
+    let child_result = if let Some(source) = replay_source
+        .as_ref()
+        .and_then(|source| source.child.as_ref())
+    {
+        enqueue_replayed_vector_raster_child(
+            &state,
+            source,
+            &parent_id,
+            &workflow_id,
+            &payload.requested_gpu,
+        )
+        .await
+    } else {
+        create_image_job(State(state.clone()), ApiJson(child_request))
+            .await
+            .map(|(_, Json(child))| child)
+    };
+    let child = match child_result {
+        Ok(child) => child,
         Err(error) => {
             let _ = store_call(state.clone(), {
                 let parent_id = parent_id.clone();

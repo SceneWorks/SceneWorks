@@ -48,6 +48,15 @@ pub(super) fn public_job_snapshot(mut job: JobSnapshot) -> JobSnapshot {
     for value in job.extra.values_mut() {
         redact_private_binding_markers(value);
     }
+    // Worker source guards may include an OS path in a refusal. Public diagnostics keep the
+    // actionable prefix while removing the path and any following private detail.
+    redact_absolute_paths_with(&mut job.message, "[redacted path]");
+    if let Some(error) = job.error.as_mut() {
+        redact_absolute_paths_with(error, "[redacted path]");
+    }
+    if let Some(title) = job.title.as_mut() {
+        redact_absolute_paths_with(title, "[redacted path]");
+    }
     job
 }
 
@@ -401,7 +410,10 @@ pub(super) fn redact_selected_text_encoder_paths(
 /// Web URLs and relative paths remain intact, while `file://` URLs are filesystem locations and
 /// are therefore private.
 pub(super) fn redact_absolute_paths(value: &mut String) {
-    const REDACTED: &str = "[selected text encoder]";
+    redact_absolute_paths_with(value, "[selected text encoder]");
+}
+
+fn redact_absolute_paths_with(value: &mut String, replacement: &str) {
     let bytes = value.as_bytes();
     let boundary = |index: usize| match index.checked_sub(1).and_then(|i| bytes.get(i)) {
         None => true,
@@ -509,7 +521,7 @@ pub(super) fn redact_absolute_paths(value: &mut String) {
             .checked_sub(1)
             .filter(|previous| matches!(bytes[*previous], b'"' | b'\'' | b'`' | b'<'));
         value.truncate(prefix_end.unwrap_or(index));
-        value.push_str(REDACTED);
+        value.push_str(replacement);
         return;
     }
 }
@@ -683,6 +695,10 @@ mod portable_redaction_tests {
             })
             .unwrap();
         let mut raw_with_echo = raw.clone();
+        raw_with_echo.message =
+            "Portable source refused: /private/worker/weights.safetensors".into();
+        raw_with_echo.error = Some("Cannot confine C:\\private\\worker\\model.safetensors".into());
+        raw_with_echo.title = Some("Source \\\\worker\\share\\model refused".into());
         raw_with_echo.result.insert(
             "nested".into(),
             json!({"portableModelBinding":{"secret":"must-not-leak"}}),
@@ -695,6 +711,11 @@ mod portable_redaction_tests {
         assert!(!serde_json::to_string(&public)
             .unwrap()
             .contains("must-not-leak"));
+        let diagnostics = format!("{} {:?} {:?}", public.message, public.error, public.title);
+        assert!(!diagnostics.contains("/private/worker"));
+        assert!(!diagnostics.contains("C:\\private"));
+        assert!(!diagnostics.contains("\\\\worker"));
+        assert!(diagnostics.contains("[redacted path]"));
         assert_eq!(public.payload["modelManifestEntry"]["id"], "trained_iris");
         assert_eq!(
             public.payload["modelManifestEntry"]["components"][0]["componentId"],
@@ -756,7 +777,12 @@ mod portable_redaction_tests {
             .unwrap()
             .contains("must-not-leak"));
         let mut event = serde_json::to_value(raw).unwrap();
+        event["message"] = json!("Portable source refused: /private/worker/weights.safetensors");
+        event["error"] = json!("Cannot confine C:\\private\\worker\\model.safetensors");
         redact_private_job_metadata_from_event("job.updated", &mut event);
         assert!(!serde_json::to_string(&event).unwrap().contains("/private"));
+        assert!(!serde_json::to_string(&event)
+            .unwrap()
+            .contains("C:\\\\private"));
     }
 }
