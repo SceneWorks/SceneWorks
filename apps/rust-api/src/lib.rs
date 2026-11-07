@@ -242,6 +242,7 @@ mod checkpoint_library;
 // attachment + typed external-library availability preflight, all data-driven.
 mod model_library;
 mod model_sources;
+mod portable_admission;
 // Read + control surface for the app-owned resolved-model hot cache (sc-19711): status for the
 // Settings storage card, and the per-model keep/remove operations the Model Manager drives.
 mod model_cache;
