@@ -1,6 +1,6 @@
 # APPREG-2 live hand-table inventory (SW-7032 preflight)
 
-Source baseline: local SW-7031 integration `6bb76c43c6` plus the approved-exception move in this branch. Lines below are declarations in that tree; G §1.4 and §2.1 describe the older census. This inventory records the owner and required disposition. A `pending` row is **not** accepted as resolved: it names a consumer migration still required before deleting its old owner.
+Source baseline: local SW-7032 integration `3ceec9278e` (which includes SW-7031 preflight `6bb76c43c6` and the 143-spec projection). Lines below are declaration anchors from the named source or G's older census; G §1.4 and §2.1 describe the older census. The [const-slice census](appreg2-const-slice-census.tsv) pins every one of the 332 current Rust const-slice candidates by path, symbol and line: 60 derive, 18 delete, 92 keep as product/load data, and 162 excluded with a reason (test, protocol, algorithm or package layout). It is a reviewed, checked-in audit snapshot, not a regex-based build or CI gate. A `pending` row is **not** accepted as resolved: it names a consumer migration still required before deleting its old owner.
 
 | Path:line | Symbol or group | Classification | Resolution evidence / remaining owner |
 |---|---|---|---|
@@ -35,4 +35,4 @@ Source baseline: local SW-7031 integration `6bb76c43c6` plus the approved-except
 
 ## Const-slice census boundary
 
-`rg -n '^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+[A-Z][A-Z0-9_]*\s*:\s*&\s*\[' crates/sceneworks-core/src crates/sceneworks-worker/src apps/rust-api/src` finds **332** current declarations, versus the roughly 230 estimated in G. Many are test fixtures, byte markers, file layouts, and algorithm inputs rather than model facts. This provisional inventory explicitly names the model-fact candidates from G; the remaining declarations still need a line-by-line scope audit and disposition before APPREG-2 can pass.
+`rg -n '^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+[A-Z][A-Z0-9_]*\s*:\s*&\s*\[' crates/sceneworks-core/src crates/sceneworks-worker/src apps/rust-api/src` finds **332** declarations at this baseline, versus the roughly 230 estimated in G. The companion TSV classifies each. A derive/delete row is unresolved until its old consumer moves and tests show the replacement semantics; the census is not itself proof of migration.
