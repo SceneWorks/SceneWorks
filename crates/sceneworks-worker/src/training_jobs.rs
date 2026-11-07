@@ -3541,8 +3541,14 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
         Some(objective) => {
             let task_settings = settings.clone();
             let config = plan.config.clone();
+            let bound_aux_paths = plan.extra.get("__portableAuxPaths").cloned();
             let resolved = crate::load_progress::spawn_blocking(move || {
-                crate::iris_task_training::task_load_inputs(&task_settings, objective, &config)
+                crate::iris_task_training::task_load_inputs_bound(
+                    &task_settings,
+                    objective,
+                    &config,
+                    bound_aux_paths.as_ref(),
+                )
             })
             .await
             .map_err(|error| task_join_error("Iris training resource check", error))

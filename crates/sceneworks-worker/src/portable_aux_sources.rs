@@ -187,6 +187,14 @@ pub(crate) fn resolve_selected_aux_source(
             }
         }
         #[cfg(native_lane)]
+        "iris_depth_export" => crate::iris_task_training::iris_depth_parent_export_dir(data_dir)
+            .map(|path| (path, false)),
+        #[cfg(native_lane)]
+        "iris_generation_text_encoder" => {
+            crate::iris_task_training::installed_generation_text_encoder(data_dir)
+                .map(|path| (path, false))
+        }
+        #[cfg(native_lane)]
         "ltx_training_gemma_override" => {
             crate::video_jobs::ltx::ltx_gemma_env_override().map(|path| (path, true))
         }

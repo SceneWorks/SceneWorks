@@ -31,6 +31,10 @@ pub(crate) enum SelectedSourceLocation {
         source_id: &'static str,
         default: Value,
     },
+    PreferredWorkerClaim {
+        preferred_id: &'static str,
+        fallback_id: &'static str,
+    },
     /// A worker-advertised exact digest closure, never an unpinned API download.
     OperatorCachedRepo(&'static str),
 }
@@ -52,6 +56,32 @@ fn push_operator_source(rows: &mut Vec<SelectedRouteSource>, slot: &str, source_
         source: SelectedSourceLocation::OperatorCachedRepo(source_id),
         selected_tier: None,
     });
+}
+
+fn push_builtin_training_source(
+    rows: &mut Vec<SelectedRouteSource>,
+    slot: &str,
+    catalog: &[Value],
+    catalog_id: &str,
+    component_id: &str,
+) -> Result<(), String> {
+    let entry = catalog
+        .iter()
+        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(catalog_id))
+        .ok_or_else(|| format!("training source {catalog_id} lacks catalog entry"))?;
+    let download = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.first())
+        .ok_or_else(|| format!("training source {catalog_id} lacks pinned download"))?;
+    rows.push(SelectedRouteSource {
+        model_slot: slot.to_owned(),
+        component_id: component_id.to_owned(),
+        role: ArtifactMemberRole::RequiredComponent,
+        source: SelectedSourceLocation::ManifestDownload(download.clone()),
+        selected_tier: None,
+    });
+    Ok(())
 }
 
 /// Source additions opened by a route but omitted from its always-required model closure.
@@ -140,6 +170,71 @@ pub(crate) fn selected_route_source_rows(
                     source: SelectedSourceLocation::ManifestDownload(download.clone()),
                     selected_tier: None,
                 });
+            }
+        }
+        if matches!(
+            plan.target.base_model.as_str(),
+            "iris_3b_depth" | "iris_3b_restore"
+        ) {
+            if training_slot.is_empty() {
+                return Err("Iris task training lacks a captured task entry".to_owned());
+            }
+            let manifest =
+                sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+                    .map_err(str::to_owned)?;
+            let catalog = manifest
+                .get("models")
+                .and_then(Value::as_array)
+                .ok_or("builtin model catalog lacks models")?;
+            if plan.target.base_model == "iris_3b_depth" {
+                if sceneworks_core::training::iris::depth::depth_init(&plan.config)
+                    .map_err(|error| error.to_string())?
+                    == sceneworks_core::training::iris::depth::DEPTH_INIT_PARENT
+                {
+                    push_builtin_training_source(
+                        &mut rows,
+                        training_slot,
+                        catalog,
+                        "iris_3b",
+                        "iris_parent_backbone",
+                    )?;
+                    rows.push(SelectedRouteSource {
+                        model_slot: training_slot.to_owned(),
+                        component_id: "iris_depth_parent".to_owned(),
+                        role: ArtifactMemberRole::RequiredComponent,
+                        source: SelectedSourceLocation::PreferredWorkerClaim {
+                            preferred_id: "iris_depth_export",
+                            fallback_id: "iris_generation_text_encoder",
+                        },
+                        selected_tier: None,
+                    });
+                }
+            } else {
+                for (catalog_id, _) in
+                    sceneworks_core::training::iris::restore::RESTORE_TRAINING_RESOURCE_MODELS
+                {
+                    push_builtin_training_source(
+                        &mut rows,
+                        training_slot,
+                        catalog,
+                        catalog_id,
+                        catalog_id,
+                    )?;
+                }
+                if sceneworks_core::training::iris::restore::restore_options(&plan.config)
+                    .map_err(|error| error.to_string())?
+                    .get("init")
+                    .and_then(Value::as_str)
+                    == Some("parent")
+                {
+                    push_builtin_training_source(
+                        &mut rows,
+                        training_slot,
+                        catalog,
+                        "iris_3b",
+                        "iris_parent_backbone",
+                    )?;
+                }
             }
         }
         let trainer_components = sceneworks_core::portable_sources::trainer_required_component_ids(
@@ -1135,5 +1230,48 @@ mod tests {
         assert!(rows
             .iter()
             .all(|row| matches!(row.source, SelectedSourceLocation::ManifestDownload(_))));
+    }
+
+    #[test]
+    fn iris_depth_parent_freezes_one_preferred_conditioning_source() {
+        let plan = json!({
+            "schemaVersion":1,"planVersion":1,"jobId":"job",
+            "target":{"targetId":"target","kernel":"iris_train","family":"iris","modality":"image","outputKind":"lora","baseModel":"iris_3b_depth","baseModelPath":"/models/iris"},
+            "dataset":{"datasetId":"dataset","datasetVersion":1,"rootPath":"/dataset","items":[]},
+            "config":{"rank":16,"alpha":32,"learningRate":0.0001,"steps":10,"batchSize":1,"gradientAccumulation":1,"resolution":512,"saveEvery":10,"seed":1,"optimizer":"adamw8bit","advanced":{"depthInit":"parent"}},
+            "output":{"loraId":"lora","outputDir":"/output","fileName":"lora.safetensors","format":"safetensors","triggerWords":[]},
+            "provenance":{"datasetId":"dataset","datasetVersion":1,"targetId":"target","baseModel":"iris_3b_depth","configSnapshot":{},"outputLoraId":"lora","sourceJobId":"job","createdAt":"2026-11-07T00:00:00Z"}
+        });
+        let manifest =
+            sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+        let entry = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "iris_3b_depth")
+            .unwrap();
+        let entries = [("baseModelManifestEntry".to_owned(), entry)];
+        let payload = json!({"plan":plan});
+        let rows = selected_route_source_rows(
+            &JobType::LoraTrain,
+            payload.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        assert!(rows
+            .iter()
+            .any(|row| row.component_id == "iris_parent_backbone"));
+        assert!(rows
+            .iter()
+            .any(|row| row.component_id == "iris_depth_parent"
+                && matches!(
+                    row.source,
+                    SelectedSourceLocation::PreferredWorkerClaim {
+                        preferred_id: "iris_depth_export",
+                        fallback_id: "iris_generation_text_encoder"
+                    }
+                )));
     }
 }

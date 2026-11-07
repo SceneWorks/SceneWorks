@@ -128,6 +128,29 @@ pub const SHIPPED_AUXILIARY_SOURCES: &[ShippedAuxiliarySource] = &[
         revision: "01df27d308466533aa09d251e3aebdcc627d07eb",
         files: &["gemma/*"],
     },
+    ShippedAuxiliarySource {
+        source_id: "iris_depth_export",
+        repo: "speridlabs/iris-3b",
+        revision: "7445443349bc9abe3c96f01ff793e2098ca012b3",
+        files: &[
+            "depth/config.yaml",
+            "depth/model.safetensors",
+            "depth/empty_prompt.safetensors",
+        ],
+    },
+    ShippedAuxiliarySource {
+        source_id: "iris_generation_text_encoder",
+        repo: "Qwen/Qwen3-VL-4B-Instruct",
+        revision: "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+        files: &[
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors",
+        ],
+    },
 ];
 
 pub fn shipped_auxiliary_source(source_id: &str) -> Option<&'static ShippedAuxiliarySource> {
@@ -335,6 +358,34 @@ mod tests {
             .as_array()
             .expect("models array")
             .to_vec()
+    }
+
+    #[test]
+    fn iris_depth_parent_alternatives_match_pinned_catalog_closures() {
+        let models = builtin_models();
+        let depth = models
+            .iter()
+            .find(|model| model["id"] == "iris_3b_depth")
+            .unwrap();
+        let export = shipped_auxiliary_source("iris_depth_export").unwrap();
+        let depth_download = &depth["downloads"][0];
+        assert_eq!(depth_download["repo"], export.repo);
+        assert_eq!(depth_download["revision"], export.revision);
+        assert_eq!(depth_download["files"], json!(export.files));
+        let generation = models
+            .iter()
+            .find(|model| model["id"] == "iris_3b")
+            .unwrap();
+        let encoder = shipped_auxiliary_source("iris_generation_text_encoder").unwrap();
+        let encoder_download = generation["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["componentId"] == "text_encoder")
+            .unwrap();
+        assert_eq!(encoder_download["repo"], encoder.repo);
+        assert_eq!(encoder_download["revision"], encoder.revision);
+        assert_eq!(encoder_download["files"], json!(encoder.files));
     }
 
     #[test]

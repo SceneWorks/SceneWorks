@@ -117,7 +117,10 @@ pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<Porta
         | "pulid_bisenet"
         | "pulid_scrfd"
         | "pulid_arcface"
-        | "veda_predictor" => Some(File),
+        | "veda_predictor"
+        | "iris_restore_train_vgg16"
+        | "iris_restore_train_lpips_lin"
+        | "iris_restore_train_critic_trunk" => Some(File),
         "depth_anything_v2_small"
         | "flux_ip_encoder"
         | "sdxl_ip_encoder"
@@ -125,7 +128,9 @@ pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<Porta
         | "sft_cover"
         | "repa_teacher"
         | "ltx_amoral_gemma_3_12b"
-        | "ltx_training_text_encoder" => Some(Directory),
+        | "ltx_training_text_encoder"
+        | "iris_depth_parent"
+        | "iris_parent_backbone" => Some(Directory),
         "instantid_mlx"
         | "instantid_controlnet"
         | "instantid_openpose"
@@ -409,6 +414,28 @@ pub fn required_portable_aux_source_ids(
                     .iter()
                     .map(|id| (*id).to_owned()),
             );
+            if id == "iris_3b_depth"
+                && crate::training::iris::depth::depth_init(&plan.config)
+                    .map_err(|error| error.to_string())?
+                    == crate::training::iris::depth::DEPTH_INIT_PARENT
+            {
+                ids.extend(["iris_parent_backbone", "iris_depth_parent"].map(str::to_owned));
+            }
+            if id == "iris_3b_restore" {
+                ids.extend(
+                    crate::training::iris::restore::RESTORE_TRAINING_RESOURCE_MODELS
+                        .iter()
+                        .map(|(catalog_id, _)| (*catalog_id).to_owned()),
+                );
+                if crate::training::iris::restore::restore_options(&plan.config)
+                    .map_err(|error| error.to_string())?
+                    .get("init")
+                    .and_then(Value::as_str)
+                    == Some("parent")
+                {
+                    ids.push("iris_parent_backbone".to_owned());
+                }
+            }
             if id == "ltx_2_3" {
                 ids.push("ltx_training_text_encoder".to_owned());
             }
@@ -663,5 +690,25 @@ mod tests {
         assert!(ids.contains("vitpose_plus_base"));
         assert!(ids.contains("instantid_face_stack"));
         assert_eq!(ids.len(), 4);
+        let mut task_plan = plan.clone();
+        task_plan.target.base_model = "iris_3b_depth".to_owned();
+        task_plan.target.kernel = "iris_train".to_owned();
+        task_plan.config.advanced.clear();
+        task_plan
+            .config
+            .advanced
+            .insert("depthInit".to_owned(), json!("parent"));
+        let payload = json!({"plan":task_plan});
+        let entry = json!({"id":"iris_3b_depth"});
+        assert_eq!(
+            required_portable_aux_source_ids(
+                &JobType::LoraTrain,
+                payload.as_object().unwrap(),
+                &entry,
+                "mlx"
+            )
+            .unwrap(),
+            vec!["iris_depth_parent", "iris_parent_backbone"]
+        );
     }
 }
