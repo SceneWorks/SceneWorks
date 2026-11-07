@@ -232,6 +232,210 @@ fn guidance_and_adapter_axes_remain_backend_specific() {
 }
 
 #[test]
+fn resolved_control_routes_and_retired_scail_conditioning_keep_their_owners() {
+    use serde_json::json;
+    for model in ["sdxl", "realvisxl", "realvisxl_lightning"] {
+        let spec = builtin_model_spec(model).unwrap();
+        assert!(spec.routes.contains_key("mlx"), "{model} MLX control owner");
+        assert!(
+            spec.routes.contains_key("candle"),
+            "{model} Candle control owner"
+        );
+        for backend in ["mlx", "candle"] {
+            assert!(image_claim(
+                model,
+                json!({"mode":"text_to_image","advanced":{"poses":[{}]}}),
+                backend
+            ));
+        }
+    }
+    let scail = builtin_model_spec("scail2_14b").unwrap();
+    for backend in ["mlx", "candle"] {
+        for route in scail.video_routes.get(backend).into_iter().flatten() {
+            assert!(
+                route.engines.iter().all(|engine| !engine
+                    .conditioning
+                    .iter()
+                    .any(|kind| kind == "multiReference")),
+                "SCAIL-2 retired multiReference on {backend}/{}",
+                route.mode
+            );
+        }
+    }
+    assert!(
+        crate::registry::approved_backend_exceptions()
+            .iter()
+            .all(|record| record.id != "epic-8588-conditioning-sequencing"),
+        "resolved conditioning must have no stale exception"
+    );
+}
+
+#[test]
+fn former_audit_regressions_follow_typed_image_and_video_owners() {
+    use serde_json::json;
+    let flux = builtin_model_spec("flux2_dev").unwrap();
+    for backend in ["mlx", "candle"] {
+        assert!(
+            flux.routes[backend].supports_prompt_enhancement,
+            "FLUX.2 prompt enhancement on {backend}"
+        );
+        assert!(image_claim(
+            "sana_1600m",
+            json!({"mode":"text_to_image","referenceAssetId":"base"}),
+            backend
+        ));
+        assert!(image_claim(
+            "sana_sprint_1600m",
+            json!({"mode":"text_to_image","referenceAssetId":"base"}),
+            backend
+        ));
+        assert!(image_claim(
+            "mage_flow_edit",
+            json!({"mode":"edit_image","sourceAssetId":"base","referenceAssetIds":["ref"]}),
+            backend
+        ));
+        let mage = builtin_model_spec("mage_flow_edit").unwrap();
+        for quant in ["q4", "q8"] {
+            assert!(
+                mage.routes[backend]
+                    .supported_quants
+                    .iter()
+                    .any(|q| q == quant),
+                "Mage Edit {backend}/{quant}"
+            );
+        }
+        for kind in ["reference", "multiReference"] {
+            assert!(mage.routes[backend]
+                .conditioning
+                .iter()
+                .any(|value| value == kind));
+        }
+        for mode in ["extend_clip", "video_bridge", "replace_person"] {
+            assert!(super::video_backend_mode_supported(backend, "ltx_2_3", mode).unwrap());
+            assert!(super::video_backend_mode_supported(backend, "ltx_2_5", mode).unwrap());
+            assert_eq!(
+                super::video_backend_mode_supported(backend, "ltx_2_3_eros", mode).unwrap(),
+                backend == "mlx",
+                "Eros withdrawal on {backend}/{mode}"
+            );
+        }
+        assert!(super::video_backend_mode_supported(
+            backend,
+            "wan_2_2_vace_fun_14b",
+            "replace_person"
+        )
+        .unwrap());
+    }
+    let krea = builtin_model_spec("krea_2_turbo").unwrap().project(None);
+    let convrot = krea["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["variant"] == "int8-convrot")
+        .unwrap();
+    assert_eq!(convrot["platforms"], json!(["windows", "linux"]));
+    let mlx_caps: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../config/engine-capabilities/runtime/capabilities.mlx.json"
+    ))
+    .unwrap();
+    let candle_caps: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../config/engine-capabilities/runtime/capabilities.candle.json"
+    ))
+    .unwrap();
+    assert!(!mlx_caps["workerCapabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "int8_convrot"));
+    assert!(candle_caps["workerCapabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "int8_convrot"));
+
+    let scail = builtin_model_spec("scail2_14b").unwrap();
+    for backend in ["mlx", "candle"] {
+        assert!(scail.video_routes[backend].iter().any(|route| {
+            route.mode == "animate_character"
+                && route
+                    .engines
+                    .iter()
+                    .any(|engine| engine.supports_lora && engine.supports_lokr)
+        }));
+    }
+    let vace = builtin_model_spec("wan_2_2_vace_fun_14b").unwrap();
+    for backend in ["mlx", "candle"] {
+        let replace = vace.video_routes[backend]
+            .iter()
+            .find(|route| route.mode == "replace_person")
+            .unwrap();
+        assert!(replace.engines.iter().any(|engine| engine.supports_lora));
+        assert!(replace.engines.iter().any(|engine| engine.supports_lokr));
+        for kind in ["controlClip", "reference"] {
+            assert!(replace
+                .engines
+                .iter()
+                .any(|engine| engine.conditioning.iter().any(|value| value == kind)));
+        }
+        for quant in ["q4", "q8"] {
+            assert_eq!(
+                replace
+                    .engines
+                    .iter()
+                    .any(|engine| engine.supported_quants.iter().any(|value| value == quant)),
+                backend == "mlx",
+                "VACE-Fun {backend}/{quant}"
+            );
+        }
+    }
+    let mage_target = crate::training::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "mage_flow_base_lora")
+        .unwrap();
+    assert!(mage_target.limits["networkTypes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|kind| kind == "full"));
+    let chatterbox = builtin_model_spec("chatterbox_tts").unwrap();
+    let candle_audio = chatterbox.provider_routes["candle"]
+        .iter()
+        .filter_map(|provider| provider.generator.as_ref())
+        .find(|generator| generator.id == "chatterbox_tts")
+        .unwrap();
+    for kind in ["referenceAudio", "voiceEmbedding"] {
+        assert!(candle_audio.conditioning.iter().any(|value| value == kind));
+    }
+    assert!(!chatterbox
+        .provider_routes
+        .get("mlx")
+        .into_iter()
+        .flatten()
+        .filter_map(|provider| provider.generator.as_ref())
+        .any(|generator| generator.id == "chatterbox_tts"));
+}
+
+#[test]
+fn former_audit_upscale_examples_use_live_dispatch_predicates() {
+    use crate::contracts::JobType;
+    for engine in ["aura-sr", "real-esrgan", "seedvr2"] {
+        let mut job = super::canonical_video_route_probe("wan_2_2", "text_to_video").unwrap();
+        job.job_type = JobType::ImageUpscale;
+        job.payload = serde_json::json!({"engine":engine})
+            .as_object()
+            .unwrap()
+            .clone();
+        for eligible in [
+            super::mlx::upscale_job_is_mlx_eligible(&job),
+            super::candle::upscale_job_is_candle_eligible(&job),
+        ] {
+            assert_eq!(eligible, engine != "aura-sr", "{engine} dispatch");
+        }
+    }
+}
+
+#[test]
 fn imported_image_defaults_join_live_family_routes() {
     use super::catalog::imported_provider_routes;
     use serde_json::json;
