@@ -708,7 +708,7 @@ mod tests {
             registered_model_content_path(&settings, "linked-model", &expected)
                 .unwrap()
                 .as_deref(),
-            Some(worker_file.as_path())
+            Some(std::fs::canonicalize(&worker_file).unwrap().as_path())
         );
         let claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
             "model-bytes",
@@ -720,7 +720,9 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert!(static_source_claims(&settings)
+        let mut claims = Vec::new();
+        registered_digest_source_claims(&settings, |claim| claims.push(claim));
+        assert!(claims
             .iter()
             .any(|claim| claim.source_id == claim_id && claim.files == vec![expected.clone()]));
         std::fs::write(&worker_file, b"substituted plan layer").unwrap();

@@ -711,6 +711,7 @@ impl VerifiedPlanLayers {
         sceneworks_core::checkpoint_plan_store::ResolvedCheckpointV1,
         sceneworks_core::checkpoint_plan_store::CheckpointPlanError,
     > {
+        let _lease = self.lease();
         use sceneworks_core::checkpoint_import::{
             CheckpointCatalogRecordV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
         };
