@@ -85,10 +85,15 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
                 emit_event_value(
                     Level::ERROR,
                     json!({
-                        "event": "mlx_h3_i2v_poisoned_worker_recycle",
+                        "event": if recycle.process_fault.is_some() {
+                            "mlx_owner_executor_poisoned_worker_recycle"
+                        } else {
+                            "mlx_h3_i2v_poisoned_worker_recycle"
+                        },
                         "workerId": settings.worker_id,
                         "gpuId": settings.gpu_id,
                         "firstTimeout": recycle.first_timeout,
+                        "processFault": recycle.process_fault,
                         "sawSubmissionsIgnored": recycle.saw_submissions_ignored,
                     }),
                 );

@@ -766,6 +766,56 @@ pub(super) struct CachedGeneratorFactory<L> {
     pub(super) load: L,
 }
 
+pub(super) fn start_cached_gen_stream_with_request_state_using_prepared<P, D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    prepare: impl FnOnce(&CancelFlag) -> WorkerResult<P> + Send + 'static,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    P: 'static,
+    D: FnOnce(
+            &dyn Generator,
+            gen_core::MemoryCacheState,
+            crate::generator_cache::ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            P,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
+    start_cached_gen_stream_with_request_state_using_owned_prepared(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        CachedGeneratorFactory {
+            cache: crate::generator_cache::GeneratorCacheHandle::global(),
+            load: load_generator,
+        },
+        prepare,
+        move |generator, state, policy, warm, external, _resident, prepared, tx, cancel| {
+            drive(
+                generator, state, policy, warm, external, prepared, tx, cancel,
+            )
+        },
+    )
+}
+
 pub(super) fn start_cached_gen_stream_with_request_state_using_owned<D, L>(
     job_id: String,
     engine_id: &'static str,
@@ -794,7 +844,55 @@ where
         + Send
         + 'static,
 {
+    start_cached_gen_stream_with_request_state_using_owned_prepared(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        factory,
+        |_| Ok(()),
+        move |generator, state, policy, warm, external, resident, (), tx, cancel| {
+            drive(
+                generator, state, policy, warm, external, resident, tx, cancel,
+            )
+        },
+    )
+}
+
+pub(super) fn start_cached_gen_stream_with_request_state_using_owned_prepared<P, D, L>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    factory: CachedGeneratorFactory<L>,
+    prepare: impl FnOnce(&CancelFlag) -> WorkerResult<P> + Send + 'static,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    P: 'static,
+    L: FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static,
+    D: FnOnce(
+            &dyn Generator,
+            gen_core::MemoryCacheState,
+            crate::generator_cache::ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+            P,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
     let cancel = CancelFlag::new();
+    let prepare_cancel = cancel.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
     let blocking = crate::load_progress::spawn(async move {
@@ -804,18 +902,33 @@ where
             engine_id,
             adapter_count,
         );
-        crate::generator_cache::with_cached_generator_for_request_using_cache(
+        crate::generator_cache::with_cached_generator_for_request_using_cache_prepared(
             factory.cache,
             engine_id,
             spec,
             load_error_context,
+            move || {
+                if prepare_cancel.is_cancelled() {
+                    return Err(crate::WorkerError::Canceled(
+                        "Image generation canceled before owner preparation.".to_owned(),
+                    ));
+                }
+                let prepared = prepare(&prepare_cancel)?;
+                if prepare_cancel.is_cancelled() {
+                    return Err(crate::WorkerError::Canceled(
+                        "Image generation canceled before generator load.".to_owned(),
+                    ));
+                }
+                Ok(prepared)
+            },
             factory.load,
             move |generator,
                   cache_state,
                   loaded_policy,
                   warm_policy,
                   external_committed_bytes,
-                  provider_resident_bytes| {
+                  provider_resident_bytes,
+                  prepared| {
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,
@@ -829,6 +942,7 @@ where
                     warm_policy,
                     external_committed_bytes,
                     provider_resident_bytes,
+                    prepared,
                     tx,
                     blocking_cancel,
                 )

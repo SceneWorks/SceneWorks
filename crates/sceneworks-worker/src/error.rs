@@ -19,6 +19,9 @@ pub enum WorkerError {
     /// as a raw loader ENOENT and never triggers a silent re-download of installed state.
     ExternalLibraryUnavailable(String),
     Engine(String),
+    /// The owner executor caught a panic or an explicitly typed fatal fault. Its backend state
+    /// cannot be touched again in this process; terminal accounting keeps this original detail.
+    ProcessPoisoned(String),
     Canceled(String),
 }
 
@@ -44,6 +47,7 @@ impl fmt::Display for WorkerError {
                 sceneworks_core::model_artifacts::external_library::EXTERNAL_LIBRARY_UNAVAILABLE_CODE
             ),
             Self::Engine(detail) => formatter.write_str(detail),
+            Self::ProcessPoisoned(detail) => formatter.write_str(detail),
             Self::Canceled(detail) => formatter.write_str(detail),
         }
     }

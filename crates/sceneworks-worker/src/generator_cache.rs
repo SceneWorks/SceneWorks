@@ -602,48 +602,6 @@ impl GeneratorCacheHandle {
         }
     }
 
-    /// Run a weights-free request compiler on the same serialized owner thread that subsequently
-    /// loads and drives the generator. MLX schedule construction uses MLX arithmetic whose exact
-    /// rounding is part of the existing image path; moving it to a Tokio caller changes both
-    /// thread ownership and class-(a) numerical behavior. This command does not touch the resident
-    /// cache entry and completes before the caller submits the load command.
-    #[cfg(any(native_lane, test))]
-    pub(crate) async fn prepare_on_owner<R>(
-        &self,
-        prepare: impl FnOnce() -> WorkerResult<R> + Send + 'static,
-    ) -> WorkerResult<R>
-    where
-        R: Send + 'static,
-    {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let progress_context = crate::load_progress::Context::capture();
-        let job: GeneratorJob = Box::new(move |cache| {
-            if reply_tx.is_closed() {
-                return;
-            }
-            let _progress = progress_context.install();
-            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(prepare)) {
-                Ok(result) => result,
-                Err(panic) => {
-                    if cache.evict().is_some() {
-                        cache_thread::release_backend_cache_after_evict();
-                    }
-                    Err(WorkerError::Engine(format!(
-                        "{}: {}",
-                        GENERATOR_SEAM_MESSAGES.panic_reset,
-                        cache_thread::panic_message(panic.as_ref())
-                    )))
-                }
-            };
-            let _ = reply_tx.send(result);
-        });
-        self.worker
-            .send(job)
-            .map_err(|_| WorkerError::Engine(GENERATOR_SEAM_MESSAGES.worker_stopped.into()))?;
-        reply_rx
-            .await
-            .map_err(|_| WorkerError::Engine(GENERATOR_SEAM_MESSAGES.worker_dropped.into()))?
-    }
     #[cfg(all(test, native_lane))]
     pub(crate) fn isolated() -> (Self, thread::JoinHandle<()>) {
         let (worker, rx) = mpsc::channel();
@@ -675,10 +633,11 @@ fn generator_worker() -> &'static mpsc::Sender<GeneratorJob> {
 /// Thin wrapper over the generic [`cache_thread::run_cache_worker`]: no evict-before-load
 /// ([`GENERATOR_EVICT_BEFORE_LOAD`]) and the generator-specific idle-eviction log.
 fn run_generator_cache_worker(rx: mpsc::Receiver<GeneratorJob>, idle_timeout: Option<Duration>) {
-    cache_thread::run_cache_worker(
+    cache_thread::run_cache_worker_with_panic_policy(
         rx,
         idle_timeout,
         GENERATOR_EVICT_BEFORE_LOAD,
+        cfg!(target_os = "macos"),
         |key: &LoadIdentity, idle_seconds| {
             // Documented event (docs/observability.md): expected idle-timeout eviction, so info
             // level with the engine + idle window.
@@ -1504,8 +1463,48 @@ pub(crate) async fn with_cached_generator_for_request_using_cache<R>(
 where
     R: Send + 'static,
 {
+    with_cached_generator_for_request_using_cache_prepared(
+        cache,
+        engine_id,
+        load,
+        load_error_context,
+        || Ok(()),
+        load_generator,
+        move |generator, state, policy, warm, external, resident, ()| {
+            run(generator, state, policy, warm, external, resident)
+        },
+    )
+    .await
+}
+
+/// Owner-local request compilation and its cached load/run share one indivisible queue command.
+pub(crate) async fn with_cached_generator_for_request_using_cache_prepared<P, R>(
+    cache: GeneratorCacheHandle,
+    engine_id: &'static str,
+    load: impl Into<GeneratorRequestLoad> + Send,
+    load_error_context: impl Into<String>,
+    prepare: impl FnOnce() -> WorkerResult<P> + Send + 'static,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+            P,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    P: 'static,
+    R: Send + 'static,
+{
     let GeneratorRequestLoad { spec, prepared_h3 } = load.into();
-    with_cached_generator_for_request_after_cold_admission_using_on_with_h3(
+    with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared(
         &cache.worker,
         async {
             if cache.evict_transform {
@@ -1520,6 +1519,7 @@ where
         load_error_context,
         0,
         |_| Ok(()),
+        prepare,
         load_generator,
         run,
     )
@@ -1635,6 +1635,54 @@ async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3
 where
     R: Send + 'static,
 {
+    with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared(
+        worker,
+        evict_transform,
+        engine_id,
+        spec,
+        prepared_h3,
+        load_error_context,
+        incoming_reclaimable_weight_bytes,
+        cold_admission,
+        || Ok(()),
+        load_generator,
+        move |generator, state, policy, warm, external, resident, ()| {
+            run(generator, state, policy, warm, external, resident)
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared<P, R>(
+    worker: &mpsc::Sender<GeneratorJob>,
+    evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    prepared_h3: Option<PreparedH3CacheContext>,
+    load_error_context: impl Into<String>,
+    incoming_reclaimable_weight_bytes: u64,
+    cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    prepare: impl FnOnce() -> WorkerResult<P> + Send + 'static,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+            P,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    P: 'static,
+    R: Send + 'static,
+{
     // One resident engine across the generator and transform caches (sc-25683): a resident
     // restoration transform is dropped before a generator can load on top of it. A no-op when no
     // transform was ever loaded. Injected (production passes the process-global
@@ -1687,7 +1735,7 @@ where
             ),
         })
     };
-    let run = move |cached: &CachedGenerator, access| {
+    let run = move |cached: &CachedGenerator, access, prepared| {
         run_spec.validate_prepared_file_pins().map_err(|error| {
             crate::classify_engine_error("Generator run source validation failed", error)
         })?;
@@ -1704,12 +1752,14 @@ where
             warm_policy,
             cached.external_committed_bytes,
             cached.provider_resident_bytes,
+            prepared,
         )
     };
     let incoming_key = key.clone();
-    cache_thread::run_cached_with_access_after_cold_admission(
+    cache_thread::run_cached_with_access_after_cold_admission_prepared(
         worker,
         key,
+        prepare,
         move |resident| {
             log_generator_cache_miss(resident.map(|(key, _)| key), &incoming_key);
             let resident = resident.map(|(_, cached)| cached);
@@ -3566,10 +3616,10 @@ mod tests {
         (tx, capture, worker)
     }
 
-    /// The plan compiler must run on the generator's actual OS owner, ahead of a cold load and
-    /// again ahead of warm reuse. A separate Tokio worker would change MLX schedule arithmetic.
     #[tokio::test]
-    async fn preparation_uses_the_same_owner_before_cold_and_warm_access() {
+    async fn prepared_request_keeps_plan_load_run_and_cancel_on_one_owner_turn() {
+        use std::sync::{Arc, Mutex};
+
         let (tx, _capture, worker) = start_capturing_cache_worker();
         let cache = GeneratorCacheHandle {
             worker: tx.clone(),
@@ -3577,52 +3627,105 @@ mod tests {
         };
         let weights = tempfile::tempdir().expect("weights tempdir");
         let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
-        let sequence = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        for expected in 1..=2 {
-            let marker = std::sync::Arc::clone(&sequence);
-            let owner = cache
-                .prepare_on_owner(move || {
-                    marker.store(expected, std::sync::atomic::Ordering::SeqCst);
-                    Ok(thread::current().id())
-                })
-                .await
-                .expect("plan compiled on cache owner");
-            let load_marker = std::sync::Arc::clone(&sequence);
-            let run_marker = std::sync::Arc::clone(&sequence);
-            let state = with_cached_generator_for_request_using_cache(
-                cache.clone(),
+        let trace = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let prepare_trace = Arc::clone(&trace);
+        let load_trace = Arc::clone(&trace);
+        let run_trace = Arc::clone(&trace);
+        let first = tokio::spawn(async move {
+            with_cached_generator_for_request_using_cache_prepared(
+                cache,
                 "sc3724_stub",
-                spec.clone(),
+                spec,
                 "stub load",
+                move || {
+                    prepare_trace.lock().unwrap().push("prepare");
+                    ready_tx
+                        .send(thread::current().id())
+                        .expect("tell caller owner id");
+                    release_rx.recv().expect("release preparation");
+                    Ok(7_u32)
+                },
                 move |_id, spec| {
-                    assert_eq!(thread::current().id(), owner);
-                    assert_eq!(load_marker.load(std::sync::atomic::Ordering::SeqCst), 1);
+                    load_trace.lock().unwrap().push("load");
                     staging_stub_load(spec)
                 },
-                move |_, state, _, warm_policy, _, _| {
-                    assert_eq!(thread::current().id(), owner);
-                    assert_eq!(
-                        run_marker.load(std::sync::atomic::Ordering::SeqCst),
-                        expected
-                    );
-                    warm_policy.decline(
+                move |_, _, _, warm, _, _, plan| {
+                    warm.decline(
                         crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
                     );
-                    Ok(state)
+                    assert_eq!(plan, 7);
+                    run_trace.lock().unwrap().push("run");
+                    Ok(())
                 },
             )
             .await
-            .expect("cache access completes");
-            assert_eq!(
-                state,
-                if expected == 1 {
-                    MemoryCacheState::Cold
-                } else {
-                    MemoryCacheState::Warm
-                }
-            );
-        }
-        drop(cache);
+        });
+        let owner_id = ready_rx.await.expect("preparation started");
+        let queued_trace = Arc::clone(&trace);
+        let (other_done_tx, other_done_rx) = tokio::sync::oneshot::channel();
+        tx.send(Box::new(move |_cache| {
+            assert_eq!(thread::current().id(), owner_id);
+            queued_trace.lock().unwrap().push("other job");
+            let _ = other_done_tx.send(());
+        }))
+        .expect("queue competing job");
+        release_tx.send(()).expect("release first request");
+        first.await.expect("first task").expect("first request");
+        other_done_rx.await.expect("competing job completed");
+        assert_eq!(
+            *trace.lock().unwrap(),
+            ["prepare", "load", "run", "other job"]
+        );
+
+        // A cancellation during owner preparation refuses the load while the next queue command
+        // remains behind this request. No backend object is created for the canceled request.
+        let cancel = gen_core::CancelFlag::new();
+        let (cancel_ready_tx, cancel_ready_rx) = tokio::sync::oneshot::channel();
+        let (cancel_release_tx, cancel_release_rx) = mpsc::channel();
+        let cancel_for_prepare = cancel.clone();
+        let canceled_trace = Arc::clone(&trace);
+        let canceled = tokio::spawn(async move {
+            let (request_tx, request_rx) = mpsc::channel::<GeneratorJob>();
+            let owner = thread::spawn(move || run_generator_cache_worker(request_rx, None));
+            let result = with_cached_generator_for_request_using_cache_prepared(
+                GeneratorCacheHandle {
+                    worker: request_tx.clone(),
+                    evict_transform: false,
+                },
+                "sc3724_stub",
+                LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf())),
+                "stub load",
+                move || {
+                    canceled_trace.lock().unwrap().push("cancel prepare");
+                    cancel_ready_tx.send(()).expect("signal cancellation seam");
+                    cancel_release_rx.recv().expect("release cancellation seam");
+                    if cancel_for_prepare.is_cancelled() {
+                        return Err(WorkerError::Canceled("canceled before load".to_owned()));
+                    }
+                    Ok(())
+                },
+                |_id, _spec| panic!("canceled request must not load"),
+                |_, _, _, _, _, _, ()| -> WorkerResult<()> {
+                    panic!("canceled request must not run")
+                },
+            )
+            .await;
+            drop(request_tx);
+            owner.join().expect("canceled owner exits");
+            result
+        });
+        cancel_ready_rx.await.expect("cancellation seam reached");
+        cancel.cancel();
+        cancel_release_tx
+            .send(())
+            .expect("release canceled request");
+        assert!(matches!(
+            canceled.await.expect("canceled task"),
+            Err(WorkerError::Canceled(_))
+        ));
+        assert_eq!(trace.lock().unwrap().last(), Some(&"cancel prepare"));
         drop(tx);
         worker.join().expect("cache owner exits");
     }

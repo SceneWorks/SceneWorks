@@ -42,6 +42,7 @@ fn classify(diagnostic: &str) -> Option<MetalSignal> {
 
 #[derive(Default)]
 struct Inner {
+    process_fault: Option<String>,
     first_timeout: Option<String>,
     first_secondary: Option<String>,
     quarantined: bool,
@@ -59,6 +60,7 @@ impl MlxWorkerRecovery {
     pub(crate) const fn new() -> Self {
         Self {
             inner: Mutex::new(Inner {
+                process_fault: None,
                 first_timeout: None,
                 first_secondary: None,
                 quarantined: false,
@@ -87,6 +89,24 @@ impl MlxWorkerRecovery {
         }
         inner.quarantined = true;
         Some(job_failure(&inner))
+    }
+
+    /// Typed owner-executor failure, already distinguished from request/provider errors at the
+    /// cache boundary. Keep the first error verbatim for terminal accounting and forbid reuse.
+    pub(crate) fn observe_process_fault(&self, detail: &str) -> String {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        inner.process_fault.get_or_insert_with(|| detail.to_owned());
+        inner.quarantined = true;
+        job_failure(&inner)
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn process_fault_detail(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .process_fault
+            .clone()
     }
 
     /// Whether this process may enter the next claim. Once false it never becomes true again; only
@@ -126,6 +146,7 @@ impl MlxWorkerRecovery {
         inner.recycle_started = true;
         Some(RecycleRequest {
             reason: status_reason(&inner),
+            process_fault: inner.process_fault.clone(),
             first_timeout: inner.first_timeout.clone(),
             saw_submissions_ignored: inner.first_secondary.is_some(),
         })
@@ -133,6 +154,9 @@ impl MlxWorkerRecovery {
 }
 
 fn job_failure(inner: &Inner) -> String {
+    if let Some(detail) = &inner.process_fault {
+        return detail.clone();
+    }
     match (&inner.first_timeout, &inner.first_secondary) {
         (Some(timeout), Some(_)) => format!(
             "{timeout} This first Metal watchdog timeout poisoned the MLX worker process. A later \
@@ -155,6 +179,9 @@ fn job_failure(inner: &Inner) -> String {
 }
 
 fn status_reason(inner: &Inner) -> String {
+    if let Some(detail) = &inner.process_fault {
+        return format!("The MLX owner executor is quarantined and will recycle before another claim. Original failure: {detail}");
+    }
     match &inner.first_timeout {
         Some(timeout) => format!(
             "The MLX process is quarantined after the first MiniMax-H3 I2V Metal watchdog timeout \
@@ -169,6 +196,7 @@ fn status_reason(inner: &Inner) -> String {
 
 pub(crate) struct RecycleRequest {
     pub(crate) reason: String,
+    pub(crate) process_fault: Option<String>,
     pub(crate) first_timeout: Option<String>,
     pub(crate) saw_submissions_ignored: bool,
 }
@@ -389,6 +417,29 @@ mod tests {
             assert_eq!(state.observe(diagnostic), None, "{diagnostic}");
         }
         assert!(state.can_claim());
+        assert!(state.begin_recycle().is_none());
+    }
+
+    #[test]
+    fn typed_owner_fault_keeps_first_error_and_recycles_only_after_terminal_write() {
+        let state = MlxWorkerRecovery::new();
+        assert_eq!(
+            state.observe_process_fault("original owner panic"),
+            "original owner panic"
+        );
+        assert_eq!(
+            state.observe_process_fault("later fallout"),
+            "original owner panic"
+        );
+        assert!(!state.can_claim());
+        assert!(state.begin_recycle().is_none());
+        state.note_terminal_failure_persisted();
+        let recycle = state.begin_recycle().expect("one replacement");
+        assert_eq!(
+            recycle.process_fault.as_deref(),
+            Some("original owner panic")
+        );
+        assert!(recycle.reason.contains("original owner panic"));
         assert!(state.begin_recycle().is_none());
     }
 }

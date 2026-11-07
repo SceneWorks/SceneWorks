@@ -165,6 +165,10 @@ pub(crate) struct CacheThread<K, M> {
     /// `false` does not (generator cache). Kept as a per-cache parameter to preserve each lane's
     /// current memory behavior exactly.
     evict_before_load: bool,
+    /// Generator execution panics can leave Metal state unusable. Other cache lanes retain their
+    /// historical per-request panic containment until they explicitly opt into process retirement.
+    fatal_panics: bool,
+    poisoned: bool,
 }
 
 struct Entry<K, M> {
@@ -191,6 +195,20 @@ where
         Self {
             entry: None,
             evict_before_load,
+            fatal_panics: false,
+            poisoned: false,
+        }
+    }
+
+    fn mark_poisoned(&mut self) {
+        self.poisoned = true;
+    }
+
+    fn mark_poisoned_with_error(&mut self, _error: &WorkerError) {
+        self.mark_poisoned();
+        #[cfg(all(target_os = "macos", not(test)))]
+        if let WorkerError::ProcessPoisoned(detail) = _error {
+            crate::mlx_worker_recovery::global().observe_process_fault(detail);
         }
     }
 
@@ -388,9 +406,8 @@ fn recv_job<J>(rx: &mpsc::Receiver<J>, idle_timeout: Option<Duration>) -> Worker
 /// `rx`, and evict the resident model after `idle_timeout` of inactivity. `log_idle_evict(key,
 /// idle_seconds)` emits the lane-specific idle-eviction telemetry.
 ///
-/// A panic escaping a job is contained (`catch_unwind`) so this one shared thread can never die and
-/// poison every later request (sc-6067); on a contained panic the cache is reset because post-abort
-/// backend state is suspect.
+/// A panic escaping a job is contained (`catch_unwind`). Ordinary cache lanes evict and keep
+/// serving (sc-6067); a generator owner with fatal-panics policy retires without GPU cleanup.
 pub(crate) fn run_cache_worker<K, M>(
     rx: mpsc::Receiver<CacheJob<K, M>>,
     idle_timeout: Option<Duration>,
@@ -399,7 +416,34 @@ pub(crate) fn run_cache_worker<K, M>(
 ) where
     K: Clone + PartialEq,
 {
+    run_cache_worker_with_panic_policy(rx, idle_timeout, evict_before_load, false, log_idle_evict)
+}
+
+/// The generator owner uses this policy because a panic after a backend submission cannot prove
+/// that dropping the model or clearing the backend cache is safe. The process supervisor replaces
+/// this owner after the active job's original failure has been persisted.
+pub(crate) fn run_cache_worker_with_fatal_panics<K, M>(
+    rx: mpsc::Receiver<CacheJob<K, M>>,
+    idle_timeout: Option<Duration>,
+    evict_before_load: bool,
+    log_idle_evict: impl Fn(&K, u64),
+) where
+    K: Clone + PartialEq,
+{
+    run_cache_worker_with_panic_policy(rx, idle_timeout, evict_before_load, true, log_idle_evict)
+}
+
+pub(crate) fn run_cache_worker_with_panic_policy<K, M>(
+    rx: mpsc::Receiver<CacheJob<K, M>>,
+    idle_timeout: Option<Duration>,
+    evict_before_load: bool,
+    fatal_panics: bool,
+    log_idle_evict: impl Fn(&K, u64),
+) where
+    K: Clone + PartialEq,
+{
     let mut cache = CacheThread::<K, M>::new(evict_before_load);
+    cache.fatal_panics = fatal_panics;
     loop {
         let job = match recv_job(&rx, idle_timeout) {
             WorkerEvent::Job(job) => job,
@@ -412,14 +456,27 @@ pub(crate) fn run_cache_worker<K, M>(
             }
             WorkerEvent::Disconnected => break,
         };
-        // Backstop: contain any panic that escapes a job's own guard so this single shared cache
-        // thread can never die and poison every later request (sc-6067). A job normally catches its
-        // own panic, replies with a clean error, and evicts; this catches anything it misses. On a
-        // contained panic the cache is reset because post-abort backend state is suspect.
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut cache))).is_err()
-            && cache.evict().is_some()
+        // Backstop for a panic that escaped the job's own reply guard. Ordinary cache lanes evict;
+        // the MLX generator owner retires because its backend state may be poisoned.
+        if let Err(_panic) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut cache)))
         {
-            release_backend_cache_after_evict();
+            if fatal_panics {
+                cache.mark_poisoned();
+                #[cfg(all(target_os = "macos", not(test)))]
+                crate::mlx_worker_recovery::global().observe_process_fault(&format!(
+                    "Generator owner queue panicked: {}",
+                    panic_message(_panic.as_ref())
+                ));
+            } else if cache.evict().is_some() {
+                release_backend_cache_after_evict();
+            }
+        }
+        if cache.poisoned {
+            // A backend destructor may itself submit to the poisoned device. Abandon this process's
+            // resident object; OS process retirement releases it without another GPU operation.
+            std::mem::forget(cache);
+            break;
         }
     }
 }
@@ -441,9 +498,9 @@ pub(crate) struct SeamMessages {
 /// thread, and await the result. The model lives on the worker thread — `load` builds it there and
 /// `run` executes there (so it may hold a `!Send` reference) — and only the `R` result crosses back.
 ///
-/// A panic from inside the load/run (e.g. an mlx-rs `.unwrap()` on a Metal OOM) is contained: it
-/// fails THIS request with a clean [`WorkerError::Engine`] built from `msgs.panic_reset`, evicts the
-/// resident model (post-abort backend state is suspect), and leaves the shared thread serving.
+/// A panic from inside load/run fails this request with the original diagnostic. Ordinary caches
+/// evict and continue; the MLX generator owner returns [`WorkerError::ProcessPoisoned`] and retires
+/// without backend cleanup.
 pub(crate) async fn run_cached<K, M, R>(
     worker: &mpsc::Sender<CacheJob<K, M>>,
     key: K,
@@ -490,43 +547,77 @@ where
     M: 'static,
     R: Send + 'static,
 {
+    run_cached_with_access_after_cold_admission_prepared(
+        worker,
+        key,
+        || Ok(()),
+        cold_admission,
+        load,
+        move |model, access, ()| run(model, access),
+        msgs,
+    )
+    .await
+}
+
+/// Compile request state on the cache owner immediately before its load/run transaction. This
+/// keeps global-seed preparation, materialization, cancellation and teardown in one queue entry.
+pub(crate) async fn run_cached_with_access_after_cold_admission_prepared<K, M, P, R>(
+    worker: &mpsc::Sender<CacheJob<K, M>>,
+    key: K,
+    prepare: impl FnOnce() -> WorkerResult<P> + Send + 'static,
+    cold_admission: impl FnOnce(Option<(&K, &M)>) -> WorkerResult<()> + Send + 'static,
+    load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
+    run: impl FnOnce(&M, CacheAccess, P) -> WorkerResult<R> + Send + 'static,
+    msgs: SeamMessages,
+) -> WorkerResult<R>
+where
+    K: Clone + PartialEq + Send + 'static,
+    M: 'static,
+    P: 'static,
+    R: Send + 'static,
+{
     let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
     let progress_context = crate::load_progress::Context::capture();
     let job: CacheJob<K, M> = Box::new(move |cache: &mut CacheThread<K, M>| {
         let _progress = progress_context.install();
-        // Contain a panic from inside the load/run so it fails THIS job with a clean error instead of
-        // unwinding out of the shared cache thread and stopping every subsequent request (sc-6067).
-        // The cached model is evicted on panic — post-abort backend state is suspect, so the next
-        // job reloads fresh.
+        // Contain a panic at this job's reply seam. Ordinary caches evict and continue; a fatal
+        // owner returns a typed process fault and retires without touching backend state.
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let prepared = prepare()?;
             cache.with_model_access_after_cold_admission(
                 key,
                 cold_admission,
                 load,
-                run,
+                move |model, access| run(model, access, prepared),
                 msgs.entry_missing,
             )
         })) {
             Ok(result) => result,
             Err(panic) => {
-                if cache.evict().is_some() {
+                if cache.fatal_panics {
+                    cache.mark_poisoned();
+                } else if cache.evict().is_some() {
                     release_backend_cache_after_evict();
                 }
-                Err(WorkerError::Engine(format!(
-                    "{}: {}",
-                    msgs.panic_reset,
-                    panic_message(panic.as_ref())
-                )))
+                let detail = format!("{}: {}", msgs.panic_reset, panic_message(panic.as_ref()));
+                if cache.fatal_panics {
+                    Err(WorkerError::ProcessPoisoned(detail))
+                } else {
+                    Err(WorkerError::Engine(detail))
+                }
             }
         };
+        if let Err(error @ WorkerError::ProcessPoisoned(_)) = &result {
+            cache.mark_poisoned_with_error(error);
+        }
         let _ = reply_tx.send(result);
     });
     worker
         .send(job)
-        .map_err(|_| WorkerError::Engine(msgs.worker_stopped.to_owned()))?;
+        .map_err(|_| owner_stopped_error(msgs.worker_stopped))?;
     reply_rx
         .await
-        .map_err(|_| WorkerError::Engine(msgs.worker_dropped.to_owned()))?
+        .map_err(|_| owner_stopped_error(msgs.worker_dropped))?
 }
 
 /// SCAIL-only sibling of [`run_cached_with_access`]. The admission closure runs on the dedicated
@@ -576,24 +667,38 @@ where
         })) {
             Ok(result) => result,
             Err(panic) => {
-                if cache.evict().is_some() {
+                if cache.fatal_panics {
+                    cache.mark_poisoned();
+                } else if cache.evict().is_some() {
                     release_backend_cache_after_evict();
                 }
-                Err(WorkerError::Engine(format!(
-                    "{}: {}",
-                    msgs.panic_reset,
-                    panic_message(panic.as_ref())
-                )))
+                let detail = format!("{}: {}", msgs.panic_reset, panic_message(panic.as_ref()));
+                if cache.fatal_panics {
+                    Err(WorkerError::ProcessPoisoned(detail))
+                } else {
+                    Err(WorkerError::Engine(detail))
+                }
             }
         };
+        if let Err(error @ WorkerError::ProcessPoisoned(_)) = &result {
+            cache.mark_poisoned_with_error(error);
+        }
         let _ = reply_tx.send(result);
     });
     worker
         .send(job)
-        .map_err(|_| WorkerError::Engine(msgs.worker_stopped.to_owned()))?;
+        .map_err(|_| owner_stopped_error(msgs.worker_stopped))?;
     reply_rx
         .await
-        .map_err(|_| WorkerError::Engine(msgs.worker_dropped.to_owned()))?
+        .map_err(|_| owner_stopped_error(msgs.worker_dropped))?
+}
+
+fn owner_stopped_error(fallback: &str) -> WorkerError {
+    #[cfg(all(target_os = "macos", not(test)))]
+    if let Some(detail) = crate::mlx_worker_recovery::global().process_fault_detail() {
+        return WorkerError::ProcessPoisoned(detail);
+    }
+    WorkerError::Engine(fallback.to_owned())
 }
 
 /// Parse a cache idle-eviction window (seconds) from an env value, falling back to `default_secs`
@@ -669,6 +774,167 @@ mod tests {
         let (tx, rx) = mpsc::channel::<CacheJob<u32, DropProbe>>();
         let worker = thread::spawn(move || run_cache_worker(rx, None, false, |_key, _seconds| {}));
         (tx, worker)
+    }
+
+    #[tokio::test]
+    async fn fatal_owner_panic_preserves_original_failure_without_gpu_cleanup_or_reuse() {
+        let (worker, rx) = mpsc::channel::<CacheJob<u32, DropProbe>>();
+        let owner = thread::spawn(move || {
+            run_cache_worker_with_fatal_panics(rx, None, false, |_key, _seconds| {})
+        });
+        let drops = Arc::new(AtomicUsize::new(0));
+        let loaded_drops = Arc::clone(&drops);
+        run_cached(
+            &worker,
+            7,
+            move || Ok(DropProbe(loaded_drops)),
+            |_model| Ok(()),
+            TEST_SEAM_MESSAGES,
+        )
+        .await
+        .expect("initial owner access");
+
+        let failure = run_cached(
+            &worker,
+            7,
+            || panic!("warm load must not execute"),
+            |_model| -> WorkerResult<()> { panic!("first Metal owner fault") },
+            TEST_SEAM_MESSAGES,
+        )
+        .await
+        .expect_err("panic must poison the owner");
+        assert!(matches!(failure, WorkerError::ProcessPoisoned(_)));
+        assert!(failure.to_string().contains("first Metal owner fault"));
+        owner.join().expect("poisoned owner retires");
+        assert_eq!(drops.load(Ordering::SeqCst), 0, "no backend destructor ran");
+        assert!(worker
+            .send(Box::new(|_| panic!("retired owner ran again")))
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn two_prepared_jobs_serialize_materialization_and_destruction_on_owner() {
+        use std::sync::Mutex;
+
+        struct OwnerDrop {
+            id: u32,
+            trace: Arc<Mutex<Vec<(u32, &'static str, thread::ThreadId)>>>,
+        }
+        impl Drop for OwnerDrop {
+            fn drop(&mut self) {
+                self.trace
+                    .lock()
+                    .unwrap()
+                    .push((self.id, "drop", thread::current().id()));
+            }
+        }
+
+        let (worker, rx) = mpsc::channel::<CacheJob<u32, OwnerDrop>>();
+        let owner = thread::spawn(move || run_cache_worker(rx, None, false, |_key, _seconds| {}));
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_worker = worker.clone();
+        let first_trace = Arc::clone(&trace);
+        let first = tokio::spawn(async move {
+            let prepared_trace = Arc::clone(&first_trace);
+            let loaded_trace = Arc::clone(&first_trace);
+            run_cached_with_access_after_cold_admission_prepared(
+                &first_worker,
+                104729,
+                move || {
+                    let id = thread::current().id();
+                    prepared_trace.lock().unwrap().push((104729, "prepare", id));
+                    ready_tx.send(id).expect("owner entered first prepare");
+                    release_rx.recv().expect("release first prepare");
+                    Ok(104729_u32)
+                },
+                |_| Ok(()),
+                move || {
+                    loaded_trace
+                        .lock()
+                        .unwrap()
+                        .push((104729, "load", thread::current().id()));
+                    Ok(OwnerDrop {
+                        id: 104729,
+                        trace: loaded_trace,
+                    })
+                },
+                move |_, _, seed| {
+                    assert_eq!(seed, 104729);
+                    first_trace
+                        .lock()
+                        .unwrap()
+                        .push((104729, "run", thread::current().id()));
+                    Ok(())
+                },
+                TEST_SEAM_MESSAGES,
+            )
+            .await
+        });
+        let owner_id = ready_rx.await.expect("first prepare starts");
+        let second_worker = worker.clone();
+        let second_trace = Arc::clone(&trace);
+        let second = tokio::spawn(async move {
+            let prepared_trace = Arc::clone(&second_trace);
+            let loaded_trace = Arc::clone(&second_trace);
+            run_cached_with_access_after_cold_admission_prepared(
+                &second_worker,
+                104730,
+                move || {
+                    prepared_trace.lock().unwrap().push((
+                        104730,
+                        "prepare",
+                        thread::current().id(),
+                    ));
+                    Ok(104730_u32)
+                },
+                |_| Ok(()),
+                move || {
+                    loaded_trace
+                        .lock()
+                        .unwrap()
+                        .push((104730, "load", thread::current().id()));
+                    Ok(OwnerDrop {
+                        id: 104730,
+                        trace: loaded_trace,
+                    })
+                },
+                move |_, _, seed| {
+                    assert_eq!(seed, 104730);
+                    second_trace
+                        .lock()
+                        .unwrap()
+                        .push((104730, "run", thread::current().id()));
+                    Ok(())
+                },
+                TEST_SEAM_MESSAGES,
+            )
+            .await
+        });
+        release_tx.send(()).expect("resume first request");
+        first.await.expect("first task").expect("first request");
+        second.await.expect("second task").expect("second request");
+        drop(worker);
+        owner.join().expect("owner exits and drops second model");
+        let observed = trace.lock().unwrap();
+        assert_eq!(
+            observed
+                .iter()
+                .map(|(id, phase, _)| (*id, *phase))
+                .collect::<Vec<_>>(),
+            [
+                (104729, "prepare"),
+                (104729, "load"),
+                (104729, "run"),
+                (104730, "prepare"),
+                (104729, "drop"),
+                (104730, "load"),
+                (104730, "run"),
+                (104730, "drop"),
+            ]
+        );
+        assert!(observed.iter().all(|(_, _, id)| *id == owner_id));
     }
 
     fn cache_state(worker: &mpsc::Sender<CacheJob<u32, DropProbe>>) -> (bool, Option<u32>) {

@@ -369,6 +369,7 @@ async fn handle_job_failure(
     match error {
         WorkerError::Canceled(_) => {}
         error => {
+            let owner_process_fault = matches!(error, WorkerError::ProcessPoisoned(_));
             // sc-16247: this detail is what `QueueScreen` renders as `job.error`, so it is the
             // last point before a raw `DriverError(...)` reaches the user. `classify_engine_error`
             // already annotates the lanes that route through it (the reported krea_2_turbo path),
@@ -376,7 +377,9 @@ async fn handle_job_failure(
             // problem hits all of them identically. Annotating here catches every one, and is a
             // no-op when the guidance is already present.
             let original_detail = error.to_string();
-            let recovery_detail = if settings.gpu_id == "mlx" {
+            let recovery_detail = if settings.gpu_id == "mlx" && owner_process_fault {
+                Some(mlx_worker_recovery::global().observe_process_fault(&original_detail))
+            } else if settings.gpu_id == "mlx" {
                 mlx_worker_recovery::global().observe(&original_detail)
             } else {
                 None
@@ -385,7 +388,11 @@ async fn handle_job_failure(
                 emit_event_value(
                     Level::ERROR,
                     json!({
-                        "event": "mlx_h3_i2v_worker_poisoned",
+                        "event": if owner_process_fault {
+                            "mlx_owner_executor_worker_poisoned"
+                        } else {
+                            "mlx_h3_i2v_worker_poisoned"
+                        },
                         "workerId": settings.worker_id,
                         "gpuId": settings.gpu_id,
                         "jobId": job.id,
