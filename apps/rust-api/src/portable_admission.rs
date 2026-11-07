@@ -1399,6 +1399,139 @@ async fn verify_pinned_worker_claim(
     Ok(())
 }
 
+/// Select the exact installed FLUX.2 Klein base tier the converter will borrow. Claims are
+/// authenticated worker inventory, but their hashes still need publisher proof for this
+/// request-selected repository and immutable revision. A different worker may claim the job only
+/// if it advertises the same frozen source ID and file ledger.
+async fn capture_conversion_borrow_member(
+    state: &AppState,
+    repo: &str,
+    preferred_subdir: Option<&str>,
+    role: ArtifactMemberRole,
+    component_id: String,
+    claims: &[PortableSourceClaim],
+    frozen_model: Option<&PortableModelBinding>,
+) -> Result<PortableArtifactMember, ApiError> {
+    let repo = sceneworks_core::hf_repo_id::namespaced(repo)
+        .map_err(|error| incomplete(format!("conversion base repository is invalid: {error}")))?;
+    let tiers = if let Some(preferred) = preferred_subdir.filter(|tier| !tier.is_empty()) {
+        let mut tiers = vec![preferred];
+        for fallback in ["bf16", "q8", "q4"] {
+            if !tiers.contains(&fallback) {
+                tiers.push(fallback);
+            }
+        }
+        tiers
+    } else {
+        vec!["root"]
+    };
+    let allowed = |claim: &PortableSourceClaim| {
+        let Some((claim_repo, revision, tier)) =
+            sceneworks_core::portable_sources::parse_flux2_convert_base_claim_id(&claim.source_id)
+        else {
+            return None;
+        };
+        let PortableSourceProvenance::PinnedRepo {
+            repository,
+            revision: provenance_revision,
+        } = &claim.provenance
+        else {
+            return None;
+        };
+        (claim_repo == repo
+            && repository == repo
+            && revision == provenance_revision
+            && tiers.contains(&tier))
+        .then_some(tier)
+    };
+    let chosen = if let Some(member) = frozen_source_member(frozen_model, &role, &component_id)? {
+        claims
+            .iter()
+            .find(|claim| {
+                allowed(claim).is_some() && claim.matches_worker_claim_member(member).is_ok()
+            })
+            .ok_or_else(|| incomplete("frozen conversion base has no matching live worker claim"))?
+    } else {
+        let mut candidates = claims
+            .iter()
+            .filter_map(|claim| allowed(claim).map(|tier| (claim, tier)))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|(left, left_tier), (right, right_tier)| {
+            let rank = |tier: &str| {
+                tiers
+                    .iter()
+                    .position(|candidate| *candidate == tier)
+                    .unwrap()
+            };
+            rank(left_tier)
+                .cmp(&rank(right_tier))
+                .then_with(|| left.source_id.cmp(&right.source_id))
+                .then_with(|| left.closure_sha256.cmp(&right.closure_sha256))
+        });
+        candidates
+            .first()
+            .map(|(claim, _)| *claim)
+            .ok_or_else(|| incomplete("conversion base has no fresh installed tier claim"))?
+    };
+    chosen
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    let (_, revision, tier) =
+        sceneworks_core::portable_sources::parse_flux2_convert_base_claim_id(&chosen.source_id)
+            .ok_or_else(|| incomplete("conversion base worker claim ID is invalid"))?;
+    verify_conversion_borrow_claim(state, chosen, repo, revision, tier).await?;
+    let member = PortableArtifactMember {
+        role,
+        component_id: Some(component_id),
+        source: PortableSourceIdentity::WorkerClaim {
+            source_id: chosen.source_id.clone(),
+            provenance: chosen.provenance.clone(),
+            closure_sha256: chosen.closure_sha256.clone(),
+        },
+        tier: Some(tier.to_owned()),
+        files: chosen.files.clone(),
+    };
+    member
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    Ok(member)
+}
+
+async fn verify_conversion_borrow_claim(
+    state: &AppState,
+    claim: &PortableSourceClaim,
+    repo: &str,
+    revision: &str,
+    tier: &str,
+) -> Result<(), ApiError> {
+    let prefix = if tier == "root" {
+        String::new()
+    } else {
+        format!("{tier}/")
+    };
+    let selectors =
+        ["tokenizer/*", "text_encoder/*", "vae/*"].map(|selector| format!("{prefix}{selector}"));
+    let remote = resolve_trusted_pinned_files(state, repo, revision, &selectors).await?;
+    let mut normalized = remote
+        .into_iter()
+        .map(|mut file| {
+            file.relative_path = file
+                .relative_path
+                .strip_prefix(&prefix)
+                .map_err(|_| incomplete("conversion base file escaped selected tier"))?
+                .to_path_buf();
+            Ok(file)
+        })
+        .collect::<Result<Vec<PortableArtifactFile>, ApiError>>()?;
+    normalized.sort();
+    if normalized != claim.files {
+        return Err(incomplete(
+            "conversion base worker bytes differ from selected pinned tier",
+        ));
+    }
+    Ok(())
+}
+
 fn common_parent(paths: &[&str]) -> Result<PathBuf, ApiError> {
     let first = paths
         .first()
