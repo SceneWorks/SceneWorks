@@ -56,7 +56,7 @@ mod strict_control_tests {
             .unwrap()
             .clone();
         assert_eq!(
-            selected_krea_control_override(&advanced, override_file.to_str().as_deref())
+            selected_krea_control_override(&advanced, override_file.to_str())
                 .unwrap()
                 .as_deref(),
             Some(bound.as_path())
@@ -65,11 +65,9 @@ mod strict_control_tests {
             .as_object()
             .unwrap()
             .clone();
-        assert!(
-            selected_krea_control_override(&missing, override_file.to_str().as_deref()).is_err()
-        );
+        assert!(selected_krea_control_override(&missing, override_file.to_str()).is_err());
         assert_eq!(
-            selected_krea_control_override(&JsonObject::new(), override_file.to_str().as_deref())
+            selected_krea_control_override(&JsonObject::new(), override_file.to_str())
                 .unwrap()
                 .as_deref(),
             Some(override_file.as_path())
