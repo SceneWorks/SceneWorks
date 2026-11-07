@@ -492,6 +492,30 @@ async fn vector_workflow_metadata_server() -> (String, tokio::task::JoinHandle<(
     (base_url, server)
 }
 
+async fn uncataloged_convert_metadata_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("conversion metadata listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener address")
+    );
+    let app = axum::Router::new().fallback(|uri: axum::http::Uri| async move {
+        if uri.path().ends_with("/revision/main") {
+            axum::Json(json!({"sha":"4444444444444444444444444444444444444444"}))
+        } else {
+            axum::Json(json!([{
+                "type":"file", "path":"diffusion_pytorch_model.safetensors", "size":7,
+                "lfs":{"oid":"f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d"}
+            }]))
+        }
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("metadata server");
+    });
+    (base_url, server)
+}
+
 #[test]
 fn prompt_vector_revision_identity_rejects_mutable_missing_and_conflicting_primaries() {
     let revision = "1111111111111111111111111111111111111111";
@@ -2349,10 +2373,12 @@ async fn generic_model_utility_jobs_reject_path_unsafe_model_id_before_create() 
 
 #[tokio::test]
 async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
+    let (base_url, metadata_server) = uncataloged_convert_metadata_server().await;
+    let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let conversion_root = settings.data_dir.join("models/mlx");
-    let app = create_app(settings).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
 
     let request_convert = |output_dir: &std::path::Path| {
         json!({
@@ -2361,6 +2387,7 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
             "payload": {
                 "modelId": "model-1",
                 "sourceRepo": "owner/source",
+                "converter": "flux2_dev_quant",
                 "outputDir": output_dir.display().to_string(),
             },
         })
@@ -2378,6 +2405,34 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
         StatusCode::CREATED,
         "backup-looking model names remain valid in the disjoint recovery design: {accepted}"
     );
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let binding_json: String = connection
+        .query_row(
+            "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+            [accepted["id"].as_str().expect("conversion job id")],
+            |row| row.get(0),
+        )
+        .expect("conversion binding exists");
+    let binding: Value = serde_json::from_str(&binding_json).expect("conversion binding JSON");
+    for route in binding["routes"].as_object().expect("route map").values() {
+        let primary = &route["models"][0]["members"][0]["source"];
+        assert_eq!(primary["kind"], "revision");
+        assert_eq!(
+            primary["identity"]["revision"],
+            "4444444444444444444444444444444444444444"
+        );
+    }
+    let (status, edited_source) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/jobs/{}/duplicate",
+            accepted["id"].as_str().expect("conversion job id")
+        ),
+        json!({"payloadChanges":{"sourceFile":"different.safetensors"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{edited_source}");
 
     for (output_dir, expected) in [
         (conversion_root.join("nested/model-2"), "direct child"),
@@ -2407,6 +2462,7 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
     }
 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    metadata_server.abort();
     assert_eq!(
         jobs.as_array().expect("jobs array").len(),
         1,
