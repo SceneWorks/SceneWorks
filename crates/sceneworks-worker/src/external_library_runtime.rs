@@ -1562,6 +1562,16 @@ fn rewrite_loader_locator(
             .or_insert_with(|| json!({}))
             .as_object_mut()
             .ok_or_else(|| invalid_binding("advanced options are not an object"))?;
+        if source_id == "strict_control" {
+            if let Some(weights) = advanced
+                .get_mut("controlWeights")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                // Some legacy strict-control loaders read this field directly. Give them the
+                // verified attempt copy, never the API host's recorded physical locator.
+                weights.insert("path".to_owned(), json!(path.clone()));
+            }
+        }
         advanced
             .entry("__portableAuxPaths".to_owned())
             .or_insert_with(|| json!({}))
@@ -2441,6 +2451,21 @@ fn selected_local_artifact_path(
             })
             .transpose()?
     } else if member.role == ArtifactMemberRole::Control {
+        if member.component_id.as_deref() == Some("strict_control") {
+            let overlay_id = payload
+                .get("advanced")
+                .and_then(|advanced| advanced.get("controlWeights"))
+                .and_then(|weights| weights.get("overlayId"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid_binding("registered control overlay has no ID"))?;
+            return crate::portable_source_claims::registered_control_overlay_path(
+                settings,
+                payload,
+                overlay_id,
+                &member.files,
+            )?
+            .ok_or_else(|| invalid_binding("registered control overlay bytes are unavailable"));
+        }
         let claim = serde_json::Value::Object(payload.clone());
         member
             .component_id

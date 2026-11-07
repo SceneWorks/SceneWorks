@@ -109,14 +109,20 @@ fn catalog_hash(settings: &Settings) -> [u8; 32] {
     let mut paths = vec![
         manifests.join("user.models.jsonc"),
         manifests.join("user.loras.jsonc"),
+        manifests.join("user.control_overlays.jsonc"),
     ];
     let projects =
         sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
     if let Ok(projects) = projects.list_projects() {
         paths.extend(
             projects
+                .iter()
+                .map(|project| PathBuf::from(&project.path).join("loras/manifest.jsonc")),
+        );
+        paths.extend(
+            projects
                 .into_iter()
-                .map(|project| PathBuf::from(project.path).join("loras/manifest.jsonc")),
+                .map(|project| PathBuf::from(project.path).join("control-overlays/manifest.jsonc")),
         );
     }
     paths.sort();
@@ -340,6 +346,143 @@ fn registered_digest_source_claims(
             }
         }
     }
+    for manifest in control_overlay_manifests(settings) {
+        for overlay in catalog_records(&manifest, "controlOverlays") {
+            let Some(id) = overlay.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(path) = control_overlay_entry_file(settings, &manifest, &overlay) else {
+                continue;
+            };
+            append_registered_claim(&mut claims, "control", id, None, &path);
+            for claim in claims.drain(..) {
+                publish(claim);
+            }
+        }
+    }
+}
+
+fn control_overlay_manifests(settings: &Settings) -> Vec<PathBuf> {
+    let mut manifests = vec![settings
+        .config_dir
+        .join("manifests/user.control_overlays.jsonc")];
+    let projects =
+        sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
+    if let Ok(projects) = projects.list_projects() {
+        manifests.extend(
+            projects
+                .into_iter()
+                .map(|project| PathBuf::from(project.path).join("control-overlays/manifest.jsonc")),
+        );
+    }
+    manifests
+}
+
+/// Resolve the same local file the API's control-overlay catalog selects. Hosted rows use a
+/// pinned Revision binding and do not advertise an operator Digest source.
+fn control_overlay_entry_file(
+    settings: &Settings,
+    manifest: &Path,
+    overlay: &serde_json::Value,
+) -> Option<PathBuf> {
+    let source = overlay.get("source");
+    if source
+        .and_then(|source| source.get("provider"))
+        .or_else(|| overlay.get("provider"))
+        .and_then(serde_json::Value::as_str)
+        == Some("huggingface")
+    {
+        return None;
+    }
+    let raw = source
+        .and_then(|source| source.get("path"))
+        .or_else(|| overlay.get("path"))
+        .and_then(serde_json::Value::as_str)?;
+    let raw = Path::new(raw);
+    let scoped = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else if manifest
+        == settings
+            .config_dir
+            .join("manifests/user.control_overlays.jsonc")
+    {
+        settings.data_dir.join(raw)
+    } else if manifest
+        .file_name()
+        .is_some_and(|name| name == "manifest.jsonc")
+        && manifest.parent().is_some_and(|parent| {
+            parent
+                .file_name()
+                .is_some_and(|name| name == "control-overlays")
+        })
+    {
+        manifest.parent()?.parent()?.join(raw)
+    } else {
+        return None;
+    };
+    let path = if scoped.is_file() {
+        scoped
+    } else {
+        let file = overlay
+            .get("files")
+            .and_then(serde_json::Value::as_array)?
+            .first()?
+            .as_str()?;
+        scoped.join(file)
+    };
+    let path = crate::paths::normalize_app_managed_model_entry_path(
+        settings,
+        &path,
+        "registered control overlay",
+    )
+    .ok()?;
+    path.is_file().then_some(path)
+}
+
+pub(crate) fn registered_control_overlay_path(
+    settings: &Settings,
+    payload: &JsonObject,
+    overlay_id: &str,
+    frozen_files: &[PortableArtifactFile],
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(weights) = payload
+        .get("advanced")
+        .and_then(|advanced| advanced.get("controlWeights"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(None);
+    };
+    if weights.get("overlayId").and_then(serde_json::Value::as_str) != Some(overlay_id)
+        || weights
+            .get("_catalogAuthorized")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return Ok(None);
+    }
+    let mut manifests = Vec::new();
+    if let Some(project) = crate::paths::project_path_for_payload(settings, payload)? {
+        manifests.push(project.join("control-overlays/manifest.jsonc"));
+    }
+    manifests.push(
+        settings
+            .config_dir
+            .join("manifests/user.control_overlays.jsonc"),
+    );
+    for manifest in manifests {
+        for overlay in catalog_records(&manifest, "controlOverlays") {
+            if overlay.get("id").and_then(serde_json::Value::as_str) != Some(overlay_id) {
+                continue;
+            }
+            let Some(path) = control_overlay_entry_file(settings, &manifest, &overlay) else {
+                continue;
+            };
+            if capture_registered_files(&path).is_ok_and(|files| files == frozen_files) {
+                return Ok(Some(path));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Catalog source paths are relative to their declared scope, not the worker's process cwd.
@@ -811,6 +954,107 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn registered_control_overlay_claims_rebind_only_matching_confined_bytes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut settings = Settings::for_test(temp.path().join("data"));
+        settings.config_dir = temp.path().join("config");
+        let global_file = settings.data_dir.join("overlays/global.safetensors");
+        std::fs::create_dir_all(global_file.parent().unwrap()).unwrap();
+        std::fs::write(&global_file, b"global overlay").unwrap();
+        let global_manifest = settings
+            .config_dir
+            .join("manifests/user.control_overlays.jsonc");
+        std::fs::create_dir_all(global_manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &global_manifest,
+            serde_json::to_vec(&json!({"controlOverlays":[
+                {"id":"global-pose","source":{"path":"overlays/global.safetensors"}}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let store =
+            sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
+        let project = store.create_project("Pose").unwrap();
+        let project_path = PathBuf::from(&project.path);
+        let project_file = project_path.join("control-overlays/pose.safetensors");
+        std::fs::create_dir_all(project_file.parent().unwrap()).unwrap();
+        std::fs::write(&project_file, b"project overlay").unwrap();
+        std::fs::write(
+            project_file.parent().unwrap().join("manifest.jsonc"),
+            serde_json::to_vec(&json!({"controlOverlays":[
+                {"id":"project-pose","source":{"path":"control-overlays/pose.safetensors"}}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let project_files = capture_registered_files(&project_file).unwrap();
+        let mut claims = Vec::new();
+        registered_digest_source_claims(&settings, |claim| claims.push(claim));
+        let claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "control",
+            "project-pose",
+            None,
+            &sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                &project_files,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(claims
+            .iter()
+            .any(|claim| claim.source_id == claim_id && claim.files == project_files));
+        let payload = json!({"projectId":project.id,"advanced":{"controlWeights":{
+            "overlayId":"project-pose","_catalogAuthorized":true
+        }}})
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(
+            registered_control_overlay_path(&settings, &payload, "project-pose", &project_files)
+                .unwrap()
+                .as_deref(),
+            Some(std::fs::canonicalize(&project_file).unwrap().as_path())
+        );
+        std::fs::write(&project_file, b"changed overlay").unwrap();
+        assert!(registered_control_overlay_path(
+            &settings,
+            &payload,
+            "project-pose",
+            &project_files
+        )
+        .unwrap()
+        .is_none());
+        let global_files = capture_registered_files(&global_file).unwrap();
+        let global_claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "control",
+            "global-pose",
+            None,
+            &sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                &global_files,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(claims
+            .iter()
+            .any(|claim| claim.source_id == global_claim_id && claim.files == global_files));
+        #[cfg(unix)]
+        {
+            let escaped = temp.path().join("escaped.safetensors");
+            std::fs::write(&escaped, b"outside").unwrap();
+            let link = settings.data_dir.join("overlays/escape.safetensors");
+            std::os::unix::fs::symlink(&escaped, &link).unwrap();
+            assert!(control_overlay_entry_file(
+                &settings,
+                &global_manifest,
+                &json!({"source":{"path":"overlays/escape.safetensors"}})
+            )
+            .is_none());
+        }
+    }
 
     #[test]
     fn registered_model_bytes_rebind_across_filename_and_refuse_substitution() {

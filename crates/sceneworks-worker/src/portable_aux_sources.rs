@@ -20,6 +20,63 @@ pub(crate) fn has_bound_aux_paths(advanced: &JsonObject) -> bool {
     advanced.get("__portableAuxPaths").is_some()
 }
 
+/// A verified portable attempt must use its leased strict-control copy even when an operator
+/// env override is present. Legacy, unbound jobs retain the operator override behavior.
+pub(crate) fn selected_krea_control_override(
+    advanced: &JsonObject,
+    env_override: Option<&str>,
+) -> crate::WorkerResult<Option<PathBuf>> {
+    if has_bound_aux_paths(advanced) {
+        return bound_aux_path(advanced, "strict_control")
+            .map(Some)
+            .ok_or_else(|| {
+                crate::WorkerError::InvalidPayload("missing bound strict_control source".to_owned())
+            });
+    }
+    Ok(env_override
+        .map(str::trim)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file()))
+}
+
+#[cfg(test)]
+mod strict_control_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn admitted_overlay_precedes_krea_env_override() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let bound = temp.path().join("bound.safetensors");
+        let override_file = temp.path().join("override.safetensors");
+        std::fs::write(&bound, b"admitted").unwrap();
+        std::fs::write(&override_file, b"other").unwrap();
+        let advanced = json!({"__portableAuxPaths":{"strict_control":bound}})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            selected_krea_control_override(&advanced, override_file.to_str().as_deref())
+                .unwrap()
+                .as_deref(),
+            Some(bound.as_path())
+        );
+        let missing = json!({"__portableAuxPaths":{}})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(
+            selected_krea_control_override(&missing, override_file.to_str().as_deref()).is_err()
+        );
+        assert_eq!(
+            selected_krea_control_override(&JsonObject::new(), override_file.to_str().as_deref())
+                .unwrap()
+                .as_deref(),
+            Some(override_file.as_path())
+        );
+    }
+}
+
 /// The native PuLID providers take a single face directory although the three selected
 /// face files belong to two independently authenticated repositories. Compose only from
 /// worker-leased immutable paths and keep this temporary directory alive through generation.
