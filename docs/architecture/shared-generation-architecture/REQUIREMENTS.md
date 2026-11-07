@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.6, design decisions approved.** All four round-5 findings are addressed. Michael approved DEC-1…19 on 2026-11-03, taking the remaining recommendations together after DEC-8. This approves the design direction, not implementation evidence or execution. Design-only: no program tracker items, pilots or implementation start from these decisions. |
-| **Date** | 2026-11-03 |
-| **Repositories** | SceneWorks (`main` @ `a1d95e2c4`) and inference (`origin/main` @ `a43724b82`). All citations refer to those revisions. |
+| **Status** | **Draft 0.7, revised after round 7.** DEC-1…19 retain their November 3 approval. The additional contracts below are the revision author's proposed resolution of the review findings. See the [closure review](evidence/reviews/round8-codex.md) for evidence and remaining implementation obligations. |
+| **Date** | 2026-11-07 |
+| **Repositories** | The A–H research baseline is SceneWorks `a1d95e2c4` and inference `a43724b82`. Round 7 and this revision use SceneWorks `e1ffa54df6` and its inference pin `2b09938e33`. Historical citations retain their original revision. |
 | **Companion** | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): target design, migration strategy and phased roadmap. |
 | **Evidence** | [evidence/](evidence/): eight read-only research reports, cited as `[A §n]` … `[H §n]`. The internal reviews are summarized in [REVIEW_LOG.md](REVIEW_LOG.md). |
 | **Origin** | We asked whether a "low-res first steps" acceleration could be added for every model. It could not be added once, because the engine has no shared pipeline. An audit then showed that the same structural cause is behind the month-plus memory-ladder effort. |
@@ -124,7 +124,7 @@ Every requirement inherits these. A design that violates one needs an explicit d
 |---|---|
 | **AP1** | **Policy is tensor-free; kernels belong to the backend.** Plans, schedules, phase math, hook ordering, admission math and capability derivation live in tensor-free contract crates. Backends implement tensor operations only. This is proven by tiling, attention budget, block window and residency [A §8]. |
 | **AP2** | **Shared code owns the loop; families supply narrow hooks and data.** Families never re-implement cancellation, progress, preview, cleanup, phase iteration or step-invariant caching. |
-| **AP3** | **Off means absent, and absent means byte-identical.** A disabled feature or hook produces numerics byte-identical to today's per backend, with peak memory within PERF-2. |
+| **AP3** | **A disabled Feature is inert.** On the same implementation, compare its disabled path with the path that omits its hooks, holding backend, weights, seed, settings and execution policy fixed. Outputs must match byte for byte and peak memory satisfies PERF-2. Comparing a migrated implementation to its pre-feature reference is a separate AP13 obligation. |
 | **AP4** | **Refuse, never silently ignore.** A request field or feature that a route cannot honour is refused at plan time with a typed reason. |
 | **AP5** | **One primary declaration per fact; everything else derived.** Structural facts that only a family knows (prediction type, time convention, legal grids, `DriverSupport`, geometry-change support) are declared once, by the family. Every *behavioural* declaration that could disagree with the code has a Tier 0 conformance check (MIG-3). |
 | **AP6** | **Structural facts, not identities.** Shared code and feature predicates key on declared structure, never on model or family id strings. |
@@ -144,7 +144,7 @@ Format: **ID — statement.** *Rationale and evidence.* **Accept:** observable a
 
 ### 6.1 Engine pipeline (PIPE)
 
-**PIPE-1 — Every generation route executes through one shared pipeline runner with a fixed stage vocabulary.** Plan compiles the complete run once; each pass then invokes the stages it needs in this order, with explicit dependencies on earlier pass outputs:
+**PIPE-1 — Every denoising route executes through one shared runner with a fixed stage vocabulary. Native token routes use their typed driver under the common lifecycle (XL-1, LANE-1).** Plan compiles a bounded execution contract once. Fixed passes and admitted conditional invocations then invoke the stages it needs in this order, with explicit dependencies on earlier pass outputs:
 - Plan
 - Prompt-prep
 - Encode
@@ -158,11 +158,13 @@ Format: **ID — statement.** *Rationale and evidence.* **Accept:** observable a
 
 A **pass** has its own resolved schedules, prompt/conditioning bindings, init and decode policy. A **phase** is a slice within that pass. Stage results may be reused only when their declared dependencies match. Intermediate decode/re-encode and later prompt preparation remain runner-owned stage invocations, not hidden work in a transition or driver. The plan lists their residency and event visibility. This is a finite generation-stage vocabulary, not a general workflow language.
 
+A route whose next stage depends on model output declares a typed conditional region. Before load it fixes the allowed stage templates, guards, token/image/geometry limits, cache lifetime, output retention and conservative peak. At runtime the runner owns each invocation and records the realized path. A family may classify a stop token or supply a native operation. It cannot create an unpriced pass. SenseNova must preserve zero-image completion, repeated image feedback into text generation, early stop, cancellation and its existing outer-step progress. The worked trace is in PLAN §6.10.
+
 Encode includes declared dependencies among encoder components, such as Qwen edit's vision features feeding its text encoder. Reference denotes subsequent latent/aligned conditioning; it must not force vision inputs needed by Encode to be produced afterward. Those component dependencies and lifetimes are explicit in the same plan.
 
-*C1; the stage model is derived from 14 family walks [B §2].* **Accept:** for every row of the route inventory (PIPE-18), a weights-free trace test shows the runner invoking the stages in dependency order. The Hires.fix trace preserves first-pass unenhanced prompts, final-pass enhancement/encoding, reference replacement and event ordering. No route has a hand-written `generate` that bypasses the runner.
+*C1; the stage model is derived from 14 family walks [B §2].* **Accept:** for every generation row of PIPE-18, a weights-free trace shows its declared runner or native-driver stages in dependency order. The Hires.fix trace preserves first-pass unenhanced prompts, final-pass enhancement/encoding, reference replacement and event ordering. A denoising route cannot bypass the runner; a token-driver route must use the shared lifecycle and declared output adapter.
 
-**PIPE-2 — The request is compiled into a typed `RenderPlan` before any weights move.** The plan holds every decision a Feature may rewrite: passes and their stage dependencies; per-phase, per-stream geometry; schedules and coupling; guidance; conditioning requirements; transitions and boundary estimates; decode; memory inputs; seeds; and output. After all rewrites, the complete plan is validated for applicability, legal grids and step domains, ordering cycles, ownership, sampling conventions, driver support, stage dependencies and history compatibility. A changed admission selection revalidates and re-prices the resolved plan before execution. **Accept:** for every route, a plan can be built, inspected and serialized without loading weights. Invalid combinations refuse before loading. Admission consumes that exact resolved plan (ADM-3).
+**PIPE-2 — The request is compiled into a typed `RenderPlan` before any weights move.** The plan holds every decision a Feature may rewrite: passes and their stage dependencies; per-phase, per-stream geometry; schedules and coupling; guidance; conditioning requirements; transitions and boundary estimates; decode; memory inputs; seeds; and output. After all rewrites, the complete plan is validated for applicability, legal grids and step domains, ordering cycles, ownership, sampling conventions, driver support, stage dependencies and history compatibility. A changed admission selection revalidates and re-prices the resolved plan before execution. **Accept:** for every route, a plan, including any conditional stage bounds, can be built, inspected and serialized without loading weights. Invalid combinations refuse before loading. Admission consumes that exact resolved plan (ADM-3).
 
 **PIPE-3 — Phases are first-class.** A phase is a span of the trajectory with optional overrides: per-stream geometry, model slot, adapter scales, guidance plan, solver and **solver-history policy** (`Carry` or `Reset`).
 - **Model-slot selection** may be a σ-keyed rule evaluated per model evaluation. Wan curated MoE selects the expert per evaluation by σ, including inside Heun and DPM++-SDE sub-evaluations (`mlx-gen-wan/src/pipeline/moe.rs:139-145,187-194`).
@@ -240,10 +242,10 @@ Encode includes declared dependencies among encoder components, such as Qwen edi
 - **New noise streams use one splitmix derivation with per-stream salts.** Feature re-noise and recipe-introduced draws get named domains; adding an inert phase boundary does not create a new noise stream or restart existing draws. The precedent is sc-20414's `DENOISE_PASS_RENOISE_SALT`.
 - **The image-index → seed relation is exported per route.** It is the relation SceneWorks persists for regenerate and replay (`worker/src/image_jobs/stream.rs:441`).
 
-**Accept:** replay is bit-identical; the persisted per-image seeds are unchanged; no legacy scheme changes without a class (c) decision.
+**Accept:** exact replay uses its recorded execution identity (OPT-6) and reproduces the result on the declared deterministic backend. Regeneration keeps its existing fresh-seed semantics. The persisted per-image seed relation changes only with a class (c) decision.
 
 **PIPE-12 — Outputs and reports are typed.**
-- **Outputs:** `Images`, `ImagesRgba`, `Video{frames, fps, audio}`, `Audio`, interleaved text and images, and streamed chunks (PIPE-16).
+- **Outputs:** `Images`, `ImagesRgba`, `Video{frames, fps, audio}`, `Audio`, interleaved text and images, streamed chunks (PIPE-16), and sanitized canonical SVG plus its preview and terminal metadata for vector generation.
 - **Execution reports** come back from the run as a typed report, not from `&self` getters [A P1, P13].
 
 **Accept:** `Generator` has no family-named methods.
@@ -256,7 +258,7 @@ Encode includes declared dependencies among encoder components, such as Qwen edi
 **PIPE-14 — Concurrency is safe by construction.**
 - **Shared resident modules are immutable during a run.** Today's invariant "keep the shared resident DiT unmutated" (`gen-core-family/src/krea_multiphase.rs:36-45`) holds. Per-request state is passed through forward arguments or the step context, never stored on shared modules. That state includes adapter scales, step context and guidance state.
 
-**Accept:** a Tier 0 test runs two interleaved requests with different phase scales on one provider; each yields its single-request trace.
+**Accept:** thread-safe descriptors submit messages to the assigned executor. Loaded providers, codecs, hooks, prepared tensors and global RNG remain on their owning thread unless the route proves a stronger capability. Load, forward, cancellation handling, destruction and poison recovery follow that ownership. Queue entire trajectories for a global-seed route, including draws and materialization. Test two distinct seeds and adapters against isolated traces, verify thread identity through teardown, and permit actual overlap only for opted-in providers. A changed native execution boundary gets a separately dispatched worker-entry proof.
 
 **PIPE-15 — The engine has a typed error taxonomy and failure posture.**
 - **Errors are classed** as request-local, provider-poisoned or process-poisoned.
@@ -277,7 +279,7 @@ Encode includes declared dependencies among encoder components, such as Qwen edi
 
 **PIPE-17 — Telemetry flows through `gen-core-telemetry`** at stage, phase and lifecycle hooks. Existing telemetry fields stay stable (OPT-8). **Accept:** existing telemetry consumers see unchanged field names.
 
-**PIPE-18 — A route inventory is generated from the catalogs.** It has one row per (family, route, backend), with the planned loop kind, the owning feature and the expected AP13 class. It is a typed dump (AP11), not a hand list. **Accept:** every program feature's exit criterion is stated against inventory rows; the program ends with every row migrated or refused by an approved decision.
+**PIPE-18 — Reconcile callable routes independently of their registration.** Include the union of old API/MCP operations and worker dispatch, platform bundle registrations, imports, bespoke worker entry points and external mode/conditioning paths. Each row names platform/backend, logical provider and mode, conditioning semantics, output contract, migration owner, AP13 class and disposition. Preserve genuine unsupported combinations and legacy refusals explicitly. A catalog export alone cannot define the denominator. **Accept:** removing a shipping bespoke route from the candidate export fails reconciliation. ENG-6 closes its image/video runner cohort. ENG-7 closes outstanding bespoke registrations, ENG-14 adopts audio, and the program closes only when every in-scope row has its delivered owner or a specifically approved exception (PLAN §6.11).
 
 ### 6.2 Hooks and features (HOOK)
 
@@ -310,7 +312,7 @@ These runtime classes determine purpose and activation authority. AP13's separat
 
 **HOOK-4 — Applicability is computed and exported.** For each route and backend, the engine computes which Features apply, why the others do not, and the parameter limits. That export is the UI-availability source for SceneWorks (REG-3, OPT-2). The worker's linked engine is authoritative at run time (REG-3). **Accept:** removing a Feature's structural precondition in a test flips availability in the export and the UI with no table edits.
 
-**HOOK-5 — Hooks cost nothing when unused.** A route with no active Feature runs exactly today's computation (AP3), with no measurable per-step overhead (PERF-1).
+**HOOK-5 — Hooks cost nothing when unused.** A route with no active Feature runs the same implementation with Feature work absent (AP3), with no measurable per-step overhead (PERF-1).
 
 ### 6.3 Shared components (COMP)
 
@@ -398,7 +400,7 @@ Kit replacements that change operation order declare class (b) or (c). **Accept:
 
 **Accept:** per-phase adapter Features work on every route that is residual-capable or can switch to residual; merge-only routes refuse structurally.
 
-**WGT-4 — Training reuses inference modules in differentiable mode (DEC-2 approved).** The backend switches from fused to composable kernels. Trainers get adapter injection, frozen-stage caching, x0 decode and checkpoint boundaries from the shared layers; optimizer, loss and data orchestration remain trainer-owned. **Accept:** no trainer-specific model-graph copy remains (`dit_train`, `train_dit` and kin).
+**WGT-4 — Training reuses inference modules in differentiable mode (DEC-2 approved).** The backend switches from fused to composable kernels. Trainers get adapter injection, frozen-stage caching, x0 decode and checkpoint boundaries from the shared layers; optimizer, loss and data orchestration remain trainer-owned. **Accept:** no trainer-specific model-graph copy remains (`dit_train`, `train_dit` and kin). The feature deleting each trainer graph must compare the old and new trainable/frozen sets, gradients or parameter deltas for a fixed batch, and the next update after checkpoint resume versus uninterrupted execution. Use that trainer's existing oracle and a bounded separately dispatched backward proof.
 
 **WGT-5 — Loads and model-slot swaps are cancellable** at component and batch boundaries, with cleanup. For example, a Wan expert swap reloads 14B parameters mid-run. **Accept:** a Tier 0 cancellation test at each lifecycle stage passes.
 
@@ -431,12 +433,13 @@ The rung set is open.
 - **Aliases and shared weights are counted once.**
 - **Budget domains are kept apart:** host, device, and unified memory (counted once).
 
-Pricing uses per-component weights, existing aggregate phase/operation peak evidence (two anchors plus derivation) and shape-computed additional buffers. Transition operations include their executing component/evaluation workspace and the components actually resident at that operation. Evidence states whether weights, ordinary latents, streams and joint workspace are already included; adding them again is invalid. A transition is not bounded by weights and latent shapes alone. This remains component/phase accounting, not a per-allocation model or a new measurement gate.
+Pricing uses per-component weights, existing aggregate evidence with verified scope (where available, two anchors plus derivation) and shape-computed additional buffers. Transition operations include their executing component/evaluation workspace and the components actually resident at that operation. Evidence states whether weights, ordinary latents, streams and joint workspace are already included; adding them again is invalid. A transition is not bounded by weights and latent shapes alone. This remains component/phase accounting, not a per-allocation model or a new measurement gate.
 
 **Accept:**
 - Low-res start, multi-phase, video and audio-video plans are priced by one mechanism.
 - Pure fixtures cover two streams that each fit alone but exceed the budget together, a transition peak above either steady phase, and alias deduplication.
 - A learned-transition workspace is priced above latent-only deltas; a joint-total evidence value is not added to its already included stream totals. Ambiguous evidence follows the existing route's unpriced-evidence posture and is reported as such, rather than silently reinterpreted.
+- A whole-request high-water copied into several phase fields keeps its whole-request basis. For a new recipe, admission must establish a conservative byte bound for all additional live work or refuse that recipe with a typed reason before loading. An unknown extension cannot inherit a permissive legacy posture. The original request keeps its existing posture. Compare exact-fit and one-byte-under against the same effective budget (PLAN §6.12).
 
 **MEM-4 — Admission selects only equivalent-class Features (DEC-8 approved).**
 - **Equivalent-class Features are output-preserving within a declared and recorded quality bound.** Tiled decode changes pixels (`gen-core/src/memory_strategy/decode_quality.rs`), so "output-preserving" cannot mean byte-identical here.
@@ -446,7 +449,7 @@ Pricing uses per-component weights, existing aggregate phase/operation peak evid
 
 **MEM-5 — The runner drives today's `MemoryRequestScope` lifecycle** (47 implementations; `gen-core/src/memory_strategy/run.rs:191-217`) for every migrated route **until that route's rung is relocated**. Each phase supplies its actual geometry, conditioning/mode and selected rungs under the admitted whole-plan reservation; a final-phase identity is never reused for a different phase. The first geometry-changing feature delivers that integration and conservative pricing for its adopted routes. **Accept:** scope-identity traces pass at each boundary, admitted rungs keep applying after each migration, and the Tier 1 peak-memory check shows no regression. Later admission unification is not a prerequisite for correcting these first-consumer inputs.
 
-**MEM-6 — The engine-side iOS admission and pricing system is relocated onto the shared memory geometry and plan.** That system is `ios_admission.rs`, per-family `ios_pricing/` and the solver quanta checks. Per-quantum OS-headroom checks stay as hooks. **Accept:** no per-family `ios_pricing` module remains; iOS admits from plan bytes.
+**MEM-6 — The engine-side iOS admission and pricing system is relocated onto the shared memory geometry and plan.** That system is `ios_admission.rs`, per-family `ios_pricing/` and the solver quanta checks. Per-quantum OS-headroom checks stay as hooks. **Accept:** no per-family `ios_pricing` module remains; iOS admits from plan bytes. Compare old/new cold, already-resident and falling-headroom decisions in byte units, preserving incremental process footprint, absolute cap and per-quantum checks. Changed device logic requires applicable physical-device evidence, with build profile, architecture, features and media inclusion held constant for size comparisons.
 
 ### 6.7 Engine registry and capabilities (REG)
 
@@ -465,12 +468,12 @@ One call registers the generator, memory contract, fixtures and behaviour. **Acc
 
 **REG-2 — Capabilities are computed from route records and their primary declarations (AP5).** **Accept:** the hand `Capabilities` literals, the 4,516-line preview scanner and the additivity scanner are deleted; every behavioural declaration has a Tier 0 conformance check.
 
-**REG-3 — There is one versioned capability export per backend.** It is a **hardware-free build product**: a pure function of the linked registry, produced in hosted CI for both backends' feature sets, with no GPU and no off-Mac step.
+**REG-3 — There is one versioned capability export per backend.** It is a **hardware-free build product**: a pure function of the linked registry, produced in hosted CI for both backends' feature sets, without a GPU or a dedicated off-Mac runner.
 - **It feeds SceneWorks' UI availability and registry.**
 - **The worker's linked engine is authoritative at run time.** On disagreement, the worker refuses with a typed reason.
-- **Each pin bump regenerates the export from the pinned engine** and checks it in. A Tier 0 check confirms the checked-in export equals the export generated from the linked registry.
+- Generate the canonical product schema from descriptor-only registration for each shipping feature set. Check semantic equality when registry/schema inputs change. A pin with identical schema bytes requires no artifact churn, attestation, capability campaign or proof of measurement currency.
 
-If any part cannot be produced without hardware, the requirement and the critical path must say so. **Accept:** the export is produced by hosted CI; no hand table restates its fields.
+A hosted descriptor build must establish the required platform feature sets. If native linkage prevents this, revise REG-3 explicitly before proceeding with any device-dependent substitute. **Accept:** the export is produced by hosted CI; no hand table restates its fields.
 
 **REG-4 — The request contract is a typed core plus typed extension blocks.** Feature parameters live in a feature map. Selectors are enums at the boundary. Id-string gates move into route declarations. **Accept:** the core request has no family-specific top-level field; no shared code compares model ids.
 
@@ -482,10 +485,10 @@ If any part cannot be produced without hardware, the requirement and the critica
 
 **APPREG-1 — Each model has one typed `ModelSpec`, built in two layers.**
 - **The static layer** is built at build time from the capability export, the slim product manifest and the evidence store.
-- **The runtime layer** holds imported models, ComfyUI external bases from disk scans, Iris trained-checkpoint overlays, user overrides and hides, OS, install, decoder-availability and credential projections, and converted-model paths.
+- **The runtime layer** represents imported/external/trained model identities, authorized product overrides and hides. API and worker project installation, decoder, credential availability and converted paths in their own scope. A portable snapshot contains the immutable logical identity and permitted author choices.
 - **One merge rule** combines the layers. The plan states where each runtime source lives (API or worker).
 
-**Accept:** web, API, core and worker consume the same projection. Acceptance fixtures cover a builtin model, an imported model, a ComfyUI external base and an Iris trained checkpoint.
+**Accept:** web, API, core and worker agree on logical identity and shared product facts; only the authorized host supplies local bindings or policy. Acceptance fixtures cover a builtin model, an imported model, a ComfyUI external base and an Iris trained checkpoint.
 
 **APPREG-2 — No hand table restates registry facts.** An **enumerated, checked-in inventory** lists every table that restates model facts, by path and line. Each entry is classified *derive*, *keep as product data* or *delete*. The inventory is built from [G §1.4, §2.1] and review [APP-15], with about 230 const tables `[M]`. **Accept:** every *derive* or *delete* entry is resolved; the acceptance criterion is that inventory, not an open-ended grep.
 
@@ -495,7 +498,7 @@ If any part cannot be produced without hardware, the requirement and the critica
 
 **APPREG-5 — Manifest schema v2 has an upgrader for user `*.jsonc` files.** Desktop seeding ships the evidence store. Every consumer of manifest memory keys migrates in the same feature: scripts, Rust readers and the memory-adapter (review [APP-16] lists them). **Accept:** old user manifests load; no consumer reads removed keys.
 
-**APPREG-6 — The job carries a resolved, typed `ModelSpec` snapshot.** This covers non-builtin models and multi-worker deployments such as RunPod. A worker never re-resolves a different spec. Legacy job rows that carry `modelManifestEntry` are upgraded by the upgrader. **Accept:** imported, external and trained models run on a remote worker; retry of an old job row works.
+**APPREG-6 — Job snapshots bind logical identity across workers.** Persist source revision/digest, component and adapter identities, selected variant/tier and authored options. Send those identities and authorized job references. The server owns repository/component restrictions and acknowledgments. Aliases, overrides and stale client metadata cannot weaken policy. The receiving worker binds the exact identity to a validated local artifact and lease. Physical locators, credentials, access tokens and install observations stay local and are excluded from portable payloads, shares and public receipts. Upgrade legacy carriers with the same checks. **Accept:** retry on another root uses the same bytes. A missing artifact, alias with changed bytes, or imported overlay clearing a protected component refuses without substituting another source or starting a disallowed fetch/load.
 
 ### 6.9 Options, validation and UI (OPT)
 
@@ -550,6 +553,7 @@ Rules:
 - **A core upgrader maps legacy shapes.**
 - **Forward compatibility:** writers emit v1-compatible shares whenever the content is expressible in v1.
 - **Unknown higher versions are refused with a typed reason**; rollback behaviour is defined.
+- Emit outer share version 2 for an active recipe that v1 cannot express, even if the option block has its own version. Write v1 for expressible content. An actual old reader must accept the ordinary v1 fixture and reject the active v2 envelope. Exact replay pins backend, source/adapter identities, seed scheme, resolved recipe/estimator and output-affecting execution choices, including the rung. If unavailable, return a typed refusal. Portable import revalidates local availability and identifies any loss. Regenerate retains its existing fresh-seed behavior. Any different permitted result requires an explicit new action.
 - **The upgrade corpus is built from historical builder outputs in git history**, never from user data.
 
 **Accept:** the corpus upgrades losslessly; an old desktop build reads every new share that is expressible in v1.
@@ -559,7 +563,7 @@ Rules:
 **OPT-8 — Refusals and telemetry are stable product surfaces.**
 - **Typed refusals are rendered** in the web UI and in MCP responses. Raw engine strings no longer reach the queue UI.
 - **Telemetry field names stay stable.**
-- **The stamp key `advanced.memoryStrategy` stays a replay contract** (`regenerateImage.js:33`).
+- **The stamp key `advanced.memoryStrategy` stays readable** as execution provenance. Exact replay uses a versioned receipt. Asset-based regeneration strips the old machine decision before current admission.
 
 **Accept:** the refusal-render tests pass; existing telemetry consumers are unchanged.
 
@@ -569,7 +573,7 @@ Rules:
 
 **ADM-2 — Backend specifics sit behind `BackendBudget`:** probe, reclaimable bytes, margins and evict-to-reclaim, with one byte-denominated budget vocabulary. **Failure posture is a property of (backend × evidence basis), declared per route or derived.** It is not a per-backend constant: some MLX routes admit when unpriced today (`instantid.rs:285-288`; SenseNova). **Accept:** only `BackendBudget` implementations contain backend-conditional admission code.
 
-**ADM-3 — Admission consumes the `RenderPlan` and the route's memory contract**, including concurrent live-set pricing (MEM-3) and Feature memory effects. It runs in two phases: Plan (before load) and Run (in-cache, warm/cold-aware). Every feature that first adds geometry, stages or allocations to a route updates its existing admission consumers in that feature; APP-4 later unifies those consumers. An existing estimator can remain unchanged only if a documented bound covers every additional live allocation over the supported settings. The admitted resolved plan is the plan executed; Run rechecks local budget/cache facts and any equivalent-feature reselection revalidates/re-prices the plan. **Accept:** budget-boundary decision tests and phase-scope traces pass when each adopted route first ships; low-res start, multi-phase, video and audio-video plans ultimately use one admission pipeline.
+**ADM-3 — Admission consumes the `RenderPlan` and the route's memory contract**, including concurrent live-set pricing (MEM-3) and Feature memory effects. It runs in two phases: Plan (before load) and Run (in-cache, warm/cold-aware). Every feature that first adds geometry, stages or allocations to a route updates its existing admission consumers in that feature; APP-4 later unifies those consumers. An existing estimator can remain unchanged only if a documented bound covers every additional live allocation over the supported settings. The admitted resolved plan is the plan executed; Run rechecks local budget/cache facts and any equivalent-feature reselection on a fresh generation revalidates/re-prices the plan. Exact replay binds its recorded quality-affecting choices under OPT-6. **Accept:** budget-boundary decision tests and phase-scope traces pass when each adopted route first ships; low-res start, multi-phase, video and audio-video plans ultimately use one admission pipeline.
 
 **ADM-4 — Refusals are typed:** binding phase, bytes needed and available, and suggestions. **Accept:** no admission refusal is built as a bare string.
 
@@ -583,17 +587,17 @@ Rules:
 
 ### 6.11 Worker lane harness (LANE)
 
-**LANE-1 — Every `JobType` is classified.** A checked-in table maps each of the about 33 job types to one of: generation lane, `LaneHooks` lane, or utility (no lane). Each entry names its admission owner and its cache owner. Image, video, audio, VQA and interleave, vector, upscale, restore, extend, bridge and person-replace generation run through **one generation lane**: plan → admit → load → generate → consume → write → receipt. **Accept:** every `JobType` is in the table; the image dispatch function and the per-lane function families (grep-defined patterns, not frozen counts) are deleted.
+**LANE-1 — Every `JobType` is classified.** A checked-in table maps each job type (38 at the November 7 baseline) to one of: generation lane, `LaneHooks` lane, or utility (no lane). Each entry names its admission owner and its cache owner. Image, video, audio, VQA and interleave, vector, upscale, restore, extend, bridge and person-replace generation run through **one generation lane**: plan → admit → load → generate → consume → write → receipt. **Accept:** every `JobType` is in the table; the image dispatch function and the per-lane function families (grep-defined patterns, not frozen counts) are deleted.
 
 **LANE-2 — Routing is data**, derived from the registry. **Accept:** adding a route in an existing class requires no worker code.
 
 **LANE-3 — Every engine is cached, residency-managed and preview-wired by construction** (REG-6). **Accept:** the manual pool bookkeeping (`note_loaded_peak`, `gate_with_evict_reclaim`) and the preview source-scan test are deleted.
 
-**LANE-4 — One event consumer serves image, video and audio**, parameterized by output sink and watchdog policy. Coordinate with SW-F327's shared stream supervisor (#3258).
+**LANE-4 — One event consumer serves image, video and audio**, parameterized by output sink and watchdog policy. Coordinate with SW-F327's shared stream supervisor (#3258). The claiming attempt owns provisional output. Publish the ordered artifact identities and terminal receipt through one authoritative, idempotent store transition, with completion events after commit. A canceled or superseded attempt cannot publish. Fault-inject write, final-write and pre-receipt failures, and retry/redelivery (PLAN §4.4).
 
 **LANE-5 — The backend split is one module boundary.** Coordinate with SW-F327's cfg alias (#3270).
 
-**LANE-6 — The API→worker dependency reaches a defined end state.** Validation and admission math live in core. The API links no lane code. The in-process worker mode for desktop is preserved. Coordinate with SW-F327 SW-6824. **Accept:** the API's Cargo graph does not include worker lane modules.
+**LANE-6 — API-only and desktop composition have distinct dependency boundaries.** Shared validation and admission math live in core. The API-only library and server build graph exclude worker lanes. The shipped desktop `sceneworks-api` sidecar explicitly composes the worker, including worker-only launch, GPU preflight, Iris rank re-entry, supervision and supported in-process mode. **Accept:** dependency assertions cover the API-only feature/profile. Packaging and launch checks cover the actual desktop binary/profile (PLAN §4.4).
 
 ### 6.12 Tooling and generated artifacts (TOOL)
 
@@ -605,7 +609,7 @@ Rules:
 
 **TOOL-2 — The memory-adapter drives routes through the shared runner and registry**, with no per-family arms. That covers `bin/mlx.rs`, `bin/candle.rs` and the auxiliary bins (`mlx_ltx25`, `flux3_*`, `*_wan_scail2`, `*_iris`, `*_supra2`). Workflow consumers (`memory-catalog-campaign.yml`) are migrated. Proof of the rewrite follows DEC-18. **Accept:** no per-family arm remains.
 
-**TOOL-3 — Hand mirrors are deleted:** the web `modelCatalog.js` seed (being deleted by SW-F327 #3268), `tierSuggestion.js`, and duplicated vocabularies.
+**TOOL-3 — Hand mirrors are deleted:** the web `modelCatalog.js` seed (removed by SW-F327 #3268), `tierSuggestion.js`, and duplicated vocabularies.
 
 **TOOL-4 — Narrow structural checks protect shared ownership (DEC-6 approved).** Introduce them alongside each consolidation in the existing architecture test suite and CI lanes. Prefer language visibility/types and Cargo dependency boundaries; use focused syntax checks for remaining gaps. Each check enforces a specific agreed rule, permits documented essential backend/native variants and reports an actionable violation.
 - Check source structure and dependency direction without model execution. Numerical/runtime proof remains separate.
@@ -669,9 +673,9 @@ Pure admission and routing logic lives cfg-free in `sceneworks-core`, so it runs
 
 ### 6.15 Performance (PERF)
 
-**PERF-1 — No speed regression.** Seconds per step and end-to-end time for every proof-set route stay within ±2% per backend, or within measured run-to-run noise if that is larger. This is measured **A/B on the same runner in the same window**: pre-feature `main` against the feature head. It is never measured against a months-old baseline.
+**PERF-1 — No speed regression.** Compare matched base/head samples for seconds per outer step and end-to-end time on the same runner and device. Use a one-sided +2% slowdown ceiling or a larger predeclared measured noise allowance. A speed improvement is permitted. Predeclare the statistic, comparable configurations, finite sample budget and inconclusive rule (PLAN §10.4).
 
-**PERF-2 — No memory or size regression.** Peak resident memory and iOS binary size stay within +2% of the A/B baseline for the proof set.
+**PERF-2 — No memory or size regression.** Compare like-for-like peak resident memory and iOS binary slice/profile size using a one-sided +2% ceiling. Include host, device or unified budget domains as applicable. For changes touching H3 CUDA preserve the accepted 24 GiB sparse and fallback operating envelopes described in PLAN §8.1.
 
 **PERF-3 — Features deliver their stated benefit.** For low-res start, the speedup at K = N/2 and scale 0.5 is measured on the proof set. The expected speedup is about 1.5–1.7× `[L]`.
 
@@ -687,11 +691,11 @@ Pure admission and routing logic lives cfg-free in `sceneworks-core`, so it runs
   - K must satisfy `1 ≤ K < M`, where M is the number of steps the pass actually executes.
   - Scale reduces spatial dimensions only. Frames, audio and count are unchanged.
   - Invalid values refuse; they are never clamped.
-  - With the Feature absent, the output is byte-identical to today.
+  - With the Feature absent, AP3 applies on the same implementation and the migration independently satisfies AP13.
 - **Availability:**
   - It is offered on every route whose targeted pass supports the required resize, estimator and transition.
   - Every other route refuses it with a typed reason.
-  - Initially, edit, reference and control inputs on the targeted pass refuse, until COMP-5 rebuilds aligned conditioning. Ordinary img2img stays supported.
+  - Initially, edit, reference and control inputs on the targeted pass refuse, until COMP-5 rebuilds aligned conditioning. Ordinary img2img stays supported. On a route with plain img2img, fit source pixels directly to the reduced phase-one grid, perform the route's native init encode, normalization and seed blend there, and retain the full-pass schedule. Charge the initial codec work. Identity references remain a distinct conditioning mode. See PLAN §6.13.
   - Unavoidable exceptions are listed under DEC-13.
   - The expected-route list comes from the route inventory, so availability cannot pass vacuously.
 - **UI:** a number field for K; a linked slider showing K/M; a scale control; the resolved dimensions shown.
@@ -708,7 +712,7 @@ Pure admission and routing logic lives cfg-free in `sceneworks-core`, so it runs
 
 ### 6.17 Configurable chained passes (FEAT)
 
-**FEAT-2 — User-configurable chained denoise passes (DEC-4 approved).** An advanced, opt-in recipe lets users define an ordered, bounded list of passes with independent step counts and denoise strengths. It compiles through the shared Feature and option systems into fresh-per-pass schedules in the same `RenderPlan`.
+**FEAT-2 — User-configurable chained denoise passes (DEC-4 approved).** An advanced, opt-in recipe lets users define an ordered, bounded list of passes with independent step counts and denoise strengths. It compiles through the shared Feature and option systems into fresh-per-pass schedules in the same `RenderPlan`. Bound the whole expanded job through checked arithmetic before load: count, native and authored passes, executed steps, solver sub-evaluations, endpoint forwards and retained output bytes. Apply shared caps to effective work at every submitted entry point. Reject overflow or an exceeded limit with the same issue in HTTP, MCP and browser validation.
 - Transition, seed-stream and solver-history rules are explicit. The whole composed plan is validated and priced before execution; unsupported routes or combinations refuse with typed reasons.
 - The resolved recipe is versioned and persisted for deterministic per-backend replay. An absent Feature preserves the current route.
 - Old sc-20414 controls and normalization rules receive an explicit compatibility disposition when its schema is derived; the old executor and hand-written wire contract are not imported.
@@ -729,7 +733,7 @@ Pure admission and routing logic lives cfg-free in `sceneworks-core`, so it runs
 | **PAT-5** | **No model ids in shared conditionals.** No builtin model-id literal appears in a conditional in production code outside the manifest, route records, tests and an enumerated exemption list. |
 | **PAT-6** | **Fidelity.** Every proof-set route meets its declared AP13 class, per backend. |
 | **PAT-7** | **Performance.** PERF-1 and PERF-2 hold, measured A/B. |
-| **PAT-8** | **Controls preserved.** The control-inventory tool (implementation plan §10.3) shows zero removed controls and zero changed per-control behaviour fields, per (model, backend, mode, studio), between before and after. |
+| **PAT-8** | **Controls preserved.** Compare the union of old-product and candidate model/backend/mode/studio surfaces against an identified revision preceding the first registry, validation or UI change for that surface. Exercise menu choices, actual submitted batch prompts, imports and sampling overrides. Zero unapproved removals or behavior changes. |
 | **PAT-9** | **Admission coverage.** ADM-1's grep check and ADM-6's enumeration both pass. |
 | **PAT-10** | **Census recorded.** The LOC census (§8) is recorded at every feature end. It is reported, never gating. |
 

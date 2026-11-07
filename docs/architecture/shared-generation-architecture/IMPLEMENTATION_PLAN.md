@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.6, design decisions approved.** Addresses all four round-5 findings. DEC-1…19 were approved by Michael on 2026-11-03; the remaining recommendations were accepted together after DEC-8. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
-| **Date** | 2026-11-03 |
+| **Status** | **Draft 0.7, pre-planning revision.** DEC-1…19 retain their November 3 approval. This roadmap incorporates the five blockers and twelve major findings in round 7. The [closure review](evidence/reviews/round8-codex.md) separates design verification from future product acceptance. |
+| **Date** | 2026-11-07 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
-| **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
+| **Evidence** | [A–H research](evidence/) uses SceneWorks `a1d95e2c4` and inference `a43724b82`. [Round 7](evidence/reviews/round7-codex.md) and the revised walkthroughs use SceneWorks `e1ffa54df6` and its inference pin `2b09938e33`. |
 | **Code sketches** | Rust and JSON blocks are **sketches**. Names and shapes are illustrative; they are not final APIs. |
 
 ---
@@ -96,7 +96,7 @@ SCENEWORKS                         ▼
 | 39 family twins | Same crates, holding config, graph, `FamilyModel`/`FamilyDriver`, declarations and `RouteRecord`. Under DEC-1 (c), each collapses to one `gen-<f>` crate. |
 | `mlx-llm`, `candle-llm` | Owners of decoder-LM blocks and the encoder tap API. They use the shared Linear spine. |
 | `mlx-gen-ios-catalog` (incl. `ios_admission.rs`, per-family `ios_pricing/`) | iOS admission computed from plan bytes and shared memory geometry (MEM-6). Quantum checks remain as hooks. |
-| `*-catalog`, `bundles/runtime-*` | Register RouteRecords and Features. Emit the capability export and the route inventory as hardware-free build products. |
+| `*-catalog`, `bundles/runtime-*` | Register RouteRecords and Features and emit descriptor-only product schemas. The coverage check reconciles this surface with independently callable product/driver rows under PIPE-18 (§6.11). |
 | `candle-audio-*` | Adopt the weights, Linear and adapter layers and the runtime contracts. Use the runner where a flow loop exists (XL-1). |
 
 **Concrete crate direction (R2-08).** `mlx-layers → {mlx-rs, tensor-free contracts}`; `mlx-llm → mlx-layers`; `mlx-gen → {mlx-layers, mlx-llm, contracts}`; media family/component crates consume those lower layers. Candle mirrors this direction with its own backend only. There is no `*-layers → *-gen` or `*-layers → *-llm` edge. Media's existing text-sampling dependency on `mlx-llm` remains legal. Error and runtime-sink types needed below both owners live in the existing tensor-free contract layer, not a media runtime. L1 has no catalog, model or training-application dependency. Platform-specific codecs, kernels and training primitives remain feature-partitioned so `runtime-ios` does not acquire CUDA/training/video. ENG-4a extracts the Linear/adapter primitive owner and migrates both media and LLM projections; later features extend that same owner. Validate `cargo metadata --locked` and `check-workspace.py` when implemented. Names here are illustrative; the dependency direction is the contract.
@@ -131,7 +131,7 @@ The design grows existing seams rather than inventing new ones.
 | SceneWorks `generate_video_using` | `worker/src/video_jobs/wan.rs:2806` | Template for the generation lane, with typed hooks replacing the flat field bag |
 | SceneWorks `CandleStrictControl` | `worker/src/image_jobs/candle_strict_control.rs:45` | Template for `LaneHooks` |
 | SceneWorks `memory_strategy::select_strategy` | worker | Selection step inside the admission pipeline |
-| SW-F327 deliverables (in review) | #3258 stream supervisor, #3264 memory-contract/probe unification, #3270 cfg alias + AST architecture checks | Built upon, not redone. See the §7.5 overlap ledger. |
+| SW-F327 deliverables on main | #3258 stream supervisor, #3264 memory-contract/probe unification, #3270 cfg alias and architecture tests | Reuse the shipped contracts (§7.5). |
 | SceneWorks `ADVANCED_KEY_RULES`, `TECHNIQUE_KEYS` | `core/src/workflow_share.rs:1411-1833`; training | Part of the `OptionSpec` seed (OPT-1) |
 | Engine capability dumps and their producer `dump-engine-capabilities` | `config/engine-capabilities/*.json`; `memory-catalog-campaign.yml:911` | Replaced by the hardware-free capability export (REG-3). Every consumer migrates in the same feature (AP9). |
 
@@ -158,11 +158,12 @@ pub struct RenderPlan {
     pub output: OutputSpec,
     pub count: CountPlan,                       // Sequential{n} | Batched{n} | Packed{samples} (PIPE-13)
     pub seeds: SeedPlan,                        // route SeedScheme (legacy, bit-exact) + new-stream salts
-    pub passes: Vec<PassPlan>,                  // ordered, stable PassIds; ≥1 for denoising routes
+    pub program: StageProgram,                  // fixed passes or bounded native region over typed stage templates
     pub features: Vec<AppliedFeature>,
     pub memory: PricingPlan,                    // per-component weights, per-phase peaks, transition deltas (§3.9)
 }
 
+// StageProgram::Conditional binds route-owned guards to finite runner-owned invocations (§6.10).
 pub struct PassPlan {
     pub id: PassId,                             // stable route/recipe role, not registration order
     pub stages: PassStageBindings,              // prompt/encode/reference/init/decode + explicit reuse
@@ -239,7 +240,7 @@ pub enum BoundaryState<L> {
 3. Validate Feature relations as a graph (including multi-Feature cycles). Apply pass producers and then targeted span contributions in a unique declared order. Resolve ownership, boundary transition compositions and final phase partitions.
 4. Validate the **entire rewritten plan** against `RouteStructure`: every geometry/grid, mode/conditioning restriction, schedule node, transition-state law, estimator capability, slot, solver, history rule and component dependency. Applicability is re-evaluated with the composed plan, not just the original request.
 5. Resolve conditioning and preparation dependencies per pass/phase, including negative branches, scales and stage-result reuse; construct their immutable dependency keys.
-6. Derive `PricingPlan` from existing aggregate component/phase/operation evidence and additional coexisting transition buffers (§3.9), plus all boundary-evaluation work. Compile the exact resolved plan used by admission and execution. Admission-selected equivalent Features use the same validation and pricing path; each finite candidate is considered once in deterministic order, and no unvalidated rewrite occurs after selection. Run admission can change a selection only by repeating that path before execution; recipe Features, estimator choice and tiers stay fixed.
+6. Derive `PricingPlan` from existing aggregate component/phase/operation evidence and additional coexisting transition buffers (§3.9), plus all boundary-evaluation work. Compile the exact resolved plan used by admission and execution. Admission-selected equivalent Features use the same validation and pricing path; each finite candidate is considered once in deterministic order, and no unvalidated rewrite occurs after selection. On a fresh generation, Run admission can change a selection only by repeating that path before execution. Exact replay locks the recorded output-affecting selection and refuses if unavailable; recipe Features, estimator choice and tiers stay fixed.
 
 **Boundary conversion (R2-01).**
 
@@ -311,8 +312,9 @@ The runner is policy in gen-core, generic over backend operation traits. The pre
 
 **Dispatch shape [ENG-22]:**
 - Families are reached through an object-safe `dyn` interface. The per-step dynamic call is negligible next to a model forward.
-- Step contexts and driver state may be type-erased (`Box<dyn Any + Send>`), with request-owned lifetimes; immutable preparations are built once per complete dependency key.
+- Step contexts and driver state may be type-erased (owner-local `Box<dyn Any>`), with request-owned lifetimes; immutable preparations are built once per complete dependency key.
 - Tensor operations inside the backend stay statically dispatched.
+- Registration factories, job messages and immutable tensor-free specs can cross threads. Create, run and destroy each loaded model/codec, hooks and scratch on its executor. External cancellation sets a flag. The owner checks it before work and performs safe cleanup. Poisoned native state is retired by its owner/supervisor without another GPU operation. Routes default to serial execution. A stronger policy requires evidence for the device, RNG and every loaded component.
 - This avoids instantiating the runner about 40 times per binary, which would cost iOS size and compile time.
 
 ```rust
@@ -323,7 +325,7 @@ pub trait RunnerBackend {                       // implemented once per backend 
     fn exec(&self) -> &dyn ExecPolicy;
 }
 
-pub trait FamilyModel<B: RunnerBackend>: Send + Sync {     // object-safe
+pub trait FamilyModel<B: RunnerBackend> {     // object-safe
     fn structure(&self) -> &RouteStructure;
     fn prepare_step_context(&self, key: &StepCtxKey, cond: &CondBundle<B>, refs: &AlignedRefs<B>,
                             args: &PrepareArgs)
@@ -336,7 +338,7 @@ pub struct ForwardArgs<'a> { pub adapter_scales: &'a AdapterScales, pub perturba
 pub struct PrepareArgs<'a> { pub adapter_scales: &'a AdapterScales, pub branches: &'a BranchSet,
                             pub effective_model: ModelIdentity }
 
-pub trait FamilyDriver<B: RunnerBackend>: Send + Sync {    // PIPE-7
+pub trait FamilyDriver<B: RunnerBackend> {    // PIPE-7
     fn support(&self) -> &DriverSupport;                    // conformance-checked
     fn run_slice(&self, input: SliceInput<'_, B>, state: &mut DriverRunState<B>,
                  hooks: &mut StepHooks<'_, B>) -> Result<BoundaryState<B::Latent>>;
@@ -390,7 +392,8 @@ pub enum TimeInput { Sigma(PerStream<f32>), FlowMap{ t: f32, t_ref: f32 },
 S0  plan = compile(request, route); select/admit exact validated plan before load
 for trajectory in plan.count:                                 [sequential/batched/packed, legacy semantics]
   run = request_owned_state(trajectory, plan.seeds)
-  for pass in plan.passes:                                    [stable ids, explicit output dependencies]
+  for pass in admitted_invocations(plan.program, run):         [fixed order, or guarded templates bounded by S0]
+    check invocation and retained state against admitted limits  [conditional calls and realized path, §6.10]
     S1 prompt = resolve_or_run(pass.prompt_prep)                [enhancement only where declared]
     S2 cond   = resolve_or_encode(pass.conditioning)             [reuse only with equal dependencies]
     S3 refs   = resolve_references(pass, earlier_outputs)        [geometry-free + aligned builders]
@@ -412,7 +415,7 @@ finish request accounting and host resource release on every exit; GPU cleanup o
 - **`PixelRoundTrip` points at runner-owned stages:** intermediate decode, pixel resize, and next-pass reference and encode. It never hides them inside a `FamilyDriver`, and never decodes the same intermediate twice. Hires.fix refinement can re-run S1 and S2 after that decode.
 - **Encode has an internal dependency graph.** A vision encoder can run before the text encoder that consumes its features (Qwen edit). S3 refers to latent and aligned reference preparation, not to every image input.
 - **Chunked output.** A streaming route repeats chunk stage invocations under the same owners, with explicit causal state and bounded sinks. Today's Krea-realtime batch path stays a single terminal decode (PIPE-16).
-- **Scope.** Execution is limited to these typed generation stages and their earlier-pass and chunk dependencies.
+- **Scope.** Execution is limited to these typed generation stages and their earlier-pass, bounded conditional and chunk dependencies.
 
 **Runner invariants.** These are salvaged from sc-20414 and corrected [ENG-2, ENG-19]:
 - **Progress is monotone in outer steps.** Evaluation counts stay internal (DEC-19).
@@ -421,7 +424,7 @@ finish request accounting and host resource release on every exit; GPU cleanup o
 - **Solver history never crosses an incompatible boundary.** Geometry change/re-noise forces Reset; `Carry` on `Continue` additionally requires compatible solver/convention and schedule continuation. RNG and driver-cache policies are independent.
 - **Re-noise seeds are domain-separated** for new streams; legacy schemes stay bit-exact.
 - **Shared resident modules are never mutated.** Per-request state flows through `ForwardArgs` and `StepCtx`.
-- **A single-pass, single-phase plan equals the legacy route bit-exactly.** Inert splits preserve numerical and stochastic traces.
+- **An orchestration-only class (a) migration must equal its matched legacy route bit-exactly.** Inert splits preserve numerical and stochastic traces.
 
 **Approved DEC-4:** Michael selected both selective prior-art reuse and user-configurable chained denoise passes on 2026-11-03. ENG-16 delivers FEAT-2 as a shared recipe Feature after APP-2/3 and ENG-7. It produces typed passes before phase contributions, uses fresh-per-pass schedules and declares transition, history and seed policies. Preserve low-res start's first-pass-only targeting and validate native-pass composition through stable pass roles; ambiguous ownership refuses. Derive the versioned advanced controls from the shared option schema, inventory/disposition the old controls and persist the resolved recipe. Admission prices the complete chain through the existing `PricingPlan` interface; it does not wait for APP-4. No separate family executor or hand-written wire contract is introduced. No implementation or tracker creation is authorized during this design discussion.
 
@@ -439,7 +442,7 @@ pub trait FeatureSpec: Send + Sync {
     fn memory_effect(&self, p: &FeatureParams, plan: &RenderPlan) -> MemoryEffect { MemoryEffect::None }
 }
 // L1 (per backend) — only for model-internal hooks (caches, attention perturbation, token pruning)
-pub trait FeatureHooks<B: RunnerBackend>: Send + Sync {
+pub trait FeatureHooks<B: RunnerBackend> {
     fn id(&self) -> FeatureId;
     fn install(&self, p: &FeatureParams, hooks: &mut HookSet<B>);
 }
@@ -486,7 +489,7 @@ pub trait FeatureHooks<B: RunnerBackend>: Send + Sync {
 **Latent codecs.**
 
 ```rust
-pub trait LatentCodec<B>: Send + Sync {
+pub trait LatentCodec<B> {
     fn space(&self) -> &LatentSpace;
     fn tiling_law(&self) -> &TilingLaw;         // declared per codec (Wan vae16/22, LTX causal overlap, DC-AE)
     fn encode(&self, px: &B::Pixels, plan: &EncodePlan) -> Result<B::Latent>;
@@ -557,9 +560,9 @@ pub struct ComponentPlan {
 - **Until relocation, the runner drives today's `MemoryRequestScope` lifecycle** for each migrated route (MEM-5): `enter_phase`, `configure_decode`, `materialize_transformer_window` and `finish`.
 - **Contracts are computed from the route record plus these declarations (MEM-2).**
 - **Pricing (MEM-3, R2-05, C4-02): sum what is live together, at component and phase granularity, on existing evidence.**
-  - **Building blocks:** per-component weight bytes from the weight plan; existing aggregate phase/operation peak evidence (two anchors plus derivation); and additional buffers computed from shapes/dtypes. Use the same mechanism for endpoint estimation, learned upsampling, codec encode/decode and ordinary phase execution. This adds no per-model allocation graph, re-keying or recapture campaign.
+  - **Building blocks:** per-component weight bytes from the weight plan; existing aggregate peak evidence with declared coverage (two anchors plus derivation where applicable); and additional buffers computed from shapes/dtypes. Use the same mechanism for endpoint estimation, learned upsampling, codec encode/decode and ordinary phase execution. This adds no per-model allocation graph, re-keying or recapture campaign.
   - **Evidence basis:** each reused value declares its existing coverage at component/phase granularity: `TotalPeak` (already includes named resident components and ordinary latent/stream/workspace roles) or `ActivationPeak` (excludes weight residency and states which ordinary buffers are included). A joint AV total includes both streams and joint workspace; separate stream estimates may be summed only when their coverage is disjoint, with shared weights/workspace counted once. Do not add a total and its included parts.
-  - **Normalize before composing:** for `TotalPeak`, keep the total and add only required resident components or coexisting buffers absent from its coverage. For `ActivationPeak`, add the required resident weights once, then only missing buffers. Do not subtract an assumed component cost from a measured total or treat an unclassified total as activation-only. Existing identity keys are preserved; coverage is a declaration about the existing evidence, not a new measured grid. If its basis cannot be established from the source, keep the existing unpriced-evidence posture (ADM-2/7), mark it unpriced and expose the reason; never manufacture a smaller priced value or silently change refusal policy.
+  - **Normalize before composing:** for `TotalPeak`, keep the total and add only required resident components or coexisting buffers absent from its coverage. For `ActivationPeak`, add the required resident weights once, then only missing buffers. Do not subtract an assumed component cost from a measured total or treat an unclassified total as activation-only. Existing identity keys are preserved; coverage is a declaration about the existing evidence, not a new measured grid. If its basis cannot be established from the source, keep the existing unpriced-evidence posture (ADM-2/7), mark it unpriced and expose the reason; never manufacture a smaller priced value or silently change refusal policy. For a newly added recipe, an unbounded increment is a typed recipe refusal (§6.12), independent of legacy-job posture.
   - **Operation peak:** per budget domain, `normalized operation evidence + extra resident component bytes + extra coexisting buffers`, where both extras exclude everything already covered. The required resident set comes from that operation's component dependencies/lifetimes; it need not equal the departing phase's weights. Include retained contexts, previous-estimate capture/snapshot state, source/destination latents, fresh noise and casts where they actually coexist.
   - **Transition peak:** the maximum of its operation peaks (endpoint forward, clean-latent resize, learned upsampler, intermediate codec work, re-noise and preparation as applicable). The operation evidence includes its activation/workspace peak. Do not model learned upsampler/codec workspace from output latent sizes alone or omit it because the weights are resident. A sequential operation can release its scratch before the next; only retained buffers cross that boundary.
   - **Request peak:** the maximum over all steady phase/stage peaks and transition-operation peaks. Neighboring phase peaks remain candidates; they are not blindly summed. Feature deltas are applied at the operation where they coexist, not added to an unrelated global maximum.
@@ -580,7 +583,7 @@ pub struct ComponentPlan {
   - **`MemoryRequestScope` receives,** for each phase, its geometry, mode and conditioning, selected rungs and transition identity, under the whole-plan budget reservation.
   - **ENG-2** extends the same integration to Hires.fix's intermediate codec and encoder stages, and to its own adopted routes.
   - **These are production interfaces that APP-4 keeps**, not temporary parallel implementations. APP-4 later centralizes the callers and budget hooks. ENG-1b and ENG-2 do not depend on it.
-  - **Gate:** ENG-1b's admission edits touch files in SW-F327 #3264, so they wait for its remediation to reach `main` and re-baseline (approved DEC-5).
+  - **Baseline:** #3264 reached main with SW-F327. Recheck the actual consumers at ENG-1b against §7.5.
 - **iOS admission** (`ios_admission.rs`, per-family `ios_pricing/`) is replaced by plan-byte pricing plus quantum hooks (MEM-6).
 
 **Aggregate accounting walkthroughs (R5-01; illustrative units, not measurements).**
@@ -604,8 +607,8 @@ pub struct RouteRecord {
 }
 ```
 
-- **The capability export** (`sga.capabilities/2`) is a pure function of the linked registry. Bundles produce it in hosted CI for both backends' feature sets, with no GPU and no off-Mac step (REG-3). [APP-14]
-- **Verification item.** ENG-7, item 0, confirms that the candle feature set builds on hosted Linux without CUDA. If it does not, the plan is re-cut and the CUDA host goes on that feature's critical path.
+- **The capability export** (`sga.capabilities/2`) is a pure function of the linked registry. Hosted descriptor-only builds cover the shipping feature sets without GPU access or a dedicated off-Mac runner (REG-3). [APP-14]
+- **Verification item.** ENG-7 builds descriptor-only graphs on hosted CI with the declared macOS/MLX, iOS subset, and Windows/Linux Candle feature sets represented. Compare exported IDs/modes to the corresponding shipping registries, including bespoke/audio boundaries. A pin-only change with equal semantics produces identical canonical bytes. If toolkit/device linkage is indispensable, report the missing partition and revise REG-3 before changing the proof lane.
 - **Authority.** The export feeds UI availability. The worker's linked engine is authoritative at runtime and refuses with a typed reason when the two disagree [APP-13].
 - **Fields:** modes, defaults, limits, solvers, schedules, guidance surface, conditioning (aligned flag), adapters (formats, install policy, per-phase capability), quant tiers per component, preview, decoders, seed scheme and image-index → seed relation, count semantics, Feature applicability and limits, and memory rung support.
 
@@ -622,11 +625,11 @@ STATIC LAYER (build time; checked-in snapshot; usable by an API without engines)
 RUNTIME LAYER (API-owned unless noted)
   imports (user.models.jsonc, manifest schema v2 + upgrader) · ComfyUI external-base scans ·
   Iris trained-checkpoint overlays · user hides/overrides · OS/install/decoder/credential projections ·
-  converted-model paths
+  worker-local artifact binding (shipping jobs receive portable identities plus authorized intent)
 ONE MERGE RULE  → ModelSpec (typed)
 ```
 
-- **Jobs carry a resolved, typed `ModelSpec` snapshot**, not a revision reference. This works for non-builtin models and multi-worker RunPod. The upgrader converts legacy `modelManifestEntry` carriers.
+- **Job snapshot and local binding.** Persist logical provider/variant, immutable repository/revision or artifact digest, adapter/component identities and permitted request/product choices. Derived client availability is advisory. The API applies its canonical repository/component restrictions before fetch or import. User aliases and hides affect presentation and selection only. The worker resolves the same identity under its own root, checks source confinement, verifies bytes and holds its local lease for the attempt. Credentials, consent evidence, absolute locators, machine paths and live install observations stay with their authority. Only permitted logical IDs, public refusal codes and execution facts leave it. Upgrade a legacy carrier through the same validation. Test root A → B with identical identity, missing bytes, alias substitution and a protected inherited component whose overlay clears a flag.
 - **Desktop seeding** ships the evidence store.
 - **Manifest memory-key consumers** migrate in the same feature (APPREG-5 list).
 - **Hand-table cutover:** for each inventoried table, generate it from `ModelSpec`, assert equality in a test, switch consumers, then delete the table and the test.
@@ -648,10 +651,11 @@ pub struct OptionSpec {
 - **Studios:** Image, Video, Audio, Training, the Simple studios and Character.
 - **Approved DEC-9 validation:** isolate the pure Rust validator from native runtime dependencies and compile it to WebAssembly for local feedback, using the same rules as API/MCP/worker validation. The server always revalidates submissions; live installed-model/device/memory checks stay server/worker-owned. Browser results use their metadata snapshot. APP-2 verifies a shared native/wasm corpus, compatible schema/validator versions, startup/bundle cost, offline behavior and measured interaction latency on desktop/RunPod. Set concrete UX budgets at its planning. If portability or bundle cost is disproportionate, use cached availability plus server cross-field validation, retaining one rule owner; no JavaScript rule copy.
 - **Versioning (OPT-6):** the upgrader handles payloads, recipes, studio settings, share envelopes, film plans, training plans, and the HTTP and MCP DTOs.
-  - Writers emit v1-compatible shares when the share is expressible in v1.
+  - Keep the existing v1 writer for expressible content. An active low-res or chained recipe requires outer `schemaVersion: 2`; revised readers support v1/v2 and validate the nested recipe identity. Exercise the real v1 reader.
   - A newer version is refused with a typed reason.
   - The corpus comes from historical builder outputs.
 - **Refusals** render in the web and MCP. Telemetry field names and `advanced.memoryStrategy` stay stable (OPT-8).
+- **Exact replay** binds logical source/components and adapters, backend and applicable numerical runtime identity, seed/draw scheme, geometry, recipe version, schedule, estimator, solver and every quality-affecting selected policy (including tiling/rung). If replay cannot use that identity or budget, return `ReplayUnavailable`. A separate user action may start a fresh generation with a disclosed change. Portable import revalidates compatibility, availability and redactions. Existing regeneration continues to discard machine-specific stamps and choose its existing seed policy.
 
 ### 4.3 Admission pipeline (ADM-1…8) [APP-7…10]
 
@@ -685,7 +689,7 @@ pub trait BackendBudget { fn probe(&self) -> Result<MemoryBudget, BudgetUnavaila
 
 ### 4.4 Generation lane and job types (LANE-1…6) [APP-23…25]
 
-- **APP-5, item 0, delivers the `JobType` table.** All ~33 job types are classified as generation lane, `LaneHooks`, or utility, each with its admission owner and cache owner. The generation lane covers:
+- **APP-5, item 0, delivers the `JobType` table.** All job types (38 at the November 7 baseline) are classified as generation lane, `LaneHooks`, or utility, each with its admission owner and cache owner. The generation lane covers:
   - image, video, audio
   - VQA/interleave (SenseNova)
   - vector (StarVector)
@@ -706,10 +710,11 @@ pub trait BackendBudget { fn probe(&self) -> Result<MemoryBudget, BudgetUnavaila
   7. cache acquire
   8. admit (Run)
   9. run with one event consumer (builds on SW-F327 #3258)
-  10. write
-  11. stamp
+  10. stage output files under the claim attempt and verify their identities
+  11. commit ordered outputs and terminal receipt for that attempt, then emit completion
 - **The backend module** builds on SW-F327 #3270's cfg alias.
-- **LANE-6 end state:** validation and admission math live in core; the API links no lane modules; in-process worker mode is preserved for desktop. This is coordinated with SW-6824.
+- **Publication.** The current claim/attempt is the write authority. Staged media and document references stay private until complete. Finalize under the store's claim check, using an idempotent attempt/finalization key, a single authoritative artifact list and terminal receipt. Use the current jobs-store terminal transition and its durable pending-side-effects handoff. A lost acknowledgement returns the committed result on redelivery. Final asset indexing/visibility recovers idempotently from that manifest, including a crash between terminal acceptance and the catalog write. Use the existing [terminal-state and recovery owner](https://github.com/SceneWorks/SceneWorks/blob/e1ffa54df69a6d37b9efaa61f8a6dbce9d279ff8/apps/rust-api/src/jobs.rs#L2100). The receipt and ordered IDs cannot change on retry. A superseded attempt cannot commit. Cancel or failure before commit leaves no published partial result and cleans only owned staging. Preserve any product-defined partial result through an explicit typed outcome. Fake-store faults after first write, after last write, immediately before commit and after commit/before notification must preserve referential integrity, one terminal outcome and post-commit event order.
+- **LANE-6 composition.** Target a worker-free API library and standalone server feature/profile. The desktop composition root remains the shipped `sceneworks-api` sidecar built with explicit worker support and the existing platform feature set. It supports normal API/in-process mode, `SCENEWORKS_WORKER_ONLY`, GPU preflight, Iris rank re-entry and desktop supervision. Assert Cargo edges on the API-only target/profile and package/relaunch the desktop binary separately. APP-6 owns the boundary and both build profiles.
 
 ### 4.5 Tooling (TOOL-1…4) [APP-26…28]
 
@@ -760,7 +765,7 @@ The hook enum in code is the source of truth (HOOK-1). The table below is the de
 | Engine `[INF]` | `gen-core/src/features/low_res_start.rs`. **Params:** `{version: 1, k, scale}`. **Resolved constants:** first denoising PassId only; fixed final-pass-geometry schedule/mu; bilinear clean-latent resample; destination noise law; Reset. **Default estimator:** read-only endpoint x0; the completed-K previous-estimate candidate is separately declared in §3.1/DEC-10. No exposed `renoise` or `mu_policy` knob in v1. **Applicability:** supported spatial axes/grids/modes, endpoint estimator, transition, stream coupling and composed-plan checks (§3.1, FEAT-1). Edit/reference/control initially refuse until ENG-12 rebuild support; ordinary img2img init remains supported. **Plan rewrite:** split that pass's M executed steps at K, use reduced spatial dimensions for `[0,K)` and full pass dimensions for `[K,M)`. Other axes and later passes are unchanged. All transition allocations are priced. |
 | Backend `[INF]` | None after ENG-1a, which builds `BundleOps::resample` and pack/unpack once. |
 | Families | None after adoption. `prepare_step_context` uses its complete declared dependency key (PIPE-5), and model/guidance/Feature hooks honor boundary-estimate nonmutation and state invalidation (§3.3). Refusals come from composed route support. |
-| SceneWorks `[SW]` | The `lowResStart` option entry, common parameter validation and web controls, all gated by the export. **Persistence:** a versioned `lowResStart` block (`{version, k, scale}` plus the resolved fields) travels through the existing `ADVANCED_KEY_RULES` and share path. There is no new upgrader: no legacy shape exists. Forward compatibility follows the existing share-envelope rules. APP-2's upgrader later adopts this block as one of its shapes (C4-05). **Admission:** ENG-1b updates admission on adopted routes to the shared plan and pricing interface and to per-phase scope identities (§3.9). It does not wait for APP-4, but it does wait for #3264 (DEC-5). |
+| SceneWorks `[SW]` | The `lowResStart` option entry, common parameter validation and web controls, all gated by the export. **Persistence:** register the versioned `lowResStart` block and emit outer share v2 when active. Extend the share reader/writer in the first feature introducing unrepresentable content. ENG-1b owns this for low-res, whichever app feature lands first. Exercise the actual old reader. Ordinary expressible shares remain v1. APP-2's upgrader later adopts this block as one of its shapes (C4-05). **Admission:** ENG-1b updates admission on adopted routes to the shared plan and pricing interface and to per-phase scope identities (§3.9). It ships with ENG-1b against the delivered #3264 baseline. |
 | **Not the PAT-1 measure** | ENG-1b legitimately touches SceneWorks option, validation and web files. PAT-1 is measured on a later Feature (§6.4). |
 
 **Version-1 recipe choices (approved DEC-10, R2-09).**
@@ -768,7 +773,7 @@ The hook enum in code is the source of truth (HOOK-1). The table below is the de
 - M is the selected pass's executed step count after strength truncation. Valid K is `1 ≤ K < M`; default `max(1, floor(M/2))` for M ≥ 2; slider fraction K/M. K=0/M or M<2 refuses. Changing steps/strength to invalidate K produces an issue, not a silent clamp. Feature absent is the no-op.
 - Scale is finite in [0.25,0.9], default 0.5. Spatial dimensions use `floor(full_dim * scale / legal_quantum) * legal_quantum`, then minimum, strict reduction and joint-grid checks. Invalid dimensions refuse with legal limits. Frames, audio duration/tokens and count remain unchanged. Native fixed tables permit only eligible interior boundaries.
 - `EndpointEvaluation` remains the default. The precisely defined `PreviousEvaluation` protocol in §3.1 is an optional candidate for the declared supporting solvers/drivers, evaluated using the same bounded proof set. It retains the guided primary estimate after normal completion of all K steps. It is not an early-exit or terminal-step replacement.
-- Persist resolved recipe/estimator identity and semantic version, target pass, dimensions, K, unchanged schedule/shift policy, transition arithmetic and seed derivation. Runtime provenance also distinguishes source outer-step/evaluation kind, sigma and configuration; do not serialize tensor data. Use the existing versioned block/share path; unknown identities refuse. Do not change estimator defaults for a persisted recipe or silently fall back to a different estimator on replay.
+- Persist resolved recipe/estimator identity and semantic version, target pass, dimensions, K, unchanged schedule/shift policy, transition arithmetic and seed derivation. Runtime provenance also distinguishes source outer-step/evaluation kind, sigma and configuration; do not serialize tensor data. Use the v2 outer envelope for active recipes; unknown identities refuse. Do not change estimator defaults for a persisted recipe or silently fall back to a different estimator on replay.
 - The active recipe is intentionally result-changing. Disabled paths retain class (a). Estimate retention and any capture conversion cost are included in time/memory comparison; no fixed saving is claimed.
 
 **Feature acceptance.**
@@ -842,11 +847,79 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 ---
 
+### 6.10 Conditional stages and owning-thread execution
+
+At ENG-1a define a bounded native region with a finite set of stage templates and typed guard results. SenseNova's text decoder chooses “stop” or “image”. The runner owns repeated text rollout, image denoise, generated-image feedback into the conditioning caches and ordered output. The compiler fixes geometry, remaining-token budget, maximum images and denoise steps, and reserves for the largest admitted image invocation, cumulative KV/cache and retained output at those limits. It records possible paths before load and only realized stages in the receipt. A driver cannot add a template, increase those limits or consume another pass's budget. ENG-6 binds the production SenseNova driver to this same contract. Within a conditional region, a Feature targeting the first denoising pass binds to the first realized image invocation only. Zero images consume no image Feature work. Require finite priced templates and an unambiguous role before enabling the combination. Charge worst-case retained KV and output through the final possible feedback.
+
+Example with maximum three images and four steps per image:
+
+- End token before any image produces text, zero image invocations and no image progress bar.
+- Two image-start tokens execute text → image 0 → feedback → text → image 1 → feedback → text → end. Retain causal state, charge both retained outputs and count eight actual outer steps. The existing public bar spans 12 and emits its terminal fill to 12 for an early finish. Record the fill separately from completed steps. At the image/token limit, finish without another image.
+- Cancellation during second-image denoise or feedback stops future invocations, releases attempt-local state on its owner, and follows the partial-publication rule in §4.4. The next request cannot see the canceled caches.
+
+**Executor trace.** Registration and cancellation messages can cross threads. Load, prepare, seed/draw, dispatch, materialize and destroy run on the selected device-owning executor. For a provider using global RNG, submitting seed 22 while seed 11 is running queues the entire second trajectory. Expected order is seed 11, all its draws/materialization and finish, then seed 22 and its draws. Each result equals its isolated trace. An explicit per-request RNG provider can opt in to safe overlap only after the same two-trace comparison checks adapters, state, kernel ownership and teardown. A poison event retires the executor under the existing supervisor without new GPU calls. ENG-1a owns the mock and the existing worker-entry validation when this boundary changes.
+
+### 6.11 Route population and first-wave owners
+
+Build the old side from the shipped job dispatcher/API modes, native bundle/registry surfaces and actual bespoke worker selectors, independent of the proposed export. Join on platform, backend, stable provider, public operation/mode and conditioning meaning. Separate native/imported routes and output variants whenever implementations differ. A descriptor's generic “reference” bit alone cannot distinguish an init image from an IP adapter. Include direct engine/external bundle consumers and supported CPU variants even when no SceneWorks job exposes them. For a product row, follow the entry point into the selected implementation. For an engine-only row, retain its actual external entry point. Record unsupported cells as negative witnesses. A present registry ID is insufficient evidence of execution or device fit.
+
+At the November 7 baseline the 38 `JobType` variants all have an explicit dispatch arm. The packaged media descriptors enumerate 75 MLX and 63 Candle IDs. There are 21 Candle audio IDs, four imported family categories in the existing app matrix, and a separate iOS subset of seven generators plus its transform surface. The sets overlap; summing them would double-count routes. Expand each applicable cell using its provider-specific operations/conditioning, keep the origin and assign the owners below. Consume the existing matrix as a *baseline input* before DEC-16 removes it. The reconciliation is a test over typed sources and public entry points; there is no new checked-in capability matrix.
+
+Two checks establish why the join matters. On both backends StarVector is registered in the runtime snapshot's text-LLM surface rather than the media generator list. In the Candle runtime snapshot four Qwen edit aliases point to `qwen_image_edit`, absent from the media-generator list. Its [worker selector](https://github.com/SceneWorks/SceneWorks/blob/e1ffa54df69a6d37b9efaa61f8a6dbce9d279ff8/crates/sceneworks-core/src/jobs_store/routing/candle.rs#L1565) preserves the actually supported conditions. ENG-2 owns Qwen edit behavior and ENG-7 owns registration cleanup. Neither a missing media ID nor a mapped alias alone decides public eligibility.
+
+| Public or directly callable cohort | Conditional behavior and product output | Engine migration / app acceptance |
+|---|---|---|
+| FLUX.1 dev/schnell T2I on linked desktop MLX/Candle | RGB image. Base T2I starts from noise. Plain img2img has no base witness on these providers. | ENG-1a, then applicable low-res in ENG-1b. |
+| FLUX.1 XLabs IP, dev strict ControlNet and PuLID | Resolve each actual MLX or Candle selector independently. Identity/structural conditioning stays distinct from an init image. Preserve composed-mode refusals. | ENG-1a migrates each shipping route, including bespoke dispatch parity. ENG-7 registers any residual bespoke entrypoint. |
+| FLUX.2 MLX dev plain img2img (native public generator); SD3.5 Medium MLX (SceneWorks public job) | Source-image VAE init and strength blend, RGB image. Other edits and Candle Klein's reserved reference modes have their own keys. | ENG-2, trace §6.13. |
+| Other catalog image and video generation | Public image/edit and video modes resolve via runtime maps, including count, alpha, conditioning and AV outputs. Match each provider/mode to the named shared-driver or native cohort in §9.2. Imported FLUX.2, Krea, Mage and SDXL use their actual selectors. Native and curated SDXL, Kolors and Wan are split by loop kind. | ENG-2/3 shared drivers, ENG-4b Krea, ENG-5/6 native/specialized, APP-5 image and APP-6 video. |
+| SenseNova VQA and interleave | Preserve text-only responses and documents referencing the actual ordered image/text segments. Admit conditional feedback (§6.10). | ENG-6 driver, APP-6 ordered document publication. |
+| StarVector 1B/8B on MLX and Candle | Native image-to-SVG through the token driver, existing finish reason, sanitized canonical SVG, derived preview and terminal metadata. Other vector modes keep their own eligibility/refusal. | ENG-7 owns registered output contract and native binding; APP-5 owns public vector lane and artifacts. |
+| Audio registry and audio jobs | Typed audio outputs. Flow/diffusion providers use the runner. Autoregressive token providers keep token generation and shared lifecycle. | ENG-14, then APP-6. |
+| iOS and external bundles | iOS image registry, including Sana/Sprint, Anima Turbo, SDXL, Iris and Z-Image Turbo/control; separately registered transforms, including Iris restore. Record device admission independently. ChatWorks, Art and mobile get compatibility checks at the feature changing their contract (XL-4). | Respective graph cohort, ENG-7 registration, ENG-13 iOS, consuming feature for external compatibility. |
+| Bespoke dispatch and non-denoising jobs | Expand native image detail/restore/upscale, extend/bridge/person-replace and other product entrypoints from dispatch. Record existing artifact types, cache/admission owners and typed refusals. Classify training, downloads/imports and utility jobs by their actual lifecycle (LANE-1); a utility classification never implies a denoising migration. | ENG-7 owns residual bespoke registration and contract gaps; APP-4 admission, APP-5 image/vector, APP-6 remaining lanes; ENG-8 and subsequent owning features qualify each trainer before graph removal. |
+
+**Cutover test.** Every legacy supported row must resolve to its owner, candidate binding, output contract and AP13 evidence, or an approved per-route exception. An unknown owner fails inventory publication. Deliberately remove StarVector's binding while keeping its old dispatch witness: reconciliation must name the missing provider/mode. A new catalog row likewise requires a consumer or legitimate engine-only disposition. ENG-6 closes only its assigned cohort. Later owners close theirs independently.
+
+### 6.12 A byte bound for the first FLUX.1 recipe
+
+For SC-15823, Candle `flux1_dev`, q4, 1024×1024 T2I, batch 1, 8 steps, seed 42, Resident, the recorded live-allocation high-water is **17,651,074,970 B**. The artifact is `SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9`, inventory `38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341`. It covers the complete ordinary render. Its repeated “conditioning/denoise/decode” values denote that same total. Source, captured at inference `5f973a73bf`: [SC-15823 evidence](https://github.com/SceneWorks/SceneWorks/blob/e1ffa54df69a6d37b9efaa61f8a6dbce9d279ff8/docs/flux1-candle-memory-ladder-sc-15823.md#L33).
+
+Take K=4, scale 0.5. The 16-channel unpacked f32 latent at 512² is 262,144 B, and at 1024² it is 1,048,576 B. For the resize/re-noise suboperation, a bounded implementation may hold at most two reduced buffers (source and unpacked clean) and four full buffers (resized clean, independent noise, blend result and destination pack/cast). Counting each as f32 and all six simultaneously bounds **those buffers** at **4,718,592 B**. Alias elimination can only reduce that subtotal. This layout is an implementation condition: extra backend scratch, RNG staging/host transfers, retained snapshot or rollout state and an endpoint forward each require their own covered bound and budget domain. The existing total already includes ordinary weights and buffers; do not add them again or subtract fictitious phase measurements.
+
+For a stage whose matching ordinary live set is proven bounded by B, the above layout needs at most B + 4,718,592 B **only if** its other increments are covered or zero. With the recorded value as a numerical fixture B, the cutoff is 17,655,793,562 B of effective device budget after reserve/margin; equality admits that fixture and 17,655,793,561 B refuses it. In the real record the endpoint snapshot/workspace, small-grid operation and changed live set are **unclassified**. The measured high-water alone does not prove B for the new stage. Until a source-derived upper bound or the planned bounded component proof closes every operation, the actual new cell returns a typed unpriced-recipe refusal even above that illustrative cutoff. The original T2I posture remains intact. ENG-1b may claim availability only on cells with a reconciled bound and quality proof; lack of any usable first cohort is an explicit FEAT-1 blocker, never a successful rollout.
+
+### 6.13 Plain img2img initialization at reduced spatial resolution
+
+For MLX FLUX.2 dev, take a 1200×700 source, final pass 1024×768, scale 0.5, 10 native steps and strength 0.4. FLUX.2 computes `start_step = floor(10 × 0.4) = 4`, leaving M=6 executed steps on the full-geometry schedule. With K=3, phase one uses 512×384, phase two 1024×768. Bind the single source as ordinary init; an XLabs identity reference or strict control would follow its own applicability rule.
+
+Apply this route's native Lanczos pixel fit to **512×384** and normalize input to [-1,1]. Run its mean VAE encode, transpose, even crop/grid match, patchify, codec normalization and pack at that grid. The initial latent is 64×48, then the packed token grid is 32×24 (width × height). Blend it with the route's per-sample seeded noise using the full-pass sigma at node 4. Execute nodes 4→7 at the reduced size, perform the declared clean-sample transition at node 7, then execute nodes 7→10 at full size. Initial encode, retained clean init, noise and first forward have their own admission scopes. Price the source pixel buffer as well as the fitted input and actual codec workspace. Persist init semantics in recipe v1 and prove through this route's ordinary entrypoint; lower-strength and legal-grid refusal cases use the same order. [Init implementation](https://github.com/SceneWorks/inference/blob/2b09938e33370915d4f853389961709b8bbf8bf9/crates/media/mlx-gen/mlx-gen-flux2/src/model.rs#L885)
+
+The native FLUX.2 proof enters through the exported dev generator, as in its [img2img example](https://github.com/SceneWorks/inference/blob/2b09938e33370915d4f853389961709b8bbf8bf9/crates/media/mlx-gen/mlx-gen-flux2/examples/flux2_dev_img2img.rs). The public SceneWorks proof uses SD3.5 Medium MLX through the normal T2I job with a reference asset and strength. The [worker](https://github.com/SceneWorks/SceneWorks/blob/e1ffa54df69a6d37b9efaa61f8a6dbce9d279ff8/crates/sceneworks-worker/src/image_jobs/conditioning.rs#L1721) and [provider](https://github.com/SceneWorks/inference/blob/2b09938e33370915d4f853389961709b8bbf8bf9/crates/media/mlx-gen/mlx-gen-sd3/src/model.rs#L390) both implement an init-image path. Use SD3's own sigma, fitting and normalization rules there. A direct FLUX.2 witness makes no claim about which UI mode reaches it.
+
+### 6.14 Hires.fix last-use owners
+
+| Existing production consumer under `sceneworks-worker/src/image_jobs/` | Cutover and deletion owner |
+|---|---|
+| `mlx.rs` and `candle.rs`, general base dispatch and surface-aware rendering | Each engine cohort switches its own supported rows in ENG-2…6. ENG-7 owns the final audit and removal of the legacy generic call sites. |
+| `krea_imported.rs`, admission inputs, imported execution and specialized two-pass path | ENG-4b migrates imported Krea using its public request. Preserve phase/pose conflicts and enhancement behavior. |
+| `sdxl_imported.rs`, imported admission and two-pass execution | ENG-5 migrates imported native SDXL and preserves its conditioning/refinement refusals. |
+| `memory.rs`, refinement reference-count helper | Keep pricing live for unmigrated rows. ENG-7 deletes its last legacy dependency after cohort pricing is active. |
+| `render.rs`, resolver, reference-count and both Hires generation helpers | ENG-7 deletes the shared implementation after every production caller above has moved. Update the structural/behavior tests in the same change. |
+
+Compare old/new imported Krea and SDXL at their respective exits: admitted dimensions/conditioning count, unenhanced base prompt, final-only enhanced prompt, fitted single refinement reference, seed/step events, stored final output and absence of a public intermediate. At ENG-7, search for the legacy type, resolver, reference-count and render helpers, compile both backend call paths and confirm zero surviving production calls. Any newly discovered live caller joins its own cutover and the final deletion remains with its last actual consumer.
+
+### 6.15 Whole-job work limits
+
+After composing native and user passes, calculate with checked integer arithmetic the sum of executed outer steps and maximum solver evaluations per pass, including correctors, read-only endpoints, conditional region maxima and sample/count semantics. Budget total output bytes across retained artifacts and separately price the maximum simultaneous working set. Cap expansion **before** allocating a vector from untrusted input. Counts, sums and products that overflow or exceed the common bound fail pure validation at browser, HTTP, MCP and worker preflight. Job limits are versioned product values chosen against supported legacy maxima at ENG-16 planning. A pre-existing native request remains covered by its existing limits.
+
+For a fixture cap of 36 evaluations, three sequential samples × two passes × (two steps × three evaluations) uses exactly 36. A single extra job-wide evaluation would yield 37 and refuse. A per-sample endpoint adds three and refuses at 39. Test retained output exactly at/one byte above its cap and an overflowing count product with identical issue codes at every boundary. These are fixture limits, independent of the final product values.
+
 ## 7. Migration strategy and coordination
 
 ### 7.1 Rules
 
-1. **Route-at-a-time strangler.** During a feature, the runner hosts migrated routes while legacy routes keep their `generate`. A family-migration item moves **all** of that family's routes on both backends, then deletes the legacy orchestration and the per-family copies of the shared piece the feature introduces.
+1. **Route-at-a-time strangler.** During a feature, the runner hosts migrated routes while legacy routes keep their `generate`. Cut over an explicitly named provider/mode/backend cohort. Delete the old path for that cohort in the same feature. Native/curated, imported and bespoke rows can have different owners. A shared helper keeps serving only unmigrated rows until the named last consumer deletes it. No row may retain two production paths at feature exit.
 2. **The producer migrates its consumers (AP9).** A feature that replaces a source migrates every consumer in the same feature, in both repos. Example: ENG-7 replaces the capability dumps, so ENG-7 migrates SceneWorks' dump consumers, including APP-1's static layer if APP-1 has already landed. That feature's `[SW]` items are then gated by DEC-5.
 3. **Characterize before consolidating** (§7.2).
 4. **List behaviour changes; never let them slip in.** Each change is a named PR entry with its AP13 class and evidence. Class (c) needs sign-off.
@@ -861,7 +934,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 | Plan snapshot | 0 | `RenderPlan` per route over a request corpus |
 | Runner trace over a mocked backend | 0 | Pass/stage/phase/hook sequence; Hires prompt/conditioning/event equality; Wan MoE trace equality with legacy; §6.5–6.8 |
 | `FamilyDriver` and Feature conformance over a mocked forward | 0 | Every `DriverSupport` and geometry-change claim [ENG-16, ENG-21] |
-| Concurrency | 0 | Two interleaved requests on one provider (PIPE-14) |
+| Executor and RNG isolation | 0 | Owner-thread lifecycle, queued global-seed providers and opt-in safe interleaving. Compare two isolated request traces (§6.10). |
 | Boundary-state and split conformance | 0 | Flow/VE noise law and estimate provenance; inert split versus unsplit history/draw coordinates; incompatible Carry refusal; read-only guidance/Feature state and geometry invalidation |
 | Context dependency conformance | 0 | Krea base/adapter/base, CFG-off/on and request isolation; retained allocation pricing |
 | Fault injection | 0 | Error classes × stages (PIPE-15) |
@@ -903,24 +976,18 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 - **Concurrent inference features:** the first to land merges into inference `main`; the other merges inference `main` before its final pin. Then run `cargo metadata --locked`. The coordinator of the second-landing feature resolves the conflict [APP-6].
 - **Pin sites:** run `bump-inference.mjs` and verify that no site anywhere (8+ plus the lock) still holds the old revision.
 
-### 7.5 SW-F327 overlap ledger (snapshot 2026-11-03; refreshed at each feature's planning)
+### 7.5 Delivered dependencies and current overlap
 
-**Snapshot from the DEC-4/5 discussion:** #3258 and #3264 are merged into `feature/sw-f327-code-review-remediation`, with merge commits `1c3e121bc2` and `c04f551f9a`; neither was an ancestor of fetched `origin/main`. #3260, #3268 and #3270 were open against that feature branch. The dispositions below describe ownership and intended reuse, not acceptance on main. Refresh this dated snapshot at implementation planning. DEC-5 is approved as a sequencing policy; no implementation is authorized during design review.
+As of November 7, SceneWorks main `e1ffa54df6` includes SW-F327 merge `40bac3f2d7`, the #3258 stream supervisor and #3264 admission work. #3268 and #3270's delivered changes are on main. Preserve their owners and behavior when extending the shared lane, admission and structural tests. Inference `2b09938e33` already accepts CodeGraph feature/story branch names in `scripts/ci/feature_epic_policy.py`. Reuse this policy at ENG-1a.
 
-| SW-F327 PR | Cards | SGA requirements touched | Disposition |
-|---|---|---|---|
-| #3258 | SW-6642 shared stream/heartbeat/cancel supervisor | LANE-4 | **SW-F327-owned; merged to its feature branch.** LANE-4 builds on it after main delivery and re-baselining. |
-| #3260 | inference pin to the SW-F327 head | Pin choreography | Sequence per §7.4 |
-| #3264 | SW-6659 (`apply_vram_cap` sites), SW-6662 (YuE/YuE2 admission), SW-6753 (Mochi/SVD twins), SW-6754 (`hw.memsize` probes), SW-6640 (floor semantics); touches `krea_multiphase.rs`, `candle_memory_strategy.rs`, `generator_cache.rs`, `base_admission.rs`, `conditioning_gate.rs`, `moss.rs`, `instantid.rs` | ADM-2 (part), ENG-4b `[SW]`, APP-4 | **SW-F327-owned subset; merged to its feature branch.** Overlapping `[SW]` items wait for main delivery. APP-4 re-baselines after it. |
-| #3268 | Deletes `apps/web/src/modelCatalog.js` | TOOL-3, APPREG-2 | **SW-F327-owned; PR open.** SGA does not duplicate its deletion; re-baseline after main delivery. |
-| #3270 | SW-6677/6679 cfg alias, SW-6686 AST architecture checks, SW-6812/6817/6824 dependency de-dup and direction guard | LANE-5, DEC-6, LANE-6 | **SW-F327-owned; PR open at snapshot.** SGA builds on main-delivered changes. Structural checks extend the existing architecture suite within approved DEC-6's limits. |
-| SW-F148 (`sc-8432`) | Krea Realtime interactive streaming, spike-gated; NO-GO permitted | PIPE-16, HOOK-1 | **Separate product owner; sequenced adoption (§6.9).** ENG-6 puts current batch output through the production terminal/repeated-chunk primitive. If a streaming path already exists, ENG-6 migrates it too; if delivered later, SW-F148 adopts that primitive with its first stream-only production hooks. NO-GO retains the batch user and removes no existing capability. No duplicate streaming delivery or orphan mock-only hook. |
+| Surface | Rebaseline before the first touching feature |
+|---|---|
+| Hires.fix and Krea | Use the actual consumers and per-route deletion sequence in §6.14. |
+| Product registry and controls | Include SW-F330 appearance/share behavior and expanded sampling from PRs #3335/#3334 in the before-side fixtures (§10.3). |
+| H3 memory | SW-F329 shipped the reference and policy pair in PR #3331. §8.1 specifies impact and evidence reuse. |
+| Krea streaming | SW-F148 retains product streaming, including a permitted NO-GO. ENG-6 adopts its delivered consumer if present, and the whole-clip terminal path either way (§6.9). |
 
-**Approved DEC-5 policy (2026-11-03), applied once implementation is authorized.**
-- Independent `[INF]` work may proceed while preserving worker-facing APIs and inference-pin compatibility. Check producer/consumer contracts and live overlap rather than treating every inference edit as independent.
-- Overlapping `[SW]` changes wait for their owning remediation to reach `main`, then re-baseline. Verify main ancestry; a merge into SW-F327's feature branch does not clear this dependency.
-- Reuse delivered remediation and leave in-review fixes with their current owner. Refresh the file/contract ledger at every feature's planning; unrelated work has no blanket dependency on completion of all SW-F327.
-- This is a design decision, not authorization to start implementation, create program tracker items or execute models.
+DEC-5 still applies to new overlap. Verify current main ancestry before an overlapping change, preserve worker-facing pin compatibility, and record who owns any new route. The old November 3 wait on SW-F327 is satisfied.
 
 ---
 
@@ -930,20 +997,25 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 | Route | Why |
 |---|---|
-| FLUX.1-dev t2i + img2img (+ ControlNet on candle, IP and PuLID on MLX) | Packed tokens, `mu`, guidance-embed, conditioning, PuLID's `timestep_to_start_cfg` |
+| FLUX.1 dev/schnell base T2I, plus separately inventoried ControlNet, XLabs IP and PuLID | Preserve packed tokens, guidance, conditioning and existing refusals per backend. Plain img2img is outside the base cells. |
+| FLUX.2 MLX dev native plain img2img, plus SceneWorks SD3.5 Medium MLX reference-guided T2I | Use the native real strength-dependent init encoder and include non-square source fitting (§6.13). |
 | SDXL native + curated + inpaint, plus InstantID | UNet, ε, ancestral parity loop, inpaint blend, global RNG |
 | Qwen-Image t2i + edit | Reference tokens, norm-rescaled CFG, candle merge-at-load |
 | Z-Image Turbo + Base | Few-step, C,T,H,W image latent |
 | Krea Raw multi-phase | Phases, per-phase adapters/guidance |
 | Wan 2.2 A14B T2V (native and curated) + I2V | Video, MoE with σ-keyed slot and history carry, I2V `y` |
 | LTX-2.5 distilled + dev | Two streams, explicit-table span, route transition, learned upsampler, STG branches |
-| MiniMax-H3 T2VA | Two schedules, joint rows, `FamilyDriver` |
+| MiniMax-H3 T2VA and the shipped SW-F329 long-clip CUDA case | Test two coupled schedules. Evaluate changes against the matched sparse/window and dense-fallback envelopes below. |
 | FLUX.3 Klein distilled + base | Flow-map driver; Qwen3-VL encoder on llm |
 | Boogu Turbo; MOSS-Image | DMD drivers, model-dtype combine variant |
 | Krea-realtime | Autoregressive streaming driver |
 | Iris | iOS family, FlowDPM driver, quanta |
 | One audio route (Stable Audio 3 or YuE2), from ENG-14 | Audio adoption |
 | Mage-Flow, when touched | Watermark. Weights exist only on `nax-macos-2` and the SMB share |
+
+**H3 operating envelope.** ENG-6 (driver), ENG-8 (attention/kernel), ENG-12 (block windows) and ENG-13 (admission) check the affected portion of the accepted q4, 1344×768, 345-frame, 24 fps, Turbo eight-step, Veda-enabled request with generated stereo audio. Retain the physical GPU identity, requested adapters, schedule and precision. The small arm uses a 21 GiB private pool and 3 GiB external reserve. The 95 GiB Resident control uses a 92 GiB pool and 3 GiB reserve with the same explicit 32 MiB cuBLAS workspace policy as the sparse 24 GiB arm. Keep the original request's Veda setting and effective sparse/dense path distinct. Assert actual text-encoder **and** DiT transfers and sparse calls on the windowed arm. Check dense fallback against its own cap. Compare sparse outputs only to equivalent sparse controls. Reuse [the matched control](https://github.com/SceneWorks/SceneWorks/actions/runs/42335898368) and the [terminal contract](https://github.com/SceneWorks/SceneWorks/blob/e1ffa54df69a6d37b9efaa61f8a6dbce9d279ff8/docs/testing/sw-f329-cuda-memory-terminal.md). A changed numerical or lifetime assumption selects the smallest affected witness under DEC-7.
+
+**Training.** Before ENG-8 removes a graph, freeze trainer variant, seeds, batch, target names, optimizer state and precision. Reuse the existing FLUX.3 MLX/Candle gradient/update and checkpoint oracles and each affected trainer's equivalent fixture. Compare trainable/frozen sets, nonzero expected gradients or matched deltas, unchanged frozen parameters, and next update after save/resume versus uninterrupted. Capture forward parity, update parity and resume separately in the existing dispatched tier. The optional ENG-15 pilots have a different purpose.
 
 ### 8.2 Where runs happen
 
@@ -955,6 +1027,8 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
   - **Candle:** a CUDA runner labelled `real-weights`.
 - **The dev Mac GPU** is used only on an explicit loan, with the duration stated.
 - **Every MLX run** has an external RSS guard and a stated memory cap.
+- **iOS.** ENG-1a records same-target/profile/architecture binary baselines for media-enabled and LLM-only builds. ENG-13 replays cold, resident and falling-headroom admission on the existing fixture families. Changes to footprint, incremental headroom or quantum behavior require applicable physical iPhone/iPad evidence for that OS/device/profile, including a post-admission headroom drop. Reuse a matched receipt or take one bounded affected-device witness. Simulator and desktop results have their own scopes.
+  For a fixture with 600 MiB demand, footprint 200 MiB at admission and 400 MiB at recheck, only 200 MiB of growth is credited. Remaining demand is 400 MiB and projected footprint is 800 MiB. With an 800 MiB cap, 400 MiB available fits; 399 MiB refuses. Cold with no growth requires the full 600 MiB. Credit a known reusable model only through the route's existing reuse evidence. An unrelated resident object cannot lower the cold demand. Exercise both release/media and release/LLM-only builds against their own pre-feature artifacts.
 - **Candle-gated SceneWorks tests:** one `windows-candle.yml` dispatch per batch (constraint 7).
 
 ---
@@ -973,35 +1047,35 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 | Feature | Scope (slices sketched) | Depends on | Est. |
 |---|---|---|---|
-| **ENG-1a: Runner core + FLUX.1 migration** (walking skeleton; no user-visible change) | **0** `[INF]` prerequisites: verify the delivered CodeGraph-key branch policy or land its missing prerequisite PR (DEC-11); the route-inventory dump; baselines (LOC census, fact audit, iOS size); the Tier 1 workflow route on `nax-macos-2`; the prior-art salvage review. **1** `[INF]` the pass/phase `RenderPlan` with stream bundles; typed boundary states; request-owned solver, RNG and guidance state (`RunState`); dependency-keyed preparation; whole-plan validation; `BundleOps`; the runner driving `MemoryRequestScope` with actual phase identities; the error and count contracts. **2** `[INF]` **every FLUX.1 route on both backends** (t2i, img2img, ControlNet, IP, PuLID) moves onto the runner, class (a), and its legacy orchestration is deleted. **3** terminal. **Complete consumer boundary:** FLUX.1 runs entirely on the runner and the old path is gone (AP9). | — | 5–6 wk `[L]` |
-| **ENG-1b: Low-res start (first Feature)** | **1** `[INF]` `FeatureSpec` registry; parameter and composition applicability; the `features` field on the existing dump format; typed refusal, which fixes the silent `phases` ignore. **2** `[INF]` low-res recipe v1: `EstimateSource` (endpoint default; candidate completes K steps and retains named primary x0), the typed noise law, aggregate operation evidence plus transition buffers, scope identities; bounded quality/time/memory and replay acceptance (§6.1, §6.5). **3** `[SW]` existing admission consumers move to the plan and pricing inputs; the `lowResStart` option, validation, versioned persistence block and UI (no upgrader, C4-05). **4** terminal. | ENG-1a; DEC-3 approved; DEC-10/13 approved; specific route refusals reviewed at planning; DEC-5 (`[SW]` waits for SW-F327 #3264) | 4–6 wk `[L]` |
-| **ENG-2: Shared-driver image wave** | flux2, chroma, lens, anima, sd3, sana base, boogu base, qwen-image (t2i, edit, control), qwen-2.1, z-image (base, turbo, control), kolors curated, sdxl curated. Schedules as data, `img2img_start`, `mu`/shift; `RefBundle` grid-aligned typing. **Hires.fix becomes an engine Feature** (pass-local prompt/encode/reference bindings plus `PixelRoundTrip`, §6.6); preserve final-pass-only enhancement, legacy pixel-fit, seeds, events and output policies. `[SW]` migrate its existing admission consumers to `PricingPlan` component/phase/operation inputs and actual pass scopes, then delete the worker `HiresFixPlan` path. No wait for APP-4. | ENG-1b | 5–6 wk (split at planning if needed) |
+| **ENG-1a: Runner core + FLUX.1 migration** (walking skeleton; no user-visible change) | **0** `[INF]` prerequisites: verify the delivered CodeGraph-key branch policy or land its missing prerequisite PR (DEC-11); the independent route reconciliation (§6.11); source-identified baselines (LOC census, fact audit, iOS slices); the Tier 1 workflow route on `nax-macos-2`; the prior-art salvage review. **1** `[INF]` the pass/phase `RenderPlan` with stream bundles; typed boundary states; request-owned solver, RNG and guidance state (`RunState`); dependency-keyed preparation; whole-plan validation, executor/RNG ownership and a bounded native-region contract exercised by the SenseNova design fixture (§6.10); `BundleOps`; the runner driving `MemoryRequestScope` with actual phase identities; the error and count contracts. **2** `[INF]` **every shipped FLUX.1 provider/mode on its actual backend** (base T2I and existing ControlNet, XLabs IP and PuLID routes; no fabricated base img2img) moves onto the runner, class (a), and its legacy orchestration is deleted. **3** terminal. **Complete consumer boundary:** FLUX.1 runs entirely on the runner and the old path is gone (AP9). | — | 5–6 wk `[L]` |
+| **ENG-1b: Low-res start (first Feature)** | **1** `[INF]` `FeatureSpec` registry; parameter and composition applicability; the `features` field on the existing dump format; typed refusal, which fixes the silent `phases` ignore. **2** `[INF]` low-res recipe v1: `EstimateSource` (endpoint default; candidate completes K steps and retains named primary x0), the typed noise law, aggregate operation evidence plus transition buffers, scope identities; bounded quality/time/memory and replay acceptance (§6.1, §6.5). **3** `[SW]` existing admission consumers move to the plan and pricing inputs; the `lowResStart` option, validation, versioned recipe block, outer share v2 old-reader refusal, UI and exact-replay identity; prove the scoped byte bound or refuse the new recipe (§6.12). **4** terminal. | ENG-1a; DEC-3 approved; DEC-10/13 approved; specific route refusals reviewed at planning; DEC-5 baseline refreshed (§7.5) | 4–6 wk `[L]` |
+| **ENG-2: Shared-driver image wave** | flux2, chroma, lens, anima, sd3, sana base, boogu base, qwen-image (t2i, edit, control), qwen-2.1, z-image (base, turbo, control), kolors curated, sdxl curated. Schedules as data, `img2img_start`, `mu`/shift; `RefBundle` grid-aligned typing. **Hires.fix becomes an engine Feature** (pass-local prompt/encode/reference bindings plus `PixelRoundTrip`, §6.6); preserve final-pass-only enhancement, legacy pixel-fit, seeds, events and output policies. `[SW]` migrate its existing admission consumers to `PricingPlan` component/phase/operation inputs and actual pass scopes, cut over only the ENG-2 cohort. Preserve the legacy helper for its remaining callers as listed in §6.14. Prove ordinary img2img on MLX FLUX.2 (§6.13). | ENG-1b | 5–6 wk (split at planning if needed) |
 | **ENG-3: Shared-driver video wave** | Wan curated (σ-keyed MoE slot, history `Carry`), Mochi, SVD, SCAIL-2 | ENG-1b | 4–6 wk |
 | **ENG-4a: Backend primitives + media/LLM Linear spine** | Extract `mlx-layers`/`candle-layers` below media and LLM (§1.2); move primitive contracts without a media↔LLM edge. Migrate media Linears (including LTX-local) and LLM projections with existing dense/quantized/Prism/fused/trainable variants preserved. Resolve all consumers of the moved source in this feature; locked Cargo graph and iOS partitions remain valid. | ENG-2, ENG-3 | 5–6 wk `[L]`; re-estimate against the full projection inventory; split at a complete consumer boundary if larger |
-| **ENG-4b: Request-scoped scales + per-phase adapters** | Preparation **and** forward receive phase scales/branches; dependency-keyed caches (§6.7); keep per-route fold defaults. Move Krea multiphase to runner phases; LTX pass scales and Wan filtering use the same scale seam. Deliver per-phase adapter Feature, delete candle `ip_dit`, `packed_dit`, `packed_te`. `[SW]` Krea uses existing generic generation entrypoints after #3264; no dependency on APP-5’s future lane harness. | ENG-4a | 5–6 wk `[L]` |
-| **ENG-5: FamilyDrivers I** | SDXL native (with inpaint, IP, control) + InstantID; Kolors native; Wan native UniPC (`Carry`); FLUX.3 flow-map; Boogu Turbo DMD; Sana Sprint SCM; MOSS-Image DMD; Iris FlowDPM (quanta hooks); Ideogram; Supra2 | ENG-4b | 5–6 wk |
-| **ENG-6: FamilyDrivers II (multi-stream, autoregressive)** | LTX (explicit tables, route transition, learned upsampler component, AV streams, per-token time); MiniMax-H3 (two schedules); Mage; SenseNova (interleaved output); Bernini; Krea-realtime (existing whole-clip output adopts the shared `emit` primitive as one terminal chunk; mock traces prove multi-chunk behavior; any already delivered streaming path also migrates. Later streaming delivery/NO-GO stays with SW-F148, §6.9 and MIG-7); SeedVR2; PiD sampler hosted in S10. **Exit:** PIPE-1 complete for every inventory row; the shared chunk contract has a production batch user and conformance evidence, with no orphan stream-only hook; SW-F148 remains the streaming product owner. | ENG-5 | 6 wk (likely 6a/6b) |
-| **ENG-7: Route records + capability export + registration** | `RouteRecord`, defaults and limits on records; capabilities computed from records; hardware-free export (item 0: hosted candle build check); `Generator` cleanup and typed reports; typed request blocks; REG-6 bespoke providers registered. `[SW]` migrate every dump consumer, SceneWorks linking via bundles only, no direct `runtime_*::providers` imports. | ENG-6 | 5–6 wk |
-| **ENG-8: Layer kit II** | `AttentionOp` (all raw SDPA), RoPE/qkv/norm/MLP/timestep kit, `ExecPolicy`, trainable op-set switch; delete training model copies (WGT-4) | ENG-6 | 5–6 wk |
+| **ENG-4b: Request-scoped scales + per-phase adapters** | Preparation **and** forward receive phase scales/branches; dependency-keyed caches (§6.7); keep per-route fold defaults. Cut over imported Krea Hires.fix and its memory inputs (§6.14). Move Krea multiphase to runner phases; LTX pass scales and Wan filtering use the same scale seam. Deliver per-phase adapter Feature, delete candle `ip_dit`, `packed_dit`, `packed_te`. `[SW]` Krea uses existing generic generation entrypoints after #3264; no dependency on APP-5’s future lane harness. | ENG-4a | 5–6 wk `[L]` |
+| **ENG-5: FamilyDrivers I** | SDXL native (with inpaint, IP, control), including imported SDXL Hires.fix and its admission path, + InstantID; Kolors native; Wan native UniPC (`Carry`); FLUX.3 flow-map; Boogu Turbo DMD; Sana Sprint SCM; MOSS-Image DMD; Iris FlowDPM (quanta hooks); Ideogram; Supra2 | ENG-4b | 5–6 wk |
+| **ENG-6: FamilyDrivers II (multi-stream, autoregressive)** | LTX (explicit tables, route transition, learned upsampler component, AV streams, per-token time); MiniMax-H3 (two schedules); Mage; SenseNova (conditional text/image region, feedback and typed interleaved output, §6.10); Bernini; Krea-realtime (existing whole-clip output adopts the shared `emit` primitive as one terminal chunk; mock traces prove multi-chunk behavior; any already delivered streaming path also migrates. Later streaming delivery/NO-GO stays with SW-F148, §6.9 and MIG-7); SeedVR2; PiD sampler hosted in S10. **Exit:** all image/video denoising cohorts assigned through ENG-6 have adopted the runner. ENG-7 owns remaining bespoke registration and last Hires.fix use, ENG-14 owns audio adoption, and app cohorts retain their named obligations. Verify H3's affected long-clip behavior (§8.1); the shared chunk contract has a production batch user and conformance evidence, with no orphan stream-only hook; SW-F148 remains the streaming product owner. | ENG-5 | 6 wk (likely 6a/6b) |
+| **ENG-7: Route records + capability export + registration** | `RouteRecord`, defaults and limits on records; capabilities computed from records; hardware-free export (item 0: hosted candle build check); `Generator` cleanup and typed reports; typed request blocks; REG-6 remaining bespoke entrypoints registered, including StarVector's native token driver with a typed sanitized SVG, preview and terminal metadata. Resolve all outstanding generic Hires.fix callers and delete the shared helper (§6.14). `[SW]` migrate every dump consumer, SceneWorks linking via bundles only, no direct `runtime_*::providers` imports. | ENG-6 | 5–6 wk |
+| **ENG-8: Layer kit II** | `AttentionOp` (all raw SDPA), RoPE/qkv/norm/MLP/timestep kit, `ExecPolicy`, trainable op-set switch; delete each training graph copy only with its backward/update and resume witness (WGT-4, §8.1); apply H3 impact checks | ENG-6 | 5–6 wk |
 | **ENG-9: Weights** | Codec registry, `WeightPlan` lifecycle, loaders migrated by dialect, per-component tiers, load cancellation, generic load progress, generated adapter routing | ENG-7 | 6 wk (likely 9a/9b) |
 | **ENG-10: Latent codecs + R2** | KL-2D, WanCausal3D, causal-3D kit; tiling laws; quality bounds | ENG-8 | 5–6 wk |
 | **ENG-11: Encoders on llm + towers** | `TapPolicy` on the existing tap API; codec, mask and architecture blockers; towers | ENG-8, ENG-9 | 5–6 wk |
-| **ENG-12: BlockStack + conditioning + R3/R4** | `BlockStack`, block hooks, conditioning modules; R3 in `AttentionOp`, R4 in `BlockStack` | ENG-8, ENG-9 | 5–6 wk |
-| **ENG-13: Computed memory contracts + R1 + iOS** | MEM-2 (delete the fixtures); R1 in the lifetime graph; retire `MemoryRequestScope`; MEM-6 iOS admission. `[SW]` migrate the admission contract input if APP-4 has landed. | ENG-10, ENG-11, ENG-12 | 5–6 wk |
-| **ENG-14: Audio + LLM adoption** | XL-1/2 | ENG-9, ENG-13 | 5–6 wk |
+| **ENG-12: BlockStack + conditioning + R3/R4** | `BlockStack`, block hooks, conditioning modules; R3 in `AttentionOp`, R4 in `BlockStack`; verify affected H3 window/fallback contracts (§8.1) | ENG-8, ENG-9 | 5–6 wk |
+| **ENG-13: Computed memory contracts + R1 + iOS** | MEM-2 (delete the fixtures); R1 in the lifetime graph; retire `MemoryRequestScope`; MEM-6 iOS incremental admission and quantum cases (§8.2); H3 policy/host/device preservation (§8.1). `[SW]` migrate the admission contract input if APP-4 has landed. | ENG-10, ENG-11, ENG-12 | 5–6 wk |
+| **ENG-14: Audio + LLM adoption** | XL-1/2. Flow/diffusion audio completes runner adoption; autoregressive audio retains its token driver. Close the audio rows against both the audio registry and job dispatch, preserving typed outputs. | ENG-9, ENG-13 | 5–6 wk |
 | **ENG-15: DEC-1 (c) pilots** | Approved design direction: pilot A then pilot B, with no rollout until both satisfy BACK-5. Failure leaves baseline (b) in place. Successful rollout waves remain separately planned; no pilot execution is authorized by decision review. | ENG-8…12; DEC-1 approved | 4–6 wk pilots; conditional rollout 3–6 months `[L]` |
-| **ENG-16: Configurable chained denoise passes** `[INF]+[SW]` | FEAT-2: inventory/disposition sc-20414 pass controls; shared recipe schema and bounded pass-list validation; fresh schedule resolution, explicit transitions/history/seeds; whole-chain pricing and typed refusals across the supported route inventory. Persist/version the recipe; expose advanced controls through APP-3's common renderer. Prove replay, cancellation and low-res/native-pass composition; bounded separately dispatched output/quality/time/memory evidence on both shipped backends. No family chain loop or parallel schema. | ENG-7, APP-2, APP-3; DEC-4 approved; `[SW]` DEC-5 gate | 4–6 wk `[L]`; re-estimate after schema/route inventory; split at a complete consumer boundary if larger |
+| **ENG-16: Configurable chained denoise passes** `[INF]+[SW]` | FEAT-2: inventory/disposition sc-20414 pass controls; shared recipe schema and checked whole-job limits (§6.15); fresh schedule resolution, explicit transitions/history/seeds; whole-chain pricing and typed refusals across the supported route inventory. Persist/version the recipe; expose advanced controls through APP-3's common renderer. Prove replay, cancellation and low-res/native-pass composition; bounded separately dispatched output/quality/time/memory evidence on both shipped backends. At ENG-16 exit qualify all then-shipping migrated rows. When ENG-14 lands later, it owns chain coverage on each newly adopted audio row; if ENG-14 lands first, ENG-16 owns those existing rows. Program FEAT-2 acceptance includes both sets. No family chain loop or parallel schema. | ENG-7, APP-2, APP-3; DEC-4 approved; `[SW]` DEC-5 gate | 4–6 wk `[L]`; re-estimate after schema/route inventory; split at a complete consumer boundary if larger |
 
-### 9.3 SceneWorks features (all `[SW]`; start after the DEC-5 gate)
+### 9.3 SceneWorks features
 
 | Feature | Scope | Depends on | Est. |
 |---|---|---|---|
-| **APP-1: Model registry** | **0** delete the backend-capability matrix (DEC-16); hand-table inventory (APPREG-2). Static and runtime layers; one merge rule; job carries the `ModelSpec` snapshot; manifest v2 with upgrader; evidence store (keys verbatim); seeding; consumer migration. The static layer ingests **today's** dumps, and ENG-7 later migrates that ingest (producer migrates consumers). | DEC-5 gate | 5–6 wk |
-| **APP-2: Options core** | **0** control-inventory tool and "before" capture (§10.3). `OptionSpec` union seed; `validate()` at every boundary; portable-validator wasm build and native/browser corpus, startup/bundle/latency budgets, hybrid fallback (approved DEC-9); upgrader and versioning for all shapes; `IntentClass::Context`; option effects; typed refusal rendering; telemetry and stamp stability | APP-1 | 5–6 wk |
+| **APP-1: Model registry** | **0** pin the old-product UI population and capture before-side behavior before any registry/gating edit (§10.3); migrate live consumers and delete the capability digest matrix under DEC-16. Inventory hand tables (APPREG-2). Static and runtime layers; one merge rule; job carries portable logical identity, with server-owned policy and worker-local rebinding (§4.1); manifest v2 with upgrader; evidence store (keys verbatim); seeding; consumer migration. The static layer ingests **today's** dumps, and ENG-7 later migrates that ingest (producer migrates consumers). | DEC-5 verified (§7.5) | 5–6 wk |
+| **APP-2: Options core** | **0** extend the pre-change control inventory with old-tree rendering and public-path fixtures (§10.3). `OptionSpec` union seed; `validate()` at every boundary; portable-validator wasm build and native/browser corpus, startup/bundle/latency budgets, hybrid fallback (approved DEC-9); upgrader and versioning for all shapes; `IntentClass::Context`; option effects; typed refusal rendering; telemetry and stamp stability | APP-1 | 5–6 wk |
 | **APP-3: Generated panels** | Image, Video, Audio, Training, Simple and Character studios; enumerated custom renderers; accessibility floor; delete `macGating.js`/`candleGating.js`/id gating. Zero diff on the control inventory. | APP-2 | 6 wk (split by studio if needed) |
-| **APP-4: Admission pipeline** | **0** re-inventory by grep. Unify the `PricingPlan` component/phase/operation inputs already delivered for migrated routes in ENG-1a…6; `BackendBudget`, per-route posture, decision-diff, ≥25 paths, typed refusal, one stamp, ADM-7 approvals. Keep legacy memory-contract data until ENG-13 migrates that input. APP-4 centralizes consumers; it does not first activate safe pricing for new Features. | ENG-6 (`RenderPlan` for all routes); APP-1; #3264 merged | 5–6 wk |
-| **APP-5: Generation lane I** | **0** `JobType` table. Image generation lane, one event consumer (on #3258), routing table | ENG-7 (REG-6), APP-1, APP-4 | 5–6 wk |
-| **APP-6: Generation lane II** | Video, audio and utility lanes; backend module (on #3270); LANE-6 API end state | APP-5; audio lane after ENG-14 | 5–6 wk |
+| **APP-4: Admission pipeline** | **0** re-inventory by grep. Unify the `PricingPlan` component/phase/operation inputs already delivered for migrated routes in ENG-1a…6; `BackendBudget`, per-route posture, decision-diff, ≥25 paths, typed refusal, one stamp, ADM-7 approvals. Keep legacy memory-contract data until ENG-13 migrates that input. APP-4 centralizes consumers; it does not first activate safe pricing for new Features. | ENG-6 (image/video cohort); APP-1. Integrate already-shipping bespoke/audio job admission on its existing declared inputs; ENG-7/14 migrate their inputs with the producer | 5–6 wk |
+| **APP-5: Generation lane I** | **0** `JobType` table. Image and vector generation lanes, one event consumer (on #3258), typed vector output, attempt-owned publication and fault/redelivery tests (§4.4), routing table | ENG-7 (REG-6), APP-1, APP-4 | 5–6 wk |
+| **APP-6: Generation lane II** | Video, audio and utility lanes including multi-artifact publication; backend module (on #3270); API-only and shipped desktop build/launch acceptance (§4.4) | APP-5; audio lane after ENG-14 | 5–6 wk |
 | **APP-7: Tooling** | Generic memory-adapter with one bounded paired proof per designated backend (approved DEC-18), typed dumps, consumer migration and evidence preservation before deleting the memory matrix (DEC-17) and mirrors | ENG-9, APP-1 | 4–5 wk |
 
 ### 9.4 Sequencing and delivery bounds
@@ -1012,16 +1086,17 @@ ENGINE  ENG-1a → ENG-1b → [ENG-2 + ENG-3] → ENG-4a → ENG-4b → ENG-5 �
         ENG-8 → ENG-10; [ENG-8 + ENG-9] → [ENG-11 + ENG-12]
         [ENG-10 + ENG-11 + ENG-12] → ENG-13 → ENG-14
         [ENG-8…ENG-12] + DEC-1 → ENG-15 pilots
-APP     (DEC-5 gate) APP-1 → APP-2 → APP-3
+APP     (DEC-5 cleared) APP-1 → APP-2 → APP-3
                          └──────────(after ENG-6)→ APP-4 → (after ENG-7) APP-5 → APP-6
                          └──────────(after ENG-9)→ APP-7
+        ENG-14 → APP-6 (audio adoption)
 RECIPE  [ENG-7 + APP-2 + APP-3] → ENG-16
 ```
 
 - **Delivery estimates `[L]`, restored (C4-06).** These are my estimates, at low confidence, re-estimated when each feature is planned.
   - **Per feature:** 4–6 weeks each, as shown in the tables. Any feature planned above 6 weeks is split at a complete consumer boundary (DEC-12).
   - **Engine track:** ENG-1a…14 contains **16 features** including the 1a/1b and 4a/4b splits; ENG-16 adds one cross-repository recipe feature. There are **17 non-pilot engine features and 25 roadmap nodes** including ENG-15 pilots and APP-1…7. With the parallelism the graph allows (ENG-2∥3, ENG-8∥9, ENG-10∥11∥12 on disjoint files), the aggregate remains **about 14–18 months**, assuming ENG-16 can run alongside later component waves after ENG-7 and APP-3. Serializing it adds its 4–6 weeks; this is a staffing assumption, not a guaranteed date.
-  - **SceneWorks track:** APP-1…3 can run from the DEC-5 gate onward, in roughly months 2–8. APP-4…7 follow their engine producers and finish around months 14–18.
+  - **SceneWorks track:** APP-1…3 can run against the refreshed baseline, in roughly months 2–8. APP-4…7 follow their engine producers and finish around months 14–18.
   - **DEC-1 (c):** backend-generic rollout adds 3–6 months if both approved pilots pass.
   - **Why longer than draft 0.2's 13–16 months:** the R2 prerequisites (pass model, state contracts, first-consumer admission, the primitives extraction) now land inside early features.
   - **Main uncertainty:** the size of the inventories found at each planning — projection inventory, admission consumers, route-inventory exceptions.
@@ -1029,10 +1104,10 @@ RECIPE  [ENG-7 + APP-2 + APP-3] → ENG-16
 
 | Milestone | Prerequisite | What lands |
 |---|---|---|
-| M1 | ENG-1b complete, including its `[SW]` admission and persistence inputs, which wait for SW-F327 #3264 | Low-res start on FLUX.1 (about 2.5–3.5 months `[L]`) |
+| M1 | ENG-1b complete, including its `[SW]` admission and persistence inputs, against the delivered #3264 baseline | Low-res start on FLUX.1 (about 2.5–3.5 months `[L]`) |
 | M2 | ENG-2/3 complete | Low-res start on supported shared-driver image/video routes |
 | M3 | ENG-4b mechanism, extended as remaining routes migrate | Per-phase LoRA on every structurally supported migrated route |
-| M4 | ENG-6 and APP-1/2 complete | Every route on the runner; one registry and options pipeline |
+| M4 | ENG-6 and APP-1/2 complete | Assigned image/video cohorts on the runner; static registry and shared option validation. Bespoke, audio and remaining app-lane exits follow their owners. |
 | M5 | APP-4/5/6 complete, with their engine dependencies | One admission pipeline; one generation lane |
 | M6 | program end | Shared components; computed memory contracts; slimming targets |
 
@@ -1077,15 +1152,15 @@ A checked-in script counts `git ls-files` lines per area in both repos, separati
 
 ### 10.3 Control-inventory tool (PAT-8)
 
-- **What it is:** a Tier 0 test harness built in APP-2, item 0, using vitest and React Testing Library on jsdom.
-- **What it renders:** every studio, for every (model, backend, mode) in a `ModelSpec` fixture set.
+- **What it is:** an old/new comparison using vitest and React Testing Library on jsdom. The first feature touching a surface owns a pre-change capture or renders that surface from its pinned old tree in the comparison. APP-2 generalizes the harness.
+- **What it renders:** every studio, for the union of the original product's public model/mode/backend surfaces and the candidate `ModelSpec` fixtures. A removed fixture remains present on the old side.
 - **What it records per control:** role, label, option id, default, min/max/step, availability and disabled reason, persistence key, emitted payload when default and when changed, tooltip text, and declared side effects.
-- **When it runs:** the "before" capture runs before APP-3 changes any UI. The diff must show zero removals and zero changed behaviour fields, unless approved.
+- **When it runs:** before the first changing feature, including APP-1 and ENG-1b if either touches the surface first. Record the full old SHA and app/engine pairing. Exercise menu navigation and cardinality, authored and effective prompts in actual batch submissions, re-imports, provider-specific sampling defaults and invalid overrides. Zero unapproved removals or changed behavior. A dropped candidate model must still fail against the old population.
 - **Model execution:** none.
 
 ### 10.4 Performance and size
 
-- **PERF-1 and PERF-2:** A/B on the same runner and in the same window (pre-feature `main` against the feature head), on proof-set routes the feature touched.
+- **PERF-1/2.** Predeclare the fixed paired sample count/budget, warm-up, warm/cold cache mode, equivalent host/device, allocator/workspace, precision, effective adapters, schedule, route, seed and resolution. For timing, use the median paired head/base ratio for seconds per outer step and end-to-end. Use a one-sided ceiling of 1.02 or a larger allowance frozen from comparable baseline variability before evaluating the head. Apply the predeclared uncertainty interval method to the paired ratio: upper bound at or below the ceiling passes, lower bound above fails, overlap or mismatched conditions is inconclusive. Gains are allowed. An inconclusive result at the finite budget returns for a decision. Peak memory uses matched per-domain high-water and the +2% ceiling; size uses identical binary slice/profile against its own media-on/off baseline.
 - **iOS size:** binary size is baselined in ENG-1a, item 0.
 
 ---
@@ -1100,13 +1175,13 @@ A checked-in script counts `git ls-files` lines per area in both repos, separati
 | R4 | Collisions with in-flight work | High/Med | DEC-5 gating; overlap ledger refreshed at each planning; file-ownership tables; new-model rule |
 | R5 | Agent failure modes (regrowth, stubs, scope narrowing, boundary gaps) | High/Med | Approved DEC-6 structural checks; verification contract; stub grep at item end; terminal integration sweep |
 | R6 | iOS size and memory | Med/Med | Baseline in ENG-1a; feature-partitioned crates; MEM-6 |
-| R7 | Training regressions | Med/Med | Trainers in Tier 1 from ENG-8 |
+| R7 | Training regressions | Med/Med | The graph-removal feature owns backward/update and resume evidence for each affected trainer (§8.1). |
 | R8 | Hardware contention | High/Med | Live pool discovery per planning; Tier 1 off the dev Mac; batching |
 | R9 | Feature-specific exception and acceptance latency | Med/Med | All §10 policies are approved; batch concrete route exceptions with evidence at planning and keep independent work moving |
 | R10 | Hidden coupling (API embeds worker; 17 family crates linked) | Med/Med | REG-5 and REG-6 in ENG-7; LANE-6 in APP-6 |
 | R11 | MLX runtime and thread-state bugs invisible to in-crate tests | Med/High | Process-level worker validation whenever runner, `ExecPolicy` or residency changes |
 | R12 | Disk exhaustion from agent `target/` directories | High/Med | Clean finished `target/`; cap building agents |
-| R13 | Capability export cannot be produced hardware-free for candle | Med/Med | ENG-7 item 0 checks this first; otherwise the CUDA host goes on the critical path and the plan is re-cut |
+| R13 | Descriptor export needs a native dependency | Med/Med | ENG-7 verifies the hardware-free target feature graphs. If that fails, resolve the descriptor/runtime partition or explicitly revise REG-3 before changing the critical path. |
 | R14 | `FamilyDriver` claims diverge from behaviour | Med/High | Drivers generic over a forward seam; conformance suite for slicing, read-only estimates and state continuity (PIPE-7) |
 | R15 | A new Feature uses unpriced transitions or stale preparation | Med/High | ENG-1b first-consumer pricing/scope identities; complete dependency keys; §6.5–6.8 design traces and scoped implementation proofs |
 

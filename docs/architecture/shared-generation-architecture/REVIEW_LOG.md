@@ -239,3 +239,18 @@ Michael accepted the remaining recommendations together after approving DEC-1…
 Synchronized REQUIREMENTS (status, §10 and affected requirements) and PLAN (validation, recipe, migration, roadmap dependencies and proof policy); README now summarizes the approved design. Duration, quality and performance estimates remain estimates, not measured acceptance. Confidence: high in recorded choices and contract consistency; medium in unmeasured native feasibility/quality/performance. This is a document consistency check by the revision author, not an independent architecture review or runtime validation.
 
 Verified all 19 unique decision rows are Approved, with no stale open-decision markers in the current requirements/plan/README. Local document links, code fences and whitespace pass. The 25-node roadmap remains acyclic with 17 non-pilot engine features; decision approval changed no dependency edge. Only the four design documents changed. No product code, tracker items, build/test model execution, CI dispatch or shared resource use occurred.
+
+## Rounds 7 and 8 · Pre-planning revision (2026-11-07)
+
+The [round 7 adversarial review](evidence/reviews/round7-codex.md) found five blockers and twelve major findings in draft 0.6. Draft 0.7 revises the requirements, runner contracts, proof cohorts and producer/consumer exits. The [round 8 closure review](evidence/reviews/round8-codex.md) checks every finding separately and records which observations are from current product code, which are design walkthroughs, and which must be proved during implementation.
+
+| Findings | Accepted change in draft 0.7 |
+|---|---|
+| B1, B2, B3 | Use independent route coverage, bounded conditional stages and executor-owned native state. |
+| B4, B5 | Refuse unpriced recipe increments, retain ordinary route posture and assign Hires.fix deletion to its last consumer. |
+| M1, M2, M3 | Separate model identity from worker-local binding, define exact replay/share compatibility and specify reduced-grid img2img initialization. |
+| M4, M5, M6 | Qualify trainer backward/resume, retain the H3 CUDA operating envelope and capture the pre-change product UI population. |
+| M7, M8, M9 | Name API-only and desktop composition roots, isolate semantic descriptor export from measurement currency and preserve physical iOS admission behavior. |
+| M10, M11, M12 | Bound total composed work, make terminal output publication attempt-owned, and distinguish inert-feature, migration and one-sided performance comparisons. |
+
+DEC-1…19 retain Michael's November 3 approval. The new detailed contracts are draft resolutions. Round 8 is the revision author's design review. Native training parity, fit, speed and quality remain acceptance obligations of the named features.
