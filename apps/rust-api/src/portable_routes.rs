@@ -89,13 +89,11 @@ pub(crate) fn selected_route_source_rows(
                 entry.get("id").and_then(Value::as_str) == Some(plan.target.base_model.as_str())
             })
             .map(|(slot, _)| slot.as_str())
-            .ok_or_else(|| {
-                format!(
-                    "training base {} lacks a captured manifest entry",
-                    plan.target.base_model
-                )
-            })?;
+            .unwrap_or("");
         if plan.target.base_model == "ltx_2_3" {
+            if training_slot.is_empty() {
+                return Err("LTX training base lacks a captured manifest entry".to_owned());
+            }
             let base_entry = entries
                 .iter()
                 .find(|(slot, _)| slot == training_slot)
@@ -129,6 +127,11 @@ pub(crate) fn selected_route_source_rows(
             let options = sceneworks_core::training::iris::iris_options(&plan.config)
                 .map_err(|error| error.to_string())?;
             if sceneworks_core::training::iris::curricula::iris_repa_enabled(&options) {
+                if training_slot.is_empty() {
+                    return Err(
+                        "Iris REPA training base lacks a captured manifest entry".to_owned()
+                    );
+                }
                 let manifest =
                     sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
                         .map_err(str::to_owned)?;
@@ -411,7 +414,7 @@ pub(crate) fn eligible_portable_routes(
         routes.extend(
             platforms
                 .iter()
-                .filter(|platform| entries_support_route(entries, backend, platform))
+                .filter(|platform| entries_support_route(job_type, entries, backend, platform))
                 .map(|platform| (backend.to_owned(), (*platform).to_owned())),
         );
     }
@@ -423,8 +426,13 @@ pub(crate) fn eligible_portable_routes(
     Ok(routes)
 }
 
-fn entries_support_route(entries: &[(String, &Value)], backend: &str, platform: &str) -> bool {
-    entries.iter().all(|(_, entry)| {
+fn entries_support_route(
+    job_type: &JobType,
+    entries: &[(String, &Value)],
+    backend: &str,
+    platform: &str,
+) -> bool {
+    entries.iter().all(|(slot, entry)| {
         let Some(id) = entry.get("id").and_then(Value::as_str) else {
             return false;
         };
@@ -447,8 +455,11 @@ fn entries_support_route(entries: &[(String, &Value)], backend: &str, platform: 
         if !downloads_support_platform {
             return false;
         }
-        if entry.get("componentOnly").and_then(Value::as_bool) == Some(true)
-            && entry.get("type").and_then(Value::as_str) == Some("utility")
+        if entry.get("type").and_then(Value::as_str) == Some("utility")
+            && (entry.get("componentOnly").and_then(Value::as_bool) == Some(true)
+                || (*job_type == JobType::CatalogAnalysis
+                    && slot != "modelManifestEntry"
+                    && slot != "baseModelManifestEntry"))
         {
             return !downloads.is_empty();
         }
@@ -679,7 +690,31 @@ mod tests {
     fn component_only_utility_entries_are_route_neutral_but_platform_bound() {
         let entry = json!({"id":"person_detector","type":"utility","componentOnly":true,"downloads":[{"provider":"huggingface","repo":"example/person","revision":"0123456789012345678901234567890123456789","files":["model.safetensors"],"platforms":["linux"]}]});
         let entries = [("modelManifestEntries/0".to_owned(), &entry)];
-        assert!(entries_support_route(&entries, "candle", "linux"));
-        assert!(!entries_support_route(&entries, "mlx", "macos"));
+        assert!(entries_support_route(
+            &JobType::CatalogAnalysis,
+            &entries,
+            "candle",
+            "linux"
+        ));
+        assert!(!entries_support_route(
+            &JobType::CatalogAnalysis,
+            &entries,
+            "mlx",
+            "macos"
+        ));
+        let non_component = json!({"id":"person_detector","type":"utility","downloads":[{"provider":"huggingface","repo":"example/person","revision":"0123456789012345678901234567890123456789","files":["model.safetensors"],"platforms":["linux"]}]});
+        let entries = [("modelManifestEntries/0".to_owned(), &non_component)];
+        assert!(entries_support_route(
+            &JobType::CatalogAnalysis,
+            &entries,
+            "candle",
+            "linux"
+        ));
+        assert!(!entries_support_route(
+            &JobType::ImageGenerate,
+            &entries,
+            "candle",
+            "linux"
+        ));
     }
 }
