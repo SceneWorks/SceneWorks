@@ -1847,12 +1847,29 @@ fn verify_portable_binding(
         requested_runtime_variant(payload).as_deref(),
         &settings.data_dir,
     );
+    let selected_manifest = selected_model_artifact_closure(
+        entry,
+        std::env::consts::OS,
+        requested_runtime_variant(payload).as_deref(),
+    );
+    let manifest_variant = selected_manifest
+        .get("downloads")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|row| !is_co_requisite_download(row))
+        .map(|row| {
+            row.get("variant")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("default")
+                .to_owned()
+        });
     let selected_variant = selected
         .requirements
         .iter()
         .find(|requirement| requirement.is_primary)
         .map(|requirement| requirement.variant.clone())
-        .or_else(|| raw_conversion_primary.then(|| binding.variant.clone()))
+        .or(manifest_variant)
         .or_else(|| requested_runtime_variant(payload))
         .unwrap_or_else(|| "default".to_owned());
     if binding.variant != selected_variant || primary.tier != binding.tier {
@@ -1940,8 +1957,32 @@ fn selected_manifest_row_covers_member(
 fn recursive_snapshot_matches(snapshot: &Path, selector: &str) -> WorkerResult<Vec<PathBuf>> {
     let pattern = glob::Pattern::new(selector)
         .map_err(|_| invalid_binding("artifact selector is invalid"))?;
+    // Limit the walk to the literal directory prefix. A selected q4/* closure must not depend on
+    // whether an unrelated q8 sibling contains a broken link or a non-file entry.
+    let mut prefix = PathBuf::new();
+    for component in Path::new(selector).components() {
+        let std::path::Component::Normal(segment) = component else {
+            return Err(invalid_binding(
+                "artifact selector is not repository-relative",
+            ));
+        };
+        let segment = segment
+            .to_str()
+            .ok_or_else(|| invalid_binding("artifact selector is not UTF-8"))?;
+        if segment.contains(['*', '?', '[']) {
+            break;
+        }
+        prefix.push(segment);
+    }
+    let selected_root = snapshot.join(prefix);
+    if !selected_root.exists() {
+        return Ok(Vec::new());
+    }
+    if !selected_root.is_dir() || selected_root.is_symlink() {
+        return Err(invalid_binding("selected artifact subtree is invalid"));
+    }
     let mut selected = Vec::new();
-    let mut pending = vec![snapshot.to_path_buf()];
+    let mut pending = vec![selected_root];
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(&directory)
             .map_err(|_| invalid_binding("artifact snapshot is unavailable"))?
@@ -1953,14 +1994,18 @@ fn recursive_snapshot_matches(snapshot: &Path, selector: &str) -> WorkerResult<V
                 .map_err(|_| invalid_binding("artifact snapshot is unavailable"))?;
             if kind.is_dir() {
                 pending.push(path);
-            } else if kind.is_file() || kind.is_symlink() && path.is_file() {
-                let relative = path
-                    .strip_prefix(snapshot)
-                    .map_err(|_| invalid_binding("artifact snapshot is invalid"))?;
+                continue;
+            }
+            let relative = path
+                .strip_prefix(snapshot)
+                .map_err(|_| invalid_binding("artifact snapshot is invalid"))?;
+            if kind.is_file() || kind.is_symlink() && path.is_file() {
                 if pattern.matches(&relative.to_string_lossy()) {
                     selected.push(relative.to_path_buf());
                 }
-            } else {
+            } else if kind.is_symlink() && path.is_dir()
+                || pattern.matches(&relative.to_string_lossy())
+            {
                 return Err(invalid_binding("artifact snapshot has a non-file entry"));
             }
         }
@@ -4045,6 +4090,16 @@ mod tests {
         ] {
             seed_snapshot(&library, repo, REV_A, file);
         }
+        #[cfg(unix)]
+        {
+            let unrelated = library
+                .join("models--guardfx--nested-glob/snapshots")
+                .join(REV_A)
+                .join("q8");
+            std::fs::create_dir_all(&unrelated).unwrap();
+            std::os::unix::fs::symlink("absent.safetensors", unrelated.join("broken.safetensors"))
+                .unwrap();
+        }
         let files = [
             "q4/transformer/model.safetensors",
             "q4/text_encoder/model.safetensors",
@@ -4080,9 +4135,9 @@ mod tests {
             .unwrap()],
         )
         .unwrap();
-        let payload = json!({"model":"nested-glob","variant":"q4","modelManifestEntry":{
+        let payload = json!({"model":"nested-glob","modelManifestEntry":{
             "id":"nested-glob","downloads":[{"provider":"huggingface","repo":repo,
-                "revision":REV_A,"variant":"q4","files":["q4/*"]}]
+                "revision":REV_A,"variant":"q4","default":true,"files":["q4/*"]}]
         }})
         .as_object()
         .unwrap()
