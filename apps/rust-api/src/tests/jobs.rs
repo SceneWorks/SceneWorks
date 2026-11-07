@@ -2276,6 +2276,16 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{changed}");
         std::fs::write(&checkpoint, b"fixture").expect("restore registered model bytes");
+        std::fs::remove_file(&checkpoint).expect("remove registered model bytes");
+        let (status, missing) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/retry"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{missing}");
+        std::fs::write(&checkpoint, b"fixture").expect("restore registered model bytes");
     }
 }
 
