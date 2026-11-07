@@ -2,7 +2,6 @@ import { SCAIL2_CANDLE_PRODUCT_TIERS, TIER_SCREEN, videoExecutionTierModel, unav
 import { candleVideoTierPickerAvailable } from "../../modelEligibility.js";
 import { useCallback, useEffect, useMemo } from "react";
 import { useQuantTierPicker } from "../../components/generationStudio.jsx";
-import { SCAIL2_MODEL_ID } from "../../videoStudioValidation.js";
 import { videoModelServesMode } from "../../modelEligibility.js";
 import { allPossibleTiers, installedTiers, tierLabel, tierPickerOptions, tierQuantize } from "../../quantTier.js";
 import { suggestTier } from "../../registryTierEvidence.js";
@@ -40,7 +39,7 @@ export function useVideoExecutionTier({
     (activeBackend === "candle" && candleVideoTierPickerAvailable(selectedModel));
 
   const scail2CandleTierLane =
-    activeBackend === "candle" && selectedModel?.id === SCAIL2_MODEL_ID;
+    activeBackend === "candle" && selectedModel?.family === "scail2" && selectedModel?.type === "video";
 
   // A Video Studio-only projection: retain the complete catalog object for every non-tier concern,
   // but narrow every tier vocabulary the shared picker understands. The original model object still

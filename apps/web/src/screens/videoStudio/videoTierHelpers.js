@@ -1,5 +1,4 @@
 import { resolveJobResultAssets } from "../../jobResultAssets.js";
-import { SCAIL2_MODEL_ID } from "../../videoStudioValidation.js";
 import { tierLabel } from "../../quantTier.js";
 
 export const MOTIONS = [
@@ -63,9 +62,9 @@ export const MAX_SCAIL2_REFERENCE_CHARACTERS = 6;
 
 export function videoExecutionTierModel(model, backend) {
   const acceptedTiers =
-    model?.id === SCAIL2_MODEL_ID
+    model?.family === "scail2" && model?.type === "video"
       ? SCAIL2_CANDLE_PRODUCT_TIERS
-      : model?.id === ltx25VideoModelId
+      : model?.family === "ltx-video" && model?.type === "video" && model?.loraCompatibility?.generation === "2.5"
         ? LTX25_CANDLE_PRODUCT_TIERS
         : null;
   if (backend !== "candle" || acceptedTiers === null) {
@@ -108,7 +107,7 @@ export function unavailableRecipeTierMessage(model, backend, tier) {
   const recorded = tierLabel(tier);
   if (
     backend === "candle" &&
-    model?.id === SCAIL2_MODEL_ID &&
+    model?.family === "scail2" && model?.type === "video" &&
     !SCAIL2_CANDLE_PRODUCT_TIERS.includes(tier)
   ) {
     return `This recipe was recorded at ${recorded}, which is not enabled for SCAIL-2 Candle generation. Replay it on MLX, or install an admitted SCAIL-2 tier in Model Manager before starting a new generation.`;
