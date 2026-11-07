@@ -810,7 +810,47 @@ async fn capture_portable_model_binding_inner(
                 .filter(|source_id| claims.iter().any(|claim| claim.source_id == *source_id))
                 .count()
         };
-        claim_sets.sort_by(|left, right| preferred_count(right).cmp(&preferred_count(left)));
+        let conversion_tier_rank = |claims: &[PortableSourceClaim]| {
+            selected_sources
+                .iter()
+                .filter_map(|source| match &source.source {
+                    SelectedSourceLocation::ConversionBorrow {
+                        repo,
+                        preferred_subdir,
+                    } => Some((repo.as_str(), preferred_subdir.as_deref())),
+                    _ => None,
+                })
+                .map(|(repo, preferred)| {
+                    let mut tiers = preferred
+                        .filter(|tier| !tier.is_empty())
+                        .map(|tier| vec![tier])
+                        .unwrap_or_else(|| vec!["root"]);
+                    if preferred.is_some() {
+                        for fallback in ["bf16", "q8", "q4"] {
+                            if !tiers.contains(&fallback) {
+                                tiers.push(fallback);
+                            }
+                        }
+                    }
+                    claims
+                        .iter()
+                        .filter_map(|claim| {
+                            let (claim_repo, _, tier) = sceneworks_core::portable_sources::
+                                parse_flux2_convert_base_claim_id(&claim.source_id)?;
+                            (claim_repo == repo)
+                                .then(|| tiers.iter().position(|candidate| *candidate == tier))
+                                .flatten()
+                        })
+                        .min()
+                        .unwrap_or(usize::MAX / 2)
+                })
+                .sum::<usize>()
+        };
+        claim_sets.sort_by(|left, right| {
+            preferred_count(right)
+                .cmp(&preferred_count(left))
+                .then_with(|| conversion_tier_rank(left).cmp(&conversion_tier_rank(right)))
+        });
         let mut selected_route = None;
         for source_claims in &claim_sets {
             let mut models = Vec::with_capacity(entries.len());
