@@ -1534,6 +1534,41 @@ async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_be
 /// because the worker's pre-loader guard fails closed on a model-backed job with no carriers.
 /// The client's own fields must still pass through untouched.
 #[tokio::test]
+async fn raw_image_detail_rejects_unregistered_adapter_locator() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest directory");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("builtin model catalog");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type":"image_detail",
+            "requestedGpu":"auto",
+            "payload":{
+                "model":"realvisxl",
+                "sourceAssetId":"asset-1",
+                "loras":[{"id":"unregistered_alias","installedPath":"/private/substitute.safetensors"}]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("LoRA not found: unregistered_alias")),
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn generic_jobs_route_still_serves_non_generation_types() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

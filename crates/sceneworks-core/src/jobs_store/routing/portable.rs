@@ -78,6 +78,7 @@ pub fn native_route_claims_request(
     let worker = WorkerSnapshot {
         id: "portable-route-worker-probe".to_owned(),
         gpu_id: gpu_id.to_owned(),
+        platform: None,
         gpu_name: None,
         status: WorkerStatus::Idle,
         current_job_id: None,
