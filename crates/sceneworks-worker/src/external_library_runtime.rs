@@ -2259,8 +2259,8 @@ fn selected_manifest_row_covers_member(
             let Some(selectors) = row.get("files").and_then(serde_json::Value::as_array) else {
                 return false;
             };
-            !selectors.is_empty()
-                && member.files.iter().all(|file| {
+            selectors.is_empty()
+                || member.files.iter().all(|file| {
                     selectors
                         .iter()
                         .filter_map(serde_json::Value::as_str)
@@ -2362,14 +2362,21 @@ fn verify_manifest_globs(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("default");
         let primary = !is_co_requisite_download(download);
-        for selector in download
-            .get("files")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .filter(|selector| selector.contains(['*', '?', '[']))
-        {
+        let Some(files) = download.get("files").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        // Admission expands the legacy empty selector to `*` before freezing its exact
+        // pinned ledger. Verify the same whole-snapshot set on this worker.
+        let selectors = if files.is_empty() {
+            vec!["*"]
+        } else {
+            files
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|selector| selector.contains(['*', '?', '[']))
+                .collect()
+        };
+        for selector in selectors {
             let snapshot = sceneworks_core::hf_home::model_source_library(&settings.data_dir)
                 .discover_snapshot(repo, Some(revision))
                 .map_err(|error| invalid_binding(error.to_string()))?
@@ -5010,6 +5017,77 @@ mod tests {
                 decision,
                 crate::utility_dispatch::SourceGuardBeforeFetch::Missing(_)
             ));
+        });
+    }
+
+    #[test]
+    fn empty_manifest_selector_binds_entire_pinned_snapshot() {
+        use sceneworks_core::model_artifacts::ArtifactIdentity;
+
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        let repo = "guardfx/whole-snapshot";
+        std::fs::create_dir_all(data.join("models")).unwrap();
+        for file in ["model.safetensors", "tokenizer/config.json"] {
+            seed_snapshot(&library, repo, REV_A, file);
+        }
+        let files = ["model.safetensors", "tokenizer/config.json"]
+            .into_iter()
+            .map(|relative_path| PortableArtifactFile {
+                relative_path: relative_path.into(),
+                size_bytes: 7,
+                sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+            })
+            .collect();
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Revision {
+                identity: ArtifactIdentity::pinned(repo, REV_A, "default").unwrap(),
+            },
+            tier: Some("default".to_owned()),
+            files,
+        };
+        let route = PortableRouteBinding::new(
+            "cpu",
+            std::env::consts::OS,
+            vec![PortableModelBinding::new(
+                "modelManifestEntry",
+                "whole-snapshot",
+                "cpu",
+                "default",
+                Some("default".to_owned()),
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                vec![member],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let payload = json!({"model":"whole-snapshot","modelManifestEntry":{
+            "id":"whole-snapshot", "downloads":[{"provider":"huggingface",
+                "repo":repo,"revision":REV_A,"variant":"default","default":true,"files":[]}]
+        }})
+        .as_object()
+        .unwrap()
+        .clone();
+        with_library(&library, || {
+            RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings(data.clone()),
+                Some(&route),
+            )
+            .unwrap();
+            seed_snapshot(&library, repo, REV_A, "unbound-extra.bin");
+            let error = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings(data.clone()),
+                Some(&route),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("file set differs"), "{error}");
         });
     }
 
