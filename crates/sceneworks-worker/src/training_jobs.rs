@@ -6604,31 +6604,10 @@ mod tests {
         assert_eq!(mapped.gradient_noise_gamma, 0.75);
     }
 
-    /// Every SceneWorks training kernel the worker can route, with a base model it accepts.
-    #[cfg(native_lane)]
-    const ROUTED_TRAINING_TARGETS: &[(&str, &str)] = &[
-        ("z_image_lora", "z_image_turbo"),
-        ("sdxl_lora", "sdxl"),
-        ("kolors_lora", "kolors"),
-        ("lens_lora", "lens"),
-        ("krea_lora", "krea_2_raw"),
-        ("krea_control", "krea_2_raw"),
-        ("sd3_lora", "sd3_5_large"),
-        ("sd3_lora", "sd3_5_medium"),
-        ("ltx_mlx_lora", "ltx_2_3"),
-        ("ltx_mlx_lora", "ltx_2_5"),
-        ("wan_lora", "wan_2_2"),
-        ("wan_moe_lora", "wan_2_2_t2v_14b"),
-        ("wan_moe_lora", "wan_2_2_i2v_14b"),
-        ("anima_lora", "anima_base"),
-        ("mage_flow_lora", "mage_flow_base"),
-    ];
-
     /// sc-24826/sc-24827 (epic 2123 E3/E5): the shared dry/real preflight admits weight noise and
-    /// gradient noise on every LoRA/LoKr trainer the active runtime registers (S2 put both on every
-    /// trainer, both backends), refuses them on a trainer that does not declare them (the Krea
-    /// control-branch trainer), refuses them with a full base fine-tune, and refuses out-of-range /
-    /// malformed values.
+    /// gradient noise on every target that advertises them and whose trainer is registered on this
+    /// backend, refuses them on the Krea control-branch trainer, refuses them with a full base
+    /// fine-tune, and refuses out-of-range / malformed values.
     #[cfg(native_lane)]
     #[test]
     fn preflight_gates_adapter_noise_on_the_trainer_descriptor() {
@@ -6651,7 +6630,27 @@ mod tests {
 
         let mut admitted = 0;
         let mut refused = 0;
-        for &(kernel, base) in ROUTED_TRAINING_TARGETS {
+        for target in sceneworks_core::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .filter(|target| {
+                sceneworks_core::training::target_supports_weight_noise(target)
+                    || sceneworks_core::training::target_supports_gradient_noise(target)
+                    || target.output_kind
+                        == sceneworks_core::training::TrainingOutputKind::ControlBranch
+            })
+        {
+            let kernel = target.kernel.as_str();
+            let base = target.base_model.as_str();
+            let target_plan = |network: &str, key: &str, technique_value: Value| {
+                let mut value = plan_json(dir.path(), kernel, base, network, &[&image]);
+                value["target"]["targetId"] = json!(target.id);
+                value["target"]["baseModelRepo"] = json!(target.base_model_repo);
+                value["config"] = serde_json::to_value(&target.defaults).expect("target defaults");
+                value["config"]["advanced"]["networkType"] = json!(network);
+                value["config"]["advanced"][key] = technique_value;
+                parse(value)
+            };
             let engine_id = engine_trainer_id_for(kernel, base).expect("routed kernel");
             let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
                 continue; // not registered on this backend (e.g. the candle-only Krea control trainer)
@@ -6663,18 +6662,21 @@ mod tests {
             };
             // Off is always admitted — the gate must not refuse a plan that does not ask for it.
             for (key, _, _) in techniques.clone() {
-                validate_training_target_config(&plan(kernel, base, network, key, json!(0)))
+                validate_training_target_config(&target_plan(network, key, json!(0)))
                     .unwrap_or_else(|e| panic!("{kernel}/{base}: {key}=0 refused: {e}"));
             }
-            let adapter_trainer = descriptor.supports_lora || descriptor.supports_lokr;
+            let adapter_trainer = sceneworks_core::training::target_supports_weight_noise(&target)
+                && sceneworks_core::training::target_supports_gradient_noise(&target);
             assert_eq!(
-                descriptor.techniques.weight_noise && descriptor.techniques.gradient_noise,
-                adapter_trainer,
-                "{engine_id}: every LoRA/LoKr trainer declares both adapter-noise techniques; a \
-                 non-adapter trainer declares neither"
+                descriptor.techniques.weight_noise, adapter_trainer,
+                "{engine_id}: trainer weight-noise capability disagrees with the target"
+            );
+            assert_eq!(
+                descriptor.techniques.gradient_noise, adapter_trainer,
+                "{engine_id}: trainer gradient-noise capability disagrees with the target"
             );
             for (key, on, name) in techniques.clone() {
-                let request = plan(kernel, base, network, key, on);
+                let request = target_plan(network, key, on);
                 if adapter_trainer {
                     validate_training_target_config(&request)
                         .unwrap_or_else(|e| panic!("{kernel}/{base}: {name} refused: {e}"));
