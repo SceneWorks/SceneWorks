@@ -3297,7 +3297,8 @@ impl JobsStore {
         let worker = self.get_worker_on_connection(&transaction, worker_id)?;
         let route_key = match (portable_backend, portable_platform) {
             (Some(backend), Some(platform))
-                if portable_binding_version == 1
+                if portable_binding_version
+                    == crate::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION
                     && worker.platform.as_deref() == Some(platform)
                     && match backend {
                         "mlx" => worker.gpu_id.eq_ignore_ascii_case("mlx"),

@@ -55,30 +55,29 @@ async fn start_worker(app: axum::Router, settings: &crate::Settings) -> Runtime 
         .await
         .unwrap();
     });
-    let worker_settings = sceneworks_worker::Settings {
-        api_url: format!("http://{address}"),
-        access_token: None,
-        data_dir: settings.data_dir.clone(),
-        config_dir: settings.config_dir.clone(),
-        resolved_cache: Default::default(),
-        worker_id: "import-recovery-worker".into(),
-        gpu_id: "cpu".into(),
-        is_child_worker: true,
-        poll_seconds: 1,
-        heartbeat_seconds: 1,
-        shutdown_timeout_seconds: 1,
-        huggingface_base_url: "http://127.0.0.1:9".into(),
-        huggingface_token: None,
-        credentials: vec![],
-        max_lora_url_bytes: 1 << 20,
-        max_model_url_bytes: 1 << 20,
-        allow_private_lora_urls: false,
-        utility_workers: 1,
-        backend_mlx_enabled: false,
-        backend_candle_enabled: false,
-        external_model_roots: vec![],
-        gpu_memory_limit_bytes: 0,
-    };
+    let mut worker_settings = sceneworks_worker::Settings::from_env();
+    worker_settings.api_url = format!("http://{address}");
+    worker_settings.access_token = None;
+    worker_settings.data_dir = settings.data_dir.clone();
+    worker_settings.config_dir = settings.config_dir.clone();
+    worker_settings.resolved_cache = Default::default();
+    worker_settings.worker_id = "import-recovery-worker".into();
+    worker_settings.gpu_id = "cpu".into();
+    worker_settings.is_child_worker = true;
+    worker_settings.poll_seconds = 1;
+    worker_settings.heartbeat_seconds = 1;
+    worker_settings.shutdown_timeout_seconds = 1;
+    worker_settings.huggingface_base_url = "http://127.0.0.1:9".into();
+    worker_settings.huggingface_token = None;
+    worker_settings.credentials = vec![];
+    worker_settings.max_lora_url_bytes = 1 << 20;
+    worker_settings.max_model_url_bytes = 1 << 20;
+    worker_settings.allow_private_lora_urls = false;
+    worker_settings.utility_workers = 1;
+    worker_settings.backend_mlx_enabled = false;
+    worker_settings.backend_candle_enabled = false;
+    worker_settings.external_model_roots = vec![];
+    worker_settings.gpu_memory_limit_bytes = 0;
     let (stop, stop_rx) = tokio::sync::oneshot::channel();
     let worker = std::thread::Builder::new().name("import-recovery-test-worker".into())
         .stack_size(sceneworks_worker::WORKER_ENTRY_STACK_BYTES).spawn(move || {

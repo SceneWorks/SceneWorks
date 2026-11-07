@@ -2,7 +2,7 @@ use super::*;
 use crate::model_artifacts::portable_binding::{
     canonical_authored_options_sha256, PortableArtifactFile, PortableArtifactMember,
     PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceClaim,
-    PortableSourceIdentity, PortableSourceProvenance,
+    PortableSourceIdentity, PortableSourceProvenance, PORTABLE_MODEL_BINDING_VERSION,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -217,6 +217,17 @@ fn portable_binding_is_private_atomic_and_gates_old_workers() {
         .unwrap()
         .0
         .is_none());
+    assert!(store
+        .claim_next_job_routed_with_portable_binding(
+            "worker",
+            false,
+            PORTABLE_MODEL_BINDING_VERSION - 1,
+            Some("cpu"),
+            Some(std::env::consts::OS)
+        )
+        .unwrap()
+        .0
+        .is_none());
     {
         let mut guard = store.lock.lock();
         let connection = store.write_connection(&mut guard).unwrap();
@@ -233,7 +244,7 @@ fn portable_binding_is_private_atomic_and_gates_old_workers() {
         .claim_next_job_routed_with_portable_binding(
             "worker",
             false,
-            1,
+            PORTABLE_MODEL_BINDING_VERSION,
             Some("cpu"),
             Some(std::env::consts::OS)
         )
@@ -257,7 +268,7 @@ fn portable_binding_is_private_atomic_and_gates_old_workers() {
         .claim_next_job_routed_with_portable_binding(
             "worker",
             false,
-            1,
+            PORTABLE_MODEL_BINDING_VERSION,
             Some("cpu"),
             Some(std::env::consts::OS),
         )
