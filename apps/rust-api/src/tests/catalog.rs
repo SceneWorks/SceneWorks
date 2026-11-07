@@ -3723,6 +3723,33 @@ async fn minimax_h3_tier_state_gates_on_every_shard_the_partition_index_names() 
             .any(|file| file.as_str() == Some("q4/ (incomplete: missing model components)")),
         "the torn tier must name itself: {torn:?}"
     );
+
+    // This fixture explicitly declares both partitions as hard co-requisites (the MLX layout).
+    // Repair must clear the warning, and losing a shard in either required partition must restore
+    // it on both cards. CUDA's independent layout is covered by the variant-install tests.
+    for partition in ["transformer_ref", "transformer"] {
+        seed_minimax_partition(&snapshot, "q4", partition, &MINIMAX_SHARDS);
+        let shard = snapshot.join("q4").join(partition).join(MINIMAX_SHARDS[1]);
+        for complete in [true, false, true] {
+            if complete {
+                std::fs::write(&shard, b"x").unwrap();
+            } else {
+                std::fs::remove_file(&shard).unwrap();
+            }
+            let app = create_app(test_settings(&temp_dir)).unwrap();
+            let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+            assert_eq!(status, StatusCode::OK);
+            for model in models.as_array().unwrap() {
+                assert_eq!(model["repairAvailable"], !complete, "{partition}: {model}");
+                assert_eq!(
+                    tier_state(model, "q4")["installed"],
+                    complete,
+                    "{} must follow its declared partition closure",
+                    model["id"]
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
