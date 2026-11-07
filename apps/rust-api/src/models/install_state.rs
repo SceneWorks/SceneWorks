@@ -806,7 +806,7 @@ pub(super) fn install_state_for(
                     .iter()
                     .filter(|download| co_requisite_variant(download).as_deref() == Some(tier))
                     .all(|download| {
-                        co_requisite_cache_health(data_dir, download)
+                        model_co_requisite_cache_health(model, data_dir, download)
                             .is_some_and(|health| health.installed)
                     })
             });
@@ -833,12 +833,12 @@ pub(super) fn install_state_for(
                 .into_iter()
                 .filter(|download| co_requisite_variant(download).is_none())
                 .collect(),
-            |download| co_requisite_presence(data_dir, download),
+            |download| model_co_requisite_presence(model, data_dir, download),
         ) {
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
                 continue;
             };
-            let health = co_requisite_cache_health(data_dir, &co_requisite);
+            let health = model_co_requisite_cache_health(model, data_dir, &co_requisite);
             if health.as_ref().is_some_and(|health| health.installed) {
                 continue;
             }
@@ -905,8 +905,8 @@ pub(super) fn installed_co_requisite_choices(model: &Value, data_dir: &FsPath) -
             continue;
         };
         let options = groups.entry(choice.group).or_default();
-        let installed =
-            co_requisite_cache_health(data_dir, &download).is_some_and(|health| health.installed);
+        let installed = model_co_requisite_cache_health(model, data_dir, &download)
+            .is_some_and(|health| health.installed);
         if installed && !options.contains(&choice.option) {
             options.push(choice.option);
         }
@@ -986,6 +986,60 @@ pub(super) fn co_requisite_presence(
         Some(health) if health.incomplete => CoRequisitePresence::Incomplete,
         _ => CoRequisitePresence::Absent,
     }
+}
+
+fn model_co_requisite_presence(
+    model: &Value,
+    data_dir: &FsPath,
+    download: &Value,
+) -> sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    match model_co_requisite_cache_health(model, data_dir, download) {
+        Some(health) if health.installed => CoRequisitePresence::Installed,
+        Some(health) if health.incomplete => CoRequisitePresence::Incomplete,
+        _ => CoRequisitePresence::Absent,
+    }
+}
+
+// H3's CUDA primary is independently loadable, while MLX declares the sibling DiT as a
+// co-requisite. Validate that partition only when declared, using its own root and shard index.
+// A component glob matching one landed shard cannot certify the whole required partition.
+fn model_co_requisite_cache_health(
+    model: &Value,
+    data_dir: &FsPath,
+    download: &Value,
+) -> Option<HuggingFaceCacheHealth> {
+    let mut health = co_requisite_cache_health(data_dir, download)?;
+    if !health.installed || model.get("family").and_then(Value::as_str) != Some("minimax-h3") {
+        return Some(health);
+    }
+    let files = string_array_field(download, "files");
+    let partition = match files.as_slice() {
+        [pattern] => pattern
+            .strip_suffix("/*")
+            .and_then(|dir| dir.rsplit('/').next()),
+        _ => None,
+    };
+    let partition_model = sceneworks_core::mlx_tier_completeness::MINIMAX_H3_PARTITIONS
+        .iter()
+        .find(|(_, dir)| Some(*dir) == partition);
+    if let Some((model_id, _)) = partition_model {
+        let repo = download.get("repo").and_then(Value::as_str)?;
+        let cache_path = huggingface_repo_cache_path(data_dir, repo);
+        let managed_path = data_dir.join("models").join(safe_download_dir(repo));
+        if no_model_index_tier_is_torn(
+            "minimax-h3",
+            model_id,
+            &files,
+            cache_path.as_deref(),
+            &managed_path,
+        ) {
+            health.installed = false;
+            health.incomplete = true;
+            health.missing_files.push(torn_tier_marker(&files));
+        }
+    }
+    Some(health)
 }
 
 /// Resolve install-state health for a hard/soft co-requisite, including exact cache-only aliases
@@ -1499,12 +1553,12 @@ pub(super) fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<Mode
                         model,
                         entry.get("variant").and_then(Value::as_str),
                     ),
-                    |download| co_requisite_presence(data_dir, download),
+                    |download| model_co_requisite_presence(model, data_dir, download),
                 )
                 .into_iter()
                 .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
                 {
-                    let health = co_requisite_cache_health(data_dir, &download);
+                    let health = model_co_requisite_cache_health(model, data_dir, &download);
                     if health.as_ref().is_some_and(|health| health.installed) {
                         continue;
                     }
