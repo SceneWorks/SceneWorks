@@ -1,5 +1,6 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
+use axum::Json;
 
 /// Shape errors precede even dataset lookup, for both checkpoints/methods and dry/real submits.
 /// No worker is dispatched and no model fixture is installed by this test.
@@ -3460,7 +3461,11 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
             "lfs": { "oid": "1111111111111111111111111111111111111111111111111111111111111111" }
         }]))
     });
-    let metadata_server = tokio::spawn(axum::serve(listener, metadata));
+    let metadata_server = tokio::spawn(async move {
+        axum::serve(listener, metadata)
+            .await
+            .expect("pinned metadata server");
+    });
     let endpoint = format!("http://{address}");
     let _env = HfCacheEnvGuard::set(&[
         ("HF_HUB_CACHE", ""),

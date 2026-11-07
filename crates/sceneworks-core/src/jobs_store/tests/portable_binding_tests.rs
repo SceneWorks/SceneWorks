@@ -275,7 +275,23 @@ fn worker_source_claims_are_private_fresh_and_explicitly_cleared() {
         store
             .portable_source_claims_for_route("cpu", std::env::consts::OS, "auto", 90)
             .unwrap(),
-        vec![claim]
+        vec![claim.clone()]
+    );
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker".into(),
+            status: WorkerStatus::Idle,
+            current_job_id: None,
+            loaded_models: vec![],
+            utilization: None,
+            status_reason: None,
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .portable_source_claims_for_route("cpu", std::env::consts::OS, "auto", 90)
+            .unwrap(),
+        vec![claim.clone()]
     );
     store
         .heartbeat_worker_with_portable_sources(
@@ -294,4 +310,93 @@ fn worker_source_claims_are_private_fresh_and_explicitly_cleared() {
         .portable_source_claims_for_route("cpu", std::env::consts::OS, "auto", 90)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn worker_claim_member_requires_exact_current_worker_proof_before_claim() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let original: PortableJobBinding = serde_json::from_value(binding()).unwrap();
+    let mut routes = original.routes.clone();
+    let member = &mut routes.values_mut().next().unwrap().models[0].members[0];
+    let claim = PortableSourceClaim::new(
+        "aux/encoder",
+        PortableSourceProvenance::OperatorOverride,
+        member.files.clone(),
+    )
+    .unwrap();
+    member.source = PortableSourceIdentity::WorkerClaim {
+        source_id: claim.source_id.clone(),
+        provenance: claim.provenance.clone(),
+        closure_sha256: claim.closure_sha256.clone(),
+    };
+    let binding =
+        serde_json::to_value(PortableJobBinding::new(original.authored_options, routes).unwrap())
+            .unwrap();
+    let job = store
+        .create_job_with_portable_binding(request(), None, None, Some(&binding))
+        .unwrap();
+    let register = || RegisterWorker {
+        worker_id: "worker".into(),
+        gpu_id: "cpu".into(),
+        gpu_name: None,
+        capabilities: vec![crate::contracts::WorkerCapability::ModelDownload],
+        loaded_models: vec![],
+        utilization: None,
+    };
+    store
+        .register_worker_with_portable_sources(register(), Some(std::env::consts::OS), None)
+        .unwrap();
+    assert!(store
+        .claim_next_job_routed_with_portable_binding(
+            "worker",
+            false,
+            1,
+            Some("cpu"),
+            Some(std::env::consts::OS)
+        )
+        .unwrap()
+        .0
+        .is_none());
+    let mut wrong = claim.clone();
+    wrong.files[0].sha256 = format!("sha256:{}", "b".repeat(64));
+    wrong = PortableSourceClaim::new(wrong.source_id, wrong.provenance, wrong.files).unwrap();
+    store
+        .register_worker_with_portable_sources(
+            register(),
+            Some(std::env::consts::OS),
+            Some(&[wrong]),
+        )
+        .unwrap();
+    assert!(store
+        .claim_next_job_routed_with_portable_binding(
+            "worker",
+            false,
+            1,
+            Some("cpu"),
+            Some(std::env::consts::OS)
+        )
+        .unwrap()
+        .0
+        .is_none());
+    store
+        .register_worker_with_portable_sources(
+            register(),
+            Some(std::env::consts::OS),
+            Some(&[claim]),
+        )
+        .unwrap();
+    let claimed = store
+        .claim_next_job_routed_with_portable_binding(
+            "worker",
+            false,
+            1,
+            Some("cpu"),
+            Some(std::env::consts::OS),
+        )
+        .unwrap()
+        .0
+        .unwrap();
+    assert_eq!(claimed.id, job.id);
 }

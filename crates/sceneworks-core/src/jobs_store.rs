@@ -2527,9 +2527,10 @@ impl JobsStore {
         request: WorkerHeartbeat,
         portable_source_claims: Option<&[PortableSourceClaim]>,
     ) -> JobsStoreResult<WorkerHeartbeatOutcome> {
-        let portable_source_claims = portable_source_claims.unwrap_or(&[]);
-        validate_portable_source_claims(portable_source_claims)
-            .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+        if let Some(claims) = portable_source_claims {
+            validate_portable_source_claims(claims)
+                .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+        }
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2577,7 +2578,7 @@ impl JobsStore {
                    loaded_models_json = ?3,
                    utilization_json = ?4,
                    status_reason = ?5,
-                   portable_source_claims_json = ?6,
+                   portable_source_claims_json = coalesce(?6, portable_source_claims_json),
                    last_seen_at = ?7
              where id = ?8
             ",
@@ -2590,7 +2591,7 @@ impl JobsStore {
                 // very next heartbeat rather than carrying a stale remedy for a fixed host
                 // (sc-16260 AC 4). `None` on every non-unhealthy heartbeat.
                 request.status_reason,
-                dumps(portable_source_claims)?,
+                portable_source_claims.map(dumps).transpose()?,
                 now,
                 request.worker_id,
             ],
@@ -3250,6 +3251,18 @@ impl JobsStore {
         } else {
             None
         };
+        let worker_claims_raw: Option<String> = transaction.query_row(
+            "select portable_source_claims_json from workers where id = ?1",
+            params![worker_id],
+            |row| row.get(0),
+        )?;
+        let worker_claims: Vec<PortableSourceClaim> = worker_claims_raw
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
+        validate_portable_source_claims(&worker_claims)
+            .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
         let worker_gpu_id = worker.gpu_id.clone();
         let has_active_gpu_job = active_gpu_job_exists(&transaction, &worker.gpu_id)?;
         let mut hydration = ClaimHydrationStats::default();
@@ -3332,6 +3345,8 @@ impl JobsStore {
             queued_rows,
             &worker,
             &mut hydration,
+            portable_backend.zip(portable_platform),
+            &worker_claims,
         ) {
             Ok(queued) => queued,
             Err(error) => {
@@ -5689,6 +5704,8 @@ fn choose_claimable_job_from_candidates(
     candidates: Vec<ClaimCandidate>,
     worker: &WorkerSnapshot,
     hydration: &mut ClaimHydrationStats,
+    portable_route: Option<(&str, &str)>,
+    worker_claims: &[PortableSourceClaim],
 ) -> JobsStoreResult<Option<JobSnapshot>> {
     let mut compatible = Vec::new();
     let mut highest_compatible_rank = None;
@@ -5699,6 +5716,14 @@ fn choose_claimable_job_from_candidates(
             break;
         }
         if !worker_may_support_claim_candidate(worker, &candidate) {
+            continue;
+        }
+        if !candidate_matches_portable_worker_sources(
+            connection,
+            &candidate.id,
+            portable_route,
+            worker_claims,
+        )? {
             continue;
         }
         highest_compatible_rank.get_or_insert(candidate.queue_rank);
@@ -5721,6 +5746,40 @@ fn choose_claimable_job_from_candidates(
         });
     }
     Ok(Some(job))
+}
+
+fn candidate_matches_portable_worker_sources(
+    connection: &Connection,
+    job_id: &str,
+    portable_route: Option<(&str, &str)>,
+    worker_claims: &[PortableSourceClaim],
+) -> JobsStoreResult<bool> {
+    let Some(binding) = JobsStore::read_portable_binding(connection, job_id)? else {
+        return Ok(true);
+    };
+    let Some((backend, platform)) = portable_route else {
+        return Ok(false);
+    };
+    let binding: crate::model_artifacts::portable_binding::PortableJobBinding =
+        serde_json::from_value(binding)?;
+    let route = binding
+        .select_route(backend, platform)
+        .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+    Ok(route
+        .models
+        .iter()
+        .flat_map(|model| &model.members)
+        .all(|member| {
+            if !matches!(
+                &member.source,
+                crate::model_artifacts::portable_binding::PortableSourceIdentity::WorkerClaim { .. }
+            ) {
+                return true;
+            }
+            worker_claims
+                .iter()
+                .any(|claim| claim.matches_worker_claim_member(member).is_ok())
+        }))
 }
 
 fn choose_claimable_candidate(

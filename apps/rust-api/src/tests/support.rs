@@ -125,6 +125,7 @@ pub(crate) fn readiness_worker(
     WorkerSnapshot {
         id: id.to_owned(),
         gpu_id: "0".to_owned(),
+        platform: None,
         gpu_name: None,
         status,
         current_job_id: None,

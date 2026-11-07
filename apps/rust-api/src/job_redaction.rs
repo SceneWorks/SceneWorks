@@ -91,6 +91,7 @@ fn redact_nested_manifest_carriers(key: &str, value: &mut Value) {
             | "adapters"
             | "controls"
             | "advanced"
+            | "plan"
     ) {
         redact_manifest_locators(value);
         return;
@@ -666,6 +667,7 @@ mod portable_redaction_tests {
             "modelManifestEntries":[{"id":"comfy_base","components":[{"componentId":"vae","path":"D:\\Comfy\\vae.safetensors","files":["vae.safetensors"]}]}],
             "upscale":{"modelManifestEntry":{"id":"iris_restore","modelPath":"/private/restorer.safetensors"}},
             "loras":[{"id":"adapter","installedPath":"/private/adapter.safetensors"}]
+            ,"plan":{"target":{"baseModel":"builtin_base","baseModelPath":"/private/training-base"}}
         });
         let raw = store
             .create_job(sceneworks_core::jobs_store::CreateJob {
@@ -711,6 +713,13 @@ mod portable_redaction_tests {
             "vae.safetensors"
         );
         assert_eq!(public.payload["loras"][0]["id"], "adapter");
+        assert_eq!(
+            public.payload["plan"]["target"]["baseModel"],
+            "builtin_base"
+        );
+        assert!(public.payload["plan"]["target"]
+            .get("baseModelPath")
+            .is_none());
         assert_eq!(
             public.payload["upscale"]["modelManifestEntry"]["id"],
             "iris_restore"
