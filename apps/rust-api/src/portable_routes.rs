@@ -86,6 +86,113 @@ pub(crate) fn selected_route_source_rows(
             })
             .map(|(slot, _)| slot.as_str())
             .unwrap_or("");
+        let trainer_id = sceneworks_worker::portable_trainer_engine_id_for(
+            &plan.target.kernel,
+            &plan.target.base_model,
+        )
+        .ok_or_else(|| {
+            format!(
+                "no native trainer for {} / {}",
+                plan.target.kernel, plan.target.base_model
+            )
+        })?;
+        let aux_models =
+            sceneworks_core::portable_sources::selected_training_aux_models(&plan, trainer_id)?;
+        if !aux_models.is_empty() {
+            if training_slot.is_empty() {
+                return Err("training auxiliaries lack a captured base entry".to_owned());
+            }
+            let manifest =
+                sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+                    .map_err(str::to_owned)?;
+            let catalog = manifest
+                .get("models")
+                .and_then(Value::as_array)
+                .ok_or("builtin model catalog lacks models")?;
+            let mut selected_ids = std::collections::BTreeSet::new();
+            for model in aux_models {
+                if !selected_ids.insert(model.id) {
+                    continue;
+                }
+                let entry = catalog
+                    .iter()
+                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model.id))
+                    .ok_or_else(|| {
+                        format!("training auxiliary {} lacks a catalog entry", model.id)
+                    })?;
+                let download = entry
+                    .get("downloads")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find(|download| {
+                        download.get("repo").and_then(Value::as_str) == Some(model.repo)
+                            && download.get("revision").and_then(Value::as_str)
+                                == Some(model.revision)
+                    })
+                    .ok_or_else(|| {
+                        format!("training auxiliary {} lacks pinned download", model.id)
+                    })?;
+                rows.push(SelectedRouteSource {
+                    model_slot: training_slot.to_owned(),
+                    component_id: model.id.to_owned(),
+                    role: ArtifactMemberRole::RequiredComponent,
+                    source: SelectedSourceLocation::ManifestDownload(download.clone()),
+                    selected_tier: None,
+                });
+            }
+        }
+        let trainer_components = sceneworks_core::portable_sources::trainer_required_component_ids(
+            &plan.target.base_model,
+            backend,
+        );
+        if !trainer_components.is_empty() {
+            let base_entry = entries
+                .iter()
+                .find(|(slot, _)| slot == training_slot)
+                .map(|(_, entry)| *entry)
+                .ok_or("trainer components lack a captured base entry")?;
+            let downloads = base_entry
+                .get("downloads")
+                .and_then(Value::as_array)
+                .ok_or("trainer base lacks component downloads")?;
+            for component_id in trainer_components {
+                let candidates: Vec<&Value> = downloads
+                    .iter()
+                    .filter(|download| {
+                        download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                            && download.get("componentId").and_then(Value::as_str)
+                                == Some(component_id)
+                            && download.get("required").and_then(Value::as_str) != Some("soft")
+                    })
+                    .collect();
+                let selected = if candidates.len() == 1 {
+                    candidates[0]
+                } else {
+                    candidates
+                        .iter()
+                        .copied()
+                        .find(|download| {
+                            download
+                                .get("variant")
+                                .and_then(Value::as_str)
+                                .is_some_and(|variant| variant.eq_ignore_ascii_case("bf16"))
+                        })
+                        .ok_or_else(|| {
+                            format!(
+                                "trainer component {component_id} has no unambiguous bf16 source"
+                            )
+                        })?
+                };
+                rows.push(SelectedRouteSource {
+                    model_slot: training_slot.to_owned(),
+                    component_id: (*component_id).to_owned(),
+                    role: ArtifactMemberRole::RequiredComponent,
+                    source: SelectedSourceLocation::ManifestDownload(selected.clone()),
+                    selected_tier: Some("bf16".to_owned()),
+                });
+            }
+        }
         if plan.target.base_model == "ltx_2_3" {
             if training_slot.is_empty() {
                 return Err("LTX training base lacks a captured manifest entry".to_owned());
@@ -323,6 +430,31 @@ pub(crate) fn selected_route_source_rows(
             Ok(())
         };
         if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+            if slot == "modelManifestEntry" && id.starts_with("moss_image") {
+                for download in entry
+                    .get("downloads")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(component_id) = download
+                        .get("componentId")
+                        .and_then(Value::as_str)
+                        .filter(|id| {
+                            sceneworks_core::moss_image::is_runtime_optional_component_id(id)
+                        })
+                    else {
+                        continue;
+                    };
+                    rows.push(SelectedRouteSource {
+                        model_slot: slot.clone(),
+                        component_id: component_id.to_owned(),
+                        role: ArtifactMemberRole::OptionalComponent,
+                        source: SelectedSourceLocation::ManifestDownload(download.clone()),
+                        selected_tier: None,
+                    });
+                }
+            }
             if character_reference && matches!(id, "flux_dev" | "flux_schnell") {
                 push_operator_source(&mut rows, slot, "flux_ip_adapter");
                 push_operator_source(&mut rows, slot, "flux_ip_encoder");
@@ -911,5 +1043,32 @@ mod tests {
         .unwrap();
         assert_eq!(routes.len(), 3);
         assert_eq!(routes[0], ("mlx".to_owned(), "macos".to_owned()));
+    }
+
+    #[test]
+    fn moss_loader_components_get_stable_bound_member_ids() {
+        let entry = json!({"id":"moss_image_sft","downloads":[
+            {"componentId":"moss-dmd-time","provider":"huggingface","repo":"test/dmd","revision":"0123456789012345678901234567890123456789","files":["time_embedding.safetensors"]},
+            {"componentId":"moss-image-edit","provider":"huggingface","repo":"test/edit","revision":"0123456789012345678901234567890123456789","files":["adapter_config.json","adapter_model.safetensors"]}
+        ]});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let payload = json!({"model":"moss_image_sft"});
+        let rows = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            payload.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.component_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["moss-dmd-time", "moss-image-edit"]
+        );
+        assert!(rows
+            .iter()
+            .all(|row| matches!(row.source, SelectedSourceLocation::ManifestDownload(_))));
     }
 }

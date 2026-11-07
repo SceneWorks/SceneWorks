@@ -9,6 +9,102 @@ pub enum PortableAuxSourceShape {
     Directory,
 }
 
+/// Caller-staged trainer components at the pinned native provider registry. The manifest owns
+/// repo/revision/files; this is the backend descriptor's required-component ID projection.
+pub fn trainer_required_component_ids(base_model: &str, backend: &str) -> &'static [&'static str] {
+    match (base_model, backend) {
+        ("sdxl", "candle") => &["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"],
+        ("mage_flow_base", "mlx" | "candle") => &["text_encoder", "vae"],
+        ("iris_3b", "mlx" | "candle") => &["text_encoder"],
+        ("moss_image_base", "mlx" | "candle") => {
+            &[gen_core::moss_image::MOSS_SHARED_SNAPSHOT_COMPONENT]
+        }
+        _ => &[],
+    }
+}
+
+/// Pinned auxiliary models opened by the selected native training techniques. This uses the
+/// same strict plan parsers and model selectors as the trainer, before any loader path is opened.
+pub fn selected_training_aux_models(
+    plan: &crate::training::TrainingPlan,
+    engine_id: &str,
+) -> Result<Vec<&'static crate::training::depth_anchoring::AuxTrainingModel>, String> {
+    use crate::training::{
+        body_losses, depth_anchoring, face_losses, latent_perceptual, training_adapter,
+    };
+    use depth_anchoring::{AuxTrainingModel, X0DecoderSource};
+    let advanced = &plan.config.advanced;
+    let mut models: Vec<&'static AuxTrainingModel> = Vec::new();
+    let mut need_decoder = false;
+    if let Some(depth) =
+        depth_anchoring::depth_anchoring_settings(advanced).map_err(|error| error.to_string())?
+    {
+        need_decoder = true;
+        models.push(
+            depth_anchoring::depth_anything_v2_model(depth.model)
+                .ok_or_else(|| format!("unknown Depth Anything V2 size {}", depth.model))?,
+        );
+    }
+    let body = body_losses::body_loss_settings(advanced).map_err(|error| error.to_string())?;
+    if body.any_enabled() {
+        need_decoder = true;
+        models.push(&body_losses::VITPOSE_PLUS_BASE_MODEL);
+        for loss in body_losses::BodyLoss::ALL {
+            if body.schedule(loss).is_some() {
+                if let Some(model) = loss.own_model() {
+                    models.push(model);
+                }
+            }
+        }
+    }
+    if latent_perceptual::latent_loss_settings(&latent_perceptual::VAE_ANCHOR, advanced)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        need_decoder = true;
+        models.push(&latent_perceptual::FLUX2_VAE_MODEL);
+    }
+    if latent_perceptual::latent_loss_settings(&latent_perceptual::LATENT_LPIPS, advanced)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        models.push(
+            latent_perceptual::latent_lpips_model_for_trainer(engine_id)
+                .ok_or_else(|| format!("{engine_id} has no E-LatentLPIPS model"))?,
+        );
+    }
+    let identity =
+        face_losses::identity_loss_settings(advanced).map_err(|error| error.to_string())?;
+    let landmark =
+        face_losses::face_landmark_loss_settings(advanced).map_err(|error| error.to_string())?;
+    if identity.is_some() || landmark.is_some() {
+        need_decoder = true;
+        models.push(&face_losses::FACE_STACK_SCRFD);
+        if identity.is_some() {
+            models.push(&face_losses::FACE_STACK_ARCFACE);
+        }
+        if landmark.is_some() {
+            models.push(&face_losses::FACEMESH_V2_MODEL);
+        }
+    }
+    if need_decoder {
+        match depth_anchoring::x0_decoder_for_trainer(engine_id)
+            .ok_or_else(|| format!("{engine_id} has no x0 decoder"))?
+        {
+            X0DecoderSource::Catalog(model) => models.push(model),
+            X0DecoderSource::BaseModelVae => {}
+        }
+    }
+    if let Some(model) =
+        training_adapter::training_adapter_model(advanced).map_err(|error| error.to_string())?
+    {
+        models.push(model);
+    }
+    models.sort_by_key(|model| (model.id, model.file));
+    models.dedup_by_key(|model| (model.id, model.file));
+    Ok(models)
+}
+
 pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<PortableAuxSourceShape> {
     use PortableAuxSourceShape::{Directory, File};
     match source_id {
@@ -37,6 +133,44 @@ pub fn portable_aux_source_shape(source_id: &str, entry: &Value) -> Option<Porta
         | "kolors_ip_adapter"
         | "utility_face_stack" => Some(Directory),
         "pid_checkpoint" => Some(Directory),
+        id if crate::moss_image::is_runtime_optional_component_id(id) => {
+            let row = entry
+                .get("downloads")?
+                .as_array()?
+                .iter()
+                .find(|row| row.get("componentId").and_then(Value::as_str) == Some(id))?;
+            let files = row.get("files")?.as_array()?;
+            if files.len() == 1 && files[0].as_str().is_some_and(|file| !file.contains('*')) {
+                Some(File)
+            } else {
+                Some(Directory)
+            }
+        }
+        id if entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_some_and(|downloads| {
+                downloads
+                    .iter()
+                    .any(|row| row.get("componentId").and_then(Value::as_str) == Some(id))
+            }) =>
+        {
+            let row = entry
+                .get("downloads")?
+                .as_array()?
+                .iter()
+                .find(|row| row.get("componentId").and_then(Value::as_str) == Some(id))?;
+            let files = row.get("files")?.as_array()?;
+            if files.len() == 1
+                && files[0]
+                    .as_str()
+                    .is_some_and(|file| !file.contains(['*', '?', '[']))
+            {
+                Some(File)
+            } else {
+                Some(Directory)
+            }
+        }
         _ => entry
             .pointer("/decoders/byBackend")
             .and_then(Value::as_object)
@@ -156,6 +290,20 @@ pub fn required_portable_aux_source_ids(
         {
             ids.extend(["pid_checkpoint", "pid_gemma"].map(str::to_owned));
         }
+        if id.starts_with("moss_image") {
+            ids.extend(
+                entry
+                    .get("downloads")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row.get("componentId").and_then(Value::as_str))
+                    .filter(|component| {
+                        crate::moss_image::is_runtime_optional_component_id(component)
+                    })
+                    .map(str::to_owned),
+            );
+        }
         if character_reference && matches!(id, "flux_dev" | "flux_schnell") {
             ids.extend(["flux_ip_adapter", "flux_ip_encoder"].map(str::to_owned));
         }
@@ -244,6 +392,11 @@ pub fn required_portable_aux_source_ids(
         )
         .map_err(|error| format!("invalid resolved training plan: {error}"))?;
         if plan.target.base_model == id {
+            ids.extend(
+                trainer_required_component_ids(id, backend)
+                    .iter()
+                    .map(|id| (*id).to_owned()),
+            );
             if id == "ltx_2_3" {
                 ids.push("ltx_training_text_encoder".to_owned());
             }
@@ -427,5 +580,56 @@ mod tests {
             portable_aux_source_shape("vae", &qwen),
             Some(PortableAuxSourceShape::File)
         );
+    }
+
+    #[test]
+    fn moss_runtime_components_follow_the_projected_downloads_and_shapes() {
+        let entry = json!({"id":"moss_image_sft","downloads":[
+            {"componentId":"moss-dmd-lora","files":["lora.safetensors"]},
+            {"componentId":"moss-image-edit","files":["adapter_config.json","adapter_model.safetensors"]}
+        ]});
+        let payload = json!({"model":"moss_image_sft"});
+        assert_eq!(
+            required_portable_aux_source_ids(
+                &JobType::ImageGenerate,
+                payload.as_object().unwrap(),
+                &entry,
+                "mlx"
+            )
+            .unwrap(),
+            vec!["moss-dmd-lora", "moss-image-edit"]
+        );
+        assert_eq!(
+            portable_aux_source_shape("moss-dmd-lora", &entry),
+            Some(PortableAuxSourceShape::File)
+        );
+        assert_eq!(
+            portable_aux_source_shape("moss-image-edit", &entry),
+            Some(PortableAuxSourceShape::Directory)
+        );
+        assert_eq!(
+            trainer_required_component_ids("sdxl", "candle"),
+            &["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"]
+        );
+        assert!(trainer_required_component_ids("sdxl", "mlx").is_empty());
+    }
+
+    #[test]
+    fn training_auxiliary_selection_follows_enabled_losses() {
+        let plan: crate::training::TrainingPlan = serde_json::from_value(json!({
+            "schemaVersion":1,"planVersion":1,"jobId":"job",
+            "target":{"targetId":"target","kernel":"z_image_lora","family":"zimage","modality":"image","outputKind":"lora","baseModel":"z_image_turbo","baseModelPath":"/models/zimage"},
+            "dataset":{"datasetId":"dataset","datasetVersion":1,"rootPath":"/dataset","items":[]},
+            "config":{"rank":16,"alpha":32,"learningRate":0.0001,"steps":10,"batchSize":1,"gradientAccumulation":1,"resolution":512,"saveEvery":10,"seed":1,"optimizer":"adamw8bit","advanced":{"depthAnchoringWeight":0.1,"depthAnchoringModel":"small","bodyProportionWeight":0.1,"identityLossWeight":0.1}},
+            "output":{"loraId":"lora","outputDir":"/output","fileName":"lora.safetensors","format":"safetensors","triggerWords":[]},
+            "provenance":{"datasetId":"dataset","datasetVersion":1,"targetId":"target","baseModel":"z_image_turbo","configSnapshot":{},"outputLoraId":"lora","sourceJobId":"job","createdAt":"2026-11-07T00:00:00Z"}
+        })).unwrap();
+        let selected = selected_training_aux_models(&plan, "z_image_turbo").unwrap();
+        let ids: std::collections::BTreeSet<_> = selected.iter().map(|model| model.id).collect();
+        assert!(ids.contains("taef1"));
+        assert!(ids.contains("depth_anything_v2_small"));
+        assert!(ids.contains("vitpose_plus_base"));
+        assert!(ids.contains("instantid_face_stack"));
+        assert_eq!(ids.len(), 4);
     }
 }

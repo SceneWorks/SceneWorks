@@ -2089,18 +2089,36 @@ fn apply_latent_perceptual(
         // decoder, or none for a trainer that decodes through its own VAE.
         config.perceptual_decoder_dir =
             perceptual_decoder_dir(settings, engine_id, "The VAE anchor loss")?;
-        let vae_dir = crate::model_jobs::huggingface_pinned_snapshot_dir(
-            &settings.data_dir,
-            FLUX2_VAE_MODEL.repo,
-            FLUX2_VAE_MODEL.revision,
-        )
-        .and_then(|snapshot| {
-            FLUX2_VAE_TIER_DIRS
-                .iter()
-                .map(|tier| snapshot.join(tier))
-                .find(|dir| dir.join("diffusion_pytorch_model.safetensors").is_file())
-        })
-        .ok_or_else(|| not_installed(&FLUX2_VAE_MODEL, "The VAE anchor loss"))?;
+        let vae_dir = if let Some(paths) = plan.extra.get("__portableAuxPaths") {
+            let path = paths
+                .get(FLUX2_VAE_MODEL.id)
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "portable FLUX.2 VAE anchor is not bound".to_owned(),
+                    )
+                })?;
+            if !path.join("diffusion_pytorch_model.safetensors").is_file() {
+                return Err(WorkerError::InvalidPayload(
+                    "portable FLUX.2 VAE anchor has no weight file".to_owned(),
+                ));
+            }
+            path
+        } else {
+            crate::model_jobs::huggingface_pinned_snapshot_dir(
+                &settings.data_dir,
+                FLUX2_VAE_MODEL.repo,
+                FLUX2_VAE_MODEL.revision,
+            )
+            .and_then(|snapshot| {
+                FLUX2_VAE_TIER_DIRS
+                    .iter()
+                    .map(|tier| snapshot.join(tier))
+                    .find(|dir| dir.join("diffusion_pytorch_model.safetensors").is_file())
+            })
+            .ok_or_else(|| not_installed(&FLUX2_VAE_MODEL, "The VAE anchor loss"))?
+        };
         config.vae_anchor = gen_core::VaeAnchorConfig {
             schedule: schedule(va),
             model_dir: Some(vae_dir),
@@ -2542,7 +2560,7 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
 }
 
 /// Pure production mapping used by both dispatch and matching-platform capability facts.
-pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static str> {
+pub fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static str> {
     match kernel {
         "moss_image_lora" => match base_model {
             "moss_image_base" => Some("moss_image_base"),
