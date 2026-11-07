@@ -500,7 +500,8 @@ pub(crate) fn selected_route_source_rows(
                     ArtifactMemberRole::OptionalComponent,
                 )?;
             }
-            if slot == "modelManifestEntry"
+            if id != "instantid_realvisxl"
+                && slot == "modelManifestEntry"
                 && advanced
                     .and_then(|value| value.get("poses"))
                     .and_then(Value::as_array)
@@ -786,6 +787,25 @@ mod tests {
                 matches!(&rows[0].source, SelectedSourceLocation::ManifestDownload(row) if row["repo"] == "SceneWorks/instantid-mlx")
             );
         }
+    }
+
+    #[test]
+    fn instantid_pose_uses_its_own_openpose_source() {
+        let entry = json!({"id":"instantid_realvisxl"});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let payload = json!({"model":"instantid_realvisxl","advanced":{"poses":[{"id":"front"}]}});
+        let rows = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            payload.as_object().unwrap(),
+            &entries,
+            "candle",
+            "linux",
+        )
+        .unwrap();
+        assert!(rows
+            .iter()
+            .any(|row| row.component_id == "instantid_openpose"));
+        assert!(!rows.iter().any(|row| row.component_id == "strict_control"));
     }
 
     fn routes(job_type: JobType, payload: Value, entry: Value) -> Vec<(String, String)> {
