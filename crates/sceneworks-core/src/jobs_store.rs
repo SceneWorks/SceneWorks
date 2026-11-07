@@ -59,7 +59,6 @@ pub use routing::gaps::{
     video_request_is_claimable_by_any_lane, video_request_is_claimable_on_platform,
     UnsupportedReason, CANDLE_NATIVE_CONVERTERS, NATIVE_CONVERTERS,
 };
-pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
 // The explicit target -> backend-local trainer identity contract; the training catalog derives each
 // target's x0 decoder (`limits.x0Decoder`) through it (epic 2123).
 pub use routing::{

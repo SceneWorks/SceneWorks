@@ -78,10 +78,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
-# `sceneworks-core::jobs_store::routing::matrix` mechanically digests the owning web request/gate
-# sources with production `include_str!`s. Copy the source root (not a hand-maintained file list) so a
-# newly added authoritative seam cannot compile in a checkout but disappear from Docker builds.
-COPY apps/web/src ./apps/web/src
 COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
 # Copied purely to satisfy workspace membership (the desktop crate is in the
 # workspace but is not built into either image).
@@ -265,8 +261,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
-# Keep the Candle builder on the same fail-closed compile-time matrix inputs as the plain builder.
-COPY apps/web/src ./apps/web/src
 COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
 # Workspace-membership only (not built into this image).
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml

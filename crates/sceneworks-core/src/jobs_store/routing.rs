@@ -7,7 +7,6 @@
 pub(crate) mod candle;
 pub(crate) mod catalog;
 pub(crate) mod gaps;
-pub(crate) mod matrix;
 pub(crate) mod mlx;
 
 #[cfg(test)]
@@ -33,8 +32,8 @@ pub(crate) const SENSENOVA_MODEL_IDS: &[&str] = &[
 
 /// Every video mode exposed by the production UI/router catalog.
 ///
-/// The capability dumper consumes this accessor instead of carrying a second mode list, so a newly
-/// shipped mode cannot be omitted from matching-platform descriptor evidence.
+/// The typed video-route contract test consumes this accessor so newly shipped modes
+/// cannot be omitted from descriptor evidence.
 pub fn video_ui_modes() -> &'static [&'static str] {
     catalog::VIDEO_UI_MODES
 }

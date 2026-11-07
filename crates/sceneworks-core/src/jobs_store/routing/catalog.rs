@@ -14,11 +14,7 @@ use crate::contracts::JobType;
 
 /// Video capabilities a shipped manifest entry advertises that NO lane can currently claim.
 ///
-/// Promoted out of the test module by the sc-19721 main sync, because two checks need it and only
-/// one could see it: the class guard in this file's tests, and `matrix::canonical_model_request`,
-/// which `main` added later and which errors on a video entry with no routed mode. One row is the
-/// single place saying "advertised, knowingly unroutable, and why"; duplicating it would let the
-/// two drift apart.
+/// The class guard below verifies that every advertised mode is claimable.
 ///
 /// EXACT, not a suppression list — the class guard fails if a row here is no longer needed, so a
 /// capability that becomes claimable forces its row to be deleted.
@@ -28,7 +24,8 @@ use crate::contracts::JobType;
 /// withheld pending a `MultiReference` conditioning declaration — was deleted by sc-18650, which
 /// instead aligned `video_mode_conditioning_requirements` to the ordered omni-reference surface
 /// the pinned engines actually declare and restored the `minimax_h3_ref` arm in `routing/mlx.rs`.
-pub(super) const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[];
+#[cfg(test)]
+const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[];
 
 use crate::jobs_store::routing::candle::video_mode_is_candle_eligible;
 use crate::jobs_store::routing::gaps::{
@@ -1040,10 +1037,9 @@ fn imported_payload_operation(payload: &Map<String, Value>) -> &'static str {
 /// (family, source, operation) this payload selects.
 ///
 /// Declaration only. It deliberately stops short of the adapter / quant / conditioning checks
-/// [`imported_image_request_provider_eligible`] goes on to make, so a caller can compare "the facts
-/// say this backend serves this shape" against an independently measured "the worker actually
-/// routes it". That comparison is what lets the capability matrix prove a declared lane is really
-/// reachable instead of restating one side of the same lookup.
+/// [`imported_image_request_provider_eligible`] goes on to make. The focused test compares
+/// descriptor declaration with the production route claim for every imported source and operation.
+#[cfg(test)]
 pub fn imported_backend_declared_route(
     payload: &Map<String, Value>,
     backend: &str,
@@ -1057,6 +1053,7 @@ pub fn imported_backend_declared_route(
 }
 
 /// Convenience form of [`imported_backend_declared_route`] for callers that only need existence.
+#[cfg(test)]
 pub fn imported_backend_declares_route(payload: &Map<String, Value>, backend: &str) -> bool {
     imported_backend_declared_route(payload, backend).is_some()
 }
