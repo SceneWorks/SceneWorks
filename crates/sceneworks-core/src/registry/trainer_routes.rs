@@ -304,6 +304,64 @@ mod tests {
     }
 
     #[test]
+    fn ltx_2_3_target_rejects_the_registered_ltx_2_5_trainer() {
+        let target = crate::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "ltx_video_lora")
+            .unwrap();
+        let job = training_job(&target, "lora");
+        assert!(crate::jobs_store::training_job_is_mlx_eligible(&job));
+        assert!(crate::jobs_store::training_job_is_candle_eligible(&job));
+        for backend in ["mlx", "candle"] {
+            assert_eq!(
+                expected_backend_local_trainer_id(&target, backend).unwrap(),
+                "ltx_2_3",
+                "a same-capability newer trainer cannot satisfy the LTX 2.3 product target"
+            );
+            let mut facts = native(backend);
+            assert!(supports(&facts, &target, "lora"));
+            facts.trainer_mappings.insert(
+                target.id.clone(),
+                if backend == "mlx" {
+                    "ltx_2_5"
+                } else {
+                    "ltx_2_5_distilled"
+                }
+                .to_owned(),
+            );
+            assert_ne!(
+                facts.trainer_mappings[&target.id],
+                expected_backend_local_trainer_id(&target, backend).unwrap(),
+                "a newer registered trainer is not the target's native identity"
+            );
+            facts
+                .trainer_mappings
+                .insert(target.id.clone(), "ltx_2_3".to_owned());
+            facts
+                .snapshot
+                .trainer_capabilities
+                .retain(|trainer| trainer.id != "ltx_2_3");
+            assert!(
+                !supports(&facts, &target, "lora"),
+                "{backend} missing descriptor"
+            );
+            let mut facts = native(backend);
+            facts
+                .snapshot
+                .trainer_capabilities
+                .iter_mut()
+                .find(|trainer| trainer.id == "ltx_2_3")
+                .unwrap()
+                .supports_lora = false;
+            assert!(
+                !supports(&facts, &target, "lora"),
+                "{backend} missing LoRA support"
+            );
+        }
+    }
+
+    #[test]
     fn paired_native_trainers_preserve_x0_decoder_and_edit_reference_cap() {
         let targets = crate::training::builtin_training_targets();
         for target in &targets.targets {
