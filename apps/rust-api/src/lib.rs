@@ -96,6 +96,7 @@ use uuid::Uuid;
 mod auth;
 mod file_serving;
 mod job_redaction;
+mod portable_routes;
 mod project_files;
 mod router;
 mod uploads;
