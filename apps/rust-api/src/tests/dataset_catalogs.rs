@@ -1478,7 +1478,8 @@ async fn analyzer_configuration_is_typed_validated_revisioned_and_persistent() {
 #[tokio::test]
 async fn catalog_analysis_uses_typed_revisioned_route_and_never_accepts_catalog_paths() {
     let temporary = tempfile::tempdir().expect("temp directory");
-    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let settings = test_settings(&temporary);
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, created) = request(
         app.clone(),
         "POST",
@@ -1509,6 +1510,18 @@ async fn catalog_analysis_uses_typed_revisioned_route_and_never_accepts_catalog_
     assert_eq!(job["payload"]["catalogId"], id);
     assert_eq!(job["payload"]["analyzerConfigRevision"], 0);
     assert_eq!(job["payload"]["batchSize"], 8);
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let binding_json: Option<String> = connection
+        .query_row(
+            "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+            [job["id"].as_str().expect("analysis job id")],
+            |row| row.get(0),
+        )
+        .expect("analysis job exists");
+    assert!(
+        binding_json.is_none(),
+        "default catalog analysis loads no model"
+    );
     assert!(
         job["payload"].get("catalogRoot").is_none() && job["payload"].get("path").is_none(),
         "the worker must resolve catalog identity only through the attached registry"

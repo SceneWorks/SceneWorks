@@ -568,7 +568,7 @@ async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items(
     }
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
         &"Parquet Import Project",
@@ -638,6 +638,15 @@ async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items(
     assert_eq!(job["payload"]["captionExcludes"], json!(["logo"]));
 
     let job_id = job["id"].as_str().expect("job id");
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let binding_json: Option<String> = connection
+        .query_row(
+            "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .expect("parquet job exists");
+    assert!(binding_json.is_none(), "parquet import loads no model");
     let staging = project_path
         .join("training")
         .join("datasets")
