@@ -74,6 +74,11 @@ fn portable_authored_options(payload: &JsonObject) -> Value {
                             "posesSelected".to_owned(),
                             Value::Bool(value.as_array().is_some_and(|poses| !poses.is_empty())),
                         );
+                    } else if key == "referenceAssetId" {
+                        selected.insert(
+                            "referenceSelected".to_owned(),
+                            Value::Bool(value.as_str().is_some_and(|id| !id.trim().is_empty())),
+                        );
                     } else if is_source_choice_container(key) {
                         selected.insert(key.clone(), project(value, Some(key)));
                     } else if is_source_choice_leaf(key, parent) {
@@ -135,6 +140,7 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
             | "enhancerModel"
             | "useUncensoredEnhancer"
             | "enhancePrompt"
+            | "tileControlNetRepo"
             | "enabled"
             | "repo"
             | "revision"
@@ -188,15 +194,29 @@ pub(crate) async fn capture_portable_model_binding(
     payload: &JsonObject,
     requested_gpu: &str,
 ) -> Result<Option<PortableJobBinding>, ApiError> {
+    if model_free_job(job_type, payload) {
+        return Ok(None);
+    }
     let entries = payload_model_entries(payload)?;
     if entries.is_empty() {
-        return if model_free_job(job_type, payload) {
-            Ok(None)
-        } else {
-            Err(incomplete(
-                "model-backed job has no canonical model source carrier",
-            ))
-        };
+        return Err(incomplete(
+            "model-backed job has no canonical model source carrier",
+        ));
+    }
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        let base = payload
+            .get("plan")
+            .and_then(|plan| plan.pointer("/target/baseModel"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| incomplete("training plan has no base model"))?;
+        if !entries
+            .iter()
+            .any(|(_, entry)| entry.get("id").and_then(Value::as_str) == Some(base))
+        {
+            return Err(incomplete(
+                "training base has no matching canonical model carrier",
+            ));
+        }
     }
     let authored_options = portable_authored_options(payload);
     let authored_hash = canonical_authored_options_sha256(&authored_options)
@@ -212,11 +232,20 @@ pub(crate) async fn capture_portable_model_binding(
             job_type, payload, &entries, &backend, &platform,
         )
         .map_err(incomplete)?;
+        for source in &selected_sources {
+            if !entries.iter().any(|(slot, _)| *slot == source.model_slot) {
+                return Err(incomplete(format!(
+                    "selected source {} has no model carrier slot {}",
+                    source.component_id, source.model_slot
+                )));
+            }
+        }
         let mut models = Vec::with_capacity(entries.len());
         for (index, (slot, entry)) in entries.iter().enumerate() {
             models.push(
                 capture_model_slot(
                     state,
+                    job_type,
                     payload,
                     slot,
                     entry,
@@ -264,8 +293,113 @@ fn model_free_job(job_type: &JobType, payload: &JsonObject) -> bool {
             && payload.get("mode").and_then(Value::as_str) == Some("triggerOnly")
 }
 
+struct TrainingBaseSelection {
+    path: PathBuf,
+    tier: String,
+}
+
+/// The native trainer loads plan.target.baseModelPath directly. Its effective tier is determined
+/// by the training target, independently of a generation catalog's default tier.
+fn training_base_selection(
+    job_type: &JobType,
+    payload: &JsonObject,
+    model_id: &str,
+) -> Result<Option<TrainingBaseSelection>, ApiError> {
+    if !matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        return Ok(None);
+    }
+    let target = payload
+        .get("plan")
+        .and_then(|plan| plan.get("target"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| incomplete("training plan has no canonical target"))?;
+    let base = target
+        .get("baseModel")
+        .and_then(Value::as_str)
+        .ok_or_else(|| incomplete("training plan has no base model"))?;
+    if base != model_id {
+        return Ok(None);
+    }
+    let kernel = target
+        .get("kernel")
+        .and_then(Value::as_str)
+        .ok_or_else(|| incomplete("training plan has no native kernel"))?;
+    let path = target
+        .get("baseModelPath")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| incomplete("training plan has no resolved base model path"))?;
+    let tier = if base == "ltx_2_5" || kernel == "ltx_mlx_lora" {
+        "q4"
+    } else {
+        "bf16"
+    };
+    Ok(Some(TrainingBaseSelection {
+        path: PathBuf::from(path),
+        tier: tier.to_owned(),
+    }))
+}
+
+/// A builtin training path is allowed only inside the selected pinned snapshot. Rehash the exact
+/// directory the native trainer will open and compare it to the publisher's immutable file tree.
+async fn verify_training_primary_path(
+    state: &AppState,
+    selected_path: &Path,
+    download: &Value,
+    members: &[PortableArtifactMember],
+) -> Result<(), ApiError> {
+    let repo = required_download_string(download, "repo")?;
+    let revision = required_download_string(download, "revision")?;
+    let library = sceneworks_core::hf_home::model_source_library(&state.settings.data_dir);
+    let allowed = vec![library.root().to_path_buf()];
+    let resolver = ModelArtifactResolver::new(library);
+    let (_, snapshot) = resolver
+        .discover_source_snapshot(repo, Some(revision))
+        .map_err(|error| {
+            incomplete(format!(
+                "training base pinned snapshot is unavailable: {error}"
+            ))
+        })?;
+    let snapshot = confine_artifact_path(&snapshot, &allowed)
+        .map_err(|error| incomplete(error.to_string()))?;
+    let selected = confine_artifact_path(selected_path, &allowed)
+        .map_err(|error| incomplete(error.to_string()))?;
+    let prefix = selected
+        .strip_prefix(&snapshot)
+        .map_err(|_| incomplete("training base path is outside its pinned publisher snapshot"))?;
+    let actual = capture_local_source_files(&selected, &allowed)?;
+    let remote = members
+        .iter()
+        .find(|member| member.role == ArtifactMemberRole::Primary)
+        .ok_or_else(|| incomplete("training base has no pinned primary member"))?;
+    let mut expected = remote
+        .files
+        .iter()
+        .filter_map(|file| {
+            file.relative_path
+                .strip_prefix(prefix)
+                .ok()
+                .and_then(|relative| {
+                    (!relative.as_os_str().is_empty()).then(|| PortableArtifactFile {
+                        relative_path: relative.to_path_buf(),
+                        size_bytes: file.size_bytes,
+                        sha256: file.sha256.clone(),
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    expected.sort();
+    if expected.is_empty() || actual != expected {
+        return Err(incomplete(
+            "training base bytes differ from selected pinned publisher files",
+        ));
+    }
+    Ok(())
+}
+
 async fn capture_model_slot(
     state: &AppState,
+    job_type: &JobType,
     payload: &JsonObject,
     slot: &str,
     entry: &Value,
@@ -280,7 +414,11 @@ async fn capture_model_slot(
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| incomplete(format!("{slot} has no canonical model id")))?;
-    let requested_variant = requested_runtime_variant(payload);
+    let training = training_base_selection(job_type, payload, model_id)?;
+    let requested_variant = training
+        .as_ref()
+        .map(|selection| selection.tier.clone())
+        .or_else(|| requested_runtime_variant(payload));
     let selected = selected_model_artifact_closure(entry, platform, requested_variant.as_deref());
     let downloads = selected
         .get("downloads")
@@ -317,6 +455,9 @@ async fn capture_model_slot(
             let component_id =
                 (role != ArtifactMemberRole::Primary).then(|| format!("{slot}/downloads/{index}"));
             members.push(capture_download_member(state, download, role, component_id).await?);
+        }
+        if let Some(training) = &training {
+            verify_training_primary_path(state, &training.path, primary, &members).await?;
         }
     }
     if let Some(path) = selected_primary_override(payload, entry, owns_request_overlays) {
@@ -1016,5 +1157,23 @@ mod tests {
             selected_primary_override(payload.as_object().unwrap(), &entry, false),
             Some(PathBuf::from("/old/root/model"))
         );
+    }
+
+    #[test]
+    fn training_plan_freezes_native_base_tier_instead_of_generation_default() {
+        for (base, kernel, expected) in [
+            ("z_image_turbo", "z_image_lora", "bf16"),
+            ("ltx_2_3", "ltx_mlx_lora", "q4"),
+            ("ltx_2_5", "ltx25_mlx_lora", "q4"),
+        ] {
+            let payload = json!({"plan":{"target":{
+                "baseModel":base,"kernel":kernel,"baseModelPath":"/approved/snapshot"
+            }}});
+            let selected =
+                training_base_selection(&JobType::LoraTrain, payload.as_object().unwrap(), base)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(selected.tier, expected, "{base}");
+        }
     }
 }
