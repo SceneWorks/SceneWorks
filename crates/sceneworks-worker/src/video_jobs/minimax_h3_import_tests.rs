@@ -1513,6 +1513,21 @@ fn imported_h3_portable_plan_uses_frozen_layers_without_a_worker_plan_record() {
             .insert(&imported.checkpoint_id, &layer.layer.layer_id, path)
             .unwrap();
     }
+    let canceled = verified
+        .resolve_checkpoint(&imported.checkpoint_id, &|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "H3 preparation canceled",
+            ))
+        })
+        .unwrap_err();
+    assert!(
+        matches!(
+            canceled,
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanError::Io { .. }
+        ),
+        "cancellation keeps the store-style I/O error class: {canceled}"
+    );
     let settings = Settings {
         data_dir: worker.path().to_path_buf(),
         verified_plan_layers: Some(std::sync::Arc::new(verified)),
