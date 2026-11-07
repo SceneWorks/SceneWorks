@@ -71,6 +71,7 @@ the before side. Capture writes require the full pinned old SHA and clean old pr
 From the repository root, with web dependencies installed:
 
 ```sh
+npm --prefix apps/web test -- src/catalogBaseline.test.jsx src/catalogBaseline.behavior.test.jsx src/catalogBaseline.fixture.test.jsx
 cargo run --locked -q -p sceneworks-core --bin dump-ui-catalog > /tmp/ui-catalog-candidate.json
 CATALOG_CANDIDATE=/tmp/ui-catalog-candidate.json npm --prefix apps/web test -- src/catalogBaseline.test.jsx src/catalogBaseline.behavior.test.jsx
 cargo test --locked -p sceneworks-core --bin dump-ui-catalog
@@ -105,3 +106,59 @@ All checks are CPU-only, weights-free, and network/model calls are blocked or ca
 product submission boundary. No workflow, inference pin or production behavior changes are
 part of this item. Normal web/native test discovery picks up the regression checks; no learned
 CPU/GPU execution is added to CI.
+
+## Ordinary CI adapter repair
+
+[Web job 128447191685](https://github.com/SceneWorks/SceneWorks/actions/runs/42387223932/job/128447191685)
+at published head `24b248c8786e0f401017d537fb207b5ac699ed38` failed exactly six Vector
+Create-from-Prompt rows. The earlier local check supplied `CATALOG_CANDIDATE`; ordinary CI
+runs with it unset. The capture dumper supplies controlled model inputs in id order, but the
+manifest bridge retained manifest source order. That changed the first and alternate raster
+choices from Anima to MOSS. The same six failures reproduced locally without the override,
+so this was an adapter-path mismatch, not an OS-specific inference issue. Earlier
+`chunk unavailable` diagnostics were expected fault-injection output in passing tests.
+
+The manifest bridge now uses the capture's code-point id order. Explicit native dumps keep
+their producer order: a regression test reverses that input and verifies that the actual
+submitted raster choice changes. Another test compares actual ordinary-path Vector controls
+and requests with the frozen native inputs. Non-select controls omit the absent `options`
+property rather than retaining `undefined`; select values, option order and disabled state
+remain checked, including a strict JSON round-trip regression.
+
+The three frozen JSON artifacts, 1,197-row population and StarVector removal negative control
+are unchanged. No snapshots were regenerated. The previous native-input receipts remain
+valid for that input lane; any claim that they established ordinary default-path parity at
+`24b248c878` is withdrawn. The repair separately validates the ordinary Node 22.23.4 web lane
+(the CI version) and the native-input lane. Production code, workflow configuration, engine
+pin and learned-execution policy are unchanged.
+
+Repair validation (Node 22.23.4): ordinary full web discovery passed **7,320 tests in 390 files**
+with four bounded workers; the supplied native-dump lane passed **1,449 tests in three files**.
+Full web ESLint, the native frozen-input test, clippy, rustfmt and the capture-protection script
+test passed. An actual candidate with StarVector removed still failed as intended, naming
+`starvector_1b`. The local proof resolves the fixture failure; the failed remote receipt is
+retained and publication requires the new-head CI run.
+
+### Workflow-share parity follow-up
+
+[Parity Rust job 128447191618](https://github.com/SceneWorks/SceneWorks/actions/runs/42387223932/job/128447191618)
+also reported the discovery scan at `harness.jsx:92`. `targetForPlatform` clones catalog target
+and preset defaults into mocked AppContext inputs; only test files import the helper and its
+submission callbacks are recorders. It is not a shipping workflow payload builder. The policy
+in `workflow_share.rs:730-748` explicitly directs renaming non-payload locals because the scan
+recognizes property writes by the identifier `advanced`.
+
+The alias is now `trainingDefaults`. The `next.defaults.advanced` property and every field/value
+remain unchanged. No builder registry entry, scanner exemption or gate change was added.
+The exact focused command below reproduced the failure before the rename and passed afterward;
+the complete `workflow_share` integration suite also passed all **92 tests**. The affected
+Node 22.23.4 baseline suites passed **1,449 tests**, full web ESLint and `cargo fmt --all -- --check`
+passed, and the three frozen JSON artifacts remain byte-identical to the published head.
+
+```sh
+cargo test --locked -p sceneworks-core --test workflow_share every_advanced_builder_in_the_web_app_is_accounted_for
+cargo test --locked -p sceneworks-core --test workflow_share
+```
+
+The prior native-dump test was not workflow-share parity evidence; these receipts supply that
+missing scope. The capture data and the ordinary adapter repair remain valid.

@@ -87,14 +87,15 @@ function installed(model) {
 function targetForPlatform(target, platform) {
   if (platform === "macos") return target;
   const next = structuredClone(target);
-  const advanced = next.defaults.advanced;
+  // Cloned catalog metadata for the mocked studio context; this alias is not a payload builder.
+  const trainingDefaults = next.defaults.advanced;
   if (["kolors_lora", "sd3_lora", "mage_flow_lora", "anima_lora"].includes(target.kernel)) {
-    advanced.gradientCheckpointing = false;
-    advanced.sampleEvery = 0;
-    if (target.kernel === "mage_flow_lora") advanced.fullFinetuneConfig = { mixedPrecision: "f32", gradientCheckpointing: false };
+    trainingDefaults.gradientCheckpointing = false;
+    trainingDefaults.sampleEvery = 0;
+    if (target.kernel === "mage_flow_lora") trainingDefaults.fullFinetuneConfig = { mixedPrecision: "f32", gradientCheckpointing: false };
   }
-  if (["wan_lora", "wan_moe_lora"].includes(target.kernel)) advanced.sampleEvery = 0;
-  if (target.kernel === "wan_moe_lora") advanced.gradientCheckpointing = true;
+  if (["wan_lora", "wan_moe_lora"].includes(target.kernel)) trainingDefaults.sampleEvery = 0;
+  if (target.kernel === "wan_moe_lora") trainingDefaults.gradientCheckpointing = true;
   return next;
 }
 export function contextFor(catalog, row, overrides = {}) {
@@ -142,7 +143,7 @@ export function controls(container, persistenceKey) {
     min: node.getAttribute("min"), max: node.getAttribute("max"), step: node.getAttribute("step"),
     available: true, disabled: Boolean(node.disabled), disabledReason: clean(node.title || node.closest("[title]")?.title),
     tooltip: clean(node.getAttribute("title") || (node.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent ?? "").join(" ")), persistenceKey,
-    options: node.options ? [...node.options].map((option) => ({ id: option.value, label: clean(option.textContent), disabled: option.disabled })) : undefined,
+    ...(node.options ? { options: [...node.options].map((option) => ({ id: option.value, label: clean(option.textContent), disabled: option.disabled })) } : {}),
     selected: node.getAttribute("aria-selected"), pressed: node.getAttribute("aria-pressed"), expanded: node.getAttribute("aria-expanded"),
   }));
 }
