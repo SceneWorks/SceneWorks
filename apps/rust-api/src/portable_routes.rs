@@ -30,10 +30,21 @@ pub(crate) fn eligible_portable_routes(
         ));
     }
     let mut routes = Vec::new();
+    // The MLX worker registers the literal gpu id `mlx`. Every explicit non-CPU id other
+    // than that names a CUDA/Candle worker (including `0`, `cuda:0`, and operator ids).
+    // An unknown id may still wait in the queue, but it cannot authorize the other backend.
+    let explicit_backend = match requested_gpu {
+        "auto" => None,
+        "mlx" => Some("mlx"),
+        _ => Some("candle"),
+    };
     for (backend, platforms) in [
         ("mlx", &["macos"][..]),
         ("candle", &["linux", "windows"][..]),
     ] {
+        if explicit_backend.is_some_and(|selected| selected != backend) {
+            continue;
+        }
         let claims =
             native_route_claims_request(backend, job_type, payload).map_err(ApiError::internal)?;
         if !claims || !entries_support_backend(entries, backend) {
@@ -133,5 +144,24 @@ mod tests {
             "cpu",
         )
         .is_err());
+    }
+
+    #[test]
+    fn explicit_native_gpu_limits_the_frozen_routes() {
+        let entry = json!({"id":"flux_schnell"});
+        let entry_ref = [("modelManifestEntry".to_owned(), &entry)];
+        let payload = json!({"model":"flux_schnell"});
+        let payload = payload.as_object().unwrap();
+        assert_eq!(
+            eligible_portable_routes(&JobType::ImageGenerate, payload, &entry_ref, "mlx").unwrap(),
+            vec![("mlx".to_owned(), "macos".to_owned())]
+        );
+        assert_eq!(
+            eligible_portable_routes(&JobType::ImageGenerate, payload, &entry_ref, "0").unwrap(),
+            vec![
+                ("candle".to_owned(), "linux".to_owned()),
+                ("candle".to_owned(), "windows".to_owned())
+            ]
+        );
     }
 }
