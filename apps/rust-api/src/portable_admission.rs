@@ -256,6 +256,88 @@ pub(crate) async fn validate_frozen_replay_binding(
     Ok(candidate)
 }
 
+/// A vector workflow may fail before it creates its raster child. Its parent nevertheless froze
+/// the raster carrier under `modelManifestEntries/0`; derive the child identity from those exact
+/// bytes after checking the recorded raster model and current child route policy.
+pub(crate) async fn derive_vector_raster_child_binding(
+    state: &AppState,
+    child_type: &JobType,
+    child_payload: &JsonObject,
+    requested_gpu: &str,
+    parent_frozen: &PortableJobBinding,
+) -> Result<PortableJobBinding, ApiError> {
+    if *child_type != JobType::ImageGenerate {
+        return Err(incomplete("vector raster child has an unexpected job type"));
+    }
+    parent_frozen
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    let recorded_model = parent_frozen
+        .authored_options
+        .pointer("/workflow/rasterStage/model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| incomplete("vector parent has no recorded raster model"))?;
+    if child_payload.get("model").and_then(Value::as_str) != Some(recorded_model) {
+        return Err(incomplete("vector raster child changed the recorded model"));
+    }
+    let entries = payload_model_entries(child_payload)?;
+    if entries.len() != 1
+        || entries[0].0 != "modelManifestEntry"
+        || entries[0].1.get("id").and_then(Value::as_str) != Some(recorded_model)
+    {
+        return Err(incomplete(
+            "vector raster child has no original model carrier",
+        ));
+    }
+    let authored = portable_authored_options(child_payload);
+    let authored_hash = canonical_authored_options_sha256(&authored)
+        .map_err(|error| incomplete(error.to_string()))?;
+    let mut routes = BTreeMap::new();
+    for (backend, platform) in crate::portable_routes::eligible_portable_routes(
+        child_type,
+        child_payload,
+        &entries,
+        requested_gpu,
+    )? {
+        let key = format!("{backend}:{platform}");
+        let parent_route = parent_frozen
+            .routes
+            .get(&key)
+            .ok_or_else(|| incomplete(format!("vector parent did not freeze child route {key}")))?;
+        let raster = parent_route
+            .models
+            .iter()
+            .find(|model| model.slot == "modelManifestEntries/0")
+            .ok_or_else(|| incomplete("vector parent did not freeze the raster source"))?;
+        if raster.model_id != recorded_model {
+            return Err(incomplete("vector parent raster identity changed"));
+        }
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            &raster.model_id,
+            &backend,
+            &raster.variant,
+            raster.tier.clone(),
+            &authored_hash,
+            raster.members.clone(),
+        )
+        .map_err(|error| incomplete(error.to_string()))?;
+        let route = PortableRouteBinding::new(&backend, &platform, vec![model])
+            .map_err(|error| incomplete(error.to_string()))?;
+        routes.insert(key, route);
+    }
+    let frozen_child =
+        PortableJobBinding::new(authored, routes).map_err(|error| incomplete(error.to_string()))?;
+    validate_frozen_replay_binding(
+        state,
+        child_type,
+        child_payload,
+        requested_gpu,
+        &frozen_child,
+    )
+    .await
+}
+
 async fn capture_portable_model_binding_inner(
     state: &AppState,
     job_type: &JobType,
