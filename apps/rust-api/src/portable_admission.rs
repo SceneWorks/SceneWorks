@@ -2672,8 +2672,8 @@ mod tests {
         let q4_worker = vec![claim("q4")];
         let bf16_worker = vec![claim("bf16")];
         assert!(
-            conversion_claim_tier_rank(&[row.clone()], &bf16_worker)
-                < conversion_claim_tier_rank(&[row], &q4_worker)
+            conversion_claim_tier_rank(std::slice::from_ref(&row), &bf16_worker)
+                < conversion_claim_tier_rank(std::slice::from_ref(&row), &q4_worker)
         );
     }
 
@@ -2707,7 +2707,7 @@ mod tests {
             "model",
             "user_model",
             None,
-            &portable_file_ledger_sha256(&[file.clone()]).unwrap(),
+            &portable_file_ledger_sha256(std::slice::from_ref(&file)).unwrap(),
         )
         .unwrap();
         let claim = PortableSourceClaim::new(
@@ -2717,7 +2717,12 @@ mod tests {
         )
         .unwrap();
         assert_ne!(claim.closure_sha256, claim.files[0].sha256);
-        assert!(replay_route_claims_match(&route, &JsonObject::new(), &[claim.clone()]).is_ok());
+        assert!(replay_route_claims_match(
+            &route,
+            &JsonObject::new(),
+            std::slice::from_ref(&claim)
+        )
+        .is_ok());
         let mut changed = claim;
         changed.files[0].size_bytes += 1;
         assert!(replay_route_claims_match(&route, &JsonObject::new(), &[changed]).is_err());

@@ -23,6 +23,7 @@ pub(crate) fn has_bound_aux_paths(advanced: &JsonObject) -> bool {
 /// The native PuLID providers take a single face directory although the three selected
 /// face files belong to two independently authenticated repositories. Compose only from
 /// worker-leased immutable paths and keep this temporary directory alive through generation.
+#[cfg(native_lane)]
 pub(crate) fn bound_pulid_weights(
     advanced: &JsonObject,
 ) -> crate::WorkerResult<(PathBuf, PathBuf, PathBuf, tempfile::TempDir)> {
@@ -213,7 +214,7 @@ pub(crate) fn resolve_selected_aux_source(
         "ltx_amoral_gemma_3_12b" => {
             #[cfg(not(target_os = "macos"))]
             {
-                return None;
+                None
             }
             #[cfg(target_os = "macos")]
             {
@@ -334,7 +335,7 @@ pub(crate) fn resolve_selected_aux_source(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, native_lane))]
 mod identity_tests {
     use super::*;
     use serde_json::json;

@@ -3645,7 +3645,7 @@ mod plan_backed_video_enqueue_tests {
                             utilization: None,
                         },
                         Some(platform),
-                        Some(&[claim.clone()]),
+                        Some(std::slice::from_ref(&claim)),
                     )
                     .unwrap();
             }

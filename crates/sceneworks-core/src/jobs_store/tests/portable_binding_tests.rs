@@ -124,14 +124,14 @@ fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
         &connection,
         &job.id,
         route,
-        &[digest_claim.clone()]
+        std::slice::from_ref(&digest_claim)
     )
     .unwrap());
     assert!(!candidate_matches_portable_worker_sources(
         &connection,
         &job.id,
         route,
-        &[auxiliary_claim.clone()]
+        std::slice::from_ref(&auxiliary_claim)
     )
     .unwrap());
     assert!(candidate_matches_portable_worker_sources(

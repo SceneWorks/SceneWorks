@@ -669,7 +669,7 @@ struct PreparedPortableSnapshot {
 pub(crate) struct VerifiedPlanLayers {
     by_checkpoint: std::collections::BTreeMap<String, std::collections::BTreeMap<String, PathBuf>>,
     plans: std::collections::BTreeMap<String, PortableCheckpointPlan>,
-    lease: std::sync::Arc<FileLock>,
+    _lease: std::sync::Arc<FileLock>,
 }
 
 impl VerifiedPlanLayers {
@@ -677,17 +677,18 @@ impl VerifiedPlanLayers {
         Self {
             by_checkpoint: Default::default(),
             plans: Default::default(),
-            lease,
+            _lease: lease,
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, native_lane))]
     pub(crate) fn new_for_test(lease: std::sync::Arc<FileLock>) -> Self {
         Self::new(lease)
     }
 
+    #[cfg(native_lane)]
     pub(crate) fn lease(&self) -> std::sync::Arc<FileLock> {
-        self.lease.clone()
+        self._lease.clone()
     }
 
     pub(crate) fn add_plan(
@@ -703,6 +704,7 @@ impl VerifiedPlanLayers {
         Ok(())
     }
 
+    #[cfg(native_lane)]
     pub(crate) fn resolve_checkpoint(
         &self,
         checkpoint_id: &str,
@@ -4336,7 +4338,7 @@ mod tests {
                         path: file.to_path_buf(),
                     }],
                 },
-                &[data.clone()],
+                std::slice::from_ref(&data),
             )
             .unwrap()
         };

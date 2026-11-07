@@ -714,9 +714,9 @@ mod tests {
             "model-bytes",
             "linked-model",
             None,
-            &sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&[
-                expected.clone(),
-            ])
+            &sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                std::slice::from_ref(&expected),
+            )
             .unwrap(),
         )
         .unwrap();
