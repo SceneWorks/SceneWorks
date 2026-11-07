@@ -695,6 +695,8 @@ impl JobsStore {
         // Only the API's validated-plan handoff may freeze this write-once column.
         ensure_column(&transaction, "jobs", "model_provenance_json", "text")?;
         ensure_column(&transaction, "jobs", "download_binding_json", "text")?;
+        // A portable source commitment is private claim authority, not public job metadata.
+        ensure_column(&transaction, "jobs", "portable_model_binding_json", "text")?;
         // Durable worker-queue priority. Zero is the normal FIFO lane; positive ranks are
         // assigned monotonically whenever a job jumps to the front. Prompt-refinement jobs get a
         // rank automatically at creation, while the Queue screen can rank any still-pending jobs
@@ -1167,13 +1169,61 @@ impl JobsStore {
         provenance: Option<&Value>,
         binding: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_portable_binding(request, provenance, binding, None)
+    }
+
+    pub fn create_job_with_portable_binding(
+        &self,
+        request: CreateJob,
+        provenance: Option<&Value>,
+        download_binding: Option<&Value>,
+        portable_binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.create_job_on_connection(&transaction, request, None, provenance)?;
-        Self::write_download_binding(&transaction, &job.id, binding)?;
+        Self::write_download_binding(&transaction, &job.id, download_binding)?;
+        Self::write_portable_binding(&transaction, &job.id, portable_binding)?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    fn write_portable_binding(
+        connection: &Connection,
+        job_id: &str,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<()> {
+        if let Some(binding) = binding {
+            connection.execute(
+                "update jobs set portable_model_binding_json = ?1 where id = ?2",
+                params![dumps(binding)?, job_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Private portable source commitment. Public job snapshots do not contain this field.
+    pub fn portable_model_binding(&self, job_id: &str) -> JobsStoreResult<Option<Value>> {
+        let connection = self.open_connection()?;
+        Self::read_portable_binding(&connection, job_id)
+    }
+
+    fn read_portable_binding(
+        connection: &Connection,
+        job_id: &str,
+    ) -> JobsStoreResult<Option<Value>> {
+        let encoded: Option<String> = connection
+            .query_row(
+                "select portable_model_binding_json from jobs where id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+        encoded
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
     }
 
     fn write_download_binding(
@@ -2092,10 +2142,22 @@ impl JobsStore {
         provenance: Option<&Value>,
         binding: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.retry_job_with_portable_binding(job_id, request, provenance, binding, None)
+    }
+
+    pub fn retry_job_with_portable_binding(
+        &self,
+        job_id: &str,
+        request: RetryJob,
+        provenance: Option<&Value>,
+        download_binding: Option<&Value>,
+        portable_binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
+        let previous_binding = Self::read_portable_binding(&transaction, job_id)?;
         if job.attempts >= MAX_JOB_ATTEMPTS {
             return Err(JobsStoreError::RetryLimit {
                 max_attempts: MAX_JOB_ATTEMPTS,
@@ -2114,12 +2176,17 @@ impl JobsStore {
         });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
-        if let Some(binding) = binding {
+        if let Some(binding) = download_binding {
             if !download_binding_matches_payload(binding, &payload) {
                 return Err(JobsStoreError::InvalidStatus(
                     "Download binding changed during replay".to_owned(),
                 ));
             }
+        }
+        if previous_binding.is_some() && previous_binding.as_ref() != portable_binding {
+            return Err(JobsStoreError::InvalidStatus(
+                "Portable model identity changed during retry".to_owned(),
+            ));
         }
         let job = self.create_job_on_connection(
             &transaction,
@@ -2140,7 +2207,8 @@ impl JobsStore {
             None,
             source_provenance.as_ref(),
         )?;
-        Self::write_download_binding(&transaction, &job.id, binding)?;
+        Self::write_download_binding(&transaction, &job.id, download_binding)?;
+        Self::write_portable_binding(&transaction, &job.id, portable_binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2195,10 +2263,23 @@ impl JobsStore {
         provenance: Option<&Value>,
         binding: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_portable_binding(id, job_id, request, provenance, binding, None)
+    }
+
+    pub fn duplicate_job_with_portable_binding(
+        &self,
+        id: Option<String>,
+        job_id: &str,
+        request: DuplicateJob,
+        provenance: Option<&Value>,
+        download_binding: Option<&Value>,
+        portable_binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
+        let previous_binding = Self::read_portable_binding(&transaction, job_id)?;
         let same_source = !request.payload_changes.contains_key("model")
             && !request.payload_changes.contains_key("modelManifestEntry");
         let source_provenance = provenance.cloned().or_else(|| {
@@ -2212,12 +2293,17 @@ impl JobsStore {
         });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
-        if let Some(binding) = binding {
+        if let Some(binding) = download_binding {
             if !download_binding_matches_payload(binding, &payload) {
                 return Err(JobsStoreError::InvalidStatus(
                     "Download binding changed during replay".to_owned(),
                 ));
             }
+        }
+        if previous_binding.is_some() && previous_binding.as_ref() != portable_binding {
+            return Err(JobsStoreError::InvalidStatus(
+                "Portable model identity changed during duplicate".to_owned(),
+            ));
         }
         // A duplicated YuE2 job is a new take with its own run directory (sc-22999).
         crate::yue2_score::jobs::refresh_block_for_duplicate(&mut payload);
@@ -2239,7 +2325,8 @@ impl JobsStore {
             id,
             source_provenance.as_ref(),
         )?;
-        Self::write_download_binding(&transaction, &job.id, binding)?;
+        Self::write_download_binding(&transaction, &job.id, download_binding)?;
+        Self::write_portable_binding(&transaction, &job.id, portable_binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -3013,6 +3100,18 @@ impl JobsStore {
         worker_id: &str,
         mlx_required: bool,
     ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>)> {
+        self.claim_next_job_routed_with_portable_binding(worker_id, mlx_required, 0)
+            .map(|(job, decision, _)| (job, decision))
+    }
+
+    /// A worker must explicitly advertise support before claiming a binding-bearing job.
+    /// Versionless workers retain their normal access to historical unbound jobs.
+    pub fn claim_next_job_routed_with_portable_binding(
+        &self,
+        worker_id: &str,
+        mlx_required: bool,
+        portable_binding_version: u32,
+    ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>, Option<Value>)> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         // BEGIN IMMEDIATE: take the write lock up front. The claim reads the worker, the
@@ -3074,6 +3173,7 @@ impl JobsStore {
                    claim_model_key_3, claim_model_key_4
               from jobs
              where status = 'queued'
+               and (?4 = 1 or portable_model_binding_json is null)
                and (type in ({list}) or requested_gpu = 'auto' or requested_gpu = ?1)
                and (?2 = 0 or type in ({list}))
                and claim_facts_version = ?3
@@ -3086,7 +3186,8 @@ impl JobsStore {
             params![
                 worker.gpu_id,
                 i64::from(has_active_gpu_job),
-                CLAIM_ROUTING_FACTS_VERSION
+                CLAIM_ROUTING_FACTS_VERSION,
+                portable_binding_version
             ],
             row_to_claim_candidate,
         )?)?;
@@ -3109,12 +3210,12 @@ impl JobsStore {
         };
         let Some(queued) = queued else {
             *self.last_claim_hydration.lock() = hydration;
-            return Ok((None, None));
+            return Ok((None, None, None));
         };
         drop(statement);
         if should_defer_auto_gpu_claim(&transaction, &queued, &worker)? {
             *self.last_claim_hydration.lock() = hydration;
-            return Ok((None, None));
+            return Ok((None, None, None));
         }
         if should_defer_image_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
             || should_defer_video_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
@@ -3136,7 +3237,7 @@ impl JobsStore {
                 "idle_mlx_available",
             );
             *self.last_claim_hydration.lock() = hydration;
-            return Ok((None, Some(decision)));
+            return Ok((None, Some(decision), None));
         }
 
         let assigned_gpu = if is_non_gpu_job_type(queued.job_type.as_str()) {
@@ -3188,11 +3289,12 @@ impl JobsStore {
             params![queued.id, now, worker_id],
         )?;
         let job = self.get_job_on_connection(&transaction, &queued.id)?;
+        let portable_binding = Self::read_portable_binding(&transaction, &queued.id)?;
         hydration.claimed_snapshot_hydrated += 1;
         transaction.commit()?;
         let decision = route_decision_for_claim(&queued, &worker);
         *self.last_claim_hydration.lock() = hydration;
-        Ok((Some(job), decision))
+        Ok((Some(job), decision, portable_binding))
     }
 
     pub fn update_job_progress(
