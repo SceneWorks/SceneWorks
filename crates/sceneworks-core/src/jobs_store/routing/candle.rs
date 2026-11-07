@@ -2240,7 +2240,7 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         .and_then(|target| target.get("kernel"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+    if !CANDLE_ROUTED_TRAINING_KERNELS.contains(kernel) {
         return false;
     }
     let base_model = target

@@ -9524,7 +9524,7 @@ mod tests {
         let mut covered: BTreeSet<&str> = BTreeSet::new();
         for target in &registry.targets {
             let kernel = target.kernel.as_str();
-            if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+            if !MLX_ROUTED_TRAINING_KERNELS.contains(kernel) {
                 continue;
             }
             covered.insert(kernel);
@@ -9567,7 +9567,10 @@ mod tests {
             }
         }
 
-        let routed: BTreeSet<&str> = MLX_ROUTED_TRAINING_KERNELS.iter().copied().collect();
+        let routed: BTreeSet<&str> = MLX_ROUTED_TRAINING_KERNELS
+            .iter()
+            .map(String::as_str)
+            .collect();
         assert_eq!(
             covered, routed,
             "every MLX-routed training kernel must be reachable from at least one built-in \

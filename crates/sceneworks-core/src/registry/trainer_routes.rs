@@ -23,25 +23,20 @@ struct TrainerSnapshot {
 struct TrainerDescriptor {
     id: String,
     backend: String,
-    #[cfg(test)]
     #[serde(default)]
     supports_lora: bool,
-    #[cfg(test)]
     #[serde(default)]
     supports_lokr: bool,
-    #[cfg(test)]
     #[serde(default)]
     supports_control: bool,
-    #[cfg(test)]
     #[serde(default)]
     supports_full_finetune: bool,
-    #[cfg(test)]
     #[serde(default)]
     max_reference_images: u32,
 }
 
-static ROUTES: LazyLock<BTreeMap<String, BTreeMap<String, String>>> = LazyLock::new(|| {
-    let mut routes = BTreeMap::new();
+static EXPORTS: LazyLock<BTreeMap<String, TrainerFacts>> = LazyLock::new(|| {
+    let mut exports = BTreeMap::new();
     for (backend, source) in [
         (
             "mlx",
@@ -52,15 +47,15 @@ static ROUTES: LazyLock<BTreeMap<String, BTreeMap<String, String>>> = LazyLock::
             include_str!("../../../../config/engine-capabilities/runtime/capabilities.candle.json"),
         ),
     ] {
-        routes.insert(
+        exports.insert(
             backend.to_owned(),
-            parse_trainer_routes(source, backend).expect("typed runtime trainer export"),
+            parse_trainer_facts(source, backend).expect("typed runtime trainer export"),
         );
     }
-    routes
+    exports
 });
 
-fn parse_trainer_routes(source: &str, backend: &str) -> Result<BTreeMap<String, String>, String> {
+fn parse_trainer_facts(source: &str, backend: &str) -> Result<TrainerFacts, String> {
     let facts: TrainerFacts = serde_json::from_str(source).map_err(|error| error.to_string())?;
     if facts.schema_version != 2 || facts.snapshot.backend != backend {
         return Err(format!("invalid {backend} trainer export schema/backend"));
@@ -87,25 +82,87 @@ fn parse_trainer_routes(source: &str, backend: &str) -> Result<BTreeMap<String, 
     // The export also names deliberately unavailable mappings (for example Krea Control on
     // MLX). Claimability is a separate feature fact; keep the product identity available to
     // validation without treating every mapping as a registered route.
-    Ok(facts.trainer_mappings)
+    Ok(facts)
+}
+
+#[cfg(test)]
+fn parse_trainer_routes(source: &str, backend: &str) -> Result<BTreeMap<String, String>, String> {
+    parse_trainer_facts(source, backend).map(|facts| facts.trainer_mappings)
 }
 
 pub(crate) fn expected_backend_local_trainer_id(
     target: &crate::training::TrainingTarget,
     backend: &str,
 ) -> Result<&'static str, String> {
-    let mappings = ROUTES.get(backend).ok_or_else(|| {
+    let facts = EXPORTS.get(backend).ok_or_else(|| {
         format!(
             "production training target {:?} requested an identity for unknown backend {backend:?}",
             target.id
         )
     })?;
-    mappings.get(&target.id).map(String::as_str).ok_or_else(|| {
+    facts.trainer_mappings.get(&target.id).map(String::as_str).ok_or_else(|| {
         format!(
             "production training target {:?} (base {:?}, kernel {:?}) has no backend-local trainer in {backend} feature export",
             target.id, target.base_model, target.kernel
         )
     })
+}
+
+/// Kernels with a registered native trainer that supports at least one network type offered by a
+/// shipped target on this backend. Product targets own the kernel/technique choices; the runtime
+/// export owns the backend-local identity and executable descriptor. An exported mapping alone is
+/// insufficient: Krea Control intentionally maps on MLX without an MLX control trainer.
+pub(crate) fn native_training_kernels(backend: &str) -> BTreeSet<String> {
+    let Some(facts) = EXPORTS.get(backend) else {
+        return BTreeSet::new();
+    };
+    let targets = crate::training::builtin_training_targets();
+    training_kernels_from_facts(facts, &targets.targets)
+}
+
+fn training_kernels_from_facts(
+    facts: &TrainerFacts,
+    targets: &[crate::training::TrainingTarget],
+) -> BTreeSet<String> {
+    targets
+        .iter()
+        .filter(|target| {
+            let Some(engine) = facts.trainer_mappings.get(&target.id) else {
+                return false;
+            };
+            let Some(descriptor) = facts
+                .snapshot
+                .trainer_capabilities
+                .iter()
+                .find(|descriptor| {
+                    descriptor.id == *engine && descriptor.backend == facts.snapshot.backend
+                })
+            else {
+                return false;
+            };
+            if descriptor.max_reference_images
+                < crate::training::training_target_max_reference_images(target)
+            {
+                return false;
+            }
+            let offered = target
+                .limits
+                .get("networkTypes")
+                .and_then(serde_json::Value::as_array);
+            match offered {
+                Some(types) => types.iter().any(|kind| match kind.as_str() {
+                    Some("lora") => descriptor.supports_lora,
+                    Some("lokr") => descriptor.supports_lokr,
+                    Some("control") => descriptor.supports_control,
+                    Some("full") => descriptor.supports_full_finetune,
+                    _ => false,
+                }),
+                None if target.kernel == "krea_control" => descriptor.supports_control,
+                None => descriptor.supports_lora,
+            }
+        })
+        .map(|target| target.kernel.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -301,6 +358,50 @@ mod tests {
             trainer.backend = "wrong_backend".to_owned();
             assert!(!supports(&facts, &target, "lora"));
         }
+    }
+
+    #[test]
+    fn routed_kernel_projection_requires_a_registered_capable_native_trainer() {
+        let targets = crate::training::builtin_training_targets();
+        let mlx = native("mlx");
+        let candle = native("candle");
+        let mlx_kernels = training_kernels_from_facts(&mlx, &targets.targets);
+        let candle_kernels = training_kernels_from_facts(&candle, &targets.targets);
+        for kernels in [&mlx_kernels, &candle_kernels] {
+            for kernel in [
+                "mage_flow_lora",
+                "ltx_mlx_lora",
+                "qwen_image_2_1_lora",
+                "qwen_image_2_1_edit_lora",
+            ] {
+                assert!(kernels.contains(kernel), "{kernel} needs a native trainer");
+            }
+        }
+        assert!(!mlx_kernels.contains("krea_control"));
+        assert!(candle_kernels.contains("krea_control"));
+
+        let mut missing = mlx.clone();
+        missing
+            .snapshot
+            .trainer_capabilities
+            .retain(|trainer| trainer.id != "qwen_image_2_1");
+        let missing_kernels = training_kernels_from_facts(&missing, &targets.targets);
+        assert!(!missing_kernels.contains("qwen_image_2_1_lora"));
+        assert!(!missing_kernels.contains("qwen_image_2_1_edit_lora"));
+        assert!(missing_kernels.contains("mage_flow_lora"));
+
+        let mut incapable = candle.clone();
+        let qwen = incapable
+            .snapshot
+            .trainer_capabilities
+            .iter_mut()
+            .find(|trainer| trainer.id == "qwen_image_2_1")
+            .unwrap();
+        qwen.supports_lora = false;
+        qwen.supports_lokr = false;
+        let incapable_kernels = training_kernels_from_facts(&incapable, &targets.targets);
+        assert!(!incapable_kernels.contains("qwen_image_2_1_lora"));
+        assert!(!incapable_kernels.contains("qwen_image_2_1_edit_lora"));
     }
 
     #[test]

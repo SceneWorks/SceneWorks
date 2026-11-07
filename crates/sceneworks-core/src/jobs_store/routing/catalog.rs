@@ -1,10 +1,10 @@
 //! Model/kernel routing catalog: the per-backend routed-model and training-kernel lists,
 //! the Mac support/capability probes, and their supporting types. Moved out of
-//! `jobs_store.rs` (sc-8816) with no behavior change. List membership is pinned by the
-//! snapshot tests at the bottom of this file.
+//! `jobs_store.rs` (sc-8816) with no behavior change. Image/video membership comes from typed
+//! route policy; native training membership joins product targets with runtime trainer exports.
 
-use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{LazyLock, OnceLock};
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -712,14 +712,11 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         not_available_label: MAC_NOT_AVAILABLE_LABEL.to_owned(),
         features,
         training: MacTrainingSupport {
-            supported_kernels: MLX_ROUTED_TRAINING_KERNELS
-                .iter()
-                .map(|kernel| (*kernel).to_owned())
-                .collect(),
-            candle_supported_kernels: CANDLE_ROUTED_TRAINING_KERNELS
-                .iter()
-                .map(|kernel| (*kernel).to_owned())
-                .collect(),
+            supported_kernels: ordered_training_kernels(&MLX_ROUTED_TRAINING_KERNELS, "mlx"),
+            candle_supported_kernels: ordered_training_kernels(
+                &CANDLE_ROUTED_TRAINING_KERNELS,
+                "candle",
+            ),
             lokr_on_wan_supported: false,
         },
     }
@@ -1922,84 +1919,64 @@ pub(crate) fn video_model_has_candle_video_route(model: &str) -> bool {
 /// [`super::candle::scail2_replace_candle_eligible`] rather than by table membership.
 pub(crate) const CANDLE_SCAIL2_VIDEO_MODELS: &[&str] = &["scail2_14b"];
 
-/// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
-/// the engine registers `z_image_turbo`/`sdxl`/`kolors`/`ltx_2_3`/`wan2_2_*` trainers,
-/// which the worker reaches via these SceneWorks kernel ids (the mlx worker maps the
-/// kernel and base model onto an engine trainer id). This list describes MLX routing only; several
-/// entries also have Candle trainers. A kernel absent here is never routed to the MLX worker.
+/// SceneWorks training kernels with a registered MLX trainer supporting at least one technique
+/// offered by a shipped target. The product target owns its kernel and offered techniques; the
+/// runtime export owns the backend-local trainer identity and executable descriptor.
 ///
-/// Public (sc-15277) so the worker's `engine_trainer_id` invariant can be DERIVED from this list
+/// Public (sc-15277) so the worker's `engine_trainer_id` invariant can be checked from this set
 /// rather than restating it: a kernel that is routed here but has no trainer mapping is claimed by
 /// the mlx worker and then immediately failed, which is exactly how `mage_flow_lora` shipped broken.
-pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
-    "moss_image_lora",
-    "z_image_lora",
-    "sdxl_lora",
-    "kolors_lora",
-    "lens_lora",
-    "krea_lora",
-    "sd3_lora",
-    "wan_lora",
-    "wan_moe_lora",
-    "ltx_mlx_lora",
-    // Anima (epic 10512, sc-10522): the native `mlx-gen-anima` LoRA/LoKr trainer (DiT + `llm_adapter`
-    // conditioner). Candle reached parity in sc-18479.
-    "anima_lora",
-    // Mage-Flow adapters and full base fine-tunes have native MLX and Candle trainers.
-    "mage_flow_lora",
-    // Iris-3B generation (epic 25678, sc-25685): the native `mlx-gen-iris` LoRA/LoKr/full trainer.
-    "iris_train",
-    // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the native `mlx-gen-qwen-image-2-1`
-    // trainer. The Candle twin (sc-24160) is in the candle set too.
-    "qwen_image_2_1_lora",
-    // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S13, sc-24161): the same MLX trainer in
-    // edit mode. The Candle twin (sc-24162) is in the candle set too.
-    "qwen_image_2_1_edit_lora",
-    "flux3_klein_lora",
-    "flux3_klein_edit_lora",
+pub static MLX_ROUTED_TRAINING_KERNELS: LazyLock<BTreeSet<String>> =
+    LazyLock::new(|| crate::registry::native_training_kernels("mlx"));
+
+/// Off-Mac twin of [`MLX_ROUTED_TRAINING_KERNELS`], projected from the Candle trainer export.
+/// Families sharing a kernel remain base-model gated by [`training_job_is_candle_eligible`].
+/// `krea_control` has a Candle control trainer but no MLX control trainer.
+pub(crate) static CANDLE_ROUTED_TRAINING_KERNELS: LazyLock<BTreeSet<String>> =
+    LazyLock::new(|| crate::registry::native_training_kernels("candle"));
+
+/// Public capability-array order captured before the native route tables were derived. Only
+/// ordering lives here: the set supplied to `ordered_training_kernels` decides membership. The
+/// two ranks differ for LTX/Wan because the historical arrays had different backend ordering.
+const TRAINING_KERNEL_PRESENTATION_ORDER: &[(&str, u8, u8)] = &[
+    ("moss_image_lora", 0, 0),
+    ("z_image_lora", 1, 1),
+    ("sdxl_lora", 2, 2),
+    ("kolors_lora", 3, 3),
+    ("lens_lora", 4, 4),
+    ("krea_lora", 5, 5),
+    ("krea_control", u8::MAX, 6),
+    ("sd3_lora", 6, 7),
+    ("wan_lora", 7, 9),
+    ("wan_moe_lora", 8, 10),
+    ("ltx_mlx_lora", 9, 8),
+    ("anima_lora", 10, 11),
+    ("mage_flow_lora", 11, 12),
+    ("iris_train", 12, 13),
+    ("qwen_image_2_1_lora", 13, 14),
+    ("qwen_image_2_1_edit_lora", 14, 15),
+    ("flux3_klein_lora", 15, 16),
+    ("flux3_klein_edit_lora", 16, 17),
 ];
 
-/// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
-/// (sc-7817, epic 5164) — the off-Mac twin of [`MLX_ROUTED_TRAINING_KERNELS`]. The registry includes
-/// Kolors, SD3.5, Anima, Mage, Wan TI2V-5B, and both Wan A14B experts as of sc-18479. Families that
-/// share a kernel remain base-model gated by [`training_job_is_candle_eligible`]. LTX keeps its
-/// historical `ltx_mlx_lora` kernel name on both native backends.
-/// `krea_control` (epic 10159, B2 sc-10163 / B1 sc-10162) is the Krea 2 pose-ControlNet branch trainer
-/// (candle-gen-krea `ControlTrainer`, dispatched under `krea_2_control`); it has no MLX trainer, so —
-/// like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
-/// [`MLX_ROUTED_TRAINING_KERNELS`] (the MLX control lane is B5/sc-10177).
-pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
-    "moss_image_lora",
-    "z_image_lora",
-    "sdxl_lora",
-    "kolors_lora",
-    "lens_lora",
-    "krea_lora",
-    "krea_control",
-    "sd3_lora",
-    "ltx_mlx_lora",
-    "wan_lora",
-    "wan_moe_lora",
-    "anima_lora",
-    "mage_flow_lora",
-    // Iris-3B generation (epic 25678, sc-25686): the native `candle-gen-iris` trainer.
-    "iris_train",
-    // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S12, sc-24160): the `candle-gen-qwen-image-2-1`
-    // trainer, registered under the same engine id (`qwen_image_2_1`) as the MLX one. Base-gated to
-    // `qwen_image_2_1` by [`training_job_is_candle_eligible`].
-    "qwen_image_2_1_lora",
-    // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S14, sc-24162): the same Candle trainer
-    // in edit mode (`max_reference_images` 10), base-gated the same way.
-    "qwen_image_2_1_edit_lora",
-    "flux3_klein_lora",
-    "flux3_klein_edit_lora",
-];
+fn ordered_training_kernels(kernels: &BTreeSet<String>, backend: &str) -> Vec<String> {
+    let rank = |kernel: &str| {
+        TRAINING_KERNEL_PRESENTATION_ORDER
+            .iter()
+            .find(|(id, _, _)| *id == kernel)
+            .map(|(_, mlx, candle)| if backend == "mlx" { *mlx } else { *candle })
+            .unwrap_or(u8::MAX)
+    };
+    let mut ordered: Vec<_> = kernels.iter().cloned().collect();
+    ordered.sort_by(|left, right| rank(left).cmp(&rank(right)).then_with(|| left.cmp(right)));
+    ordered
+}
 
 /// Whether an off-Mac (candle) worker can run this training kernel at all. A real training run on a
 /// non-macOS host for a kernel that is NOT candle-routed has no worker that will ever claim it, so the
 /// submit path refuses it up front instead of leaving it queued forever (sc-24159).
 pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
-    CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel)
+    CANDLE_ROUTED_TRAINING_KERNELS.contains(kernel)
 }
 
 /// Both native MOSS lanes train adapters for the exact selected Base/SFT checkpoint only.
@@ -2030,13 +2007,15 @@ pub(crate) fn moss_training_plan_is_supported(plan: &Map<String, Value>) -> bool
     method.eq_ignore_ascii_case("lora") || method.eq_ignore_ascii_case("lokr")
 }
 
-/// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
+/// Native-only training policy — only a Rust worker can run these kernels, so a generic descriptor
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
 /// training kernel". Despite the constant's historical name, this means native-Rust-only rather than
 /// MLX-backend-only: most members have both MLX and Candle trainers. Candle workers are admitted
 /// by the [`worker_supports_job`] exception when the kernel is also in
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`], while a generic worker remains refused. `krea_control` is the
 /// intentional Candle-only exception; the historical constant name remains for compatibility.
+/// Native runtime exports cannot derive this policy: registration of a native trainer does not
+/// establish whether a separate generic trainer is absent.
 pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "moss_image_lora",
     "ltx_mlx_lora",
@@ -2058,8 +2037,7 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
-    //! Membership-parity regression guard (sc-8816, strengthened sc-9495): every routed-model /
-    //! routed-kernel list is pinned to a snapshot of its pre-collapse contents. The model lists are
+    //! Membership-parity regression guard (sc-8816, strengthened sc-9495): model lists are
     //! now DERIVED from [`IMAGE_MODEL_CAPS`] / [`VIDEO_MODEL_CAPS`] (sc-9495), so the parity test is
     //! the zero-diff proof that the table-driven derivation reproduces the OLD membership EXACTLY
     //! before the standalone lists were removed. Membership is compared as a SET (same elements, same
@@ -2078,10 +2056,9 @@ mod tests {
         video_job_type_for_mode, video_mode_probe_payload, video_model_candle_support,
         video_model_mac_support, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS,
         CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES,
-        CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS,
-        CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_IMPORTED_CAPS,
-        MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS,
-        MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS, VIDEO_UI_MODES,
+        CANDLE_ROUTED_MODELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
+        CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_IMPORTED_CAPS, MLX_ROUTED_FAMILIES,
+        MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS, VIDEO_UI_MODES,
     };
     use crate::contracts::JobType;
     use crate::jobs_store::routing::gaps::video_request_is_claimable_on_platform;
@@ -2112,74 +2089,6 @@ mod tests {
             ));
         }
     }
-
-    const EXPECTED_MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
-        "moss_image_lora",
-        "z_image_lora",
-        "sdxl_lora",
-        "kolors_lora",
-        "lens_lora",
-        "krea_lora",
-        "sd3_lora",
-        "wan_lora",
-        "wan_moe_lora",
-        "ltx_mlx_lora",
-        "anima_lora",
-        // sc-14056: Mage-Flow's native mlx trainer is routed to the mlx worker. Before this, the
-        // kernel was in `MLX_ONLY_TRAINING_KERNELS` but in NO routed set, so every worker refused it
-        // and Mage training jobs queued forever.
-        "mage_flow_lora",
-        // sc-25685: the native Iris-3B generation trainer.
-        "iris_train",
-        // sc-24159: Qwen Image 2.1 T2I LoRA/LoKr on the native MLX trainer.
-        "qwen_image_2_1_lora",
-        // sc-24161: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native MLX trainer.
-        "qwen_image_2_1_edit_lora",
-        "flux3_klein_lora",
-        "flux3_klein_edit_lora",
-    ];
-
-    const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
-        "moss_image_lora",
-        "z_image_lora",
-        "sdxl_lora",
-        "kolors_lora",
-        "lens_lora",
-        "krea_lora",
-        "krea_control",
-        "sd3_lora",
-        "ltx_mlx_lora",
-        "wan_lora",
-        "wan_moe_lora",
-        "anima_lora",
-        "mage_flow_lora",
-        // sc-25686: the native Iris-3B generation trainer (Candle/CUDA).
-        "iris_train",
-        // sc-24160: Qwen Image 2.1 T2I LoRA/LoKr on the native Candle trainer.
-        "qwen_image_2_1_lora",
-        // sc-24162: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native Candle trainer.
-        "qwen_image_2_1_edit_lora",
-        "flux3_klein_lora",
-        "flux3_klein_edit_lora",
-    ];
-
-    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
-        "moss_image_lora",
-        "ltx_mlx_lora",
-        "krea_lora",
-        "sd3_lora",
-        "anima_lora",
-        "krea_control",
-        "mage_flow_lora",
-        "iris_train",
-        // sc-24160: native-Rust-only (MLX + Candle trainers, no generic trainer), like Anima/Mage —
-        // so it stays here even though it is now candle-routed: a generic worker must still refuse it.
-        "qwen_image_2_1_lora",
-        // sc-24162: native-Rust-only like its T2I sibling, so it stays here although candle-routed.
-        "qwen_image_2_1_edit_lora",
-        "flux3_klein_lora",
-        "flux3_klein_edit_lora",
-    ];
 
     #[test]
     fn routed_model_lists_match_typed_policy() {
@@ -2215,20 +2124,21 @@ mod tests {
                 "{rows}/{field} duplicate route id"
             );
         }
-        // The training-kernel lists are keyed by kernel id (a separate namespace) and were NOT
-        // collapsed into the per-model tables (sc-9495); they stay hand-written, still order-pinned.
-        assert_eq!(
-            MLX_ROUTED_TRAINING_KERNELS,
-            EXPECTED_MLX_ROUTED_TRAINING_KERNELS
-        );
-        assert_eq!(
-            CANDLE_ROUTED_TRAINING_KERNELS,
-            EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS
-        );
-        assert_eq!(
-            MLX_ONLY_TRAINING_KERNELS,
-            EXPECTED_MLX_ONLY_TRAINING_KERNELS
-        );
+    }
+
+    #[test]
+    fn native_training_capability_arrays_keep_the_frozen_public_order() {
+        let old: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../apps/web/src/testUtils/catalogBaseline/old-catalog.json"
+        ))
+        .unwrap();
+        let actual = serde_json::to_value(super::mac_capabilities("macos", true)).unwrap();
+        for key in ["supportedKernels", "candleSupportedKernels"] {
+            assert_eq!(
+                actual["training"][key], old["catalog"]["platforms"]["macos"]["training"][key],
+                "{key} public order"
+            );
+        }
     }
 
     #[test]

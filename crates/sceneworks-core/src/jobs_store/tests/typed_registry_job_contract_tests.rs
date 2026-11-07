@@ -161,3 +161,48 @@ fn gpu_backed_jobs_reject_cpu_claims_while_plain_download_remains_utility_work()
         &download
     ));
 }
+
+#[test]
+fn native_only_training_policy_refuses_generic_workers_without_stranding_targets() {
+    use crate::jobs_store::routing::catalog::{
+        CANDLE_ROUTED_TRAINING_KERNELS, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_TRAINING_KERNELS,
+    };
+
+    let generic = worker("cuda:0", &["gpu", "lora_train", "lora_train_execute"]);
+    let targets = crate::training::builtin_training_targets();
+    for kernel in MLX_ONLY_TRAINING_KERNELS {
+        assert!(
+            MLX_ROUTED_TRAINING_KERNELS.contains(*kernel)
+                || CANDLE_ROUTED_TRAINING_KERNELS.contains(*kernel),
+            "native-only {kernel} must have a native serving lane"
+        );
+        let matching: Vec<_> = targets
+            .targets
+            .iter()
+            .filter(|target| target.kernel == *kernel)
+            .collect();
+        assert!(!matching.is_empty(), "{kernel} must have a shipped target");
+        for target in matching {
+            let job_type = if *kernel == "krea_control" {
+                JobType::ControlTraining
+            } else {
+                JobType::LoraTrain
+            };
+            let request = job(
+                job_type,
+                json!({
+                    "dryRun": false,
+                    "plan": {"target": {
+                        "targetId": target.id, "kernel": target.kernel,
+                        "baseModel": target.base_model
+                    }, "config": {"advanced": {"networkType": "lora"}}}
+                }),
+            );
+            assert!(crate::jobs_store::training_kernel_is_mlx_only(&request));
+            assert!(
+                !worker_supports_job(&generic, &request),
+                "generic worker claimed {kernel}"
+            );
+        }
+    }
+}

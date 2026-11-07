@@ -10,7 +10,7 @@ pub use spec::{ModelSpec, RoutePolicy};
 mod exceptions;
 pub use exceptions::{approved_backend_exceptions, ApprovedBackendException};
 mod trainer_routes;
-pub(crate) use trainer_routes::expected_backend_local_trainer_id;
+pub(crate) use trainer_routes::{expected_backend_local_trainer_id, native_training_kernels};
 #[allow(dead_code)] // Shared with build.rs, where every shipped evidence row is validated.
 mod evidence;
 #[cfg(test)]
