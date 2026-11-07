@@ -1042,7 +1042,7 @@ describe("bound H3 imported component precision (sc-26686 review)", () => {
 
 describe("FLUX 3 native format capability and installed artifacts", () => {
   const worker = (capabilities, status = "online") => ({ capabilities, status });
-  const model = { id: "flux3_klein", hasVariantMatrix: true, variants: [
+  const model = { id: "flux3_klein", family: "flux3", type: "image", hasVariantMatrix: true, variants: [
     { variant: "q4", installState: "installed" },
     { variant: "fp8r", installState: "installed" },
     { variant: "nvfp4", installState: "missing" },
@@ -1060,7 +1060,8 @@ describe("FLUX 3 native format capability and installed artifacts", () => {
       { tier: "fp8r", label: "FP8R (candle, sm_89+)", disabled: false },
     ]);
     expect(nativeTierEligibility({ id: "flux2_dev" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(true);
-    expect(nativeTierEligibility({ id: "flux3_klein_base" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(false);
+    expect(nativeTierEligibility({ id: "flux3_klein_base", family: "flux3", type: "image" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(false);
+    expect(nativeTierEligibility({ id: "flux3_pup", family: "flux3", type: "utility" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(true);
   });
   it("does not invent unavailable base derivations or alias FP8R to affine quantization", () => {
     const base = { ...model, id: "flux3_klein_base", variants: [{ variant: "bf16", installState: "missing" }] };

@@ -77,7 +77,7 @@ export function isFp8rTier(tier) {
 export function nativeTierEligibility(model, workers = []) {
   const has = (cap) => workers.some((worker) => worker?.status !== "offline" &&
     Array.isArray(worker?.capabilities) && worker.capabilities.includes(cap));
-  const flux3 = model?.id === "flux3_klein" || model?.id === "flux3_klein_base";
+  const flux3 = model?.family === "flux3" && model?.type === "image";
   return {
     convRotEligible: has("int8_convrot"),
     nvfp4Eligible: has(flux3 ? "flux3_nvfp4" : "nvfp4"),
