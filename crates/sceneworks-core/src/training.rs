@@ -1048,7 +1048,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
         }
         // A malformed static declaration must not panic a production catalog request. Contract
         // tests require every builtin trainer identity; an unresolved identity has no decoder.
-        if let Ok(trainer) = crate::jobs_store::expected_backend_local_trainer_id(target, "mlx") {
+        if let Ok(trainer) = crate::registry::expected_backend_local_trainer_id(target, "mlx") {
             if let Some(decoder) = depth_anchoring::x0_decoder_for_trainer(trainer) {
                 target.limits.insert(
                     depth_anchoring::X0_DECODER_LIMIT.to_owned(),
@@ -5482,7 +5482,7 @@ mod model_contract_metadata_tests {
         }
         for target in &registry.targets {
             for backend in ["mlx", "candle"] {
-                crate::jobs_store::expected_backend_local_trainer_id(target, backend)
+                crate::registry::expected_backend_local_trainer_id(target, backend)
                     .unwrap_or_else(|error| panic!("{}/{}: {error}", target.id, backend));
             }
         }

@@ -343,11 +343,10 @@
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+          "file": "config/engine-capabilities/runtime/capabilities.mlx.json",
           "op": "replace",
-          "old": "(\"moss_image_base\", \"moss_image_base\")",
-          "new": "(\"wrong\", \"wrong\")",
-          "anchor": "pub(crate) fn expected_backend_local_trainer_id("
+          "old": "\"moss_image_base_lora\": \"moss_image_base\"",
+          "new": "\"moss_image_base_lora\": \"wrong\""
         }
       ]
     },
@@ -358,11 +357,10 @@
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+          "file": "config/engine-capabilities/runtime/capabilities.mlx.json",
           "op": "replace",
-          "old": "(\"moss_image_sft\", \"moss_image_sft\")",
-          "new": "(\"wrong\", \"wrong\")",
-          "anchor": "pub(crate) fn expected_backend_local_trainer_id("
+          "old": "\"moss_image_sft_lora\": \"moss_image_sft\"",
+          "new": "\"moss_image_sft_lora\": \"wrong\""
         }
       ]
     },

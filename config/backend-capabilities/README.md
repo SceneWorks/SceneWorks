@@ -38,7 +38,7 @@ Every MLX-only cell names its Shortcut implementation obligation. `authority` id
 specialist epic whose contract governs that cell where applicable. Candle-only cells are retained
 with `preservedCandleOnly: true` rather than normalized away.
 
-`exceptions.json` retains the still-residual sequencing decisions that Michael Trefry approved on
+`../manifests/registry/approved-exceptions.json` retains the still-residual sequencing decisions that Michael Trefry approved on
 2026-08-14, with the direct approval preserved in Shortcut activity 19457. The former
 `epic-8588-conditioning-sequencing` record is intentionally absent: the authoritative Candle
 runtime facts now prove all six of its cells on both backends. It also records four product-decision

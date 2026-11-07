@@ -3,6 +3,9 @@ mod assemble;
 #[path = "src/registry/evidence.rs"]
 #[allow(dead_code)]
 mod evidence;
+#[path = "src/registry/exceptions.rs"]
+#[allow(dead_code)]
+mod exceptions;
 #[path = "src/hf_repo_id.rs"]
 mod hf_repo_id;
 #[path = "src/jsonc.rs"]
@@ -28,6 +31,8 @@ fn build_registry() {
     let product_rows: serde_json::Value =
         serde_json::from_str(&product_json).expect("invalid builtin model manifest");
     let evidence_json = read("manifests/registry/evidence.json");
+    let _approved_decisions = exceptions::approved_backend_exceptions();
+    println!("cargo:rerun-if-changed=../../config/manifests/registry/approved-exceptions.json");
     jsonc::reject_duplicate_keys(&evidence_json).expect("duplicate memory evidence key");
     evidence::validate_evidence_document(&evidence_json, &product_rows)
         .expect("invalid builtin memory evidence");

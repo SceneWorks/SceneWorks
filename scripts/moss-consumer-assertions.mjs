@@ -14,7 +14,7 @@ export const MUTABLE_FILES = [
   "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
   "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
   "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-  "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+  "config/engine-capabilities/runtime/capabilities.mlx.json",
   "crates/sceneworks-worker/src/training_jobs.rs",
 ];
 export const TESTS = {
@@ -22,7 +22,7 @@ export const TESTS = {
   library: ["sceneworks-core", "lora_family::moss_training_adapter_tests::moss_adapters_apply_on_both_base_and_sft"],
   scheduler: ["sceneworks-core", "jobs_store::routing::catalog::moss_native_training_routing_tests::moss_exact_checkpoint_adapters_route_to_both_native_lanes_not_generic"],
   catalog: ["sceneworks-core", "jobs_store::routing::catalog::tests::routed_model_lists_match_snapshot"],
-  matrix: ["sceneworks-core", "jobs_store::routing::matrix::tests::checked_in_matrix_matches_all_authoritative_sources"],
+  matrix: ["sceneworks-core", "registry::trainer_routes::tests::moss_trainer_routes_match_product_targets"],
   thin: ["sceneworks-worker", "training_jobs::tests::moss_shared_finalization_defaults_strict_options_and_preserves_explicit_sampler"],
   protocol: ["sceneworks-worker", "training_jobs::tests::moss_native_requests_keep_official_bf16_source_and_requested_compute_for_both_methods"],
 };

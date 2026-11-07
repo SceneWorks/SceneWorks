@@ -20,10 +20,12 @@ use crate::film_workspace::{QWEN36_FILM_PLANNER_MODEL_ID, QWEN36_FILM_PLANNER_RE
 use crate::jsonc::strip_jsonc_comments;
 
 use super::catalog::VIDEO_UI_MODES;
+use crate::registry::expected_backend_local_trainer_id;
 
 const MANIFEST: &str = include_str!("../../../../../config/manifests/builtin.models.jsonc");
 const PREVIEW: &str = include_str!("../../../../../config/manifests/builtin.preview-support.jsonc");
-const EXCEPTIONS: &str = include_str!("../../../../../config/backend-capabilities/exceptions.json");
+const EXCEPTIONS: &str =
+    include_str!("../../../../../config/manifests/registry/approved-exceptions.json");
 const MLX_DESCRIPTOR_FACTS: &str =
     include_str!("../../../../../config/engine-capabilities/capabilities.mlx.json");
 const CANDLE_DESCRIPTOR_FACTS: &str =
@@ -1136,86 +1138,6 @@ fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescript
         ));
     }
     Ok(facts)
-}
-
-/// The product-to-runtime trainer identity contract. Capability flags alone cannot distinguish
-/// architecture-compatible-looking trainers from the exact model version a product target names:
-/// LTX-2.3 and LTX-2.5 both advertise LoRA, but accepting either for either target trains the wrong
-/// base. Keep the product target id, base id, and worker kernel in the key, and allow the value to be
-/// backend-local because inference deliberately registers the future LTX-2.5 trainer under different
-/// MLX and Candle ids.
-pub(crate) fn expected_backend_local_trainer_id(
-    target: &crate::training::TrainingTarget,
-    backend: &str,
-) -> Result<&'static str, String> {
-    let (mlx, candle) = match (
-        target.id.as_str(),
-        target.base_model.as_str(),
-        target.kernel.as_str(),
-    ) {
-        ("moss_image_base_lora", "moss_image_base", "moss_image_lora") => {
-            ("moss_image_base", "moss_image_base")
-        }
-        ("moss_image_sft_lora", "moss_image_sft", "moss_image_lora") => {
-            ("moss_image_sft", "moss_image_sft")
-        }
-        ("z_image_turbo_lora", "z_image_turbo", "z_image_lora") => {
-            ("z_image_turbo", "z_image_turbo")
-        }
-        ("sdxl_lora", "sdxl", "sdxl_lora")
-        | ("illustrious_xl_v1_lora", "illustrious_xl_v1", "sdxl_lora")
-        | ("illustrious_xl_v2_lora", "illustrious_xl_v2", "sdxl_lora") => ("sdxl", "sdxl"),
-        ("kolors_lora", "kolors", "kolors_lora") => ("kolors", "kolors"),
-        ("lens_turbo_lora", "lens", "lens_lora") => ("lens", "lens"),
-        ("krea_2_raw_lora", "krea_2_raw", "krea_lora") => ("krea_2_raw", "krea_2_raw"),
-        ("krea_2_control", "krea_2_raw", "krea_control") => ("krea_2_control", "krea_2_control"),
-        ("sd3_5_large_lora", "sd3_5_large", "sd3_lora") => ("sd3_5_large", "sd3_5_large"),
-        ("sd3_5_medium_lora", "sd3_5_medium", "sd3_lora") => ("sd3_5_medium", "sd3_5_medium"),
-        ("anima_base_lora", "anima_base", "anima_lora") => ("anima_base", "anima_base"),
-        ("ltx_video_lora", "ltx_2_3", "ltx_mlx_lora") => ("ltx_2_3", "ltx_2_3"),
-        ("ltx_2_5_video_lora", "ltx_2_5", "ltx_mlx_lora") => ("ltx_2_5", "ltx_2_5_distilled"),
-        ("wan_lora", "wan_2_2", "wan_lora") => ("wan2_2_ti2v_5b", "wan2_2_ti2v_5b"),
-        ("wan_t2v_14b_lora", "wan_2_2_t2v_14b", "wan_moe_lora") => {
-            ("wan2_2_t2v_14b", "wan2_2_t2v_14b")
-        }
-        ("wan_i2v_14b_lora", "wan_2_2_i2v_14b", "wan_moe_lora") => {
-            ("wan2_2_i2v_14b", "wan2_2_i2v_14b")
-        }
-        ("mage_flow_base_lora", "mage_flow_base", "mage_flow_lora") => {
-            ("mage_flow_base", "mage_flow_base")
-        }
-        // Iris-3B generation (sc-25685/sc-25686): both backends register one trainer under the
-        // generation install's id.
-        ("iris_3b_generation", "iris_3b", "iris_train") => ("iris_3b", "iris_3b"),
-        // Iris-3B depth (sc-25687) / restoration (sc-25688): one trainer per task install, same id
-        // on both backends.
-        ("iris_3b_depth", "iris_3b_depth", "iris_train") => ("iris_3b_depth", "iris_3b_depth"),
-        ("iris_3b_restore", "iris_3b_restore", "iris_train") => {
-            ("iris_3b_restore", "iris_3b_restore")
-        }
-        ("flux3_klein_lora", "flux3_klein_base", "flux3_klein_lora")
-        | ("flux3_klein_edit_lora", "flux3_klein_base", "flux3_klein_edit_lora") => {
-            ("flux3_klein_base", "flux3_klein_base")
-        }
-        ("qwen_image_2_1_lora", "qwen_image_2_1", "qwen_image_2_1_lora")
-        | ("qwen_image_2_1_edit_lora", "qwen_image_2_1", "qwen_image_2_1_edit_lora") => {
-            ("qwen_image_2_1", "qwen_image_2_1")
-        }
-        _ => {
-            return Err(format!(
-                "production training target {:?} (base {:?}, kernel {:?}) has no explicit backend-local trainer identity contract",
-                target.id, target.base_model, target.kernel
-            ));
-        }
-    };
-    match backend {
-        "mlx" => Ok(mlx),
-        "candle" => Ok(candle),
-        other => Err(format!(
-            "production training target {:?} requested an identity for unknown backend {other:?}",
-            target.id
-        )),
-    }
 }
 
 fn validate_backend_local_trainer_identity(

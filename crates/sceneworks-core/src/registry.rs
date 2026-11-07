@@ -7,6 +7,10 @@ use serde_json::{Map, Value};
 
 mod spec;
 pub use spec::ModelSpec;
+mod exceptions;
+pub use exceptions::{approved_backend_exceptions, ApprovedBackendException};
+mod trainer_routes;
+pub(crate) use trainer_routes::expected_backend_local_trainer_id;
 #[allow(dead_code)] // Shared with build.rs, where every shipped evidence row is validated.
 mod evidence;
 pub use evidence::{builtin_memory_evidence, project_builtin_memory_evidence};
