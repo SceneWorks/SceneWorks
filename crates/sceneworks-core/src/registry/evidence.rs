@@ -127,9 +127,9 @@ fn download_identity_matches(candidate: &Value, evidence: &Value) -> bool {
     DOWNLOAD_IDENTITY[..5]
         .iter()
         .all(|key| candidate.get(*key) == evidence.get(*key))
-        && evidence.get("platforms").map_or(true, |platforms| {
-            candidate.get("platforms") == Some(platforms)
-        })
+        && evidence
+            .get("platforms")
+            .is_none_or(|platforms| candidate.get("platforms") == Some(platforms))
 }
 
 /// Build-time validation covers *all* legacy rows, even when a model is not yet represented by
