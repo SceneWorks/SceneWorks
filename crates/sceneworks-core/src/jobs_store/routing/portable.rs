@@ -17,6 +17,12 @@ pub fn native_route_claims_request(
     job_type: &JobType,
     payload: &Map<String, Value>,
 ) -> Result<bool, String> {
+    // Conversion is dispatched by the CPU utility worker, which may invoke a native
+    // MLX or Candle converter on its host. GPU workers do not advertise this utility
+    // capability even when their native engine can perform the conversion.
+    if *job_type == JobType::ModelConvert && backend != "cpu" {
+        return Ok(false);
+    }
     let probe = JobSnapshot {
         id: "portable-route-probe".to_owned(),
         job_type: job_type.clone(),
@@ -51,6 +57,7 @@ pub fn native_route_claims_request(
         extra: BTreeMap::new(),
     };
     let gpu_id = match backend {
+        "cpu" => "cpu",
         "mlx" => "mlx",
         "candle" => "0",
         other => return Err(format!("unknown native backend {other:?}")),
@@ -67,11 +74,15 @@ pub fn native_route_claims_request(
     let required_capability: WorkerCapability =
         serde_json::from_value(Value::String(required.to_owned()))
             .map_err(|error| error.to_string())?;
-    let mut capabilities = vec![
-        WorkerCapability::Gpu,
-        required_capability,
-        WorkerCapability::LoraTrainExecute,
-    ];
+    let mut capabilities = if backend == "cpu" {
+        vec![WorkerCapability::Cpu, required_capability]
+    } else {
+        vec![
+            WorkerCapability::Gpu,
+            required_capability,
+            WorkerCapability::LoraTrainExecute,
+        ]
+    };
     if backend == "candle" {
         capabilities.push(WorkerCapability::Unknown("candle".to_owned()));
     }
@@ -109,6 +120,29 @@ mod tests {
             )
             .unwrap());
         }
+    }
+
+    #[test]
+    fn model_convert_claim_uses_cpu_utility_worker() {
+        let payload = json!({"converter":"flux2_klein_diffusers","sourceRepo":"community/klein"});
+        assert!(native_route_claims_request(
+            "cpu",
+            &JobType::ModelConvert,
+            payload.as_object().unwrap()
+        )
+        .unwrap());
+        assert!(!native_route_claims_request(
+            "mlx",
+            &JobType::ModelConvert,
+            payload.as_object().unwrap()
+        )
+        .unwrap());
+        assert!(!native_route_claims_request(
+            "cpu",
+            &JobType::ImageGenerate,
+            json!({"model":"flux_schnell"}).as_object().unwrap()
+        )
+        .unwrap());
     }
 
     #[test]
