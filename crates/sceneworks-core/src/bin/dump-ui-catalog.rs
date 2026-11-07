@@ -1,4 +1,4 @@
-//! Weights-free inputs for the pre-registry product UI comparison. Host installation is supplied
+//! Weights-free current native inputs for the product UI comparison. Host installation is supplied
 //! by the jsdom fixture, not inferred from this machine's model cache.
 use sceneworks_core::{builtin_manifests::builtin_manifest, jobs_store, training};
 use serde_json::{json, Value};
@@ -95,14 +95,14 @@ mod tests {
     }
 
     #[test]
-    fn native_product_inputs_match_the_pinned_before_side() {
-        let old: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../apps/web/src/testUtils/catalogBaseline/old-catalog.json"
+    fn native_product_inputs_match_the_current_candidate_fixture() {
+        let candidate: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../apps/web/src/testUtils/catalogBaseline/candidate-catalog.json"
         ))
-        .expect("pinned catalog fixture");
+        .expect("current native catalog fixture");
         compare(
             &super::catalog().expect("metadata-only catalog"),
-            &old["catalog"],
+            &candidate,
             "catalog",
         );
     }
