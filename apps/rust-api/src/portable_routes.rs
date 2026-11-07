@@ -19,6 +19,12 @@ pub(crate) enum SelectedSourceLocation {
         reference: &'static str,
         files: &'static [&'static str],
     },
+    /// Existing PiD repo/file overrides are authored values, frozen to a commit at admission.
+    DynamicHfFiles {
+        repo: String,
+        reference: String,
+        files: Vec<String>,
+    },
     /// An operator Gemma override wins when a registered worker advertises it; otherwise
     /// admission binds the exact selected LTX bundle's pinned sibling Gemma download.
     OperatorOverrideOrManifest {
@@ -74,13 +80,6 @@ pub(crate) fn selected_route_source_rows(
         .is_some_and(|id| !id.trim().is_empty());
     let character_reference =
         payload.get("mode").and_then(Value::as_str) == Some("character_image") && has_reference;
-    if advanced
-        .and_then(|value| value.get("usePid"))
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        return Err("selected PiD decoder sources are not yet bound".to_owned());
-    }
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
         let plan: sceneworks_core::training::TrainingPlan = serde_json::from_value(
             payload
@@ -198,6 +197,94 @@ pub(crate) fn selected_route_source_rows(
                 },
                 selected_tier: None,
             });
+        }
+        if sceneworks_core::portable_sources::pid_backbone_for(id).is_some()
+            && id != "kolors"
+            && (id != "pulid_flux_dev" || backend == "candle")
+            && advanced
+                .and_then(|value| value.get("usePid"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            && payload.get("model").and_then(Value::as_str) == Some(id)
+        {
+            let backbone =
+                sceneworks_core::portable_sources::pid_backbone_for(id).expect("checked");
+            let manifest =
+                sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+                    .map_err(str::to_owned)?;
+            let utility = manifest
+                .get("models")
+                .and_then(Value::as_array)
+                .and_then(|models| {
+                    models.iter().find(|model| {
+                        model.get("id").and_then(Value::as_str) == Some(&format!("pid_{backbone}"))
+                    })
+                })
+                .ok_or_else(|| format!("missing PiD {backbone} utility declaration"))?;
+            let downloads = utility
+                .get("downloads")
+                .and_then(Value::as_array)
+                .ok_or("PiD utility has no downloads")?;
+            let checkpoint = downloads.first().ok_or("PiD utility has no checkpoint")?;
+            let gemma = downloads.get(1).ok_or("PiD utility has no Gemma")?;
+            let checkpoint_override = advanced
+                .and_then(|value| value.get("pidCheckpoint"))
+                .and_then(Value::as_object);
+            let checkpoint_source = if let Some(config) = checkpoint_override {
+                let repo = config
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        checkpoint.get("repo").and_then(Value::as_str).unwrap_or("")
+                    });
+                let file = config
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .ok_or("PiD checkpoint override requires filename")?;
+                if file.is_empty()
+                    || file == "."
+                    || file == ".."
+                    || file.contains(['/', '\\'])
+                    || !file.ends_with(".safetensors")
+                {
+                    return Err(
+                        "PiD checkpoint filename must be a plain safetensors name".to_owned()
+                    );
+                }
+                SelectedSourceLocation::DynamicHfFiles {
+                    repo: repo.to_owned(),
+                    reference: "main".to_owned(),
+                    files: vec![file.to_owned()],
+                }
+            } else {
+                SelectedSourceLocation::ManifestDownload(checkpoint.clone())
+            };
+            let gemma_source = if let Some(repo) = advanced
+                .and_then(|value| value.get("pidGemma"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                SelectedSourceLocation::DynamicHfFiles {
+                    repo: repo.to_owned(),
+                    reference: "main".to_owned(),
+                    files: vec!["*".to_owned()],
+                }
+            } else {
+                SelectedSourceLocation::ManifestDownload(gemma.clone())
+            };
+            for (component_id, source) in [
+                ("pid_checkpoint", checkpoint_source),
+                ("pid_gemma", gemma_source),
+            ] {
+                rows.push(SelectedRouteSource {
+                    model_slot: slot.clone(),
+                    component_id: component_id.to_owned(),
+                    role: ArtifactMemberRole::OptionalComponent,
+                    source,
+                    selected_tier: None,
+                });
+            }
         }
         let add_component = |rows: &mut Vec<SelectedRouteSource>,
                              component_id: &str,
