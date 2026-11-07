@@ -649,6 +649,7 @@ async fn resolve_dynamic_hf_revision_with_client(
         }
         parts.push("revision").push("main");
     }
+    let expected_origin = url.origin();
     let mut request = client.get(url);
     if let Some(token) = token {
         request = request.bearer_auth(token);
@@ -657,6 +658,11 @@ async fn resolve_dynamic_hf_revision_with_client(
         .send()
         .await
         .map_err(|error| incomplete(format!("custom model revision is unavailable: {error}")))?;
+    if response.url().origin() != expected_origin {
+        return Err(incomplete(
+            "custom model revision metadata left the authorized endpoint",
+        ));
+    }
     if !response.status().is_success() {
         return Err(incomplete(format!(
             "custom model revision lookup failed with status {}",
