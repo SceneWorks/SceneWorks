@@ -20,6 +20,7 @@ import {
   imageModelServesMode,
   imageModelUsable,
   ltxIcLoraRequired,
+  lowStepSdxlCheckpoint,
   missingRequiredModels,
   poseModelUsable,
   supportedControlModes,
@@ -61,6 +62,10 @@ it("derives the seven native Candle video tier pickers from shipped variant ladd
   ]);
   const ltx25 = fallbackModels.find((model) => model.id === "ltx_2_5");
   expect(candleVideoTierPickerAvailable({ ...ltx25, importedSource: { ownershipMode: "managed" } })).toBe(false);
+});
+
+it("identifies the one shipped low-step SDXL Hires.fix exclusion", () => {
+  expect(fallbackModels.filter(lowStepSdxlCheckpoint).map((model) => model.id)).toEqual(["realvisxl_lightning"]);
 });
 
 describe("modelEligibility predicates", () => {

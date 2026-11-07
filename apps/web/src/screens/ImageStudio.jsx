@@ -146,6 +146,7 @@ import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
   macGatingActive,
+  lowStepSdxlCheckpoint,
   macModelFeatureBlock,
 } from "../modelEligibility.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
@@ -1529,7 +1530,8 @@ export function ImageStudio() {
     supportsImg2img || selectedModel?.family === "sdxl",
   );
   const hiresFixAccelerationBlocked =
-    model === "realvisxl_lightning" || ["lightning", "lcm", "hyper"].includes(sampler);
+    lowStepSdxlCheckpoint(selectedModel) ||
+    ["lightning", "lcm", "hyper"].includes(sampler);
   const hiresFixInputBlocked =
     Boolean(img2imgReferenceAssetId) ||
     posePayload.length > 0 ||
