@@ -1502,12 +1502,16 @@ fn imported_h3_portable_plan_uses_frozen_layers_without_a_worker_plan_record() {
             .unwrap(),
     );
     let mut verified = crate::external_library_runtime::VerifiedPlanLayers::new_for_test(lease);
-    verified.add_plan(&imported.checkpoint_id, portable);
+    verified
+        .add_plan(&imported.checkpoint_id, portable)
+        .unwrap();
     for layer in &source.layers {
         let path = private.join(&layer.layer.target_path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::copy(&layer.path, &path).unwrap();
-        verified.insert(&imported.checkpoint_id, &layer.layer.layer_id, path);
+        verified
+            .insert(&imported.checkpoint_id, &layer.layer.layer_id, path)
+            .unwrap();
     }
     let settings = Settings {
         data_dir: worker.path().to_path_buf(),
