@@ -3437,7 +3437,28 @@ async fn create_training_job_rejects_out_of_range_subject_mask_weights_with_a_fi
 
 #[tokio::test]
 async fn create_training_job_queues_real_run_when_not_dry_run() {
-    let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)
+    // A training base must be bound to the bytes selected by its pinned revision. Serve only the
+    // dense training tier: admission must not silently attest the q4 generation default.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("pinned metadata listener");
+    let address = listener.local_addr().expect("listener address");
+    let metadata = axum::Router::new().fallback(|| async {
+        Json(json!([{
+            "type": "file",
+            "path": "bf16/weights.safetensors",
+            "size": 1,
+            "lfs": { "oid": "1111111111111111111111111111111111111111111111111111111111111111" }
+        }]))
+    });
+    let metadata_server = tokio::spawn(axum::serve(listener, metadata));
+    let endpoint = format!("http://{address}");
+    let _env = HfCacheEnvGuard::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+        ("SCENEWORKS_HUGGINGFACE_BASE_URL", &endpoint),
+    ]);
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
@@ -3502,6 +3523,30 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
     assert_eq!(job["payload"]["plan"]["target"]["kernel"], "z_image_lora");
 
     let job_id = job["id"].as_str().expect("job id").to_owned();
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let binding_json: String = connection
+        .query_row(
+            "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+            [&job_id],
+            |row| row.get(0),
+        )
+        .expect("real training job has a portable binding");
+    let binding: Value = serde_json::from_str(&binding_json).expect("binding JSON");
+    let routes = binding["routes"].as_object().expect("frozen worker routes");
+    assert!(!routes.is_empty());
+    for route in routes.values() {
+        let model = route["models"]
+            .as_array()
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|model| model["modelId"] == "z_image_turbo")
+            })
+            .expect("training base model slot");
+        assert_eq!(model["tier"], "bf16", "training loads the dense tier");
+        assert_eq!(model["variant"], "bf16");
+    }
+    metadata_server.abort();
     let (status, queued) = request(
         app.clone(),
         "GET",
