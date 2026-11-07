@@ -43,8 +43,6 @@ export const LTX25_AUTO_DURATION_MAX_SECONDS = 15;
 
 export const LTX25_TEMPORAL_UPSAMPLE_MAX_ROUNDS = 2;
 
-export const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros", ltx25VideoModelId]);
-
 // Keep this list to native Candle engines that publish a real Model Manager variant matrix. The
 // picker only enables entries whose individual install is complete (`installedTiers`); in particular,
 // adding SCAIL-2 here never fabricates q4/q8 for a dense-only or partial local snapshot.
@@ -71,8 +69,6 @@ export const LTX25_CANDLE_PRODUCT_TIERS = Object.freeze(["q4", "q8", "bf16"]);
 export const legacyDefaultTextEncoderId = "default";
 
 export const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
-
-export const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_person"]);
 
 export const TIER_SCREEN = "video";
 

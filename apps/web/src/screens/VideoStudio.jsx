@@ -17,7 +17,7 @@ import { useVideoReferences } from "./videoStudio/useVideoReferences.js";
 import { useVideoExecutionTier } from "./videoStudio/useVideoExecutionTier.js";
 import { useLtx25Controls } from "./videoStudio/useLtx25Controls.js";
 import { useVideoModelSelection } from "./videoStudio/useVideoModelSelection.js";
-import { DEFAULT_MOTION, ltxVideoModelId, ltx25VideoModelId, ltxIcLoraModelIds, ltxIcLoraRequiredModes, MAX_SCAIL2_REFERENCE_CHARACTERS } from "./videoStudio/videoTierHelpers.js";
+import { DEFAULT_MOTION, ltxVideoModelId, ltx25VideoModelId, MAX_SCAIL2_REFERENCE_CHARACTERS } from "./videoStudio/videoTierHelpers.js";
 
 import { useSamplerControls } from "../hooks/useSamplerControls.js";
 import { VedaOutcome } from "../components/VedaOutcome.jsx";
@@ -41,7 +41,7 @@ import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
-import { DEFAULT_MAC_CAPABILITIES, wanLightningAvailable } from "../modelEligibility.js";
+import { DEFAULT_MAC_CAPABILITIES, ltxIcLoraRequired, wanLightningAvailable } from "../modelEligibility.js";
 
 import { loadStudioSettings } from "../hooks/useStudioSettings.js";
 
@@ -562,7 +562,7 @@ export function VideoStudio() {
 
   const { samplerOptions, schedulerOptions, showSchedulerPicker } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler });
 
-  const requiresLtxIcLora = ltxIcLoraModelIds.has(selectedModel?.id) && ltxIcLoraRequiredModes.has(mode);
+  const requiresLtxIcLora = ltxIcLoraRequired(selectedModel, mode);
   const hasLtxIcLora = selectedLoras.some((lora) => loraLooksLikeIcLora(lora));
 
   const {

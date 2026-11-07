@@ -20,6 +20,13 @@ export function wanPairedLoraAvailable(model) {
     model?.capabilities?.some((mode) => mode === "text_to_video" || mode === "image_to_video") === true;
 }
 
+export function ltxIcLoraRequired(model, mode) {
+  return model?.family === "ltx-video" && model?.type === "video" &&
+    ["2.3", "2.5"].includes(model?.loraCompatibility?.generation) &&
+    !model?.importedSource &&
+    ["extend_clip", "video_bridge", "replace_person"].includes(mode);
+}
+
 // Platform support is supplied by the catalog projection of typed routes and feature facts.
 // Readiness switches keep all gates inert until capabilities arrive.
 export const MAC_NOT_AVAILABLE_LABEL = "Not available on Mac (MLX only)";

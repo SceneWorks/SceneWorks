@@ -18,6 +18,7 @@ import {
   hasUsableModelFor,
   imageModelServesMode,
   imageModelUsable,
+  ltxIcLoraRequired,
   missingRequiredModels,
   poseModelUsable,
   supportedControlModes,
@@ -42,6 +43,14 @@ it("derives Wan A14B Lightning and paired-LoRA controls from shipped catalog fac
   const imported = { ...fallbackModels.find((model) => model.id === expected[0]), importedSource: { ownershipMode: "managed" } };
   expect(wanLightningAvailable(imported)).toBe(false);
   expect(wanPairedLoraAvailable(imported)).toBe(false);
+});
+
+it("requires IC-LoRA only for the shipped LTX generations and their clip modes", () => {
+  const expected = ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5"];
+  expect(fallbackModels.filter((model) => ltxIcLoraRequired(model, "video_bridge")).map((model) => model.id).sort()).toEqual(expected);
+  const ltx = fallbackModels.find((model) => model.id === "ltx_2_3");
+  expect(ltxIcLoraRequired(ltx, "text_to_video")).toBe(false);
+  expect(ltxIcLoraRequired({ ...ltx, importedSource: { ownershipMode: "managed" } }, "video_bridge")).toBe(false);
 });
 
 describe("modelEligibility predicates", () => {
